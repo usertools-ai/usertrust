@@ -15,6 +15,10 @@
  * - Jobs: ci-gate, then build (read-only token, no OIDC: everything that runs dependency
  *   code), then publish (the `npm-publish` environment; write token, OIDC, NPM_TOKEN). No job
  *   that can write or mint an OIDC token installs, builds, tests or lints.
+ * - The build job is one definition run as two legs, `release` and `rebuild`, each uploading
+ *   its own artifact; the publish job refuses unless every tarball it would publish from
+ *   `release` is byte-identical to the one it assembles from `rebuild` (compare-builds), and
+ *   computes the version itself (expected-version) instead of reading it from the build.
  * - No checkout persists a credential; the write token reaches git only in the push step.
  * - ci-gate refuses unless the environment requires a reviewer; a 404, a 403 and an
  *   unreadable answer all refuse.
@@ -35,8 +39,9 @@
  *   already there (in the dry run, before the push); a republish skips one only if npm holds
  *   this run's exact tarball (dist.integrity and dist.shasum). Only the registry's own 404 for
  *   a package reads as "never published"; no npm_config_tag reaches npm.
- * - The publish job runs Node 24 and refuses an npm older than 11 before touching the
- *   registry; the GitHub Release is created only after every package's publish succeeded.
+ * - The publish job runs Node 24 and refuses an npm older than 11.5.1 or a Node older than
+ *   22.14.0 (npm trusted publishing's floor) before touching the registry; the GitHub Release
+ *   is created only after every package's publish succeeded.
  * - No setup-node restores a cache, and the publish job installs, packs and runs nothing.
  * - Republish gates on the release commit's parent only when the release commit changes
  *   nothing but the lockstep package.json "version" fields and the specs that name a lockstep
@@ -103,6 +108,8 @@ interface Step {
 interface Job {
 	name?: string;
 	needs?: string | string[];
+	strategy?: { "fail-fast"?: boolean; matrix?: Record<string, unknown> };
+	outputs?: Record<string, string>;
 	environment?: string | { name: string };
 	permissions?: Record<string, string>;
 	steps?: Step[];
@@ -163,6 +170,46 @@ describe("publish.yml", () => {
 		expect([publish.jobs.publish?.needs ?? []].flat()).toEqual(["build"]);
 		expect(envName(publish.jobs.publish as Job)).toBe("npm-publish");
 		expect(envName(publish.jobs.build as Job)).toBeUndefined();
+	});
+
+	it("the build job runs as two legs, release and rebuild, each handing on its own artifact", () => {
+		// One job definition, so the two legs run the same steps; a matrix leg is its own runner.
+		expect(publish.jobs.build?.strategy?.matrix).toEqual({ leg: ["release", "rebuild"] });
+		expect(publish.jobs.build?.strategy?.["fail-fast"]).toBe(true);
+		const uploads = jobSteps("build").filter((s) => s.uses?.startsWith("actions/upload-artifact@"));
+		expect(uploads.map((s) => s.with?.name)).toEqual(["${{ matrix.leg }}"]);
+		// No step differs by leg: nothing in the job reads the matrix but the upload's name.
+		const readers = jobSteps("build").filter((s) => JSON.stringify(s).includes("matrix."));
+		expect(readers).toEqual(uploads);
+		const downloads = jobSteps("publish").filter((s) =>
+			s.uses?.startsWith("actions/download-artifact@"),
+		);
+		expect(downloads.map((s) => [s.with?.name, s.with?.path])).toEqual([
+			["release", "${{ runner.temp }}/release"],
+			["rebuild", "${{ runner.temp }}/rebuild"],
+		]);
+	});
+
+	it("publish requires the rebuild to match, in every mode, before the dry run", () => {
+		const cmp = step("publish", "Require the rebuild to match, tarball by tarball");
+		expect(cmp.if).toBeUndefined();
+		expect(cmp.run?.trim()).toBe(
+			'bash scripts/release.sh compare-builds "${RUNNER_TEMP}/release" "${RUNNER_TEMP}/rebuild" "$COMMIT"',
+		);
+		expect(cmp.env?.COMMIT).toBe("${{ steps.source.outputs.commit }}");
+		const at = stepIndex("publish", "Require the rebuild to match, tarball by tarball");
+		expect(at).toBe(stepIndex("publish", "Select and verify what to publish") + 1);
+		expect(at).toBe(stepIndex("publish", "Publish packages (dry run)") - 1);
+	});
+
+	it("publish computes the version from the dispatched commit and the input, not the build", () => {
+		expect(publish.jobs.build?.outputs).toBeUndefined();
+		const sel = step("publish", "Select and verify what to publish");
+		expect(sel.env).toEqual({ BUMP: "${{ inputs.version }}" });
+		expect(sel.run).toContain('expected=$(bash scripts/release.sh expected-version "$BUMP")');
+		expect(sel.run).toContain(
+			'commit=$(bash scripts/release.sh verify-release "${RUNNER_TEMP}/release/release.bundle" "$expected")',
+		);
 	});
 
 	it("grants nothing by default, and write and OIDC only to the publish job", () => {
@@ -260,6 +307,7 @@ describe("publish.yml", () => {
 		const order = [
 			jobSteps("publish").findIndex((s) => s.uses?.startsWith("actions/download-artifact@")),
 			stepIndex("publish", "Select and verify what to publish"),
+			stepIndex("publish", "Require the rebuild to match, tarball by tarball"),
 			stepIndex("publish", "Publish packages (dry run)"),
 			stepIndex("publish", "Push the release commit and tag"),
 			stepIndex("publish", "Publish packages"),
@@ -329,9 +377,9 @@ describe("publish.yml", () => {
 				expect(s.with?.["registry-url"], "setup-node writes no npm config").toBeUndefined();
 			}
 		}
-		// The build's reported version is read in exactly one place, which validates it.
-		const fromBuild = jobSteps("publish").filter((s) => JSON.stringify(s).includes("needs.build"));
-		expect(fromBuild.map((s) => s.name)).toEqual(["Select and verify what to publish"]);
+		// Nothing the build job reports is read: the version is computed in the publish job.
+		const fromBuild = jobSteps("publish").filter((s) => JSON.stringify(s).includes("needs."));
+		expect(fromBuild.map((s) => s.name)).toEqual([]);
 		for (const name of [
 			"Push the release commit and tag",
 			"Publish packages",
@@ -375,18 +423,19 @@ describe("publish.yml", () => {
 		]);
 	});
 
-	it("the build runs Node 22; the publish job runs Node 24 and requires npm 11 first", () => {
+	it("the build runs Node 22; the publish job runs Node 24 and requires npm 11.5.1 first", () => {
 		const setups = allSteps().filter(([, s]) => s.uses?.startsWith("actions/setup-node@"));
 		// The publish job's major only; the exact pin is the next test's.
 		expect(
 			setups.map(([j, s]) => `${j}: ${String(s.with?.["node-version"]).split(".")[0]}`),
 		).toEqual(["build: 22", "publish: 24"]);
-		// npm 11 added the refusal to apply latest implicitly to a lower version, the backstop
-		// for the dist-tag check: the step right after setup-node refuses an older npm, on every
-		// run (dry runs included), before anything reads or writes the registry.
+		// npm trusted publishing needs npm 11.5.1 and Node 22.14.0, and npm 11 added the refusal
+		// to apply latest implicitly to a lower version, the backstop for the dist-tag check:
+		// the step right after setup-node refuses an older npm or Node, on every run (dry runs
+		// included), before anything reads or writes the registry.
 		const steps = jobSteps("publish");
 		const setup = steps.findIndex((s) => s.uses?.startsWith("actions/setup-node@"));
-		const assert = stepIndex("publish", "Require npm 11 or later");
+		const assert = stepIndex("publish", "Require npm 11.5.1 and Node 22.14.0 or later");
 		expect(assert).toBe(setup + 1);
 		expect(steps[assert]?.run?.trim()).toBe("bash scripts/release.sh assert-npm");
 		expect(steps[assert]?.if).toBeUndefined();
@@ -1419,21 +1468,200 @@ describe("release.sh publish: the npm dist-tag", { timeout: 30_000 }, () => {
 });
 
 describe("release.sh assert-npm", { timeout: 30_000 }, () => {
-	it("prints node's and npm's versions, and passes on npm 11 or later", () => {
-		for (const v of ["11.0.0", "11.19.0", "12.2.0"]) {
-			const r = run(["assert-npm"], { FAKE_NPM_VERSION: v });
-			expect(r.status, `${v}: ${r.err}`).toBe(0);
-			expect(r.out).toContain(`node ${process.version}, npm ${v}`);
+	/** Runs assert-npm with `node --version` answering <node> (any other call is the real node). */
+	function assertNpm(npm: string, node: string) {
+		const bin = join(dir, "nodebin");
+		mkdirSync(bin, { recursive: true });
+		writeFileSync(
+			join(bin, "node"),
+			`#!/usr/bin/env bash\nif [ "$1" = --version ]; then echo "$FAKE_NODE_VERSION"; exit 0; fi\nexec ${JSON.stringify(process.execPath)} "$@"\n`,
+		);
+		chmodSync(join(bin, "node"), 0o755);
+		return run(["assert-npm"], {
+			FAKE_NPM_VERSION: npm,
+			FAKE_NODE_VERSION: node,
+			PATH: `${bin}:${join(dir, "bin")}:${process.env.PATH}`,
+		});
+	}
+
+	it("prints node's and npm's versions, and passes at or above the trusted-publishing floor", () => {
+		for (const [npm, node] of [
+			["11.5.1", "v22.14.0"],
+			["11.19.0", "v24.21.0"],
+			["11.10.0", "v22.22.1"],
+			["12.0.0", "v23.0.0"],
+		]) {
+			const r = assertNpm(npm, node);
+			expect(r.status, `${npm} ${node}: ${r.err}`).toBe(0);
+			expect(r.out).toContain(`node ${node}, npm ${npm}`);
+			expect(r.out).toContain(">= 11.5.1");
 		}
 	});
 
-	for (const v of ["10.9.9", "9.9.4", "", "eleven"]) {
+	it("the real node passes too (the floor is below every Node this repository runs)", () => {
+		const r = run(["assert-npm"], { FAKE_NPM_VERSION: "11.19.0" });
+		expect(r.status, r.err).toBe(0);
+		expect(r.out).toContain(`node ${process.version}, npm 11.19.0`);
+	});
+
+	for (const v of ["11.5.0", "11.4.2", "11.0.0", "10.9.9", "9.9.4", "", "eleven", "11.5", "11.5.1-pre"]) {
 		it(`refuses npm ${JSON.stringify(v)}`, () => {
-			const r = run(["assert-npm"], { FAKE_NPM_VERSION: v });
+			const r = assertNpm(v, "v24.21.0");
 			expect(r.status).not.toBe(0);
 			expect(r.err).toContain("Refusing to release");
 		});
 	}
+
+	it("names trusted publishing's floor when it refuses npm", () => {
+		const r = assertNpm("11.5.0", "v24.21.0");
+		expect(r.err).toContain("npm 11.5.0 is older than 11.5.1");
+		expect(r.err).toContain("Node 22.14.0");
+	});
+
+	for (const v of ["v22.13.1", "v20.19.0", "v18.20.8", "", "v22", "twenty-four"]) {
+		it(`refuses node ${JSON.stringify(v)}`, () => {
+			const r = assertNpm("11.19.0", v);
+			expect(r.status).not.toBe(0);
+			expect(r.err).toContain("Refusing to release");
+		});
+	}
+});
+
+describe("release.sh expected-version", { timeout: 30_000 }, () => {
+	it("bumps HEAD's committed version as npm version does", () => {
+		for (const [bump, want] of [
+			["patch", "1.0.1"],
+			["minor", "1.1.0"],
+			["major", "2.0.0"],
+		]) {
+			const r = run(["expected-version", bump]);
+			expect(r.status, `${bump}: ${r.err}`).toBe(0);
+			expect(r.out.trim()).toBe(want);
+		}
+		releaseCommit("4.9.9");
+		expect(run(["expected-version", "patch"]).out.trim()).toBe("4.9.10");
+		expect(run(["expected-version", "minor"]).out.trim()).toBe("4.10.0");
+	});
+
+	it("reads the version HEAD records, not the working tree", () => {
+		// The build job bumps the working tree; the publish job never sees that.
+		writePackages("9.9.9");
+		const r = run(["expected-version", "patch"]);
+		expect(r.status, r.err).toBe(0);
+		expect(r.out.trim()).toBe("1.0.1");
+	});
+
+	for (const bump of ["", "prerelease", "PATCH", "1.0.1"]) {
+		it(`refuses the bump ${JSON.stringify(bump)}`, () => {
+			const r = run(["expected-version", bump]);
+			expect(r.status).not.toBe(0);
+			expect(r.err).toContain("not patch, minor or major");
+		});
+	}
+});
+
+describe("release.sh compare-builds", { timeout: 30_000 }, () => {
+	/** Two packs of the same tree, as the two legs would make them, with dist/ files. */
+	function twoBuilds(): [string, string] {
+		for (const d of DIRS) {
+			mkdirSync(join(repo, "packages", d, "dist"), { recursive: true });
+			writeFileSync(join(repo, "packages", d, "dist", "index.js"), `export const name = "${d}";\n`);
+		}
+		const a = join(dir, "tarballs");
+		const b = join(dir, "rebuild");
+		expect(run(["pack", a]).status).toBe(0);
+		expect(run(["pack", b]).status).toBe(0);
+		rmSync(join(dir, "log"), { force: true });
+		return [a, b];
+	}
+
+	/** Rewrites <out>'s tarball for <d> with dist/index.js set to <body>. */
+	function changeDist(out: string, d: string, body: string, extra = false) {
+		writeFileSync(join(repo, "packages", d, "dist", "index.js"), body);
+		if (extra) writeFileSync(join(repo, "packages", d, "dist", "extra.js"), "x\n");
+		const tmp = join(dir, "repack");
+		expect(run(["pack", tmp]).status).toBe(0);
+		copyFileSync(join(tmp, `${NAMES[d]}-1.0.0.tgz`), join(out, `${NAMES[d]}-1.0.0.tgz`));
+		rmSync(join(dir, "log"), { force: true });
+	}
+
+	it("passes when every assembled tarball is byte-identical, and prints each sha256", () => {
+		const [a, b] = twoBuilds();
+		const r = run(["compare-builds", a, b, "HEAD"]);
+		expect(r.status, r.err).toBe(0);
+		// The assembler prints a line per tarball it writes; these are compare-builds' own.
+		const lines = r.out.split("\n").filter((l) => l.includes(" sha256 "));
+		expect(lines.length).toBe(6);
+		for (const [i, d] of DIRS.entries()) {
+			expect(lines[i]).toMatch(
+				new RegExp(`^${NAMES[d]}-1\\.0\\.0\\.tgz sha256 [0-9a-f]{64}: the build and the rebuild agree$`),
+			);
+		}
+		// It reads the registry for nothing and publishes nothing.
+		expect(log()).toEqual([]);
+	});
+
+	it("refuses when one package's dist/ bytes differ, naming it and both digests", () => {
+		const [a, b] = twoBuilds();
+		changeDist(b, "server", 'export const name = "tampered";\n');
+		const r = run(["compare-builds", a, b, "HEAD"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toMatch(/usertrust-server-1\.0\.0\.tgz: the build assembles to sha256 [0-9a-f]{64}, the rebuild to [0-9a-f]{64}\./);
+		expect(r.err).toContain("differ for: usertrust-server.");
+		expect(r.err).toContain("Refusing to publish anything");
+		// The other five still agree, and are reported as such.
+		expect(r.out.split("\n").filter((l) => l.includes(" sha256 ")).length).toBe(5);
+		expect(log()).toEqual([]);
+	});
+
+	it("refuses when the rebuild has a dist/ path the build lacks", () => {
+		const [a, b] = twoBuilds();
+		changeDist(b, "core", 'export const name = "core";\n', true);
+		const r = run(["compare-builds", a, b, "HEAD"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain("differ for: usertrust.");
+	});
+
+	it("compares what npm would receive: a root file only the build tarball carries is ignored", () => {
+		// Root files come from the release commit, never from a build tarball, so a difference
+		// there changes nothing published. The control for the two refusals above.
+		const [a, b] = twoBuilds();
+		writeFileSync(join(repo, "packages/ui/README.md"), "only in the rebuild\n");
+		const tmp = join(dir, "repack");
+		expect(run(["pack", tmp]).status).toBe(0);
+		const before = readFileSync(join(b, "usertrust-ui-1.0.0.tgz"));
+		copyFileSync(join(tmp, "usertrust-ui-1.0.0.tgz"), join(b, "usertrust-ui-1.0.0.tgz"));
+		expect(readFileSync(join(b, "usertrust-ui-1.0.0.tgz")).equals(before)).toBe(false);
+		const r = run(["compare-builds", a, b, "HEAD"]);
+		expect(r.status, r.err).toBe(0);
+	});
+
+	it("refuses a missing or refused rebuild tarball, naming the rebuild", () => {
+		const [a, b] = twoBuilds();
+		rmSync(join(b, "usertrust-ui-1.0.0.tgz"));
+		let r = run(["compare-builds", a, b, "HEAD"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain(`usertrust-ui-1.0.0.tgz is missing from ${b}`);
+		writeFileSync(
+			join(b, "usertrust-ui-1.0.0.tgz"),
+			gz(archive(member("package/package.json", "{}"), member("package/dist/.npmrc", "x"))),
+		);
+		r = run(["compare-builds", a, b, "HEAD"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain("usertrust-ui-1.0.0.tgz from the rebuild was refused");
+	});
+
+	it("refuses one directory given twice, and a missing argument", () => {
+		const [a, b] = twoBuilds();
+		const same = run(["compare-builds", a, a, "HEAD"]);
+		expect(same.status).not.toBe(0);
+		expect(same.err).toContain("one directory twice");
+		for (const args of [[a, b], [a], [a, join(dir, "nope"), "HEAD"]]) {
+			const r = run(["compare-builds", ...args]);
+			expect(r.status, args.join(" ")).not.toBe(0);
+			expect(r.err).toContain("usage: compare-builds");
+		}
+	});
 });
 
 describe("release.sh assert-protected", { timeout: 30_000 }, () => {
@@ -1442,6 +1670,17 @@ describe("release.sh assert-protected", { timeout: 30_000 }, () => {
 		expect(r.status).toBe(0);
 		expect(r.out).toContain("requires 1 reviewer(s)");
 		expect(log()).toEqual(["gh|repos/owner/repo/environments/npm-publish"]);
+	});
+
+	it("passes with a warning that explains self-approval when prevent_self_review is off", () => {
+		setEnvironment(protectedEnv([reviewersRule(1, false)]));
+		const r = run(["assert-protected", "npm-publish"]);
+		expect(r.status).toBe(0);
+		expect(r.out).toContain("::warning::Environment 'npm-publish' lets whoever dispatches");
+		expect(r.out).toContain("docs/releasing.md, 'Self-approval'");
+		// The control: with it on, no warning.
+		setEnvironment(protectedEnv([reviewersRule(1, true)]));
+		expect(run(["assert-protected", "npm-publish"]).out).not.toContain("Self-approval");
 	});
 
 	it("passes with a warning when there is no deployment-branch policy", () => {

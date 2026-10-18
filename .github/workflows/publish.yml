@@ -7,9 +7,12 @@ name: Release
 # Three jobs, so that dependency code never runs next to a credential that can write:
 #   ci-gate  CI passed on the commit, and the npm-publish environment requires a reviewer.
 #   build    installs, typechecks, tests, bumps, builds and packs. Read-only token, no OIDC.
+#            Two legs of one matrix, on two fresh runners: `release` builds what is
+#            published, `rebuild` builds the same commit and bump again, for comparison.
 #   publish  approval, then pushes, and publishes tarballs it writes itself from the release
-#            commit's files and the build's dist/ bytes. Holds the write token, the OIDC
-#            token and NPM_TOKEN; installs nothing and runs no dependency code.
+#            commit's files and the build's dist/ bytes, only if the rebuild's dist/ bytes
+#            give the same tarballs. Holds the write token, the OIDC token and NPM_TOKEN;
+#            installs nothing and runs no dependency code.
 #
 # No job restores a cache: a cache another workflow's dependency code could have written must
 # not reach a release (every setup-node says package-manager-cache: false, and none says cache).
@@ -118,10 +121,18 @@ jobs:
     # Everything that runs dependency code (install scripts, typecheck, tests, the builds,
     # biome) runs here, with a read-only token and no OIDC token. What it hands on (tarballs
     # and the release commit) is checked by the publish job before anything is pushed.
+    #
+    # Two legs, each on its own fresh runner, run these same steps (one job definition, so the
+    # two cannot drift apart) and upload their output under their own name. The publish job
+    # publishes from `release`, and refuses unless every tarball it assembles from `release`
+    # is byte-identical to the one it assembles from `rebuild` (release.sh compare-builds).
+    # Nothing the build job reports is used as the version: the publish job computes it.
+    strategy:
+      fail-fast: true
+      matrix:
+        leg: [release, rebuild]
     permissions:
       contents: read
-    outputs:
-      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -287,7 +298,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: release
+          name: ${{ matrix.leg }}
           path: ${{ runner.temp }}/release/
           if-no-files-found: error
           retention-days: 7
@@ -304,8 +315,8 @@ jobs:
     # tools (git, gh, jq, python3, node, the npm bundled with node) and GitHub's actions: no
     # `npm ci`, no install, pack, build, test or cache, no dependency code.
     #
-    # Everything from the build job (the bundle, the commit in it, the tarballs, the version it
-    # reports) is untrusted DATA, never code or config. The working tree stays at the
+    # Everything from the build job (the bundle, the commit in it, both legs' tarballs) is
+    # untrusted DATA, never code or config. The working tree stays at the
     # dispatched commit, so every script this job runs is the dispatched commit's; the release
     # commit is never checked out, and its files are read as git blobs (mode 100644 only),
     # never require()d. A build tarball is never published or shown to npm: it is parsed as
@@ -330,8 +341,9 @@ jobs:
           fi
 
       # No registry-url: npm's config for the publish is written by scripts/release.sh.
-      # Node 24, for the npm it bundles (11 or later): npm's own refusal to apply latest
-      # implicitly to a lower version is the backstop for the dist-tag check. Pinned exactly:
+      # Node 24, for the npm it bundles (11.5.1 or later): npm trusted publishing needs it, and
+      # npm's own refusal to apply latest implicitly to a lower version is the backstop for the
+      # dist-tag check. Pinned exactly:
       # docs/releasing.md cites npm's source as read at the npm this Node bundles, and names
       # this version (the release-workflow test keeps the two equal). This job builds nothing;
       # the build job (Node 22) made every byte it publishes.
@@ -340,8 +352,10 @@ jobs:
           node-version: 24.21.0
           package-manager-cache: false
 
-      # Before anything reads or writes the registry: the npm in use, and that it is 11 or later.
-      - name: Require npm 11 or later
+      # Before anything reads or writes the registry: the npm and Node in use, and that they are
+      # at least what npm trusted publishing needs (npm 11.5.1, Node 22.14.0). It fails loudly:
+      # below the floor npm would publish with NPM_TOKEN alone, without saying so.
+      - name: Require npm 11.5.1 and Node 22.14.0 or later
         run: bash scripts/release.sh assert-npm
 
       # Again, now: an approval can come hours after ci-gate ran, and CI can be re-run.
@@ -355,26 +369,43 @@ jobs:
           name: release
           path: ${{ runner.temp }}/release
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: rebuild
+          path: ${{ runner.temp }}/rebuild
+
       # The release commit was made in the build job, which ran dependency code. Push it only
       # if it is exactly a version bump on top of the dispatched commit: one parent, that
       # parent is this run's commit, it changes exactly the six package.json files, each a
       # regular file and nothing but its "version" field and its lockstep siblings' specs, set
       # to exactly that version, and the tag points at it. Nothing is checked out: the commit
-      # is read as git objects. A republish publishes the dispatched commit itself, which the
-      # gate has verified.
+      # is read as git objects. That version is computed here, from the dispatched commit's
+      # committed version and the `version` input, never taken from the build job. A
+      # republish publishes the dispatched commit itself, which the gate has verified.
       - name: Select and verify what to publish
         id: source
         env:
-          BUILD_VERSION: ${{ needs.build.outputs.version }}
+          BUMP: ${{ inputs.version }}
         run: |
           if [ "$REPUBLISH" = true ]; then
             commit=$(git rev-parse HEAD)
           else
-            commit=$(bash scripts/release.sh verify-release "${RUNNER_TEMP}/release/release.bundle" "$BUILD_VERSION")
+            expected=$(bash scripts/release.sh expected-version "$BUMP")
+            echo "Expected version: ${expected}"
+            commit=$(bash scripts/release.sh verify-release "${RUNNER_TEMP}/release/release.bundle" "$expected")
           fi
           version=$(bash scripts/release.sh version-at "$commit")
           echo "commit=${commit}" >> "$GITHUB_OUTPUT"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      # The rebuild check, in every mode: each package's publish tarball, assembled from the
+      # release commit with the `release` leg's dist/ bytes, must be byte-identical to the one
+      # assembled with the `rebuild` leg's, which a second runner built from the same commit
+      # and bump. Both legs' tarballs are read as data.
+      - name: Require the rebuild to match, tarball by tarball
+        env:
+          COMMIT: ${{ steps.source.outputs.commit }}
+        run: bash scripts/release.sh compare-builds "${RUNNER_TEMP}/release" "${RUNNER_TEMP}/rebuild" "$COMMIT"
 
       # The exact publish command with --dry-run; it uploads nothing. First it assembles and
       # verifies every package's tarball: root files from the release commit's blobs, dist/

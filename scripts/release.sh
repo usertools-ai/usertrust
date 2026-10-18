@@ -17,6 +17,8 @@
 #                                        (and, to republish, the tag commit is on master)
 #   release.sh names                     the lockstep npm names, in publish order
 #   release.sh version-at <commit>       the lockstep version recorded in <commit> (git blobs)
+#   release.sh expected-version <bump>   the version a release dispatched on HEAD makes: HEAD's
+#                                        committed version bumped by patch, minor or major
 #   release.sh verify-release <bundle> <version>
 #                                        imports the release tag from the build job's bundle,
 #                                        verifies the commit, and prints it
@@ -26,8 +28,14 @@
 #   release.sh dist-tag <version>        the npm dist-tag v<version> publishes under, from
 #                                        latest-flag: latest if true, backfill if false
 #   release.sh assert-npm                prints node's and npm's versions; fails unless npm is
-#                                        11 or later (its implicit-latest refusal; see publish)
+#                                        11.5.1 or later and node 22.14.0 or later (trusted
+#                                        publishing, and npm's implicit-latest refusal; see
+#                                        assert_npm)
 #   release.sh pack <dir>                packs each package (already built) into <dir>
+#   release.sh compare-builds <dir> <rebuild dir> <commit>
+#                                        assembles each package's publish tarball from both
+#                                        directories' build tarballs, and fails unless every
+#                                        pair is byte-identical (sha256)
 #   release.sh publish <dir> <commit> [--dry-run]
 #                                        assembles each package's publish tarball from
 #                                        <commit>'s files and the build tarball in <dir> (see
@@ -398,6 +406,33 @@ version_at() {
 	echo "$first"
 }
 
+# The version a new release dispatched on HEAD makes: HEAD's committed lockstep version (read
+# from git blobs) bumped by <bump>, as `npm version <bump>` bumps a major.minor.patch version.
+# The publish job checks the build's release commit against this, so the version is never the
+# build job's word: it follows from the dispatched commit and the dispatch input alone.
+expected_version() {
+	local bump="${1:-}" v major minor patch
+	v=$(version_at HEAD) || return 1
+	IFS=. read -r major minor patch <<<"$v"
+	case "$bump" in
+	patch) patch=$((10#$patch + 1)) ;;
+	minor)
+		minor=$((10#$minor + 1))
+		patch=0
+		;;
+	major)
+		major=$((10#$major + 1))
+		minor=0
+		patch=0
+		;;
+	*)
+		err "The bump is '${bump}', not patch, minor or major."
+		return 1
+		;;
+	esac
+	echo "$((10#$major)).$((10#$minor)).$((10#$patch))"
+}
+
 # Prints "yes" if <name>@<version> is on npm and "no" if it is not. Anything else (network,
 # auth, an error it does not recognise) is a failure: an unreadable registry never reads as
 # "not published", because that would lead to publishing over it or skipping it blind.
@@ -486,6 +521,96 @@ pack() {
 	done
 }
 
+# Assembles each package's publish tarball into <out>/<dir>/<name>-<version>.tgz: the root
+# files from <commit>'s git blobs, plus the package/dist/ members of the build tarball in
+# <tardir> that pass scripts/release-tarball.py's rules (read as data, in a limited child
+# process), under headers it makes. Every member's time is the release commit's, so one commit
+# and one set of dist/ bytes always give the same tarball. Fails if any build tarball is
+# missing or refused; <what> ("the build" or "the rebuild") names the source in the error.
+assemble_all() {
+	local tardir="$1" commit="$2" version="$3" out="$4" what="$5" mtime dir pkg tgz names name
+	mtime=$(git show -s --format=%ct "$commit") || return 1
+	case "$mtime" in
+	'' | *[!0-9]*)
+		err "Could not read the commit time of ${commit}."
+		return 1
+		;;
+	esac
+	for dir in $(dirs); do
+		pkg=$(name_of "$dir") || return 1
+		tgz="${tardir}/${pkg}-${version}.tgz"
+		if [ -L "$tgz" ] || [ ! -f "$tgz" ]; then
+			err "${pkg}-${version}.tgz is missing from ${tardir}, or is not a regular file"
+			return 1
+		fi
+		mkdir "${out}/${dir}" "${out}/${dir}/root" || return 1
+		names=$(root_files "$commit" "$dir" "$version" "${out}/${dir}/root") || return 1
+		set -- assemble --input "$tgz" --output "${out}/${dir}/${pkg}-${version}.tgz" --mtime "$mtime"
+		for name in $names; do
+			set -- "$@" --root "${name}=${out}/${dir}/root/${name}"
+		done
+		if ! python3 -I "$TARBALL_TOOL" "$@"; then
+			err "${pkg}-${version}.tgz from ${what} was refused; refusing to publish anything."
+			return 1
+		fi
+	done
+}
+
+# The sha256 of a file, in hex. python3 is on every runner and on macOS, where sha256sum is not.
+sha256_of() {
+	python3 -I -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$1"
+}
+
+# The rebuild check. The build job runs as two legs of one matrix, on two fresh runners, with
+# the same steps: `release` builds what is published, `rebuild` builds the same commit with the
+# same bump again. Both legs' tarballs are untrusted data. For each package, this assembles the
+# publish tarball twice, from the same <commit> (so the same root files and member times) with
+# the dist/ bytes of each leg's build tarball, and fails unless the two are byte-identical. So
+# the bytes npm would receive are the bytes a second, independent build of the same tree gives,
+# and neither leg alone chooses a dist/ byte or a dist/ path. Prints each package's sha256.
+compare_builds() {
+	local tardir="${1:-}" redir="${2:-}" commit="${3:-}" version tmp dir pkg a b sa sb bad=""
+	if [ -z "$tardir" ] || [ ! -d "$tardir" ] || [ -z "$redir" ] || [ ! -d "$redir" ] || [ -z "$commit" ]; then
+		err "usage: compare-builds <tarball directory> <rebuild tarball directory> <commit>"
+		return 1
+	fi
+	tardir=$(cd "$tardir" && pwd) || return 1
+	redir=$(cd "$redir" && pwd) || return 1
+	if [ "$tardir" = "$redir" ]; then
+		err "compare-builds was given one directory twice (${tardir}); it compares two builds."
+		return 1
+	fi
+	version=$(version_at "$commit") || return 1
+	tmp=$(mktemp -d) || return 1
+	mkdir "${tmp}/release" "${tmp}/rebuild" || return 1
+	assemble_all "$tardir" "$commit" "$version" "${tmp}/release" "the build" || return 1
+	assemble_all "$redir" "$commit" "$version" "${tmp}/rebuild" "the rebuild" || return 1
+	for dir in $(dirs); do
+		pkg=$(name_of "$dir") || return 1
+		a="${tmp}/release/${dir}/${pkg}-${version}.tgz"
+		b="${tmp}/rebuild/${dir}/${pkg}-${version}.tgz"
+		sa=$(sha256_of "$a") || return 1
+		sb=$(sha256_of "$b") || return 1
+		case "$sa" in
+		'' | *[!0-9a-f]*)
+			err "Could not hash ${pkg}-${version}.tgz."
+			return 1
+			;;
+		esac
+		if [ "$sa" = "$sb" ] && cmp -s "$a" "$b"; then
+			echo "${pkg}-${version}.tgz sha256 ${sa}: the build and the rebuild agree"
+		else
+			err "${pkg}-${version}.tgz: the build assembles to sha256 ${sa}, the rebuild to ${sb}."
+			bad="${bad} ${pkg}"
+		fi
+	done
+	rm -rf "$tmp"
+	if [ -n "$bad" ]; then
+		err "The two builds of ${commit} differ for:${bad}. Either the build is not reproducible or one runner's output was changed; compare the two artifacts' dist/ files before releasing anything. Refusing to publish anything."
+		return 1
+	fi
+}
+
 # Publishes each package from a tarball this script assembles, never from the build's tarball
 # and never from a directory. For each package, scripts/release-tarball.py reads the build
 # tarball in <dir> as data (bounded, in a limited child process) and writes a new tarball: the
@@ -504,7 +629,7 @@ pack() {
 # active as a backstop; an explicit --tag latest would bypass it. backfill is passed as --tag
 # backfill.
 publish() {
-	local tardir="${1:-}" commit="${2:-}" dry=0 dir pkg version tag mtime state tgz tmp cfg empty work cache names name skip present
+	local tardir="${1:-}" commit="${2:-}" dry=0 dir pkg version tag state tmp cfg empty work cache skip present
 	if [ -z "$tardir" ] || [ ! -d "$tardir" ] || [ -z "$commit" ]; then
 		err "usage: publish <tarball directory> <commit> [--dry-run]"
 		return 1
@@ -521,33 +646,8 @@ publish() {
 	version=$(version_at "$commit") || return 1
 	tag=$(dist_tag "$version") || return 1
 	echo "npm dist-tag for ${version}: ${tag}"
-	# Every member's time is the release commit's, so the same commit assembles the same bytes.
-	mtime=$(git show -s --format=%ct "$commit") || return 1
-	case "$mtime" in
-	'' | *[!0-9]*)
-		err "Could not read the commit time of ${commit}."
-		return 1
-		;;
-	esac
 	tmp=$(mktemp -d) || return 1
-	for dir in $(dirs); do
-		pkg=$(name_of "$dir") || return 1
-		tgz="${tardir}/${pkg}-${version}.tgz"
-		if [ -L "$tgz" ] || [ ! -f "$tgz" ]; then
-			err "${pkg}-${version}.tgz is missing from ${tardir}, or is not a regular file"
-			return 1
-		fi
-		mkdir "${tmp}/${dir}" "${tmp}/${dir}/root" || return 1
-		names=$(root_files "$commit" "$dir" "$version" "${tmp}/${dir}/root") || return 1
-		set -- assemble --input "$tgz" --output "${tmp}/${dir}/${pkg}-${version}.tgz" --mtime "$mtime"
-		for name in $names; do
-			set -- "$@" --root "${name}=${tmp}/${dir}/root/${name}"
-		done
-		if ! python3 -I "$TARBALL_TOOL" "$@"; then
-			err "${pkg}-${version}.tgz from the build was refused; refusing to publish anything."
-			return 1
-		fi
-	done
+	assemble_all "$tardir" "$commit" "$version" "$tmp" "the build" || return 1
 	cfg="${tmp}/npmrc"
 	empty="${tmp}/empty-npmrc"
 	: >"$empty"
@@ -723,8 +823,11 @@ assert_protected() {
 	if [ "$(printf '%s' "$body" | jq -r '.deployment_branch_policy == null')" = true ]; then
 		echo "::warning::Environment '${env}' has no deployment-branch policy; docs/releasing.md recommends master and tags v*."
 	fi
+	# Accepted while the project has one maintainer who can approve: with 'Prevent self-review'
+	# on, nobody could approve that maintainer's release. The warning stays, so that it is seen
+	# on every release until a second reviewer exists. docs/releasing.md, "Self-approval".
 	if [ "$(printf '%s' "$body" | jq -r '[.protection_rules[] | select(.type == "required_reviewers") | .prevent_self_review] | any')" != true ]; then
-		echo "::warning::Environment '${env}' lets whoever dispatches the release approve it; consider 'Prevent self-review'."
+		echo "::warning::Environment '${env}' lets whoever dispatches the release approve it. This is accepted while the project has a single maintainer who can approve (docs/releasing.md, 'Self-approval'); turn on 'Prevent self-review' once a second reviewer is added."
 	fi
 	echo "Environment '${env}' requires ${reviewers} reviewer(s)."
 }
@@ -819,7 +922,7 @@ verify_release_commit() {
 verify_release() {
 	local bundle="${1:-}" version="${2:-}" commit ident message
 	if ! valid_version "$version"; then
-		err "The build job reported version '${version}', which is not major.minor.patch; refusing."
+		err "The version to verify, '${version}', is not major.minor.patch; refusing."
 		return 1
 	fi
 	if [ -L "$bundle" ] || [ ! -f "$bundle" ]; then
@@ -1154,25 +1257,53 @@ dist_tag() {
 	esac
 }
 
-# The publish job relies on npm's refusal to apply latest implicitly to a version not higher
-# than one npm holds (see publish), which npm added in 11.0.0 (lib/commands/publish.js; absent
-# in 10.9). Prints node's and npm's versions, and fails unless npm's major is 11 or later.
+# Whether release version <a> (major.minor.patch, digits only) is at least <b>. Fails on
+# anything else, so a version it cannot read never passes.
+version_at_least() {
+	local a="$1" b="$2" x y i
+	valid_version "$a" && valid_version "$b" || return 1
+	for i in 1 2 3; do
+		x=$(printf '%s' "$a" | cut -d. -f"$i")
+		y=$(printf '%s' "$b" | cut -d. -f"$i")
+		if [ "$((10#$x))" -gt "$((10#$y))" ]; then return 0; fi
+		if [ "$((10#$x))" -lt "$((10#$y))" ]; then return 1; fi
+	done
+	return 0
+}
+
+# The floor the publish job needs, before anything reads or writes the registry:
+#   - npm trusted publishing (OIDC) needs npm 11.5.1 or later and Node 22.14.0 or later
+#     (docs.npmjs.com/trusted-publishers). npm tries it on every publish by itself and falls
+#     back to the configured token (lib/utils/oidc.js, called from lib/commands/publish.js);
+#     below the floor it would publish with the token alone, silently.
+#   - npm's refusal to apply latest implicitly to a version not higher than one npm holds (see
+#     publish), which npm added in 11.0.0 (lib/commands/publish.js; absent in 10.9).
+# Prints node's and npm's versions, and fails unless both are at or above the floor. A version
+# it cannot read fails too.
+NPM_FLOOR="11.5.1"
+NODE_FLOOR="22.14.0"
 assert_npm() {
-	local nodev npmv major
+	local nodev npmv
 	nodev=$(node --version) || return 1
 	npmv=$(npm --version) || return 1
 	echo "node ${nodev}, npm ${npmv}"
-	major="${npmv%%.*}"
-	case "$major" in
-	'' | *[!0-9]*)
+	if ! valid_version "$npmv"; then
 		err "Could not read npm's version ('${npmv}'). Refusing to release."
 		return 1
-		;;
-	esac
-	if [ "$major" -lt 11 ]; then
-		err "npm ${npmv} is older than 11, which lacks npm's refusal to apply latest implicitly to a version lower than one it holds (the backstop for the dist-tag check). Refusing to release."
+	fi
+	if ! valid_version "${nodev#v}"; then
+		err "Could not read node's version ('${nodev}'). Refusing to release."
 		return 1
 	fi
+	if ! version_at_least "$npmv" "$NPM_FLOOR"; then
+		err "npm ${npmv} is older than ${NPM_FLOOR}. npm trusted publishing needs npm ${NPM_FLOOR} or later and Node ${NODE_FLOOR} or later (docs.npmjs.com/trusted-publishers), and npm 11.0.0 added the refusal to apply latest implicitly to a lower version (the backstop for the dist-tag check). Refusing to release."
+		return 1
+	fi
+	if ! version_at_least "${nodev#v}" "$NODE_FLOOR"; then
+		err "Node ${nodev} is older than ${NODE_FLOOR}, which npm trusted publishing needs (docs.npmjs.com/trusted-publishers). Refusing to release."
+		return 1
+	fi
+	echo "npm ${npmv} >= ${NPM_FLOOR} and node ${nodev} >= ${NODE_FLOOR}: npm uses trusted publishing (OIDC) where npmjs.com trusts this workflow, and the token otherwise."
 }
 
 gate() {
@@ -1194,6 +1325,7 @@ version) lockstep_version ;;
 pin-siblings) pin_siblings ;;
 version-at) version_at "${2:?usage: version-at <commit>}" ;;
 verify-release) verify_release "${2:-}" "${3:-}" ;;
+expected-version) expected_version "${2:-}" ;;
 assert-published) assert_published ;;
 assert-unreleased) assert_unreleased ;;
 assert-protected) assert_protected "${2:-}" ;;
@@ -1203,9 +1335,10 @@ latest-flag) latest_flag "${2:-}" ;;
 dist-tag) dist_tag "${2:-}" ;;
 pack) pack "${2:-}" ;;
 publish) publish "${2:-}" "${3:-}" "${4:-}" ;;
+compare-builds) compare_builds "${2:-}" "${3:-}" "${4:-}" ;;
 gate) gate ;;
 *)
-	err "usage: release.sh dirs | names | version | pin-siblings | version-at <commit> | assert-published | assert-unreleased | assert-protected <env> | assert-npm | gate | release-parent | verify-release <bundle> <version> | latest-flag <version> | dist-tag <version> | pack <dir> | publish <dir> <commit> [--dry-run]"
+	err "usage: release.sh dirs | names | version | pin-siblings | version-at <commit> | expected-version <bump> | assert-published | assert-unreleased | assert-protected <env> | assert-npm | gate | release-parent | verify-release <bundle> <version> | latest-flag <version> | dist-tag <version> | pack <dir> | publish <dir> <commit> [--dry-run] | compare-builds <dir> <rebuild dir> <commit>"
 	exit 2
 	;;
 esac
