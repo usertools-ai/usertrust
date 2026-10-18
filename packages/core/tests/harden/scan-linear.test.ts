@@ -420,7 +420,7 @@ describe("the linear scans give the old patterns' answers", () => {
 			"co",
 			".c",
 			".co",
-			"é",
+			String.fromCharCode(0xe9),
 			"!",
 		];
 		sameAnswers(
@@ -657,4 +657,63 @@ describe("the linear scans give the old patterns' answers", () => {
 			(s) => detectInjection(s).patterns.includes("delimiter_injection"),
 		);
 	});
+});
+
+describe("long runs of letters or digits: no detector throws, up to 10.4M characters", () => {
+	// V8 overflows its regexp stack on a counted quantifier `X{n,}` over a run of about 6M
+	// characters, and threw RangeError out of detectPII, redactPII and detectInjection. Every
+	// counted quantifier is now written `X{n}X*` (counted-quantifiers.test.ts holds the rest).
+	// Each row is one rule's prefix and a run of the class its quantifier repeats; the plain
+	// runs reach the hex, digit and base64 rules with no prefix at all.
+	const RUNS: ReadonlyArray<[string, string]> = [
+		["", "b"],
+		["", "1"],
+		["", "B"],
+		["sk-", "b"],
+		["sk_live_", "b"],
+		["sk-ant-", "b"],
+		["rk_live_", "b"],
+		["sk_org_", "b"],
+		["xai-", "b"],
+		["gsk_", "b"],
+		["pplx-", "b"],
+		["ghp_", "b"],
+		["github_pat_", "b"],
+		["ghu_", "b"],
+		["Bearer ", "b"],
+		["eyJ", "b"],
+		["eyJbbbbbbbbbbbb.bbbbbbbbbbbb.", "b"],
+		["SG.", "b"],
+		["glpat-", "b"],
+		["glrt-", "b"],
+		["npm_", "b"],
+		["xapp-", "b"],
+		["xoxe-1-", "b"],
+		["whsec_", "b"],
+		["AIza", "b"],
+		["AKIA", "B"],
+	];
+	const SIZES_LONG = [3_000_000, 10_400_000];
+	for (const [prefix, unit] of RUNS) {
+		const name = `${JSON.stringify(prefix)} then a run of ${JSON.stringify(unit)}`;
+		for (const [fn, scan] of [
+			["detectPII", detectPII],
+			["redactPII", (s: string) => redactPII(s)],
+		] as const) {
+			it(`${fn}: ${name}`, () => {
+				const verdict = withinRatio(scan, after(prefix, unit), SIZES_LONG);
+				expect(verdict, `ratio ${verdict.ratio.toFixed(1)} at ${verdict.size}`).toMatchObject({
+					ok: true,
+				});
+			}, 120_000);
+		}
+	}
+	for (const unit of ["b", "A", "1", "+/"]) {
+		it(`detectInjection: a run of ${JSON.stringify(unit)}`, () => {
+			const verdict = withinRatio(detectInjection, run(unit), SIZES_LONG);
+			expect(verdict, `ratio ${verdict.ratio.toFixed(1)} at ${verdict.size}`).toMatchObject({
+				ok: true,
+			});
+		}, 120_000);
+	}
 });

@@ -765,5 +765,7 @@ describe("PII detector differential: 5.0.4 beside the current detector", () => {
 		// Written only when asked for (the PR body carries it); the assertions above are the gate.
 		const out = process.env.PII_DIFFERENTIAL_TABLE;
 		if (out) writeFileSync(out, `${JSON.stringify({ rows, phoneLostByRule: byRule }, null, 2)}\n`);
-	});
+		// Both detectors over every kind's 20,000+ inputs: about 3 s on a laptop, and 4.4 to 5.1 s
+		// on CI, past vitest's default 5 s.
+	}, 30_000);
 });
