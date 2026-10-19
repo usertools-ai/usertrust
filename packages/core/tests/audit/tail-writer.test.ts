@@ -869,6 +869,85 @@ describe("the writer's own limits: a line it could not read back, a new log's di
 		expect(verifyVault(join(root, VAULT_DIR))).toMatchObject({ valid: true, chainLength: 4 });
 	});
 
+	/** The vault's files and whether `audit/quarantine` exists: what a refused repair must leave as it was. */
+	const repairState = () => ({
+		...digests(),
+		quarantine: existsSync(join(auditDir(), "quarantine")),
+	});
+
+	it("quarantine-tail on a legacy last line over the read bound, a torn fragment after it: refused in a dry run and a real one before anything is changed, since the writer could not record the cut", async () => {
+		const legacy = await legacyBigTail(64 * MIB);
+		expect(legacy).toBeGreaterThan(64 * MIB);
+		writeFileSync(logPath(), '{"kind":"llm', { flag: "a" });
+		const before = repairState();
+		const dry = await outcome(quarantineTornTail(root, { dryRun: true }));
+		const real = await outcome(quarantineTornTail(root));
+		for (const r of [dry, real]) {
+			expect(message(r)).toMatch(
+				/last lines over the 67108864-byte bound the writer reads them within \(TAIL_OVERSIZE\)/,
+			);
+		}
+		expect(repairState(), "nothing saved, nothing cut").toEqual(before);
+		expect(deadLetters()).toHaveLength(0);
+	});
+
+	it("quarantine-tail on a legacy line over the read bound BEFORE a small last one, a torn fragment after them: refused before anything is changed, since the writer could not read the cut log", async () => {
+		await legacyBigTail(64 * MIB);
+		// One small event after it, chained and anchored by hand (the writer refuses to append beside it): the
+		// last line leaves room for a record, but the last two are over the bound the writer reads them within.
+		const anchor = JSON.parse(readFileSync(metaPath(), "utf-8")) as {
+			lastHash: string;
+			sequence: number;
+		};
+		const body = {
+			id: "legacy-small",
+			timestamp: "2026-10-01T00:00:01.000Z",
+			previousHash: anchor.lastHash,
+			kind: "llm_call",
+			actor: "local",
+			data: { transferId: "tx_after" },
+			sequence: anchor.sequence + 1,
+		};
+		const hash = createHash("sha256").update(canonicalize(body)).digest("hex");
+		writeFileSync(logPath(), `${canonicalize({ ...body, hash })}\n{"kind":"llm`, { flag: "a" });
+		writeFileSync(metaPath(), JSON.stringify({ lastHash: hash, sequence: body.sequence }));
+		const before = repairState();
+		const real = await outcome(quarantineTornTail(root));
+		expect(message(real)).toMatch(
+			/last lines over the 67108864-byte bound the writer reads them within \(TAIL_OVERSIZE\)/,
+		);
+		expect(repairState(), "nothing saved, nothing cut").toEqual(before);
+		expect(deadLetters()).toHaveLength(0);
+	});
+
+	it("quarantine-tail on a legacy last line under the read bound with no room beside it for the record of the cut: refused before anything is changed", async () => {
+		// A last line 400 bytes under the bound: the cut log is one the writer reads (its last two lines and
+		// three newlines fit the bound), but the cut's record, about 500 bytes, would not fit beside it.
+		const legacy = await legacyBigTail(64 * MIB - 704);
+		expect(legacy).toBe(64 * MIB - 400);
+		expect(legacy + Buffer.byteLength(lines()[0] as string) + 3).toBeLessThanOrEqual(64 * MIB);
+		writeFileSync(logPath(), '{"kind":"llm', { flag: "a" });
+		const before = repairState();
+		const real = await outcome(quarantineTornTail(root));
+		expect(message(real)).toMatch(
+			new RegExp(
+				`last line \\(${legacy} bytes\\) leaves no room for the record of the cut within the 67108864-byte bound`,
+			),
+		);
+		expect(repairState(), "nothing saved, nothing cut").toEqual(before);
+		expect(deadLetters()).toHaveLength(0);
+	});
+
+	it("CONTROL: quarantine-tail on a 50 MiB legacy last line, a torn fragment after it: repaired, its cut recorded on a line under the room the repair keeps for it", async () => {
+		await legacyBigTail(50 * MIB);
+		writeFileSync(logPath(), '{"kind":"llm', { flag: "a" });
+		expect((await quarantineTornTail(root)).recorded).toHaveLength(1);
+		const record = lines().at(-1) as string;
+		expect(JSON.parse(record)).toMatchObject({ kind: "audit.quarantine.torn_tail", sequence: 3 });
+		expect(Buffer.byteLength(record)).toBeLessThan(1024);
+		expect(verifyVault(join(root, VAULT_DIR))).toMatchObject({ valid: true, chainLength: 3 });
+	});
+
 	it("a log this append creates is synced into its directory before the event is claimed durable", async () => {
 		fault.trace = [];
 		await vaultOf(1);

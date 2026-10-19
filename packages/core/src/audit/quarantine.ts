@@ -69,7 +69,14 @@ import {
 	releaseAuditWriterForTeardown,
 	writeAnchorAtomically,
 } from "./chain.js";
-import { acquireSmallFile, listDirectory, MAX_INVENTORY_NAMES, splitLines } from "./tail-read.js";
+import {
+	acquireSmallFile,
+	listDirectory,
+	MAX_INVENTORY_NAMES,
+	MAX_TAIL_BYTES,
+	readLogTail,
+	splitLines,
+} from "./tail-read.js";
 import {
 	classifyAuditTail,
 	eventHashHolds,
@@ -398,6 +405,32 @@ function writeEvidence(auditDir: string, cut: Cut, tailBytes: Buffer): void {
 	}
 }
 
+/** The most bytes a cut's record takes as a line: 561 with every number at 2^53, so with room to spare. */
+const MAX_RECORD_LINE_BYTES = 1024;
+
+/**
+ * Refused unless the writer could append the repair's records. Each cut is recorded by an append onto
+ * the log as the cut leaves it, its first `cut` bytes, so this is checked before anything is changed.
+ * The writer reads that log's last lines within MAX_TAIL_BYTES (`readLogTail`, its own read), and
+ * takes the first record only if it fits beside the last line within the same bound (`appendEvent`'s
+ * check); every record after it follows a record. A last line an older writer left over the bound for
+ * one event would otherwise be cut, and its record then refused on this run and every one after.
+ */
+function assertRecordable(bytes: Buffer, cut: number): void {
+	const left = readLogTail(bytes, cut);
+	if (left.kind !== "tail") {
+		throw new AuditQuarantineRefusedError(
+			`the log as the cut leaves it has last lines over the ${MAX_TAIL_BYTES}-byte bound the writer reads them within (TAIL_OVERSIZE): the writer could not append the record of the cut`,
+		);
+	}
+	const lastLineBytes = left.tail.lines.at(-1)?.length ?? 0;
+	if (lastLineBytes + MAX_RECORD_LINE_BYTES + 3 > MAX_TAIL_BYTES) {
+		throw new AuditQuarantineRefusedError(
+			`the log's last line (${lastLineBytes} bytes) leaves no room for the record of the cut within the ${MAX_TAIL_BYTES}-byte bound the writer reads its last lines within: the writer could not append it`,
+		);
+	}
+}
+
 interface Plan {
 	torn: TornTail | null;
 	tailBytes: Buffer;
@@ -511,6 +544,7 @@ function analyse(auditDir: string, logPath: string, qDir: string, logBytes?: Buf
 		}
 	}
 	const toRecord = torn === null ? pending : [...pending, cutOf(torn.sha256, torn.offset)];
+	if (toRecord.length > 0) assertRecordable(bytes, cut);
 	return { torn, tailBytes, toRecord, anchor, head };
 }
 

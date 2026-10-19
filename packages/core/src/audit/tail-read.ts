@@ -219,10 +219,16 @@ export function listDirectory(
 }
 
 /**
- * Read the tail of a log through `fd` (a regular file of `size` bytes): its last two complete lines
- * and the bytes after its last newline, read backward from the end, within `maxBytes`.
+ * Read the tail of a log through the descriptor `log` (a regular file of `size` bytes), or of the
+ * first `size` bytes of `log` when it is the bytes in hand (a log as a repair would leave it): its
+ * last two complete lines and the bytes after its last newline, read backward from the end, within
+ * `maxBytes`.
  */
-export function readLogTail(fd: number, size: number, maxBytes = MAX_TAIL_BYTES): LogObservation {
+export function readLogTail(
+	log: number | Buffer,
+	size: number,
+	maxBytes = MAX_TAIL_BYTES,
+): LogObservation {
 	// Newline offsets found so far, from the end backward: the last three are all that are needed.
 	const newlines: number[] = [];
 	let start = size;
@@ -230,7 +236,8 @@ export function readLogTail(fd: number, size: number, maxBytes = MAX_TAIL_BYTES)
 	while (start > 0 && newlines.length < 3) {
 		if (size - start >= maxBytes) return { kind: "oversize", size };
 		const from = Math.max(0, start - CHUNK);
-		const chunk = readAt(fd, start - from, from);
+		const chunk =
+			typeof log === "number" ? readAt(log, start - from, from) : log.subarray(from, start);
 		if (chunk.length !== start - from) return { kind: "unavailable", code: "ESHORTREAD" };
 		for (let i = chunk.length - 1; i >= 0 && newlines.length < 3; i--) {
 			if (chunk[i] === NEWLINE) newlines.push(from + i);
