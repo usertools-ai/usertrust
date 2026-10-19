@@ -628,6 +628,34 @@ describe("a publish without the lock", () => {
 		a.release();
 	});
 
+	it("red-first (replaced the holder's): the real link refuses a holder's record that lands after the check and the staging", () => {
+		const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		const OLD = "2026-01-02T03:04:05.000Z";
+		const holders = JSON.stringify({
+			budget: 9_999,
+			writtenAt: OLD,
+			pid: 1,
+			processStartedAt: OLD,
+		});
+		// Stage the record as the real write does, THEN the lock holder's record lands at the target: after the empty-slot
+		// check, before the link. Only `write` is a seam; the link is the real one.
+		const write = (path: string, data: string): void => {
+			writeFileSync(path, data, { mode: 0o600, flag: "wx" });
+			writeFileSync(join(vaultDir, EFFECTIVE_BUDGET_FILE), holders, { mode: 0o600 });
+		};
+		const a = registerEnforcedBudget(vaultDir, 2_000, none, { write });
+		// The holder's record, byte for byte: the publish did not replace it.
+		expect(recordBytes().equals(Buffer.from(holders))).toBe(true);
+		// Nothing of this process's was published: the record is the holder's (its pid, its budget), never 2,000.
+		expect(rawRecord()).toMatchObject({ budget: 9_999, pid: 1 });
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 9_999, writtenAt: OLD });
+		// The staged file is removed, and the refused link is silent.
+		expect(stagingFiles()).toEqual([]);
+		expect(err).not.toHaveBeenCalled();
+		a.release();
+		expect(recordBytes().equals(Buffer.from(holders))).toBe(true);
+	});
+
 	it("something at the record's path that is not a regular file is left alone", () => {
 		mkdirSync(join(vaultDir, EFFECTIVE_BUDGET_FILE));
 		const a = registerEnforcedBudget(vaultDir, 2_000, none);
