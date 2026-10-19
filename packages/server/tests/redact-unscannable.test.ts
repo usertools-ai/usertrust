@@ -705,6 +705,66 @@ describe("internalErrorLine reads the original and the sanitized text, and redac
 		}
 	}, 60_000);
 
+	it("a marker sanitizing joins to a credential's end is read there, and its credential replaced", () => {
+		// The original splits the marker, the spaced view splits it again, and the sanitized text glues
+		// it to the credential before it. 5.1.0 replaced that credential first, and its `]` put a word
+		// boundary before the marker.
+		const ESCM = `${ESC}[m`;
+		const rows: Array<[string, string[], string]> = [
+			[`api_key: Q${C(9)}Bea${C(0)}rer TK1`, [], "api_key: [redacted]"],
+			[`api_key:Q${C(9)}Bea${BEL}rer TK1`, ["x-api-key"], "api_key:[redacted]"],
+			[`api_key=K${C(9)}bear${ESCM}er TK2`, ["abc"], "api_key=[redacted]"],
+			[`api-key=Q${C(13)}be${BEL}arer TK1`, [], "api-key=[redacted]"],
+			[`r${ESC}bearer Q${C(13)}B${ESCM}earer${C(10)}TK1`, [], "rbearer [redacted]"],
+			[`r${BEL}bearer${C(9)}Q${C(13)}a${C(0x7f)}pi_key:"TK1`, ["Bearer"], "rbearer [redacted]"],
+			// A chain: each token's end is looked at, not only the first one's.
+			[`Bearer T0${C(9)}Bearer T1${C(9)}Bea${C(0)}rer T2`, [], "Bearer [redacted]"],
+			[`api_key=T0${C(9)}api_key=T1${C(9)}Bea${C(0)}rer T2`, [], "api_key=[redacted]"],
+			[`x bearer${C(9)}T0${C(11)}bearer T1${C(13)}Beare${C(0x1f)}r  T2`, [], "x bearer [redacted]"],
+		];
+		for (const [message, secrets, printed] of rows) {
+			expect(line(message, secrets), JSON.stringify(message)).toBe(`${LINE}Error: ${printed}`);
+		}
+		// Each first credential, each removed character or sequence after it, and each marker split at
+		// each position by each of them, where the marker reads whole once sanitized.
+		const failed: string[] = [];
+		let whole = 0;
+		for (const first of ["api_key: Q", "api_key=Q", "x-api-key: 'Q", "Bearer Q", "Bearer x.Q"]) {
+			for (const ender of INSIDE) {
+				for (const [marker, sep] of MARKERS) {
+					for (let p = 1; p < marker.length; p++) {
+						for (const inside of [C(0), BEL, ESCM]) {
+							const split = `${marker.slice(0, p)}${inside}${marker.slice(p)}`;
+							const message = `${first}${ender}${split}${sep}${VALUE} end`;
+							const read = joinLines(scrubForStderr(message, Number.POSITIVE_INFINITY));
+							if (read !== `${first}${marker}${sep}${VALUE} end`) continue;
+							whole++;
+							const out = line(message);
+							if (out.includes(VALUE)) failed.push(`${JSON.stringify(message)}: ${out}`);
+						}
+					}
+				}
+			}
+		}
+		expect(failed.slice(0, 10)).toEqual([]);
+		expect(whole).toBeGreaterThan(5_000);
+		// Read once: a run of such credentials, 100,000 of them, in under 3 seconds.
+		for (const unit of [
+			`api_key=a${C(9)}`,
+			`Bearer a${C(9)}`,
+			`x-api-key: a${C(0)}`,
+			`api_key=a${C(9)}Bea${C(0)}rer `,
+			`Bearer a${C(9)}api${BEL}_key=`,
+			`api_key=a${C(9)}api_key="`,
+			`api_key=a${C(9)}x-api-key: 'b' `,
+		]) {
+			const message = unit.repeat(100_000);
+			const t = performance.now();
+			line(message);
+			expect(performance.now() - t, JSON.stringify(unit)).toBeLessThan(3_000);
+		}
+	}, 60_000);
+
 	it("a marker right after the caller's key: the boundary the replacement makes is read in the text", () => {
 		expect(line(`tenantBearer ${VALUE}`, ["tenant"])).toBe(
 			`${LINE}Error: [redacted]Bearer [redacted]`,

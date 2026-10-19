@@ -1,16 +1,19 @@
 /**
- * No regression from 5.1.0: no message exists where usertrust-server 5.1.0 redacted a credential in
- * an internal error's line and this version prints it. The oracle is 5.1.0's own code
+ * No regression from 5.1.0 over this corpus: no message in it where usertrust-server 5.1.0 redacted
+ * a credential in an internal error's line and this version prints it. That is all it shows: a
+ * message outside the corpus can still differ. The oracle is 5.1.0's own code
  * (tests/helpers/server-5.1.0.ts, copied from the v5.1.0 tag). Each credential in a message is a
  * distinct token, and a token counts as printed when the line holds it whole.
  *
- * Inputs: every repro found while this redaction was rebuilt, and 20,000 seeded messages built from
+ * Inputs: every repro found while this redaction was rebuilt; 20,000 seeded messages built from
  * the classes those repros came from: markers in three letter cases, split by a character or
  * sequence sanitizing removes; separators real, doubled, made only of removed characters, or with
  * removed characters beside them; quoted, unquoted and unclosed values; a marker inside a token;
  * markers glued to the word before them or to the caller's key; removed characters and line
- * breaks between and after; seven shapes of caller's key. The comparator's own positive control: a
- * "redaction" that only sanitizes is reported as regressing.
+ * breaks between and after; seven shapes of caller's key. And 10,000 seeded messages of one class
+ * the first generator rarely makes: a chain of credentials, each ended by a character or sequence
+ * sanitizing removes, and the next one's marker right after it, split or whole. The comparator's
+ * own positive control: a "redaction" that only sanitizes is reported as regressing.
  */
 import { describe, expect, it } from "vitest";
 import { scrubForStderr } from "../src/cli/scrub.js";
@@ -113,6 +116,22 @@ const REPROS: Case[] = [
 	// A key inside a token or a quoted value.
 	{ message: "Bearer\tsk-1 x", secrets: ["sk-1"], credentials: ["sk-1"] },
 	{ message: 'api_key="sk-1 more" x', secrets: ["sk-1"], credentials: ["sk-1", "more"] },
+	// A credential ended by a character sanitizing removes, then a split marker: the sanitized text
+	// glues the marker to it.
+	{ message: `api_key: Q${TAB}Bea${C(0)}rer TK1`, secrets: [], credentials: ["Q", "TK1"] },
+	{ message: `api_key:Q${TAB}Bea${BEL}rer TK1`, secrets: ["x-api-key"], credentials: ["TK1"] },
+	{ message: `api_key=K${TAB}bear${ESC}[mer TK2`, secrets: ["abc"], credentials: ["TK2"] },
+	{ message: `api-key=Q${C(13)}be${BEL}arer TK1`, secrets: [], credentials: ["TK1"] },
+	{
+		message: `r${ESC}bearer Q${C(13)}B${ESC}[mearer${LF}TK1`,
+		secrets: [],
+		credentials: ["TK1"],
+	},
+	{
+		message: `r${BEL}bearer${TAB}Q${C(13)}a${C(0x7f)}pi_key:"TK1`,
+		secrets: ["Bearer"],
+		credentials: ["TK1"],
+	},
 ];
 
 /** A seeded generator in [0, 1) (mulberry32). */
@@ -200,6 +219,43 @@ const FUZZ: Case[] = [];
 	for (let n = 0; n < 20_000; n++) FUZZ.push(fuzzCase(r, n));
 }
 
+/** Removed characters and sequences that end a credential: whitespace first, as found. */
+const ENDERS = [TAB, C(13), C(0x0b), C(0x0c), ...REMOVED];
+
+/**
+ * A chain of credentials, each ended by a character or sequence sanitizing removes, the next one's
+ * marker right after it (split by one, or whole), and nothing else between.
+ */
+function chainCase(r: () => number, n: number): Case {
+	const pick = <T>(items: readonly T[]): T => items[Math.floor(r() * items.length)] as T;
+	const credentials: string[] = [];
+	let message = pick(["", "r", " ", "x ", `r${ESC}`, `r${BEL}`]);
+	const count = 2 + Math.floor(r() * 3);
+	for (let k = 0; k < count; k++) {
+		const token = `TOK${k}q${n}Z`;
+		const bearer = r() < 0.5;
+		let marker = pick(bearer ? BEARERS : API_KEYS);
+		if (k > 0 && r() < 0.8) {
+			const at = 1 + Math.floor(r() * (marker.length - 1));
+			marker = `${marker.slice(0, at)}${pick(REMOVED)}${marker.slice(at)}`;
+		}
+		const separator = bearer ? pick([" ", TAB, LF, "  "]) : pick(API_KEY_SEPARATORS);
+		const quote = separator.endsWith('"') ? '"' : separator.endsWith("'") ? "'" : "";
+		const close = quote !== "" && r() < 0.5 ? quote : "";
+		message += `${marker}${separator}${token}${close}`;
+		credentials.push(token);
+		if (k < count - 1) message += pick(ENDERS);
+	}
+	message += pick(["", " end", LF, ";x"]);
+	return { message, secrets: pick(KEYS), credentials };
+}
+
+const CHAINS: Case[] = [];
+{
+	const r = seeded(20261021);
+	for (let n = 0; n < 10_000; n++) CHAINS.push(chainCase(r, n));
+}
+
 describe("no regression from 5.1.0: what 5.1.0 redacted is never printed", () => {
 	it("the oracle is 5.1.0: it prints what reviewers measured 5.1.0 printing", () => {
 		expect(released(`Authorization: Bearer x.api_key= x-api-key: "S3CRET"`, [])).toContain(
@@ -238,9 +294,26 @@ describe("no regression from 5.1.0: what 5.1.0 redacted is never printed", () =>
 		).toBeGreaterThan(50);
 	}, 60_000);
 
+	it("10,000 seeded chains: each credential ended by a removed character, the next marker after it", () => {
+		const found: string[] = [];
+		let redactedBefore = 0;
+		for (const c of CHAINS) {
+			for (const token of regressions(head, c))
+				found.push(`${JSON.stringify(c.message)} ${JSON.stringify(c.secrets)}: ${token}`);
+			const before = released(c.message, c.secrets);
+			redactedBefore += c.credentials.filter((token) => !before.includes(token)).length;
+		}
+		expect(found.slice(0, 10)).toEqual([]);
+		expect(found).toHaveLength(0);
+		expect(redactedBefore).toBeGreaterThan(10_000);
+	}, 60_000);
+
 	it("positive control: a line that only sanitizes is reported as regressing", () => {
 		const unredacted: Line = (message) => scrubForStderr(message);
 		expect(REPROS.some((c) => regressions(unredacted, c).length > 0)).toBe(true);
 		expect(FUZZ.filter((c) => regressions(unredacted, c).length > 0).length).toBeGreaterThan(5_000);
+		expect(CHAINS.filter((c) => regressions(unredacted, c).length > 0).length).toBeGreaterThan(
+			5_000,
+		);
 	}, 60_000);
 });

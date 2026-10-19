@@ -636,11 +636,20 @@ function* fromGaps(
  * that sanitizing may remove, and what stood after it is then joined to the token:
  * `Bearer\tpart-one\tpart-two` reads `Bearerpart-onepart-two`, and redacting `part-one` alone
  * would print `Bearer [redacted]part-two`, a line the patterns read differently. Run on, a token's
- * replacement ends where the token ends in the text it is written in. Linear: a source's tokens of
- * one kind end in order, so the reach of the last one is reused for an end inside it.
+ * replacement ends where the token ends in the text it is written in.
+ *
+ * A marker that sanitizing joined to a token's end is read there too, with no word boundary asked
+ * for, and its credential, run on, is replaced with the token: in `api_key: <v>\tBea\0rer <token>`,
+ * the original splits the marker, the spaced view splits it again (`Bea rer`), and the sanitized
+ * text glues it to the value (`<v>Bearer`). (5.1.0 replaced the value first, and its placeholder's
+ * `]` put a boundary there.) Every token's end is looked at, since in a chain each one can be glued
+ * to the next marker (`Bearer <a>\tBearer <b>\tBea\0rer <c>`). Linear: a source's tokens of one
+ * kind end in order, so the reach of the last one is reused for an end inside it; and the markers
+ * are read as `markersAt` reads them.
  */
 function* throughTokens(spans: Iterable<Redaction>, clean: string): Generator<Redaction> {
 	const reached = new Map<RegExp, { from: number; reach: number }>();
+	const markerEnd = markersAt(clean);
 	for (const part of spans) {
 		const rest = part.rest;
 		if (rest === undefined) {
@@ -654,8 +663,53 @@ function* throughTokens(spans: Iterable<Redaction>, clean: string): Generator<Re
 			run = { from: part.end, reach: rest.lastIndex };
 			reached.set(rest, run);
 		}
+		run.reach = Math.max(run.reach, markerEnd(part.end));
 		yield { ...part, end: run.reach };
 	}
+}
+
+/**
+ * A reader of `clean` that gives, for a place in it, where the credential ends whose `Bearer` or
+ * api-key marker starts exactly there, with no word boundary asked for; -1 if none does. (A match in
+ * `clean` ends at a delimiter, so there is nothing to run on.) Linear over any places, as
+ * `markersAfterKeys` is: an unquoted value that starts inside the last one ends where it does, so
+ * that end is reused; a quoted value cannot start inside one with the same quote; and a `Bearer`
+ * token ends at whitespace, so the next token starts past it.
+ */
+function markersAt(clean: string): (at: number) => number {
+	const bearer = new RegExp(BEARER_AT);
+	const apiKey = new RegExp(API_KEY_AT);
+	const unquoted = new RegExp(UNQUOTED_VALUE);
+	let last = -1;
+	let lastEnd = -1;
+	let unquotedFrom = -1;
+	let unquotedEnd = -1;
+	const find = (at: number): number => {
+		if (!startsMarker(clean.charCodeAt(at))) return -1;
+		bearer.lastIndex = at;
+		const token = bearer.exec(clean);
+		if (token !== null) return at + token[0].length;
+		apiKey.lastIndex = at;
+		const name = apiKey.exec(clean);
+		if (name === null) return -1;
+		const quote = name[3] ?? "";
+		const valueAt = apiKey.lastIndex;
+		if (quote === "" && valueAt >= unquotedFrom && valueAt < unquotedEnd) return unquotedEnd;
+		const value = apiKeyValue(clean, quote, valueAt, unquoted);
+		if (value === undefined) return -1;
+		if (quote === "") {
+			unquotedFrom = valueAt;
+			unquotedEnd = value.end;
+		}
+		return value.end;
+	};
+	return (at) => {
+		if (at !== last) {
+			last = at;
+			lastEnd = find(at);
+		}
+		return lastEnd;
+	};
 }
 
 /**
