@@ -380,6 +380,9 @@ describe("the late give-back's outcome, by the exhaustive table, on /v1/budget",
 			remaining: 10_000,
 			settlementsUnrecoverable: 0,
 			voidsOwed: 0,
+			// Health is off for a programmatic server unless asked for.
+			ledger: "unknown",
+			ledgerObserver: { failures: 0, lastFailure: null },
 		});
 	});
 

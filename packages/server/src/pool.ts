@@ -59,6 +59,10 @@ export function secureTenantVaults(config: ServerConfig): void {
  * Lazy per-tenant Governor instances. Tenant isolation comes from per-tenant
  * vaultBase directories (separate audit chains + spend ledgers) and per-tenant
  * budget/tier overrides. The factory is injectable for tests.
+ *
+ * `onCreate`, when given, is called exactly once each time `get()` CREATES a governor promise
+ * (never when it returns a cached one), with the tenant and that promise, so a caller can track
+ * every creation however it was reached. It must not throw.
  */
 export class GovernorPool {
 	private readonly governors = new Map<string, Promise<Governor>>();
@@ -66,6 +70,7 @@ export class GovernorPool {
 	constructor(
 		private readonly config: ServerConfig,
 		private readonly factory: GovernorFactory = (opts) => createGovernor(opts),
+		private readonly onCreate?: (tenant: TenantConfig, governor: Promise<Governor>) => void,
 	) {}
 
 	get(tenant: TenantConfig): Promise<Governor> {
@@ -84,6 +89,7 @@ export class GovernorPool {
 			throw err;
 		});
 		this.governors.set(tenant.id, created);
+		this.onCreate?.(tenant, created);
 		return created;
 	}
 
