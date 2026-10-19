@@ -8,6 +8,9 @@
 //   hang          stays alive, never ready (a native load that hangs)
 //   abort         aborts at once (a native panic's signal)
 //   evict         on its first probe, says it was evicted and exits 5
+//   delayed:<readyMs>:<replyMs|never>
+//                 says ready after <readyMs> (a slow start), then answers each probe <replyMs>
+//                 after it arrives, or never
 //   file:<path>   answers a probe once <path> does not read "down" (a ledger that stops and returns)
 // Like the real child, it exits when its parent's IPC channel closes or it is re-parented.
 import { readFileSync } from "node:fs";
@@ -40,7 +43,10 @@ process.on("message", (message) => {
 	const n = message?.probe;
 	if (typeof n !== "number") return;
 	if (mode === "reply") send({ reply: n });
-	else if (mode === "error") send({ error: n, code: "ERR_FAKE" });
+	else if (mode.startsWith("delayed:")) {
+		const replyMs = mode.split(":")[2];
+		if (replyMs !== "never") setTimeout(() => send({ reply: n }), Number(replyMs));
+	} else if (mode === "error") send({ error: n, code: "ERR_FAKE" });
 	else if (mode === "evict") {
 		send({ evicted: true });
 		process.exit(5);
@@ -54,4 +60,6 @@ process.on("message", (message) => {
 	}
 	// silent: never answers.
 });
-if (mode !== "hang") send({ ready: true });
+if (mode.startsWith("delayed:"))
+	setTimeout(() => send({ ready: true }), Number(mode.split(":")[1]));
+else if (mode !== "hang") send({ ready: true });
