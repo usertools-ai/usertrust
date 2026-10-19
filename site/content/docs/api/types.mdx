@@ -64,7 +64,7 @@ interface TrustReceipt {
   timestamp: string;
   auditDegraded?: boolean;
   usageSource?: "provider" | "estimated";
-  /** Four-tier disjoint token split. Present exactly when these counts priced the call (see ReceiptUsage): always for "provider", and for "estimated" counts a headless settle priced from. */
+  /** Four-tier disjoint token split. Present exactly when a complete report priced the call (see ReceiptUsage): always for "provider", and for "estimated" counts a headless settle priced from. */
   usage?: ReceiptUsage;
   /** The 1-hour share of usage.cacheWriteTokens and its rate. Present only when the call wrote 1h cache. */
   cacheWrite1h?: { tokens: number; ratePer1k: number };
@@ -105,12 +105,16 @@ the rates recorded in the audit chain diverge from the rates your cost was compu
 ### ReceiptUsage
 
 The four-tier disjoint token split a settle was metered from (spec D5). Present on
-`TrustReceipt.usage` and `llm_call` audit events exactly when these counts priced the call:
-always for provider-reported usage, and for a headless settle's own `"estimated"` counts. It is
+`TrustReceipt.usage` and `llm_call` audit events exactly when a COMPLETE report priced the call:
+input and output both present and usable (an explicit 0 counts). That is always so for
+provider-reported usage, and for a headless settle's own complete `"estimated"` counts. It is
 absent, never zero-filled, when the cost is the metered pre-call estimate (no counts, or counts
-refused as implausible), and when an input or output count was non-finite, negative or
-non-numeric. An input or output a headless settle leaves out, while reporting others, is 0, and
-is published as 0.
+refused as implausible), and for an INCOMPLETE report: an input or output absent, non-finite,
+negative or non-numeric, or cache tiers alone. An incomplete report costs max(the metered
+estimate, its partial counts) and publishes no usage, even when its counts set the cost; report an
+explicit 0 for a count that is genuinely zero. In `trust()`, a provider count that is present but
+not a count (a string, NaN, a negative) is refused instead: the whole report is recorded as
+implausible and costs the estimate exactly.
 
 ```typescript
 interface ReceiptUsage {

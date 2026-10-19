@@ -140,7 +140,7 @@ Default: `"warn"`. PII detection mode, applied to the prompt text of each govern
 | `block` | Throw a `PolicyDeniedError` if the prompt scan finds PII |
 | `off` | Disable PII detection entirely |
 
-Detected types: email, phone, SSN, credit card (Luhn-validated), IPv4, and the secret formats `api_key`, `aws_key`, `github_token`, `bearer_token`, `jwt`, `private_key` and `generic_secret`. Fields outside the prompt text, such as tool definitions, an array-form `system` prompt or Google's `config`, are not scanned. See [PII Detection](/docs/policy/pii).
+Detected types: email, phone, SSN, credit card (Luhn-validated), IPv4, and the secret formats `api_key`, `aws_key`, `github_token`, `bearer_token`, `jwt`, `private_key` and `generic_secret`, plus `unscannable` for a value the patterns could not finish reading, which is treated as a secret. Fields outside the prompt text, such as tool definitions, an array-form `system` prompt or Google's `config`, are not scanned. See [PII Detection](/docs/policy/pii).
 
 ### circuitBreaker
 

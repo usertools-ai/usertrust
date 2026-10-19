@@ -18,6 +18,7 @@
  */
 
 import type { InjectionDetection } from "../shared/types.js";
+import { UNSCANNABLE } from "./pii.js";
 
 // ---------------------------------------------------------------------------
 // Layer 1: Keyword combo matching
@@ -107,7 +108,7 @@ function checkRoleBoundary(lower: string): boolean {
 // Layer 3: Base64 evasion detection
 // ---------------------------------------------------------------------------
 
-const BASE64_RE = /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{20,}={0,2}(?![A-Za-z0-9=])/g;
+const BASE64_RE = /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{20}[A-Za-z0-9+/]*={0,2}(?![A-Za-z0-9=])/g;
 
 function checkBase64Evasion(value: string): boolean {
 	const candidates = value.match(BASE64_RE);
@@ -131,8 +132,21 @@ function checkBase64Evasion(value: string): boolean {
 // Layer 4: Delimiter injection detection
 // ---------------------------------------------------------------------------
 
-/** Triple backtick escape followed by system-like content. */
-const DELIMITER_BACKTICK_RE = /```[\s\S]*?(?:system|instruction|admin)/i;
+/**
+ * Triple backtick escape followed by system-like content: what
+ * `/```[\s\S]*?(?:system|instruction|admin)/i` matches, a fence with one of the keywords anywhere
+ * after it. As that one regex it was tried from every fence and each try read to the end of the
+ * text, so a long run of backticks with no keyword took time in N squared (1M characters: about
+ * half a minute). The FIRST fence has the most text after it, so the text matches exactly when a
+ * keyword appears after the first fence, and that is one `indexOf` and one keyword scan.
+ */
+const DELIMITER_FENCE = "```";
+const DELIMITER_KEYWORD_RE = /system|instruction|admin/i;
+
+function hasBacktickDelimiter(value: string): boolean {
+	const fence = value.indexOf(DELIMITER_FENCE);
+	return fence !== -1 && DELIMITER_KEYWORD_RE.test(value.slice(fence + DELIMITER_FENCE.length));
+}
 
 /** XML tag injection closing a role-like tag. */
 const DELIMITER_XML_RE = /<\/(?:system|user|assistant|human|ai)>/i;
@@ -142,9 +156,7 @@ const DELIMITER_HEADING_RE = /^#{1,3}\s*(?:system|instruction|new role)/im;
 
 function checkDelimiterInjection(value: string): boolean {
 	return (
-		DELIMITER_BACKTICK_RE.test(value) ||
-		DELIMITER_XML_RE.test(value) ||
-		DELIMITER_HEADING_RE.test(value)
+		hasBacktickDelimiter(value) || DELIMITER_XML_RE.test(value) || DELIMITER_HEADING_RE.test(value)
 	);
 }
 
@@ -189,9 +201,35 @@ function scanString(value: string, currentPath: string, state: ScanState): void 
 	}
 }
 
+/**
+ * Marks a string (or, at the root, the whole data) the checks could not finish reading: V8 throws
+ * `RangeError` (call stack exhausted) when some regular-expression shapes run over a run of
+ * millions of characters. It is reported as suspected injection at the highest score, never as
+ * clean, so `injection: "block"` refuses it.
+ */
+function markUnscannable(currentPath: string, state: ScanState): void {
+	state.patterns.add(UNSCANNABLE);
+	state.paths.push(currentPath ? `${currentPath}(${UNSCANNABLE})` : `(${UNSCANNABLE})`);
+	state.score = 1;
+}
+
+/**
+ * `scanString`, failing closed for this string only: a `RangeError` marks it unscannable and the
+ * walk goes on to its siblings. Any other error is not caught, so a real bug is never reported as
+ * an unscannable string.
+ */
+function scanStringClosed(value: string, currentPath: string, state: ScanState): void {
+	try {
+		scanString(value, currentPath, state);
+	} catch (err) {
+		if (!(err instanceof RangeError)) throw err;
+		markUnscannable(currentPath, state);
+	}
+}
+
 function scanValue(value: unknown, currentPath: string, state: ScanState): void {
 	if (typeof value === "string") {
-		scanString(value, currentPath, state);
+		scanStringClosed(value, currentPath, state);
 		return;
 	}
 
@@ -220,7 +258,10 @@ function scanValue(value: unknown, currentPath: string, state: ScanState): void 
  * Detect prompt injection attempts in any value by recursively scanning
  * strings in objects/arrays.
  *
- * Returns which injection patterns were matched and at which dot-paths.
+ * Returns which injection patterns were matched and at which dot-paths. Never throws `RangeError`:
+ * a string the checks cannot finish is reported as `unscannable` at its path, and data the walk
+ * cannot finish (nested deeper than the call stack) is reported as `unscannable` as a whole, both
+ * at score 1. Any other error is not caught.
  */
 export function detectInjection(data: unknown): InjectionDetection {
 	const state: ScanState = {
@@ -229,7 +270,12 @@ export function detectInjection(data: unknown): InjectionDetection {
 		paths: [],
 	};
 
-	scanValue(data, "", state);
+	try {
+		scanValue(data, "", state);
+	} catch (err) {
+		if (!(err instanceof RangeError)) throw err;
+		markUnscannable("", state);
+	}
 
 	return {
 		detected: state.patterns.size > 0,

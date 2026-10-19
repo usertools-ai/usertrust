@@ -122,19 +122,19 @@ one you cannot reuse.
 
 ## Endpoints
 
-| Method | Path            | Auth   | Purpose                                             |
-| ------ | --------------- | ------ | --------------------------------------------------- |
-| POST   | `/v1/authorize` | Bearer | Phase 1: policy gate + PENDING budget hold          |
-| POST   | `/v1/settle`    | Bearer | Phase 2a: post actual usage, returns a TrustReceipt |
-| POST   | `/v1/abort`     | Bearer | Phase 2b: void the hold for a failed call           |
-| POST   | `/v1/release`   | Bearer | Phase 2c: give back a hold that did not fail        |
-| GET    | `/v1/budget`    | Bearer | Remaining tenant budget, `voidsOwed`                |
-| GET    | `/v1/events`    | Bearer | SSE stream of tenant governance events              |
-| GET    | `/v1/health`    | none   | Liveness and `capabilities`                         |
+| Method | Path            | Auth   | Purpose                                               |
+| ------ | --------------- | ------ | ----------------------------------------------------- |
+| POST   | `/v1/authorize` | Bearer | Phase 1: policy gate + PENDING budget hold            |
+| POST   | `/v1/settle`    | Bearer | Phase 2a: post actual usage, returns a TrustReceipt   |
+| POST   | `/v1/abort`     | Bearer | Phase 2b: void the hold for a failed call             |
+| POST   | `/v1/release`   | Bearer | Phase 2c: give back a hold that did not fail          |
+| GET    | `/v1/budget`    | Bearer | Remaining tenant budget, `voidsOwed`, `ledger`        |
+| GET    | `/v1/events`    | Bearer | SSE stream of tenant governance events                |
+| GET    | `/v1/health`    | none   | Liveness, `ledger`, `capabilities`, dropped log lines |
 
 Errors: `403 policy_denied`, `402 budget_exceeded`, `429 anomaly`, `401 unauthorized`,
 `404 not_found` (unknown transferId on `/v1/abort` and `/v1/release`; for `/v1/settle` see the three codes below), `413 too_large` (1 MiB body cap),
-`503 ledger_unavailable` (`/v1/authorize` only; see below).
+`503 ledger_unavailable` (`/v1/authorize` and `/v1/budget`; see below).
 Pending holds are swept and released when their advertised life runs out: `pendingTtlMs` (default 5 min),
 or the ledger's pending timeout when that comes first. The sweep reads hold ages on a monotonic clock, so
 no wall-clock step moves it, and it never ends a hold before its advertised life. Declared: after the host
@@ -142,6 +142,38 @@ sleeps, a hold that was pending across the sleep can keep counting against the b
 life (T, 300 s by default) plus up to one sweep interval (30 s) after wake. In enforce mode that can mean
 false denials. It's the safe direction: nothing is charged and the ledger releases the funds on time.
 A TigerBeetle-state probe for this case is a follow-up (#241).
+
+### `GET /v1/health`
+
+Unauthenticated, and always HTTP `200`. It answers:
+
+```json
+{ "ok": true, "ledger": "reachable", "name": "usertrust-server", "version": "…", "capabilities": ["…"], "logLinesDropped": 0 }
+```
+
+- **`ledger`**: whether the server can reach its ledger (see "Ledger reachability" below for how
+  it is observed). It covers every ledger the tenants use and reads the worst of them, and
+  `unknown` while a tenant's governor is still being created or reads another ledger than the one
+  watched for it.
+
+  | `ledger`      | Meaning                                                        | `ok`    |
+  | ------------- | -------------------------------------------------------------- | ------- |
+  | `reachable`   | The ledger answered the last probe.                            | `true`  |
+  | `unreachable` | A probe has gone unanswered for longer than `ledgerTimeoutMs`. | `false` |
+  | `unknown`     | Reachability is not known. Not evidence of an outage.          | `true`  |
+  | `none`        | dryRun: there is no ledger.                                    | `true`  |
+
+- **`ok`** is `false` exactly when `ledger` is `unreachable`, and nothing else changes it.
+  **A monitor should read `ledger`**, not the HTTP status. A server whose `ledgerHealth` is
+  `"off"` (the default for `createUsertrustServer()`) answers `ledger: "unknown"` and `ok: true`
+  through an outage.
+- **`name`, `version` and `capabilities`**: what this server is and honours.
+- **`logLinesDropped`**: the number of log lines this server could write nowhere, because its log
+  sink failed and its write to stderr failed too (a stderr whose reader has gone, say). It is `0`
+  normally. It is process-wide, counted across every tenant and route, and names no tenant, route
+  or error. It never resets except on a restart. It is informational and never changes `ok`.
+  Alert on it going above `0`: server diagnostics (internal errors, the late-hold, expiry and
+  shutdown notices, and the ledger observer's own lines) happened that no log recorded.
 
 ### When the ledger does not answer: `503 ledger_unavailable`
 
@@ -200,11 +232,70 @@ have reached the client.
 - **`voidsOwed`** on the authenticated `GET /v1/budget` counts the tenant's late holds whose
   give-back has not landed: those still waiting on the ledger (a second outage), and those whose
   void the ledger refused, until the hold's own life has run out. The server also logs each of
-  these to stderr, naming the transfer only by a short SHA-256 prefix.
+  these (to stderr, unless an embedder gives it a log sink), naming the transfer only by a short
+  SHA-256 prefix.
 - **Residual race.** A client that hangs up AFTER the `200` is written cannot be detected: that
   hold is registered as pending and swept as any other.
-- `GET /v1/health` still reports `ok` while the ledger is down. `/v1/settle`, `/v1/abort` and
-  `/v1/release` still wait for the ledger without a bound.
+- `/v1/settle`, `/v1/abort` and `/v1/release` still wait for the ledger without a bound.
+
+### Ledger reachability: how `ledger` is observed, and `/v1/budget`
+
+`ledger` on `GET /v1/health` (above) and on the tenant's `GET /v1/budget` (below) comes from a
+ledger observer.
+
+**How it is observed (`ledgerHealth`).** With `"ledgerHealth": "child"` the server runs one
+long-lived child process per distinct ledger target the tenants configure (the same
+`[clusterId, addresses]` pair), started by `listen()` and killed by `close()`. Each child holds one
+TigerBeetle client and answers probes (`lookupAccounts([])`): its first at once, then one every
+30 s, and at most one more per `ledgerTimeoutMs` when `/v1/health` is asked. The server process
+loads no native TigerBeetle code for this: a native panic, or a host where the client cannot start
+(io_uring blocked), kills only the child. The child holds nothing that keeps the server process
+alive, and exits within about 250 ms when the server process dies, SIGKILL included.
+
+- **The CLI defaults to `"child"`.** `createUsertrustServer()` defaults to `"off"`: a library
+  starts no background process its caller did not ask for. **With `"off"`, `/v1/health` answers
+  `ledger: "unknown"` and `ok: true` while the ledger is down.** An embedder who wants health to
+  report reachability sets `"ledgerHealth": "child"`. dryRun runs no child and answers `none`.
+- **The session budget.** Each child is one TigerBeetle client session, held for the life of the
+  server: one session per distinct configured target per running server, beside the governors'
+  own. Two address lists for the same cluster are two targets, and cost two sessions on it, so
+  **configure every tenant of one cluster with identical `tigerbeetle.addresses`**. The 30 s probe
+  makes the health session less likely to be the one a full cluster evicts, never immune: a child
+  whose session is evicted exits and is started again after the cooldown.
+- **When it reads `unknown`.** Before a new child's first answer (the child has `ledgerTimeoutMs`
+  to say it is ready; its first probe's `ledgerTimeoutMs` counts from when it is sent, after which
+  an unanswered probe reads `unreachable`, so a slow start is never read as an outage); when a child is not ready within
+  `ledgerTimeoutMs` (say its TigerBeetle load hangs): the ledger was never asked, so it reads
+  `unknown` (`not_ready`), never `unreachable`, and the child is killed and started again after the
+  cooldown; after a probe answered with an error; while a
+  child that exited, was evicted or failed to start waits out `healthRespawnCooldownMs` (default
+  300000, counted from its exit) to be started again; and with `"off"`. After a child dies,
+  `unknown` lasts at most the cooldown plus two `ledgerTimeoutMs`, **only if its replacement starts
+  and survives to its first probe**. If every replacement fails (it cannot spawn, or crashes at
+  load), `unknown` lasts as long as that does, and is never read as `unreachable`: a failing
+  observer says nothing about the ledger. Each failure is logged once per kind per cooldown.
+- **A tenant's own `ledger`.** A tenant's ledger is compared with the one its governor actually
+  uses, once the governor exists. Until then (its first request has not finished creating it),
+  the tenant reads `unknown`, and so does health. If the governor reads a ledger other than the
+  one resolved when the server started (its config changed since), the tenant reads `unknown`
+  for as long as the server runs, and the server logs that the tenant's config changed after
+  start: restart the server to watch the new ledger.
+
+The authenticated `GET /v1/budget` adds the tenant's own `ledger` and `ledgerObserver`:
+
+```json
+{ "remaining": 49500, "settlementsUnrecoverable": 0, "voidsOwed": 0, "ledger": "reachable", "ledgerObserver": { "failures": 0, "lastFailure": null } }
+```
+
+`ledgerObserver` counts the times the child for this tenant's ledger failed, and names the last
+failure's class only (`spawn_failed:EAGAIN`, `child_exited`, `child_error`, `not_ready`, `evicted`, `panic`),
+never a path, address or error message. Like authorize, `/v1/budget` waits at most
+`ledgerTimeoutMs` for the tenant's governor; past it, it answers `503 ledger_unavailable`, with
+the tenant's `ledger` and no `remaining`:
+
+```json
+{ "error": "ledger_unavailable", "reason": "the tenant's governor was not ready within 5000 ms; retry later", "retryAfterMs": 5000, "ledger": "unknown" }
+```
 
 ### Giving a hold back: `/v1/release`, not `/v1/abort`
 
@@ -261,7 +352,17 @@ the tenant's Governor (per-tenant `stateDir/<tenant>` vault: separate audit chai
 spend ledger). Each tenant vault is owner-only (directories `0700`, files `0600`, whatever
 the umask; a vault another user owns is refused), and the server writes nothing outside
 `stateDir`; a `stateDir` the server creates is `0700`, and one you created is left as you
-made it. On Windows the server neither sets nor checks permissions: the `stateDir` folder's
+made it. At start the CLI creates every configured tenant's vault that does not exist yet
+(owner-only) and checks each the way its governor will, and refuses to start, naming the tenant
+and the reason, on one it cannot create or the governor would refuse. An error a client sees only
+as the opaque `500 internal` is written to stderr as
+`usertrust-server: internal error: tenant=<id> route=<route>: <reason>`, never with a header or a
+request body; a bearer key or api-key value quoted in the reason is replaced with `[redacted]`.
+In that line only three kinds of value are redacted: the caller's own bearer key, any `Bearer`
+token, and any `x-api-key`, `api-key` or `api_key` value. Any other secret a reason quotes, such
+as a password or a token in another format, is logged as it is; the cleanup of terminal escape
+sequences and control characters removes those, not secrets. On Windows the server
+neither sets nor checks permissions: the `stateDir` folder's
 inherited ACL decides who can read it, so keep it under the service account's own profile or
 give it an owner-only ACL (see the repository's `LIMITATIONS.md`). The SSE stream is
 best-effort operational telemetry, NOT an audit source — dropped subscribers lose events.

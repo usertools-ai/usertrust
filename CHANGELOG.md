@@ -15,19 +15,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A vault whose audit chain holds more than one event and has no `.meta` anchor (deleted, or every write of it failed) is refused after upgrading (`ANCHOR_MISSING`).** Its appends are dead-lettered, or its calls refused under `audit.failClosed`, and `usertrust verify` fails. With no anchor, a truncated log cannot be told from a whole one. Keep the vault exactly as it is, and save `usertrust verify --json`.
 
+- **usertrust-server: `GET /v1/health` can now answer `ok: false`, and `GET /v1/budget` can answer `503 ledger_unavailable`.** Health stays HTTP `200`, with its `capabilities` unchanged, and gains `ledger`; `ok` is `false` when `ledger` is `unreachable`. A monitor that alerted on `ok` now sees ledger outages, and should read `ledger` (`unknown` is not an outage). `/v1/budget` waits at most `ledgerTimeoutMs` for the tenant's governor, then answers `{ error: "ledger_unavailable", reason, retryAfterMs, ledger }` with no `remaining`: treat it as retryable.
+
+- **usertrust-server: the CLI now runs one child process per ledger cluster it watches.** By default the `usertrust-server` CLI starts a long-lived health child per distinct ledger target its tenants configure (`ledgerHealth: "child"`). Each holds one TigerBeetle client session for the life of the server, beside the governors' own sessions: configure every tenant of one cluster with identical `tigerbeetle.addresses`, or each address list costs a session. `"ledgerHealth": "off"` runs none. `createUsertrustServer()` runs none unless asked.
+
+- **A new detection type and injection pattern, `unscannable`, can appear in results.** It marks a value the detectors could not finish reading (see Added). Where a detector would have thrown `RangeError` on such a value, `detectPII` and `redactPII` now report it as type `unscannable`, `pii: "redact"` replaces it with `[REDACTED:unscannable]`, and `detectInjection` reports it at score 1, so `pii: "block"` and `injection: "block"` refuse the call. Code that handles each type name or pattern name it knows (to label or route a detection, say) meets one more.
+
 ### Added
 
 - **Under `audit.failClosed`, a vault whose audit append would be refused refuses the call before any hold.** Every governed `trust()` call (streaming or not) and action, and headless `authorize()`, first runs the audit writer's pre-flight: the next append's own classification of the tail, under the writer's mutex and lock. A refused tail, a torn line, or another writer holding the vault refuses the call with `AuditDegradedError` (the refusal as its `cause`, and a hint to run `usertrust verify`) before the hold and before the provider is called. A call refused at the pre-flight wrote nothing, so it does not degrade the client: once the vault is fixed (or the other writer is gone), the next call runs. A tail that becomes refused between the pre-flight and the append follows the order each path already had. `usertrust-server` answers such a tenant's `POST /v1/authorize` with `503 audit_refused` and the refusal's state (from the state alone: no path), and `evaluate_only` never turns it into a shadow allow: the server cannot record the call, which is no policy decision. A refusal thrown where nothing wrapped it (a settle whose record could not be written) is the same `503`, never an opaque `500`, and torn bytes after lines refused in their own right name the lines' state, never `TORN_TAIL` alone.
 
-### Changed
+- **usertrust-server: `ledger` on `/v1/health` and `/v1/budget`, and `ledgerHealth`.** `GET /v1/health` reports the ledger's reachability as `ledger` (`reachable`, `unreachable`, `unknown`, or `none` in dryRun), the worst over every ledger the tenants use; `ok` is `false` exactly when it is `unreachable`. The authenticated `GET /v1/budget` reports the tenant's own `ledger`, and `ledgerObserver: { failures, lastFailure }`: how often the observer for that ledger failed, and the class of its last failure only. Reachability is observed by a child process per distinct ledger target, holding one TigerBeetle session and probing it every 30 s and when health is asked, so the server process loads no native ledger code for it. `ledgerHealth` (`"child"` or `"off"`) chooses it: the CLI defaults to `"child"`, `createUsertrustServer()` to `"off"`, which answers `ledger: "unknown"` and `ok: true` through an outage. `healthRespawnCooldownMs` (default 300000) is how long a child that died waits to be started again. See the server README, "Ledger reachability".
 
-- **A headless settle whose caller labels its own counts `"estimated"` now records them.** `createGovernor().settle(auth, { inputTokens, outputTokens, …, usageSource: "estimated" })` has always priced the call from those counts, but its receipt and `llm_call` event left out `usage` (and `cacheWrite1h`), so the record could not reproduce its own `cost` from `pricing.appliedRates`. Both are now published whenever the counts priced the call, under either label, and `usageSource` stays the caller's label. They are still absent when the cost is the metered pre-call estimate (no counts, or counts refused as implausible), and when an input or output count was non-finite, negative or non-numeric. An input or output the caller leaves out while reporting others is 0, as before: it is priced and now published as 0 under either label. A reader that took a present `usage` to mean `usageSource: "provider"` should read `usageSource` for provenance. `trust()` is unchanged: it prices only provider-reported counts.
+- **usertrust-server: `GovernorPool` takes an optional third argument, `onCreate(tenant, governor)`.** It is called once each time `get()` creates a governor, never for one it returns from its cache, so an embedder can track every governor the pool creates. It receives the governor as a Promise, not a resolved governor, and must not throw. It is optional: existing callers are unaffected.
+
+- **A value the detectors cannot finish reading is reported as `unscannable`: never thrown, never passed as clean.** V8's regular-expression engine throws `RangeError` ("Maximum call stack size exceeded") on some pattern shapes over a run of millions of characters. Under Fixed, every such shape the detectors had is removed; this is the backstop for any shape that is missed or added later.
+  - `detectPII` reports the type `unscannable` at that value's path, and `redactPII` (`pii: "redact"`) replaces that value whole with `[REDACTED:unscannable]`. The values beside it are scanned and redacted as usual. If the walk itself cannot finish, the whole data is reported as `unscannable`, and `redactPII` returns `[REDACTED:unscannable]` in its place.
+  - `detectInjection` reports the pattern `unscannable` at that value's path, or for the whole data, at score 1. That includes a value that refers to itself, on which `detectInjection` threw `RangeError` before.
+  - Only `RangeError` is caught. Any other error still throws, so a bug is never reported as an unscannable value.
+  - The name is exported as `UNSCANNABLE`.
 
 ### Fixed
-
-- **The ledger client's 30 s health check no longer piles up requests while the ledger is unreachable.** Each tick looked up the treasury whether or not the previous lookup had been answered. tigerbeetle-node has no request timeout, and a request the cluster never answers stays queued in the native client, so an outage added one queued request (and its callback) every 30 s for as long as it lasted. A tick now submits nothing while the previous check is still outstanding. `ping()` itself is unchanged.
-
-- **A failing ledger health check now says so, once per outage.** The check's alert (and the reconnect before it) ran only if `ping()` rejected, and `ping()` answers `false` instead, so a failing check raised nothing. The tick now reads the answer: a check that answers `false`, or that is still unanswered at the next tick (a ledger that does not answer at all), raises one alert through `onAlert` (or a `console.warn`), and a check that answers again raises one more, saying so. Nothing is said while it keeps failing, for a client with no treasury (which is not checked), or after `destroy()`. The tick no longer reconnects or stops itself: a failed lookup already reconnects on its own, and the check keeps running so a recovery is seen. `ping()` is unchanged.
 
 - **An interrupted audit write no longer reads as tampering.** A crash between an event's log append and its `.meta` update leaves one extra event that chains from the anchored head: `usertrust verify` called it "truncation/deletion", and the next append silently rewrote `.meta`. It is now an interrupted write: valid, with a note, and rolled forward by the next append. A count mismatch says "truncation/deletion" only when events are missing; extra ones are "more events than the anchor records".
 
@@ -37,9 +45,193 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The audit lock is taken beside the log for every writer.** `usertrust audit quarantine-tail`, `usertrust secret` and snapshot restore resolved the lock's directory with a resolver that folds a `..` inside a link's target lexically: through `.usertrust -> a/link/../vault` they took the lock in another directory than the log they wrote, and appended beside a live writer. The lock now resolves its directory as a vault is resolved: realpath(3), or the portable resolver only where it names the directory the path opens.
 
+- **`usertrust-server` logged a very long error message as "(the error could not be read)".** Before writing an internal error to its log, the server redacts api-key values, and the pattern it used could not finish on an unclosed quoted value of about 10 million characters, so the line lost the error's reason. A regular expression now finds only where a value starts, and a loop finds where a quoted one ends: it reads a message of any length, and redacts exactly what the pattern did. If a pattern still cannot finish, the message is replaced by `[redacted: the message could not be scanned]`.
+
+- **`usertrust-server` could log the first part of the caller's own key.** The server replaces the caller's key in an internal error's message before and after removing escape sequences and control characters, so a key split by one is still found once it is removed. But the message was clipped to 4,096 characters between the removal and the second replacement: a split key that reached across the clip was cut first, and its first part was logged as it was. The key and the patterns are now looked for in the whole message as it was, with the escape sequences and control characters removed, and with a space in place of each run of them (so `Bearer`, a tab, an escape sequence and a tab, then a token, still reads as a token), and what they find is replaced once, a token through whatever removing them joins to its end (`Bearer`, a tab, `part-one`, a tab, `part-two` is printed as `Bearer [redacted]`), in the message with those removed, so nothing is removed after a replacement. Each pattern goes on looking from inside its own matches, so a marker inside a token or a value is still read: `Bearer x.api_key= x-api-key: "<key>"` is printed as `Bearer [redacted] [redacted] "[redacted]"`. And a marker that removing them glues to the end of a credential is read there, with its credential: `api_key: <value>`, a tab, `Bea`, a NUL, `rer <token>` is printed as `api_key: [redacted]`. The message is clipped only after that.
+
+- **`usertrust-server` could log the second part of a caller's key that a line break or other whitespace split.** When an error's message quoted the caller's key with a line break, a tab or a control character inside it (in place of a space the key holds, or within a word, as a hard-wrapped key has), the plain replacement did not find it, and the `Bearer` or api-key pattern, if any, then took the key's first part and left the rest in the log line; with neither, the whole key was logged. The caller's key is now found with any run of whitespace or control characters, or none, between any two of its characters. It is found on the same text as the `Bearer` and api-key patterns, before anything is replaced, so neither can take part of the other's match: a caller's key that was, or held, the word `Bearer` or an api-key name no longer replaces that word and leaves the token after it in the log line. That holds where a control character splits the word too (`Bea`, a NUL, `rer`): the word reads whole in the message with control characters removed, and the token after it is replaced there. And a marker right after the caller's key (`tenantBearer <token>` with the key `tenant`), which no pattern reads in the message because no word boundary stands before it, is looked for where the key ends, since replacing the key puts one there: the token is replaced too. And a token that runs into the caller's key runs on past the key's match to where the token ends, as it did in 5.1.0: `Bearer tenant keyUPSTREAM` with the key `tenant key` is printed as `Bearer [redacted]`. A quoted value that a quote inside the caller's key seems to close runs on to its next closing quote: `api_key="xk"zUPSTREAM" end` with the key `k"z` is printed as `api_key="[redacted]" end`. So does a credential whose end the caller's key takes: a quoted value whose closing quote ends the key (`api_key="prefixTENANT"UPSTREAM` with the key `TENANT"` is printed as `api_key="[redacted]"`), and a token whose ending delimiter starts it (`Bearer x'tenantUPSTREAM` with the key `'tenant` is printed as `Bearer [redacted]`).
+
+
+## [5.1.0] - 2026-10-18
+
+### Read before upgrading
+
+- **Results can change for existing callers.** The two entries under Added are new detections: text that 5.0.5 reported clean can now be flagged under `pii: "warn"`, blocked under `pii: "block"` and rewritten under `pii: "redact"`. No export, option, default or output shape changed, so no code change is needed. Text 5.0.5 flagged is still flagged, except the placeholders described under Fixed.
+
+### Added
+
+- **Secret detection now recognises Google, xAI, Groq and Perplexity API keys, and webhook signing secrets.** Before this, they were reported clean under `pii: "block"` and `pii: "redact"`:
+  - Google API keys: `AIza`, then exactly 35 letters, digits, `_` and `-`, as Google's docs describe them.
+  - xAI (`xai-`), Groq (`gsk_`) and Perplexity (`pplx-`) API keys: the prefix, then 20 or more letters and digits (16 or more for Perplexity) that end the token. Their docs show the prefix, or a placeholder of letters and digits, but no full format.
+  - Webhook signing secrets: `whsec_`, then 32 or more characters of base64, as the Standard Webhooks format specifies and Stripe issues them.
+
+  A name after one of these prefixes is not a key: a `-` or `_` that joins another word on makes the whole run a name, however long its first word. Neither is a placeholder: the payload must hold at least four distinct characters, so a repeated `x` is not a key. One shape stays ambiguous: a name of exactly 35 characters after `AIza` has a Google key's shape, and is reported.
+
+- **PII and secret detection now reads values hidden by fullwidth forms or invisible format characters.** Before this, a key with a zero-width space inside, or a key, card number, phone number, SSN, email or IPv4 address typed in fullwidth forms (as an input method may type it), was reported clean under `pii: "block"` and `pii: "redact"`. Each pattern is now also tried on a view of the value:
+  - format characters (Unicode category Cf: zero-width spaces and joiners, soft hyphens, bidi marks) removed;
+  - the fullwidth forms of ASCII (letters, digits and punctuation) replaced by the ASCII characters, and spaces and punctuation forms whose NFKC form is ASCII (the ideographic and no-break spaces, small and vertical punctuation) replaced by that form.
+
+  A value flagged before is still flagged, and redaction still replaces the whole value. Any other character stays as it is, including superscript, subscript, circled, parenthesized and mathematical letters and digits: a footnote marker glued to a number would otherwise read as one more digit and turn it into a phone, SSN or card number. So a value written entirely in superscripts is not read. The view is never more than three times the value's length, and the scan stays linear (full NFKC can turn one character into 18). The view's 1.1 MB lookup table is allocated with the first value that is not ASCII, not when the module is imported.
+
+### Fixed
+
+- **`detectPII`, `redactPII` and `detectInjection` could throw `RangeError` on inputs containing a very long run of letters or digits.** From about 6 million characters in one run (6 MB of plain text; a run of `b` was enough), V8's regular-expression engine ran out of stack on the patterns with an open counted quantifier (`[a-z]{20,}` and the like), and the scan threw "Maximum call stack size exceeded" instead of returning. That covered the 64-character hex rule, the 16-or-more digit rule, every token prefix with a minimum length (`sk-`, `ghp_`, `ghu_`, `npm_`, `glpat-`, `Bearer`, JWTs, `whsec_` and the rest), and the base64 rule in injection detection. Each is now written as the minimum count followed by an open run (`[a-z]{20}[a-z]*`), which matches exactly the same text, and detection completes at 10 million characters. A test fails on any open counted quantifier in the packages' source, so one cannot come back unnoticed.
+
+- **A placeholder after a prefix 5.0.5 added is no longer reported as a secret.** 5.0.5 flagged placeholder values such as `rk_live_XXXX...`: one capital, repeated, satisfied the capital rule those prefixes take. The payload after each of them must now also hold at least four distinct characters. This covers `ghu_`, the stateless `ghs_` and fine-grained `github_pat_` GitHub tokens, `ASIA`, `rk_live_`, `rk_test_`, `sk_org_`, `xapp-`, `xwfp-`, `xoxe-<n>-`, and GitLab's twelve prefixes besides `glpat-`. The prefixes released before 5.0.5 are unchanged.
+
+### Known issues
+
+These remain open in this release:
+
+- A ledger-backed usertrust-server stopped by SIGINT or SIGTERM with a pending hold, or with an authorize still reserving, can exit before ending it: the hold or reservation may stay reserved until the ledger's 300 s timeout, and its release may not be recorded.
+
+- An eviction learned in the instant between a governor's shutdown request and the `destroy()` that follows it (no `await` between them) still aborts the process. The voids, audit flush and lock release have already run. What is lost is the exit status (134, which a supervisor reads as a crash) and anything the process does after `destroy()`.
+
+- `GET /v1/health` still reports `ok` while the ledger is down, so a monitor cannot read an outage from health in this release. Read the `503 ledger_unavailable` answers on `POST /v1/authorize` instead.
+
+- `/v1/settle`, `/v1/abort` and `/v1/release` still wait for the ledger without a bound during an outage, and complete when it returns. `ledgerTimeoutMs` applies to `POST /v1/authorize` only.
+
+- An authorize that ends without a ledger reply (an evicted client session) may still have reserved, and that reservation expires at the hold timeout (300 seconds).
+
+- A tenant's authorizes are served one at a time, so a burst counts against `ledgerTimeoutMs` too. Measured on an Apple M4 Pro against a local single-node TigerBeetle, the default 5 s deadline was reached at roughly 350 concurrent authorizes for one tenant, and a slower or remote ledger reaches it sooner. A tenant that issues many concurrent authorizes should raise `ledgerTimeoutMs`.
+
+- A `TrustTBClient` whose session the cluster evicted while it was idle still aborts the process when `TrustTBClient.destroy()` is called directly on it, with no request since. Make one ledger request before `destroy()`, or end the process with `process.exit()` without calling `destroy()`.
+
+- A process that holds an evicted ledger client it has dropped does not exit on its own after `destroy()`. End such a process with `process.exit()` after `destroy()`.
+
+- A Google request field that only your client's `@google/genai` version reads is not sent. Keep the `@google/genai` that usertrust resolves at the same version as your client's.
+
+- In `trust()`, a provider count that is present but not a count (a string, NaN or a negative) still costs the estimate exactly, even when the call's other counts are usable.
+
+This list is not complete. LIMITATIONS.md gives the full account: section 13, "A ledger-backed server refuses authorizes while its ledger is unreachable, health still reports `ok`, and a hold it releases on SIGINT or SIGTERM may not be audited", and section 14, "A ledger client the cluster evicted cannot be released, and keeps its process from exiting on its own".
+
+## [5.0.5] - 2026-10-18
+
+### Read before upgrading
+
+- **A request that holds a value this release newly detects is now refused under `pii: "block"` and redacted under `pii: "redact"`; before, it passed unchanged.** Under the default `pii: "warn"` it is now reported. These are the values listed under Fixed: GitHub fine-grained and user access tokens and stateless installation tokens, AWS `ASIA` key ids, Stripe restricted and organization keys, Slack app-level, workflow and refresh tokens, GitLab's other token types, SendGrid keys whose first part ends in dashes, a dashed card beside its expiry, a valid IPv4 address after an out-of-range one (`1.2.3.256 192.168.1.1`), and a long hex secret after a run of hex letters alone.
+
+- **Digits joined to a word are no longer read as a phone number, and neither is a group of 16 or more digits.** A tool call id such as `toolu_1234567890123abc`, a reference such as `ref-5558675309z`, or an order id of 20 digits was reported as a phone. A request whose only match was such a value was refused under `pii: "block"` and had it replaced under `pii: "redact"`; it now passes unchanged. A number dialled with an international access prefix (`0114915123456789`) is still a phone.
+
+### Fixed
+
+- **PII detection no longer misses a value that sits beside one it rejects, and no longer reads digits inside an identifier as a phone number.** Four checks are fixed, and each still takes time proportional to the message:
+  - **IPv4 addresses.** Only the first IPv4-shaped candidate in a string was checked, so `1.2.3.256 192.168.1.1` read as clean. Every candidate is now checked, including one that overlaps a rejected one (`999.1.2.3.4` holds `1.2.3.4`).
+  - **Long hex secrets.** Only the first run of 64 or more hex characters was checked, so a run of letters alone, or digits alone, hid a real secret after it. Every run is now checked.
+  - **Card numbers.** A number next to a card joined the card's candidate and failed the Luhn check, so a dashed card beside its expiry (`4111-1111-1111-1111 12/29`) passed as clean under `pii: "block"` and `pii: "redact"`. The old check still runs unchanged, so everything it found is still found. In addition, a card is now found when it is printed in a card's layout:
+    - groups of 4-4-4-4, 4-4-4 or 4-4-4-4 followed by 1 to 3 more digits, 4-6-5 or 4-6-4, or one group of 13 to 19 digits;
+    - groups joined by exactly one space throughout, or by exactly one dash throughout, the whole chain of them in that layout;
+    - the digits pass the Luhn check.
+
+    A chain of six groups or more is never a card, and no part of one is either. So a list of numbers adds no detection: space-separated pairs, lists of four-digit numbers, a printed bit vector and one number per line are flagged exactly as before. As before, `4111 1111 1111 1111 1111` is not a card. A card written with spaces directly before its expiry (`4111 1111 1111 1111 12/29`, and the same for American Express and Diners Club cards) is also still not detected, as in 5.0.4: the layout check covers a dashed card next to its expiry. Likewise, a card joined by the same separator to an adjacent group of digits is not detected (`4111-1111-1111-1111-123`, `order 2024-4111-1111-1111-1111`): each chain of groups is checked whole, never a window inside it, which keeps lists of numbers from reading as cards.
+  - **Phone numbers.** Ten digits inside a word matched, so a tool call id such as `toolu_1234567890123abc` read as a phone: under `pii: "block"` that blocked a request with no PII in it, and under `pii: "redact"` different tool ids got the same placeholder. Now a group of digits joined to a letter or an underscore (`toolu_1234…`, `…5309z`, `SKU12`) is treated as part of that word, not as part of a phone number. So is a group of 16 or more digits, longer than any phone number (an order id such as `12345678901234567890`, or a card number written without spaces, which is still detected as a card), unless it is a number dialled with an international access prefix: 00, 011, 010 or 0011, then at most 15 digits (`0114915123456789`). An extension written right after a number (`555-867-5309x123`, `…5309ext12`) is part of the phone, not a word. Every other format detected before is still detected, spaced and international ones included (`555  867 5309`, `+44 20 7946 0958`, `5 5 5 8 6 7 5 3 0 9`, and numbers spaced with non-breaking spaces).
+
+- **PII detection and redaction no longer throw on a deeply nested or self-referencing value.** `detectPII` and `redactPII`, and through them the PII check before each governed call, walked a value recursively. About 10,000 levels of nesting (a request body of about 20 KB) exhausted the call stack, and the call threw `RangeError`. A value that contains itself through its enumerable properties threw the same way. Both now walk with an explicit stack, in the same order and with the same results:
+  - 100,000 levels take time in proportion to the depth;
+  - a cycle is scanned once, and a redacted copy keeps the cycle;
+  - only an in-process caller can pass a value that contains itself, since a JSON body cannot hold one.
+  - a value that holds one object at several places (not a cycle) is still walked at each place, as before, so a deeply shared structure takes as long as it did.
+
+- **Secret detection now recognises the token formats GitHub, AWS, Stripe, Slack and GitLab document.** Before this, the following tokens were reported clean under `pii: "block"` and `pii: "redact"`:
+  - GitHub fine-grained personal access tokens (`github_pat_`, 22 characters, `_`, 59 characters). The check ended at a word boundary, which the `_` inside such a token never gives, so it never matched one.
+  - GitHub user access tokens for a GitHub App (`ghu_`), and the stateless installation tokens (`ghs_<app id>_<JWT>`, with all three of the JWT's segments).
+  - AWS temporary access key ids from STS (`ASIA`, then 16 base32 characters).
+  - Stripe restricted keys (`rk_live_`, `rk_test_`) and organization keys (`sk_org_`).
+  - Slack app-level tokens (`xapp-`, or `xoxe.xapp-` when rotating), workflow tokens (`xwfp-`) and the refresh tokens that token rotation issues (`xoxe-1-`).
+  - SendGrid keys whose first part ends in dashes (`SG.` and 22 characters ending `---`): the check ended at a word boundary that a trailing `-` never gives. That boundary is dropped from every pattern whose payload can hold `-`, and the payload must hold a letter or a digit instead, so a prefix followed by dashes alone is still clean.
+  - GitLab's token types other than `glpat-`: `gloas-`, `gldt-`, `glrt-`, `glrtr-`, `glcbt-`, `glptt-`, `glft-`, `glimt-`, `glagent-`, `glwt-`, `glsoat-` and `glffct-`.
+
+  These newly recognised types must hold a capital letter after their prefix: GitHub's `ghu_`, Stripe's `rk_live_`, `rk_test_` and `sk_org_`, Slack's `xapp-`, `xwfp-` and `xoxe-<n>-`, and GitLab's twelve added prefixes. A real token's random characters almost surely hold one, so a lowercase name that only starts like one (`glrt-runner-registration-walkthrough`, `sk_org_settings_for_the_dashboard`) is not a secret. The other new formats are matched by their shape and need no capital: `github_pat_`, the stateless `ghs_` token, `ASIA`, and a SendGrid key ending in dashes. The formats that were already detected are still detected: classic GitHub tokens, `AKIA`, `sk_live_` and `sk_test_`, `xoxb-` and `xoxp-`, `glpat-`, `npm_`, SendGrid's `SG.`, Anthropic and OpenAI `sk-` keys, PEM private keys, JWTs and bearer tokens. Each one now has a test in the format its provider documents. OpenAI publishes no format, so its test uses the `sk-proj-` prefix that OpenAI's dashboard issues.
+
+### Known issues
+
+These remain open in this release:
+
+- A ledger-backed usertrust-server stopped by SIGINT or SIGTERM with a pending hold, or with an authorize still reserving, can exit before ending it: the hold or reservation may stay reserved until the ledger's 300 s timeout, and its release may not be recorded.
+
+- An eviction learned in the instant between a governor's shutdown request and the `destroy()` that follows it (no `await` between them) still aborts the process. The voids, audit flush and lock release have already run. What is lost is the exit status (134, which a supervisor reads as a crash) and anything the process does after `destroy()`.
+
+- `GET /v1/health` still reports `ok` while the ledger is down, so a monitor cannot read an outage from health in this release. Read the `503 ledger_unavailable` answers on `POST /v1/authorize` instead.
+
+- `/v1/settle`, `/v1/abort` and `/v1/release` still wait for the ledger without a bound during an outage, and complete when it returns. `ledgerTimeoutMs` applies to `POST /v1/authorize` only.
+
+- An authorize that ends without a ledger reply (an evicted client session) may still have reserved, and that reservation expires at the hold timeout (300 seconds).
+
+- A tenant's authorizes are served one at a time, so a burst counts against `ledgerTimeoutMs` too. Measured on an Apple M4 Pro against a local single-node TigerBeetle, the default 5 s deadline was reached at roughly 350 concurrent authorizes for one tenant, and a slower or remote ledger reaches it sooner. A tenant that issues many concurrent authorizes should raise `ledgerTimeoutMs`.
+
+- A `TrustTBClient` whose session the cluster evicted while it was idle still aborts the process when `TrustTBClient.destroy()` is called directly on it, with no request since. Make one ledger request before `destroy()`, or end the process with `process.exit()` without calling `destroy()`.
+
+- A process that holds an evicted ledger client it has dropped does not exit on its own after `destroy()`. End such a process with `process.exit()` after `destroy()`.
+
+- A Google request field that only your client's `@google/genai` version reads is not sent. Keep the `@google/genai` that usertrust resolves at the same version as your client's.
+
+- In `trust()`, a provider count that is present but not a count (a string, NaN or a negative) still costs the estimate exactly, even when the call's other counts are usable.
+
+This list is not complete. LIMITATIONS.md gives the full account: section 13, "A ledger-backed server refuses authorizes while its ledger is unreachable, health still reports `ok`, and a hold it releases on SIGINT or SIGTERM may not be audited", and section 14, "A ledger client the cluster evicted cannot be released, and keeps its process from exiting on its own".
+
+## [5.0.4] - 2026-10-17
+
+### Read before upgrading
+
+- **usertrust-server now refuses to start on a tenant vault its governor would refuse.** Before, such a vault showed up only as an opaque `500` on that tenant's first request, with no reason anywhere. These vaults are refused:
+  - a vault other users can read that cannot be made owner-only;
+  - a symbolic link to such a vault;
+  - a dangling link;
+  - a path that is not a directory.
+
+  The server now stops before its port opens and exits 1, writing `usertrust-server failed to start: tenant <id>: <reason>` to stderr. Before restarting on this version, check each tenant's `<stateDir>/<tenant>/.usertrust`, and fix any vault that line names. A loose real directory is still tightened to owner-only, as before.
+
+- **A tenant vault that does not exist yet is now created at start, owner-only, instead of on the tenant's first request.** A state directory the server cannot write to (read-only, say) now stops the start with the same `failed to start: tenant <id>: <reason>` line, instead of failing every request once the port is open.
+
+- **A settle that reports only some of input and output is priced at no less than the metered estimate.** An incomplete report costs max(metered estimate, its partial counts) and publishes no usage; report an explicit 0 for a count that is genuinely zero. Incomplete means `inputTokens` or `outputTokens` absent, non-finite, negative or non-numeric, or cache tiers alone; such a settle is labelled `usageSource: "estimated"` whatever label the caller gave. Before, a count left out was priced as 0: `createGovernor().settle(auth, { outputTokens: 500 })` cost the output alone, 44% under the call's true cost in the measured case, and a cache-only settle cost its cache tokens alone. Absent cache tiers still mean 0 (D5), and a report with both input and output usable is priced from its counts as before. This changes the headless governor's `settle()`, and through it usertrust-server's `POST /v1/settle` (whose `inputTokens` and `outputTokens` are optional) and acs-adapter's `CompositeEvaluator.settle()`, which passes its caller's usage through. In `trust()`, an Anthropic stream now counts as reported only once it has shown both an input and an output count: a stream cut before its `message_delta` (an error, or a consumer that stops reading, on `messages.create` streams and `messages.stream()` alike) settled with its output priced at 0 under a `"provider"` label, and now costs no less than the estimate. In `trust()`, a provider count that is present but not a count (a string, NaN, a negative) is refused, as before: the whole report is recorded as implausible and costs the estimate exactly, even when its other counts are usable. Any other `trust()` settle without a complete provider report now also costs no less than its usable counts, so a large cache read with no output is never priced below what it shows.
+
+- **A headless settle whose caller labels its own counts `"estimated"` now records them.** `createGovernor().settle(auth, { inputTokens, outputTokens, …, usageSource: "estimated" })` has always priced the call from those counts, but its receipt and `llm_call` event left out `usage` (and `cacheWrite1h`), so the record could not reproduce its own `cost` from `pricing.appliedRates`. Both are now published whenever the counts priced the call, under either label, and `usageSource` stays the caller's label. They are still absent when the cost is the metered pre-call estimate (no counts, or counts refused as implausible), and for a report missing input or output (see the entry above). A reader that took a present `usage` to mean `usageSource: "provider"` should read `usageSource` for provenance. `trust()` is unchanged: it prices only provider-reported counts.
+
+### Fixed
+
+- **PII and injection scanning now takes time proportional to the message.** Three of the scan's patterns took time in the square of the message length when the text held no separator they needed: the email pattern on any long run of letters, digits or `._%+-` with no `@`, the JWT pattern on a run like `-eyJ-eyJ…`, and the triple-backtick delimiter on a long run of backticks. So one long message with no spaces or punctuation (a base64 blob, a minified file, a hex dump) could block the process for seconds to minutes. The scan runs synchronously before the hold under the default `pii: "warn"`, and usertrust-server runs every tenant in one process, so it blocked every tenant. Measured on the email pattern: 100,000 characters took 5.5 s and 200,000 took 21 s, about 9 minutes estimated at 1,000,000; the JWT pattern took 10.7 s at 200,000, and the backtick delimiter 1.3 s. Each scan is now linear, and `detectPII` and `detectInjection` each take 3 to 15 ms on 1,000,000 characters of any of these inputs. What is found is unchanged: the email check now starts from each `@`, the JWT check skips starts that cannot match, and the delimiter check looks for its keywords after the first fence only, with the same answers as the old patterns. The other patterns were measured on their own worst inputs and were already linear.
+
+- **The ledger client's 30 s health check no longer piles up requests while the ledger is unreachable.** Each tick looked up the treasury whether or not the previous lookup had been answered. tigerbeetle-node has no request timeout, and a request the cluster never answers stays queued in the native client, so an outage added one queued request (and its callback) every 30 s for as long as it lasted. A tick now submits nothing while the previous check is still outstanding. `ping()` itself is unchanged.
+
+- **A failing ledger health check now says so, once per outage.** The check's alert (and the reconnect before it) ran only if `ping()` rejected, and `ping()` answers `false` instead, so a failing check raised nothing. The tick now reads the answer: a check that answers `false`, or that is still unanswered at the next tick (a ledger that does not answer at all), raises one alert through `onAlert` (or a `console.warn`), and a check that answers again raises one more, saying so. Nothing is said while it keeps failing, for a client with no treasury (which is not checked), or after `destroy()`. The tick no longer reconnects or stops itself: a failed lookup already reconnects on its own, and the check keeps running so a recovery is seen. `ping()` is unchanged.
+
+- **usertrust-server names its internal errors in its own log, and refuses at start a tenant vault its governor would refuse.** Every error a client sees as the opaque `500 {"error":"internal","reason":"internal error"}` was written nowhere, so a tenant whose vault is refused (a symbolic link to a vault other users can read, a dangling link, a non-directory, one that cannot be made owner-only) answered every request with a 500 and no reason anywhere. The server now writes one line per such error to stderr: `usertrust-server: internal error: tenant=<id> route=<route>: <ErrorName>: <message>`. The route is one of the server's own names, never the caller's URL; no header or request body is logged, and because the message is the governor's own text, which can quote what a caller sent, the caller's bearer key, any `Bearer <token>` and any api-key style value in it are replaced with `[redacted]` before escape sequences and control characters are removed and its lines joined (U+2028 and U+2029, which a log viewer can show as a new line, count as line breaks, so a message cannot show a forged second log line). A `log` sink that throws is contained: the 500 is still sent and a shutdown still completes. A hold the sweep or shutdown cannot release is logged the same way (`route=sweep`, `route=shutdown`) instead of silently. The client's answer is unchanged. At start, before the port opens, the CLI now gives every configured tenant's `<stateDir>/<tenant>/.usertrust` the check its governor would (`securePrivateVault`, now exported from `usertrust`): a refused vault stops the start with exit 1, naming the tenant and the reason; a loose real directory is tightened, as the governor would. **Behaviour change: a tenant vault that does not exist yet is now CREATED at start, owner-only, rather than on the tenant's first request**, so one that cannot be created (a read-only state directory, say) refuses the start, naming the tenant and the reason, instead of failing every request once the port is open. `secureTenantVaults(config)` is exported for an embedder that starts the server itself, and `createUsertrustServer` takes an optional `log` for where the lines go. A stderr whose reader has gone (EPIPE) no longer stops the server: the 500 is still answered and the server keeps running.
+
+### Added
+
+- **usertrust-server's `GET /v1/health` gains a top-level `logLinesDropped`:** the number of log lines the server could write nowhere (its log sink and stderr both failed). It is process-wide, names no tenant, route or error, and is reset only by a restart, so alert on it going above 0. Creating a server now installs one process-wide `'error'` listener on `process.stderr`, once per process and beside any listener of your own, so an EPIPE on stderr from any writer in the process (`console.warn`, another library) no longer crashes it.
+
 ### Changed
 
 - **usertrust-server's README now says what `retryAfterMs` means.** It is a suggested wait before retrying a `503 ledger_unavailable`, never a promise that the retry succeeds. A client that can wait should back off with jitter rather than all retry at `retryAfterMs`; one with a hard deadline may retry once sooner, as the Claude Code plugin's PreToolUse does. The README gives how long a burst's fast-fail lasted when measured, and why retries extend it.
+
+- **usertrust-server's README now says which secrets its internal-error log line redacts, and which it does not.** It redacts the caller's own bearer key, any `Bearer` token and any `x-api-key`, `api-key` or `api_key` value. Any other secret a reason quotes, such as a password, is logged as it is.
+
+### Known issues
+
+These remain open in this release:
+
+- A ledger-backed usertrust-server stopped by SIGINT or SIGTERM with a pending hold, or with an authorize still reserving, can exit before ending it: the hold or reservation may stay reserved until the ledger's 300 s timeout, and its release may not be recorded.
+
+- An eviction learned in the instant between a governor's shutdown request and the `destroy()` that follows it (no `await` between them) still aborts the process. The voids, audit flush and lock release have already run. What is lost is the exit status (134, which a supervisor reads as a crash) and anything the process does after `destroy()`.
+
+- `GET /v1/health` still reports `ok` while the ledger is down, so a monitor cannot read an outage from health in this release. Read the `503 ledger_unavailable` answers on `POST /v1/authorize` instead.
+
+- `/v1/settle`, `/v1/abort` and `/v1/release` still wait for the ledger without a bound during an outage, and complete when it returns. `ledgerTimeoutMs` applies to `POST /v1/authorize` only.
+
+- An authorize that ends without a ledger reply (an evicted client session) may still have reserved, and that reservation expires at the hold timeout (300 seconds).
+
+- A tenant's authorizes are served one at a time, so a burst counts against `ledgerTimeoutMs` too. Measured on an Apple M4 Pro against a local single-node TigerBeetle, the default 5 s deadline was reached at roughly 350 concurrent authorizes for one tenant, and a slower or remote ledger reaches it sooner. A tenant that issues many concurrent authorizes should raise `ledgerTimeoutMs`.
+
+- A `TrustTBClient` whose session the cluster evicted while it was idle still aborts the process when `TrustTBClient.destroy()` is called directly on it, with no request since. Make one ledger request before `destroy()`, or end the process with `process.exit()` without calling `destroy()`.
+
+- A process that holds an evicted ledger client it has dropped does not exit on its own after `destroy()`. End such a process with `process.exit()` after `destroy()`.
+
+- A Google request field that only your client's `@google/genai` version reads is not sent. Keep the `@google/genai` that usertrust resolves at the same version as your client's.
+
+- In `trust()`, a provider count that is present but not a count (a string, NaN or a negative) still costs the estimate exactly, even when the call's other counts are usable.
+
+This list is not complete. LIMITATIONS.md gives the full account: section 13, "A ledger-backed server refuses authorizes while its ledger is unreachable, health still reports `ok`, and a hold it releases on SIGINT or SIGTERM may not be audited", and section 14, "A ledger client the cluster evicted cannot be released, and keeps its process from exiting on its own".
 
 ## [5.0.3] - 2026-10-14
 

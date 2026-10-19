@@ -6,10 +6,11 @@
  * Part C: Edge cases
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	detectPII,
 	isOpaqueTextFree,
+	normalizedView,
 	type PIIDetection,
 	type RedactedData,
 	redactPII,
@@ -61,6 +62,124 @@ describe("detectPII — phone", () => {
 		const result = detectPII({ phone: "234.567.8901" });
 		expect(result.found).toBe(true);
 		expect(result.types).toContain("phone");
+	});
+
+	it("detects a phone written with repeated separators, or after punctuation", () => {
+		for (const text of [
+			"call 555  867 5309 today",
+			"+1 (234)  567 - 8901",
+			"tel:5558675309",
+			"(5558675309)",
+			"5 5 5 8 6 7 5 3 0 9",
+		]) {
+			expect(detectPII({ text }).types, text).toContain("phone");
+		}
+	});
+
+	it("detects international numbers written with spaces", () => {
+		for (const text of [
+			"call +44 20 7946 0958 today",
+			"+33 1 42 68 53 00",
+			"+49 30 901820",
+			"+61 2 9374 4000",
+			"+91 98765 43210",
+		]) {
+			expect(detectPII({ text }).types, text).toContain("phone");
+		}
+	});
+
+	it("detects a phone spaced with any whitespace, non-breaking spaces included", () => {
+		const nbsp = String.fromCodePoint(0xa0);
+		const narrow = String.fromCodePoint(0x202f);
+		for (const text of [
+			["555", "867", "5309"].join(nbsp),
+			["+44", "20", "7946", "0958"].join(narrow),
+			["+33", "1", "42", "68", "53", "00"].join(nbsp),
+		]) {
+			expect(detectPII({ text }).types, JSON.stringify(text)).toContain("phone");
+		}
+	});
+
+	it("does not read part of a group of 16 or more digits as a phone", () => {
+		for (const text of [
+			'order_id: "12345678901234567890"',
+			"12345678901234567",
+			"4111111111111111",
+			// "00" and then 16 or 17 digits: it starts like a dial string, but is too long for one.
+			"001234567890123456",
+			"0012345678901234567",
+		]) {
+			expect(detectPII({ text }).types, text).not.toContain("phone");
+		}
+		// The card is still a card.
+		expect(detectPII({ text: "4111111111111111" }).types).toContain("credit_card");
+	});
+
+	it("detects a number dialled with an international access prefix, 16 digits or more", () => {
+		for (const text of [
+			"Call 0114915123456789",
+			"0114915123456789",
+			"00491512345678901",
+			"0011 61 2 9374 4000",
+			"001161293744000",
+			"0104915123456789",
+		]) {
+			expect(detectPII({ text }).types, text).toContain("phone");
+		}
+	});
+
+	it("detects a phone with an extension written right after it", () => {
+		for (const text of [
+			"555-867-5309x123",
+			"555-867-5309ext12",
+			"555-867-5309 ext. 12",
+			"call 555.867.5309X42 today",
+			"(555) 867-5309 x123",
+			"555-867-5309#123",
+		]) {
+			expect(detectPII({ text }).types, text).toContain("phone");
+		}
+	});
+
+	it("not a phone: letters that are not an extension marker (x, ext, ext.) make the digits before them part of a word", () => {
+		for (const text of [
+			"555-867-5309abc123",
+			"5558675309q42",
+			"ref 5558675309abc12",
+			"555-867-5309xy12", // x, then a letter: not x followed by digits
+			"555-867-5309extra12", // ext, then more letters: not ext followed by digits
+		]) {
+			expect(detectPII({ text }).types, text).not.toContain("phone");
+		}
+	});
+
+	it("does not read digits before a word that only starts like an extension as a phone", () => {
+		for (const text of ["id-5558675309x9f2a", "ref-5558675309xyz", "5558675309extra"]) {
+			expect(detectPII({ text }).types, text).not.toContain("phone");
+		}
+	});
+
+	it("detects a phone after digits that belong to a word", () => {
+		// "12" belongs to "SKU12" and is left out; the number after it is still a phone.
+		expect(detectPII({ text: "SKU12 555 867 5309" }).types).toContain("phone");
+	});
+
+	it("does not read digits inside an identifier as a phone", () => {
+		for (const text of [
+			"toolu_1234567890123abc",
+			"call_12345678901",
+			"id-x5558675309y",
+			"ref-5558675309z",
+		]) {
+			expect(detectPII({ text }).types, text).not.toContain("phone");
+		}
+	});
+
+	it("leaves tool call ids unredacted, so two different ids stay different", () => {
+		const ids = { use: "toolu_1234567890123abc", result: "toolu_9876543210987xyz" };
+		const redacted = redactPII(ids);
+		expect(redacted.detection.found).toBe(false);
+		expect(redacted.data).toEqual(ids);
 	});
 
 	it("does not false-positive on short numbers", () => {
@@ -147,6 +266,21 @@ describe("detectPII — IPv4", () => {
 	it("does not detect partial IPs", () => {
 		const result = detectPII({ partial: "192.168.1" });
 		expect(result.types).not.toContain("ipv4");
+	});
+
+	it("detects an address after an out-of-range candidate", () => {
+		for (const text of ["1.2.3.256 192.168.1.1", "version 999.999.999.999, host 10.0.0.1"]) {
+			expect(detectPII({ text }).types, text).toContain("ipv4");
+		}
+	});
+
+	it("detects an address that overlaps an out-of-range candidate", () => {
+		// The first candidate is 999.1.2.3; the address 1.2.3.4 starts inside it.
+		expect(detectPII({ text: "999.1.2.3.4" }).types).toContain("ipv4");
+	});
+
+	it("does not detect a string of out-of-range candidates only", () => {
+		expect(detectPII({ text: "1.2.3.256 300.1.1.1 999.1.2.3" }).types).not.toContain("ipv4");
 	});
 });
 
@@ -281,6 +415,96 @@ describe("detectPII — credit card edge cases", () => {
 		// 20+ digits — exceeds 19 digit limit
 		const result = detectPII({ card: "4111 1111 1111 1111 1111" });
 		expect(result.types).not.toContain("credit_card");
+	});
+
+	it("does not detect a bare run that is too long: a run with no separator is checked whole", () => {
+		const result = detectPII({ id: "41111111111111111111" });
+		expect(result.types).not.toContain("credit_card");
+	});
+
+	it("detects a card beside its expiry", () => {
+		for (const text of ["4111-1111-1111-1111 12/29", "card 4111 1111 1111 1111 exp 12 29"]) {
+			expect(detectPII({ text }).types, text).toContain("credit_card");
+		}
+	});
+
+	it("does not read a card from part of a longer list of groups, as 5.0.4 did not", () => {
+		// A chain of groups joined by one space is checked whole. Any four of a list of four-digit
+		// numbers pass Luhn one time in ten, so a window inside the list would read as a card.
+		for (const text of [
+			"12 4111 1111 1111 1111",
+			"4111 1111 1111 1111 1234 5678",
+			"1234 5678 9012 3456 7890 1234",
+		]) {
+			expect(detectPII({ text }).types, text).not.toContain("credit_card");
+		}
+	});
+
+	it("does not detect a Luhn-invalid number beside its expiry", () => {
+		// No span of whole groups here, with 13-19 digits, passes Luhn.
+		for (const text of ["4111 1111 1111 1112 12 29", "4111 1111 1111 1112 1234 5678"]) {
+			expect(detectPII({ text }).types, text).not.toContain("credit_card");
+		}
+	});
+
+	it("detects a card in a card's layout among other numbers", () => {
+		for (const text of [
+			"3782-822463-10005 12/29", // 4-6-5, American Express, beside its expiry
+			"3056-9309-0259-04 12/29", // 4-4-4-2, Diners Club, beside its expiry
+			"30569309025904 7", // one group of 14
+			"41111111 11111111", // 5.0.4's check: one candidate, 16 digits
+			"4222222222222 7", // one group of 13, beside another number
+		]) {
+			expect(detectPII({ text }).types, text).toContain("credit_card");
+		}
+	});
+
+	it("does not read a card from groups that are not printed as one", () => {
+		for (const text of [
+			"9 4111 1111-1111 1111 5", // two kinds of separator
+			"9 4111\n1111\n1111\n1111 5", // one group per line
+			"[0 1 1 0 1 0 0 1 1 1 0 1 0 1 1 0]", // a printed bit vector
+			"ref4111 1111 1111 1111", // the first group belongs to a word
+			"4111 1111 1111 1111z", // the last group belongs to a word
+			"4111.1111.1111.1111 12", // joined by dots, not one space or one dash
+			"4111 and 1111 and 1111 and 1111", // a gap that only starts with a space joins nothing
+			// Known limits, kept as in 5.0.4: a chain is checked whole, never a window inside it.
+			"4111-1111-1111-1111-123", // the card joined by the same dash to one more group
+			"order 2024-4111-1111-1111-1111", // a number joined to the card by the same dash
+			"4111 1111 1111 1111 12/29", // a spaced card, then its expiry after one space
+		]) {
+			expect(detectPII({ text }).types, JSON.stringify(text)).not.toContain("credit_card");
+		}
+	});
+
+	it("detects each card layout as a whole dashed chain, alone and at either end of the text", () => {
+		// Luhn-valid numbers in each layout. Beside an expiry, or after one, 5.0.4's candidate takes
+		// the neighbour in and fails, so these rows are found by the layout check.
+		const layouts: Array<[string, string]> = [
+			["4-4-4-4-1", "4111-1111-1111-1111-3"],
+			["4-4-4-4-2", "4111-1111-1111-1111-18"],
+			["4-4-4-4-3", "4111-1111-1111-1111-110"],
+			["4-4-4-1", "4111-1111-1111-9"],
+			["4-4-4-2", "4111-1111-1111-14"],
+			["4-4-4-3", "4111-1111-1111-116"],
+		];
+		for (const [layout, card] of layouts) {
+			for (const text of [card, `${card} 12/29`, `exp 12/29 ${card}`]) {
+				expect(detectPII({ text }).types, `${layout}: ${text}`).toContain("credit_card");
+			}
+		}
+	});
+
+	it("a chain of five groups in a layout is a card, and the same chain with one group more is not", () => {
+		expect(detectPII({ text: "4111-1111-1111-1111-3 12/29" }).types).toContain("credit_card");
+		expect(detectPII({ text: "7-4111-1111-1111-1111-3 12/29" }).types).not.toContain("credit_card");
+		expect(detectPII({ text: "4111-1111-1111-1111-3-7 12/29" }).types).not.toContain("credit_card");
+	});
+
+	it("detects cards of 13 and of 19 digits", () => {
+		for (const card of ["4222222222222", "4111111111111111110"]) {
+			expect(detectPII({ card }).types, card).toContain("credit_card");
+		}
 	});
 
 	it("does not detect when candidate has non-digit characters after stripping", () => {
@@ -635,6 +859,16 @@ describe("detectPII — generic_secret", () => {
 		expect(result.types).toContain("generic_secret");
 	});
 
+	it("detects a long hex secret after a run of hex letters or of digits alone", () => {
+		const secret = "a1b2c3d4e5f6".repeat(6);
+		for (const text of [`${"a".repeat(64)} ${secret}`, `${"1".repeat(64)} ${secret}`]) {
+			expect(detectPII({ text }).types).toContain("generic_secret");
+		}
+		expect(detectPII({ text: `${"a".repeat(64)} ${"1".repeat(64)}` }).types).not.toContain(
+			"generic_secret",
+		);
+	});
+
 	it("detects long hex string (64+ chars)", () => {
 		const hex = "a1b2c3d4e5f6".repeat(6);
 		const result = detectPII({ secret: hex });
@@ -973,29 +1207,17 @@ describe("redactPII — cycles and shared references keep their shape in the cop
 		expect(out.a.email).toBe("[REDACTED:email]");
 	});
 
-	it("an ENUMERABLE cycle: detection overflows before redaction runs (unchanged), so redactPII throws the same RangeError", () => {
+	it("an ENUMERABLE cycle: detection scans it once and redaction copies its shape, where both threw RangeError", () => {
 		const input: Record<string, unknown> = { email: EMAIL };
 		input.self = input;
-		const fromDetect = (() => {
-			try {
-				detectPII(input);
-				return undefined;
-			} catch (err) {
-				return err;
-			}
-		})();
-		expect(fromDetect).toBeInstanceOf(RangeError);
-		const fromRedact = (() => {
-			try {
-				redactPII(input);
-				return undefined;
-			} catch (err) {
-				return err;
-			}
-		})();
-		expect(fromRedact).toBeInstanceOf(RangeError);
-		// the overflow is detection's own walk, which this change does not touch
-		expect((fromRedact as Error).stack).toContain("scanValue");
+		// The walk does not enter an object already open on its path, so the cycle is scanned once.
+		const detection = detectPII(input);
+		expect(detection.types).toEqual(["email"]);
+		expect(detection.paths).toEqual(["email(email)"]);
+		const out = redactPII(input).data as Record<string, unknown>;
+		expect(out.email).toBe("[REDACTED:email]");
+		expect(out.self).toBe(out);
+		expect(input.email).toBe(EMAIL);
 	});
 });
 
@@ -1111,6 +1333,25 @@ describe("redactPII — an array's items are defined on the copy, never assigned
 	});
 });
 
+describe("detectPII — a card is found with an index setter on Array.prototype", () => {
+	it("detects and redacts a card by either check while Array.prototype[0] swallows writes", () => {
+		Object.defineProperty(Array.prototype, "0", {
+			get: () => undefined,
+			set: () => {},
+			configurable: true,
+		});
+		try {
+			for (const card of ["4111111111111111", "4111 1111 1111 1111", "4111-1111-1111-1111 12/29"]) {
+				expect(detectPII({ v: card }).types, card).toContain("credit_card");
+				const out = redactPII({ v: card }).data as { v: string };
+				expect(out.v, card).toMatch(/^\[REDACTED:.*credit_card/);
+			}
+		} finally {
+			Reflect.deleteProperty(Array.prototype, "0");
+		}
+	});
+});
+
 describe("redactPII — signalSent: a request whose transport slot is never serialized (the governor's Google request)", () => {
 	const EMAIL = "write to alice@example.com";
 	type Out = { prompt: string; config: { abortSignal: unknown }; contents?: unknown };
@@ -1188,5 +1429,276 @@ describe("redactPII — signalSent: a request whose transport slot is never seri
 		});
 		expect(isOpaqueTextFree(proxy)).toBe(false);
 		expect(traps).toBe(0);
+	});
+});
+
+// ===========================================================================
+// The email scan, found from each "@" (linear in the message)
+// ===========================================================================
+
+describe("detectPII — email, found from each @", () => {
+	const hasEmail = (text: string): boolean => detectPII(text).types.includes("email");
+
+	it("finds real emails: plain, + % and dots in the local part, a subdomain, short and long TLDs", () => {
+		for (const email of [
+			"user@example.com",
+			"first.last+tag@example.com",
+			"user%relay@example.org",
+			"a.b.c@mail.eu.example.com",
+			"someone@example.io",
+			"someone@example.technology",
+		]) {
+			expect(hasEmail(`write to ${email} today`), email).toBe(true);
+		}
+	});
+
+	it("a local part of 64 characters is found, and so is one of 65: the pattern matches from the last local character before the @, so no length limit applies on that side (as before)", () => {
+		expect(hasEmail(`${"a".repeat(64)}@example.com`)).toBe(true);
+		expect(hasEmail(`${"a".repeat(65)}@example.com`)).toBe(true);
+		expect(hasEmail(`${"a".repeat(10_000)}@example.com`)).toBe(true);
+	});
+
+	it("a domain of 255 characters is found, and so is a longer one: the TLD is looked for along the whole domain run (as before)", () => {
+		const label = "a".repeat(63);
+		const domain255 = `${label}.${label}.${label}.${"a".repeat(59)}.com`;
+		expect(domain255.length).toBe(255);
+		expect(hasEmail(`u@${domain255}`)).toBe(true);
+		expect(hasEmail(`u@${"a".repeat(10_000)}.com`)).toBe(true);
+	});
+
+	it("an email at the very start and at the very end of the text", () => {
+		expect(hasEmail("a@b.co and then some text")).toBe(true);
+		expect(hasEmail("some text and then a@b.co")).toBe(true);
+		expect(hasEmail("a@b.co")).toBe(true);
+	});
+
+	it("two emails close together, and an @ that is not one before one that is", () => {
+		expect(hasEmail("a@b.co,c@d.co")).toBe(true);
+		expect(hasEmail("x@y z@example.com")).toBe(true);
+		expect(hasEmail("@@a@b.co")).toBe(true);
+		expect(hasEmail("a@@b.co")).toBe(false);
+	});
+
+	it("an @ with no valid domain is not an email", () => {
+		for (const text of [
+			"user@",
+			"user@localhost",
+			"user@.com",
+			"user@example.c",
+			"user@example.c0m",
+			"user@example.",
+			"user@-.x",
+			" @example.com",
+			"@example.com",
+			"user@ example.com",
+		]) {
+			expect(hasEmail(text), text).toBe(false);
+		}
+	});
+
+	it("the TLD needs two letters right after a dot, and nothing after them: a longer run still matches", () => {
+		expect(hasEmail("user@a.bc")).toBe(true);
+		expect(hasEmail("user@a.bc9")).toBe(true);
+		expect(hasEmail("user@a-b.cd-e")).toBe(true);
+		expect(hasEmail("user@a..bc")).toBe(true);
+		expect(hasEmail("user@a.b.c")).toBe(false);
+	});
+
+	it("an @ inside a long run of letters is not an email without a dotted domain, and is one with it", () => {
+		const run = "a".repeat(100_000);
+		expect(hasEmail(`${run}@${run}`)).toBe(false);
+		expect(hasEmail(`${run}@${run}.com${run}`)).toBe(true);
+	});
+});
+
+describe("detectPII — jwt", () => {
+	const hasJwt = (text: string): boolean => detectPII(text).types.includes("jwt");
+	const JWT =
+		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
+
+	it("finds a JWT alone, in text, and after a run that holds other starts", () => {
+		expect(hasJwt(JWT)).toBe(true);
+		expect(hasJwt(`Authorization: ${JWT}.`)).toBe(true);
+		expect(hasJwt(`-eyJ-eyJ-eyJ ${JWT}`)).toBe(true);
+		expect(hasJwt(`-eyJ-eyJ-${JWT}`)).toBe(true);
+	});
+
+	it("does not find one with a short segment, a missing segment, or no boundary before eyJ", () => {
+		expect(hasJwt("eyJshort.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N")).toBe(false);
+		expect(hasJwt("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0")).toBe(false);
+		expect(hasJwt(`x${JWT}`)).toBe(false);
+	});
+});
+
+describe("the normalized view: fullwidth forms and format characters", () => {
+	const cp = (n: number) => String.fromCodePoint(n);
+	const ZWSP = cp(0x200b);
+	const fullwidth = (s: string) =>
+		[...s]
+			.map((c) => {
+				const code = c.codePointAt(0) as number;
+				return code > 0x20 && code < 0x7f ? cp(code + 0xfee0) : c;
+			})
+			.join("");
+	const key = ["sk", "-proj-", "aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xY"].join("");
+	const split = (s: string, cf: string) => `${s.slice(0, 9)}${cf}${s.slice(9)}`;
+
+	it("a key split by any one format character is a key", () => {
+		// Zero-width space, non-joiner, joiner, word joiner, byte order mark, soft hyphen, and a
+		// left-to-right mark: each is Unicode category Cf.
+		for (const cf of [0x200b, 0x200c, 0x200d, 0x2060, 0xfeff, 0xad, 0x200e].map(cp)) {
+			expect(detectPII(split(key, cf)).types, cf.codePointAt(0)?.toString(16)).toContain("api_key");
+		}
+	});
+
+	it("a key, card, phone, SSN, email and address in fullwidth forms are found", () => {
+		const rows: Array<[string, string]> = [
+			["api_key", fullwidth(key)],
+			["credit_card", fullwidth("4111 1111 1111 1111")],
+			["phone", fullwidth("(234) 567-8901")],
+			["ssn", fullwidth("123-45-6789")],
+			["email", fullwidth("alice@example.com")],
+			["ipv4", fullwidth("192.168.1.1")],
+		];
+		for (const [type, text] of rows) expect(detectPII(text).types, type).toContain(type);
+	});
+
+	it("paths and types are the same whichever view matched", () => {
+		const plain = detectPII({ a: { b: key }, c: ["4111 1111 1111 1111"] });
+		const hidden = detectPII({ a: { b: split(key, ZWSP) }, c: [fullwidth("4111 1111 1111 1111")] });
+		expect(hidden.types).toEqual(plain.types);
+		expect(hidden.paths).toEqual(plain.paths);
+		expect(hidden.found).toBe(true);
+	});
+
+	it("redaction replaces the WHOLE original value, format characters and all, as it does the plain one", () => {
+		const card = "4111 1111 1111 1111";
+		const plain = redactPII({ note: `use ${key} today`, card }).data as Record<string, string>;
+		const out = redactPII({ note: `use ${split(key, ZWSP)} today`, card: fullwidth(card) })
+			.data as Record<string, string>;
+		expect(out.note).toBe("[REDACTED:api_key]");
+		expect(out).toEqual(plain);
+	});
+
+	it("text with fullwidth forms or format characters and no PII is left byte for byte", () => {
+		const text = `${fullwidth("Hello")} ${ZWSP}world${cp(0xfeff)} ${cp(0xfdfa)} ok`;
+		const out = redactPII({ text }).data as Record<string, string>;
+		expect(out.text).toBe(text);
+		expect(detectPII(text).found).toBe(false);
+	});
+
+	it("a character NFKC expands (U+FDFA, to 18) beside a key leaves the key found", () => {
+		const fdfa = cp(0xfdfa);
+		for (const text of [`${fdfa}${key}`, `${key}${fdfa}`, `${fdfa} ${split(key, ZWSP)} ${fdfa}`]) {
+			expect(detectPII(text).types).toContain("api_key");
+		}
+	});
+
+	it("the view, for EVERY code point: removed if a format character; its NFKC form if that is ASCII and the character is a fullwidth form or the form holds no letter or digit; else kept", () => {
+		const wrong: string[] = [];
+		let replaced = 0;
+		let fullwidthReplaced = 0;
+		for (let code = 0x80; code <= 0x10ffff; code++) {
+			if (code >= 0xd800 && code <= 0xdfff) continue;
+			const c = cp(code);
+			const form = c.normalize("NFKC");
+			const isFullwidth = code >= 0xff01 && code <= 0xff5e;
+			const expected = /^\p{Cf}$/u.test(c)
+				? ""
+				: form !== c &&
+						/^[ -~\t\n\r\f\v]+$/.test(form) &&
+						(isFullwidth || !/[A-Za-z0-9]/.test(form))
+					? form
+					: c;
+			if (expected !== c && expected !== "") {
+				replaced++;
+				if (isFullwidth) fullwidthReplaced++;
+			}
+			const got = normalizedView(`a${c}b`);
+			if (got !== `a${expected}b`) wrong.push(code.toString(16));
+			if (got.length - 2 > 3 * c.length) wrong.push(`${code.toString(16)} longer than 3`);
+		}
+		expect(wrong.slice(0, 10)).toEqual([]);
+		// Every fullwidth form of printable ASCII, and 76 spaces and punctuation forms: 170 under
+		// Unicode 16. NFKC mappings are stable, so a later Unicode version only adds to them.
+		expect(fullwidthReplaced).toBe(94);
+		expect(replaced).toBeGreaterThanOrEqual(170);
+	}, 60_000);
+
+	it("the view of ASCII text is the same string; a lone surrogate is kept", () => {
+		const ascii = `plain ASCII ${key}`;
+		expect(normalizedView(ascii)).toBe(ascii);
+		const lone = `x${cp(0xd800)}y`;
+		expect(normalizedView(lone)).toBe(lone);
+	});
+
+	it("a value 5.0.4's patterns already read stays found (the view only adds)", () => {
+		for (const text of [
+			key,
+			"4111 1111 1111 1111",
+			"alice@example.com",
+			`${fullwidth("x")} ${key}`,
+		]) {
+			expect(detectPII(text).found, text.slice(0, 12)).toBe(true);
+		}
+	});
+
+	// A superscript, subscript, circled, full-stop or mathematical digit or letter, glued to a value
+	// one character short of a pattern, used to complete it in the view: a footnote marker after a
+	// number read as its last digit. Each is now kept, so the answer is the plain text's.
+	const MARKS = [0xb9, 0x2081, 0x2460, 0x2488, 0x1d7cf].map(cp);
+	const LETTER_MARKS = [0x1d43, 0x1d41a, 0x24d0].map(cp);
+	const HEX63 = "0123456789abcdef".repeat(4).slice(0, 63);
+
+	it("a digit mark glued after a number does not extend it into a phone, SSN, card or hex secret", () => {
+		for (const mark of MARKS) {
+			for (const text of ["234-567-890", "123-45-678", "4111 1111 1111 111", HEX63]) {
+				const label = `${text.slice(0, 12)} + U+${mark.codePointAt(0)?.toString(16)}`;
+				expect(detectPII(text + mark).types, label).toEqual(detectPII(text).types);
+				expect(normalizedView(text + mark), label).toBe(text + mark);
+			}
+		}
+		// Positive control: the same rows with the digit typed plainly, or in its fullwidth form.
+		for (const digit of ["1", cp(0xff11)]) {
+			expect(detectPII(`234-567-890${digit}`).types).toContain("phone");
+			expect(detectPII(`123-45-678${digit}`).types).toContain("ssn");
+			expect(detectPII(`4111 1111 1111 111${digit}`).types).toContain("credit_card");
+			expect(detectPII(`${HEX63}${digit}`).types).toContain("generic_secret");
+		}
+	});
+
+	it("a letter mark glued after a hex run does not extend it into a secret", () => {
+		for (const mark of LETTER_MARKS) {
+			expect(detectPII(HEX63 + mark).found, `U+${mark.codePointAt(0)?.toString(16)}`).toBe(false);
+		}
+		for (const letter of ["a", cp(0xff41)]) {
+			expect(detectPII(HEX63 + letter).types).toContain("generic_secret");
+		}
+	});
+
+	it("a value written entirely in superscript digits is not read (the declared cost)", () => {
+		const ssn = [0xb9, 0xb2, 0xb3, 0x2d, 0x2074, 0x2075, 0x2d, 0x2076, 0x2077, 0x2078, 0x2079]
+			.map(cp)
+			.join("");
+		expect(detectPII(ssn).found).toBe(false);
+	});
+
+	it("spaces and punctuation forms are still read: a no-break space, a small hyphen", () => {
+		const nbsp = cp(0xa0);
+		const header = `-----BEGIN${nbsp}RSA${nbsp}PRIVATE${nbsp}KEY-----`;
+		expect(normalizedView(header)).toBe("-----BEGIN RSA PRIVATE KEY-----");
+		expect(normalizedView(`234${cp(0xfe63)}567`)).toBe("234-567");
+	});
+
+	it("the code point table is allocated with the first string that is not ASCII, not at import", async () => {
+		vi.resetModules();
+		const before = process.memoryUsage().arrayBuffers;
+		const fresh = await import("../../src/policy/pii.js");
+		fresh.detectPII({ note: `plain ASCII ${key}` });
+		const afterAscii = process.memoryUsage().arrayBuffers;
+		fresh.normalizedView(fullwidth("x"));
+		const afterView = process.memoryUsage().arrayBuffers;
+		expect(afterAscii - before).toBeLessThan(0x110000 / 2);
+		expect(afterView - afterAscii).toBeGreaterThanOrEqual(0x110000);
 	});
 });

@@ -321,6 +321,29 @@ describe("wrapStream", () => {
 			const [, partial] = onError.mock.calls[0] as [unknown, StreamCompletion];
 			expect(partial.chunksDelivered).toBe(2);
 			expect(partial.usage.inputTokens).toBe(50);
+			// Input alone was seen: not provider-reported usage until an output count arrives too.
+			expect(partial.usageReported).toBe(false);
+		});
+
+		it("partial usage is reported once both input and output were seen before the error", async () => {
+			const chunks = [
+				{ type: "message_start", message: { usage: { input_tokens: 50 } } },
+				{ type: "message_delta", usage: { output_tokens: 7 } },
+				{ type: "content_block_delta", delta: { text: "boom" } },
+			];
+			const onComplete = vi.fn();
+			const onError = vi.fn();
+			const wrapped = wrapStream(failingStream(chunks, 2), "anthropic", onComplete, onError);
+			try {
+				for await (const _ of wrapped) {
+					/* consume */
+				}
+			} catch {
+				/* expected */
+			}
+			const [, partial] = onError.mock.calls[0] as [unknown, StreamCompletion];
+			expect(partial.usage.inputTokens).toBe(50);
+			expect(partial.usage.outputTokens).toBe(7);
 			expect(partial.usageReported).toBe(true);
 		});
 	});

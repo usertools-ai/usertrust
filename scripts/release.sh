@@ -17,6 +17,12 @@
 #                                        (and, to republish, the tag commit is on master)
 #   release.sh names                     the lockstep npm names, in publish order
 #   release.sh version-at <commit>       the lockstep version recorded in <commit> (git blobs)
+#   release.sh expected-version <bump>   the version a release dispatched on HEAD makes: HEAD's
+#                                        committed version bumped by patch, minor or major
+#   release.sh assert-bump <bump>        fails unless <bump> is the class the CHANGELOG's release
+#                                        section requires (docs/releasing.md, "Choosing the
+#                                        version"), and refuses an early major unless
+#                                        ALLOW_EARLY_MAJOR gives the reason
 #   release.sh verify-release <bundle> <version>
 #                                        imports the release tag from the build job's bundle,
 #                                        verifies the commit, and prints it
@@ -26,8 +32,14 @@
 #   release.sh dist-tag <version>        the npm dist-tag v<version> publishes under, from
 #                                        latest-flag: latest if true, backfill if false
 #   release.sh assert-npm                prints node's and npm's versions; fails unless npm is
-#                                        11 or later (its implicit-latest refusal; see publish)
+#                                        11.5.1 or later and node 22.14.0 or later (trusted
+#                                        publishing, and npm's implicit-latest refusal; see
+#                                        assert_npm)
 #   release.sh pack <dir>                packs each package (already built) into <dir>
+#   release.sh compare-builds <dir> <rebuild dir> <commit>
+#                                        assembles each package's publish tarball from both
+#                                        directories' build tarballs, and fails unless every
+#                                        pair is byte-identical (sha256)
 #   release.sh publish <dir> <commit> [--dry-run]
 #                                        assembles each package's publish tarball from
 #                                        <commit>'s files and the build tarball in <dir> (see
@@ -398,6 +410,230 @@ version_at() {
 	echo "$first"
 }
 
+# The version a new release dispatched on HEAD makes: HEAD's committed lockstep version (read
+# from git blobs) bumped by <bump>, as `npm version <bump>` bumps a major.minor.patch version.
+# The publish job checks the build's release commit against this, so the version is never the
+# build job's word: it follows from the dispatched commit and the dispatch input alone.
+expected_version() {
+	local bump="${1:-}" v major minor patch
+	v=$(version_at HEAD) || return 1
+	IFS=. read -r major minor patch <<<"$v"
+	case "$bump" in
+	patch) patch=$((10#$patch + 1)) ;;
+	minor)
+		minor=$((10#$minor + 1))
+		patch=0
+		;;
+	major)
+		major=$((10#$major + 1))
+		minor=0
+		patch=0
+		;;
+	*)
+		err "The bump is '${bump}', not patch, minor or major."
+		return 1
+		;;
+	esac
+	echo "$((10#$major)).$((10#$minor)).$((10#$patch))"
+}
+
+# The release's CHANGELOG section, read as data from CHANGELOG.md (argv[1]): [Unreleased] must
+# hold no entry (everything is cut into the release's section before dispatch), and the section
+# under it, `## [<version>] - <date>`, must hold at least one entry under a class heading. Prints
+# "<version> <class>", the class being the highest among its entries'. It DENIES BY DEFAULT: a
+# line it cannot place is refused, never skipped, so no entry can hide from the count.
+# - An entry is a list item of any Markdown marker (`-`, `*`, `+`, `1.`, `1)`) at the line's
+#   start. An indented line is accepted only under an entry (its continuation or sub-item).
+# - Under a class heading, every other line is refused: a quote, HTML, prose, an indented item
+#   under no entry. A class heading with no entry is refused.
+# - Anywhere in [Unreleased] and the release's section, a line that reads as a heading but is not
+#   a `### ` class or note heading (`####`, `###Removed`, an indented `#`), a setext underline
+#   (`---`, `===`), a line that is only a class or note name in emphasis or HTML
+#   (`**Removed**`), and a `## ` line that is not the next version's header are refused.
+# - A note's text, and text that opens the section before its first heading, is free but for
+#   those lines; an entry under a note counts as no class, and one under no heading is refused.
+#   A link reference definition (`[1.0.0]: <url>`) is accepted anywhere.
+#   The classes are docs/releasing.md's "Choosing the version".
+CHANGELOG_PY='
+import re, sys
+CLASSES = {
+    "Removed": "major", "Breaking": "major",
+    "Added": "minor", "Changed": "minor", "Deprecated": "minor",
+    "Fixed": "patch", "Security": "patch", "Dependencies": "patch",
+}
+NOTES = {"Read before upgrading", "Known issues"}
+NAMES = {n.lower() for n in list(CLASSES) + list(NOTES)}
+RANK = {"patch": 1, "minor": 2, "major": 3}
+ENTRY = re.compile(r"(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)")
+NESTED = re.compile(r" {1,3}(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)")
+VERSION = re.compile(r"\[(\d+\.\d+\.\d+)\] - \d{4}-\d{2}-\d{2}")
+ATX = re.compile(r"[ \t]{0,3}#")
+SETEXT = re.compile(r"[ \t]{0,3}(?:=+|-+)[ \t]*")
+LINK_REF = re.compile(r"\[[^\]]+\]:[ \t]+\S+.*")
+
+def fail(msg):
+    print(msg, file=sys.stderr)
+    sys.exit(1)
+
+def bare(line):
+    return re.sub(r"[\s*_`#:>]+", " ", re.sub(r"<[^>]*>", " ", line)).strip().lower()
+
+def refuse_disguised(where, line):
+    if ATX.match(line) and not line.startswith("### "):
+        fail("%s has a line that reads as a heading but is not a ### heading: \"%s\". Use \"### <class>\" (docs/releasing.md, \"Cutting the CHANGELOG\")." % (where, line.strip()))
+    if SETEXT.fullmatch(line):
+        fail("%s has a line \"%s\", which would make the line above it a heading. Use \"### <class>\"." % (where, line.strip()))
+    if not ENTRY.match(line) and not line.startswith("### ") and bare(line) in NAMES:
+        fail("%s has a line that names a heading but is not one: \"%s\". Use \"### <class>\"." % (where, line.strip()))
+
+lines = open(sys.argv[1], encoding="utf-8").read().split("\n")
+sections = []
+for line in lines:
+    if line.startswith("## "):
+        sections.append([line[3:].strip(), []])
+    elif sections:
+        sections[-1][1].append(line)
+if not sections or sections[0][0] != "[Unreleased]":
+    fail("CHANGELOG.md does not begin with a ## [Unreleased] section.")
+left = [l for l in sections[0][1] if ENTRY.match(l) or NESTED.match(l)]
+if left:
+    fail("[Unreleased] still holds %d entr%s. Cut every entry into the release section before dispatching (docs/releasing.md, \"Cutting the CHANGELOG\")." % (len(left), "y" if len(left) == 1 else "ies"))
+for line in sections[0][1]:
+    if line.strip() == "":
+        continue
+    refuse_disguised("[Unreleased]", line)
+    if not line.startswith("### ") or line[4:].strip() not in CLASSES and line[4:].strip() not in NOTES:
+        fail("[Unreleased] holds a line that is not a class or note heading: \"%s\". Cut it into the release section, or remove it." % line.strip())
+if len(sections) < 2:
+    fail("CHANGELOG.md has no section under [Unreleased] to release.")
+m = VERSION.fullmatch(sections[1][0])
+if not m:
+    fail("The section under [Unreleased] is \"## %s\", not \"## [major.minor.patch] - YYYY-MM-DD\"." % sections[1][0])
+where = "The %s section" % m.group(1)
+if len(sections) > 2 and not VERSION.fullmatch(sections[2][0]):
+    fail("%s is followed by \"## %s\", which is not a version\x27s section. A ## line ends the section, so its entries would not be counted; use \"### <class>\"." % (where, sections[2][0]))
+heading, best, counts, under = None, None, [], False
+for line in sections[1][1]:
+    if line.strip() == "":
+        continue
+    refuse_disguised(where, line)
+    if line.startswith("### "):
+        heading, under = line[4:].strip(), False
+        if heading not in CLASSES and heading not in NOTES:
+            fail("%s has a heading \"%s\", which is neither a class (%s) nor a note (%s)." % (where, heading, ", ".join(CLASSES), ", ".join(sorted(NOTES))))
+        if heading in CLASSES:
+            counts.append([heading, 0])
+    elif NESTED.match(line):
+        if not under:
+            fail("%s has an indented entry that is not under an entry: \"%s\". Start an entry at the line\x27s start." % (where, line.strip()))
+    elif ENTRY.match(line):
+        if heading is None:
+            fail("%s has an entry under no ### heading." % where)
+        under = True
+        if heading in CLASSES:
+            counts[-1][1] += 1
+            c = CLASSES[heading]
+            if best is None or RANK[c] > RANK[best]:
+                best = c
+    elif LINK_REF.fullmatch(line):
+        continue
+    elif heading in CLASSES and (line[0] not in " \t" or not under):
+        fail("%s has a line under ### %s that is not an entry, nor indented under one: \"%s\". Every entry is a list item at the line\x27s start, so that it is counted." % (where, heading, line.strip()))
+if best is None:
+    fail("%s is empty: it has no entry under %s." % (where, ", ".join(CLASSES)))
+for h, n in counts:
+    if n == 0:
+        fail("%s has a ### %s heading with no entry under it. Remove the heading, or write its entries as list items at the line\x27s start." % (where, h))
+for h, n in counts:
+    print("%s: %d entr%s (%s)" % (h, n, "y" if n == 1 else "ies", CLASSES[h]), file=sys.stderr)
+print(m.group(1), best)
+'
+
+# The policy's cap on majors: at most one a quarter.
+EARLY_MAJOR_DAYS=90
+
+# Refuses a new release whose bump is not the one its CHANGELOG section requires (the highest
+# class among its entries: docs/releasing.md, "Choosing the version"), in either direction: a
+# patch with an Added entry, and a major with no Removed or Breaking entry, alike. Refuses an
+# empty section, entries left in [Unreleased], and a section for another version. A major less
+# than EARLY_MAJOR_DAYS after the last major (its v<N>.0.0 tag on master) is refused unless
+# ALLOW_EARLY_MAJOR (the dispatch's allow_early_major input) gives a reason, which the release
+# notes carry; a reason given to any other release is refused, so it is never silently unused.
+# CHANGELOG.md is read from HEAD's blob, as every file this script releases is.
+assert_bump() {
+	local bump="${1:-}" reason="${ALLOW_EARLY_MAJOR:-}" expected tmp out section required
+	local tags last="" last_n=-1 t n when now age
+	expected=$(expected_version "$bump") || return 1
+	tmp=$(mktemp -d) || return 1
+	if ! blob_to HEAD CHANGELOG.md "${tmp}/CHANGELOG.md"; then
+		rm -rf "$tmp"
+		return 1
+	fi
+	if ! out=$(python3 -c "$CHANGELOG_PY" "${tmp}/CHANGELOG.md" 2>"${tmp}/err"); then
+		err "$(cat "${tmp}/err")"
+		rm -rf "$tmp"
+		return 1
+	fi
+	cat "${tmp}/err"
+	rm -rf "$tmp"
+	read -r section required <<<"$out"
+	if [ "$required" != "$bump" ]; then
+		err "The CHANGELOG's ${section} section requires a ${required} release (its highest class), but this dispatch is ${bump}. Refusing (docs/releasing.md, \"Choosing the version\")."
+		return 1
+	fi
+	if [ "$section" != "$expected" ]; then
+		err "A ${bump} release of $(version_at HEAD) is ${expected}, but the CHANGELOG's newest section is ${section}. Refusing."
+		return 1
+	fi
+	reason="$(printf '%s' "$reason" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+	if [ "$bump" != major ]; then
+		if [ -n "$reason" ]; then
+			err "allow_early_major is set, but this is a ${bump} release. Clear it and dispatch again."
+			return 1
+		fi
+		echo "${expected}: a ${bump} release, as its CHANGELOG section requires."
+		return 0
+	fi
+	if ! git fetch --quiet --tags origin; then
+		err "Could not fetch tags from origin, so cannot tell when the last major release was."
+		return 1
+	fi
+	fetch_master "when the last major release was" || return 1
+	tags=$(git tag -l 'v*.0.0' --merged refs/remotes/origin/master) || return 1
+	for t in $tags; do
+		[[ "$t" =~ ^v([0-9]+)\.0\.0$ ]] || continue
+		n=$((10#${BASH_REMATCH[1]}))
+		if [ "$n" -gt "$last_n" ]; then
+			last_n=$n
+			last=$t
+		fi
+	done
+	if [ -z "$last" ]; then
+		age=""
+	else
+		when=$(git for-each-ref --format='%(creatordate:unix)' "refs/tags/${last}") || return 1
+		if ! [[ "$when" =~ ^[0-9]+$ ]]; then
+			err "Could not read when ${last} was tagged."
+			return 1
+		fi
+		now=$(date +%s)
+		age=$(((now - when) / 86400))
+	fi
+	if [ -n "$age" ] && [ "$age" -lt "$EARLY_MAJOR_DAYS" ]; then
+		if [ -z "$reason" ]; then
+			err "${last} was released ${age} days ago; a major release comes at most once every ${EARLY_MAJOR_DAYS} days. To release ${expected} anyway, give the reason in allow_early_major: it goes into the release notes."
+			return 1
+		fi
+		echo "${expected}: a major release ${age} days after ${last}, allowed early: ${reason}"
+		return 0
+	fi
+	if [ -n "$reason" ]; then
+		err "allow_early_major is set, but ${last:-no earlier major} is not under ${EARLY_MAJOR_DAYS} days old. Clear it and dispatch again."
+		return 1
+	fi
+	echo "${expected}: a major release, as its CHANGELOG section requires${last:+, ${age} days after ${last}}."
+}
+
 # Prints "yes" if <name>@<version> is on npm and "no" if it is not. Anything else (network,
 # auth, an error it does not recognise) is a failure: an unreadable registry never reads as
 # "not published", because that would lead to publishing over it or skipping it blind.
@@ -486,6 +722,96 @@ pack() {
 	done
 }
 
+# Assembles each package's publish tarball into <out>/<dir>/<name>-<version>.tgz: the root
+# files from <commit>'s git blobs, plus the package/dist/ members of the build tarball in
+# <tardir> that pass scripts/release-tarball.py's rules (read as data, in a limited child
+# process), under headers it makes. Every member's time is the release commit's, so one commit
+# and one set of dist/ bytes always give the same tarball. Fails if any build tarball is
+# missing or refused; <what> ("the build" or "the rebuild") names the source in the error.
+assemble_all() {
+	local tardir="$1" commit="$2" version="$3" out="$4" what="$5" mtime dir pkg tgz names name
+	mtime=$(git show -s --format=%ct "$commit") || return 1
+	case "$mtime" in
+	'' | *[!0-9]*)
+		err "Could not read the commit time of ${commit}."
+		return 1
+		;;
+	esac
+	for dir in $(dirs); do
+		pkg=$(name_of "$dir") || return 1
+		tgz="${tardir}/${pkg}-${version}.tgz"
+		if [ -L "$tgz" ] || [ ! -f "$tgz" ]; then
+			err "${pkg}-${version}.tgz is missing from ${tardir}, or is not a regular file"
+			return 1
+		fi
+		mkdir "${out}/${dir}" "${out}/${dir}/root" || return 1
+		names=$(root_files "$commit" "$dir" "$version" "${out}/${dir}/root") || return 1
+		set -- assemble --input "$tgz" --output "${out}/${dir}/${pkg}-${version}.tgz" --mtime "$mtime"
+		for name in $names; do
+			set -- "$@" --root "${name}=${out}/${dir}/root/${name}"
+		done
+		if ! python3 -I "$TARBALL_TOOL" "$@"; then
+			err "${pkg}-${version}.tgz from ${what} was refused; refusing to publish anything."
+			return 1
+		fi
+	done
+}
+
+# The sha256 of a file, in hex. python3 is on every runner and on macOS, where sha256sum is not.
+sha256_of() {
+	python3 -I -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$1"
+}
+
+# The rebuild check. The build job runs as two legs of one matrix, on two fresh runners, with
+# the same steps: `release` builds what is published, `rebuild` builds the same commit with the
+# same bump again. Both legs' tarballs are untrusted data. For each package, this assembles the
+# publish tarball twice, from the same <commit> (so the same root files and member times) with
+# the dist/ bytes of each leg's build tarball, and fails unless the two are byte-identical. So
+# the bytes npm would receive are the bytes a second, independent build of the same tree gives,
+# and neither leg alone chooses a dist/ byte or a dist/ path. Prints each package's sha256.
+compare_builds() {
+	local tardir="${1:-}" redir="${2:-}" commit="${3:-}" version tmp dir pkg a b sa sb bad=""
+	if [ -z "$tardir" ] || [ ! -d "$tardir" ] || [ -z "$redir" ] || [ ! -d "$redir" ] || [ -z "$commit" ]; then
+		err "usage: compare-builds <tarball directory> <rebuild tarball directory> <commit>"
+		return 1
+	fi
+	tardir=$(cd "$tardir" && pwd) || return 1
+	redir=$(cd "$redir" && pwd) || return 1
+	if [ "$tardir" = "$redir" ]; then
+		err "compare-builds was given one directory twice (${tardir}); it compares two builds."
+		return 1
+	fi
+	version=$(version_at "$commit") || return 1
+	tmp=$(mktemp -d) || return 1
+	mkdir "${tmp}/release" "${tmp}/rebuild" || return 1
+	assemble_all "$tardir" "$commit" "$version" "${tmp}/release" "the build" || return 1
+	assemble_all "$redir" "$commit" "$version" "${tmp}/rebuild" "the rebuild" || return 1
+	for dir in $(dirs); do
+		pkg=$(name_of "$dir") || return 1
+		a="${tmp}/release/${dir}/${pkg}-${version}.tgz"
+		b="${tmp}/rebuild/${dir}/${pkg}-${version}.tgz"
+		sa=$(sha256_of "$a") || return 1
+		sb=$(sha256_of "$b") || return 1
+		case "$sa" in
+		'' | *[!0-9a-f]*)
+			err "Could not hash ${pkg}-${version}.tgz."
+			return 1
+			;;
+		esac
+		if [ "$sa" = "$sb" ] && cmp -s "$a" "$b"; then
+			echo "${pkg}-${version}.tgz sha256 ${sa}: the build and the rebuild agree"
+		else
+			err "${pkg}-${version}.tgz: the build assembles to sha256 ${sa}, the rebuild to ${sb}."
+			bad="${bad} ${pkg}"
+		fi
+	done
+	rm -rf "$tmp"
+	if [ -n "$bad" ]; then
+		err "The two builds of ${commit} differ for:${bad}. Either the build is not reproducible or one runner's output was changed; compare the two artifacts' dist/ files before releasing anything. Refusing to publish anything."
+		return 1
+	fi
+}
+
 # Publishes each package from a tarball this script assembles, never from the build's tarball
 # and never from a directory. For each package, scripts/release-tarball.py reads the build
 # tarball in <dir> as data (bounded, in a limited child process) and writes a new tarball: the
@@ -504,7 +830,7 @@ pack() {
 # active as a backstop; an explicit --tag latest would bypass it. backfill is passed as --tag
 # backfill.
 publish() {
-	local tardir="${1:-}" commit="${2:-}" dry=0 dir pkg version tag mtime state tgz tmp cfg empty work cache names name skip present
+	local tardir="${1:-}" commit="${2:-}" dry=0 dir pkg version tag state tmp cfg empty work cache skip present
 	if [ -z "$tardir" ] || [ ! -d "$tardir" ] || [ -z "$commit" ]; then
 		err "usage: publish <tarball directory> <commit> [--dry-run]"
 		return 1
@@ -521,33 +847,8 @@ publish() {
 	version=$(version_at "$commit") || return 1
 	tag=$(dist_tag "$version") || return 1
 	echo "npm dist-tag for ${version}: ${tag}"
-	# Every member's time is the release commit's, so the same commit assembles the same bytes.
-	mtime=$(git show -s --format=%ct "$commit") || return 1
-	case "$mtime" in
-	'' | *[!0-9]*)
-		err "Could not read the commit time of ${commit}."
-		return 1
-		;;
-	esac
 	tmp=$(mktemp -d) || return 1
-	for dir in $(dirs); do
-		pkg=$(name_of "$dir") || return 1
-		tgz="${tardir}/${pkg}-${version}.tgz"
-		if [ -L "$tgz" ] || [ ! -f "$tgz" ]; then
-			err "${pkg}-${version}.tgz is missing from ${tardir}, or is not a regular file"
-			return 1
-		fi
-		mkdir "${tmp}/${dir}" "${tmp}/${dir}/root" || return 1
-		names=$(root_files "$commit" "$dir" "$version" "${tmp}/${dir}/root") || return 1
-		set -- assemble --input "$tgz" --output "${tmp}/${dir}/${pkg}-${version}.tgz" --mtime "$mtime"
-		for name in $names; do
-			set -- "$@" --root "${name}=${tmp}/${dir}/root/${name}"
-		done
-		if ! python3 -I "$TARBALL_TOOL" "$@"; then
-			err "${pkg}-${version}.tgz from the build was refused; refusing to publish anything."
-			return 1
-		fi
-	done
+	assemble_all "$tardir" "$commit" "$version" "$tmp" "the build" || return 1
 	cfg="${tmp}/npmrc"
 	empty="${tmp}/empty-npmrc"
 	: >"$empty"
@@ -723,8 +1024,11 @@ assert_protected() {
 	if [ "$(printf '%s' "$body" | jq -r '.deployment_branch_policy == null')" = true ]; then
 		echo "::warning::Environment '${env}' has no deployment-branch policy; docs/releasing.md recommends master and tags v*."
 	fi
+	# Accepted while the project has one maintainer who can approve: with 'Prevent self-review'
+	# on, nobody could approve that maintainer's release. The warning stays, so that it is seen
+	# on every release until a second reviewer exists. docs/releasing.md, "Self-approval".
 	if [ "$(printf '%s' "$body" | jq -r '[.protection_rules[] | select(.type == "required_reviewers") | .prevent_self_review] | any')" != true ]; then
-		echo "::warning::Environment '${env}' lets whoever dispatches the release approve it; consider 'Prevent self-review'."
+		echo "::warning::Environment '${env}' lets whoever dispatches the release approve it. This is accepted while the project has a single maintainer who can approve (docs/releasing.md, 'Self-approval'); turn on 'Prevent self-review' once a second reviewer is added."
 	fi
 	echo "Environment '${env}' requires ${reviewers} reviewer(s)."
 }
@@ -819,7 +1123,7 @@ verify_release_commit() {
 verify_release() {
 	local bundle="${1:-}" version="${2:-}" commit ident message
 	if ! valid_version "$version"; then
-		err "The build job reported version '${version}', which is not major.minor.patch; refusing."
+		err "The version to verify, '${version}', is not major.minor.patch; refusing."
 		return 1
 	fi
 	if [ -L "$bundle" ] || [ ! -f "$bundle" ]; then
@@ -1154,25 +1458,102 @@ dist_tag() {
 	esac
 }
 
-# The publish job relies on npm's refusal to apply latest implicitly to a version not higher
-# than one npm holds (see publish), which npm added in 11.0.0 (lib/commands/publish.js; absent
-# in 10.9). Prints node's and npm's versions, and fails unless npm's major is 11 or later.
+# Whether release version <a> (major.minor.patch, digits only) is at least <b>. Fails on
+# anything else, so a version it cannot read never passes.
+version_at_least() {
+	local a="$1" b="$2" x y i
+	valid_version "$a" && valid_version "$b" || return 1
+	for i in 1 2 3; do
+		x=$(printf '%s' "$a" | cut -d. -f"$i")
+		y=$(printf '%s' "$b" | cut -d. -f"$i")
+		if [ "$((10#$x))" -gt "$((10#$y))" ]; then return 0; fi
+		if [ "$((10#$x))" -lt "$((10#$y))" ]; then return 1; fi
+	done
+	return 0
+}
+
+# The floor the publish job needs, before anything reads or writes the registry:
+#   - npm trusted publishing (OIDC) needs npm 11.5.1 or later and Node 22.14.0 or later
+#     (docs.npmjs.com/trusted-publishers). npm tries it on every publish by itself and falls
+#     back to the configured token (lib/utils/oidc.js, called from lib/commands/publish.js);
+#     below the floor it would publish with the token alone, silently.
+#   - npm's refusal to apply latest implicitly to a version not higher than one npm holds (see
+#     publish), which npm added in 11.0.0 (lib/commands/publish.js; absent in 10.9).
+# Prints node's and npm's versions, and fails unless both are at or above the floor. A version
+# it cannot read fails too.
+NPM_FLOOR="11.5.1"
+NODE_FLOOR="22.14.0"
 assert_npm() {
-	local nodev npmv major
+	local nodev npmv
 	nodev=$(node --version) || return 1
 	npmv=$(npm --version) || return 1
 	echo "node ${nodev}, npm ${npmv}"
-	major="${npmv%%.*}"
-	case "$major" in
-	'' | *[!0-9]*)
+	if ! valid_version "$npmv"; then
 		err "Could not read npm's version ('${npmv}'). Refusing to release."
 		return 1
-		;;
-	esac
-	if [ "$major" -lt 11 ]; then
-		err "npm ${npmv} is older than 11, which lacks npm's refusal to apply latest implicitly to a version lower than one it holds (the backstop for the dist-tag check). Refusing to release."
+	fi
+	if ! valid_version "${nodev#v}"; then
+		err "Could not read node's version ('${nodev}'). Refusing to release."
 		return 1
 	fi
+	if ! version_at_least "$npmv" "$NPM_FLOOR"; then
+		err "npm ${npmv} is older than ${NPM_FLOOR}. npm trusted publishing needs npm ${NPM_FLOOR} or later and Node ${NODE_FLOOR} or later (docs.npmjs.com/trusted-publishers), and npm 11.0.0 added the refusal to apply latest implicitly to a lower version (the backstop for the dist-tag check). Refusing to release."
+		return 1
+	fi
+	if ! version_at_least "${nodev#v}" "$NODE_FLOOR"; then
+		err "Node ${nodev} is older than ${NODE_FLOOR}, which npm trusted publishing needs (docs.npmjs.com/trusted-publishers). Refusing to release."
+		return 1
+	fi
+	echo "npm ${npmv} >= ${NPM_FLOOR} and node ${nodev} >= ${NODE_FLOOR}: npm uses trusted publishing (OIDC) where npmjs.com trusts this workflow, and the token otherwise."
+}
+
+# <text> as one Markdown code span, so the Release notes show it literally: no mention, link,
+# HTML or emphasis in it renders. Its whitespace runs become one space each (a span holds one
+# line), and its fence is one backtick longer than its longest run of them.
+code_span() {
+	local text fence='`'
+	text=$(printf '%s' "${1:-}" | tr -s '[:space:]' ' ' | sed 's/^ //;s/ $//')
+	while [[ "$text" == *"$fence"* ]]; do fence+='`'; done
+	# A span that starts or ends with a backtick needs a space inside each fence; Markdown strips them.
+	if [[ "$text" == '`'* || "$text" == *'`' ]]; then text=" ${text} "; fi
+	printf '%s%s%s' "$fence" "$text" "$fence"
+}
+
+# Annotates the release tag on <commit> in the publish job, replacing the one the build job made
+# (whose message is never read): the version, then, for a major released early, its reason
+# (ALLOW_EARLY_MAJOR) as a code span, since it is dispatch input that the Release notes render.
+# The tag is pushed with the release commit, so the reason outlives the run: a republish, which
+# refuses allow_early_major, reads it back with release-note.
+tag_release() {
+	local version="${1:-}" commit="${2:-}" reason
+	local message=(-m "v${version}")
+	if ! valid_version "$version" || [ -z "$commit" ]; then
+		err "usage: tag-release <version> <commit>"
+		return 1
+	fi
+	reason=$(printf '%s' "${ALLOW_EARLY_MAJOR:-}" | tr -d '[:space:]')
+	if [ -n "$reason" ]; then
+		message+=(-m "Released less than 90 days after the previous major: $(code_span "$ALLOW_EARLY_MAJOR")")
+	fi
+	git -c user.name="github-actions[bot]" \
+		-c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+		tag -a -f "${message[@]}" "v${version}" "${commit}^{commit}" > /dev/null
+}
+
+# What leads the GitHub Release's notes: the release tag's message after its first line (an
+# early major's reason), or nothing. The tag must be an annotated one; any other is refused, so a
+# reason can never be lost by reading the wrong object.
+release_note() {
+	local version="${1:-}"
+	if ! valid_version "$version"; then
+		err "usage: release-note <version>"
+		return 1
+	fi
+	if [ "$(git cat-file -t "refs/tags/v${version}" 2> /dev/null)" != tag ]; then
+		err "v${version} is not an annotated tag here; refusing to guess the release notes."
+		return 1
+	fi
+	git for-each-ref --format='%(contents:body)' "refs/tags/v${version}"
 }
 
 gate() {
@@ -1194,18 +1575,23 @@ version) lockstep_version ;;
 pin-siblings) pin_siblings ;;
 version-at) version_at "${2:?usage: version-at <commit>}" ;;
 verify-release) verify_release "${2:-}" "${3:-}" ;;
+expected-version) expected_version "${2:-}" ;;
+assert-bump) assert_bump "${2:-}" ;;
 assert-published) assert_published ;;
 assert-unreleased) assert_unreleased ;;
 assert-protected) assert_protected "${2:-}" ;;
 assert-npm) assert_npm ;;
 release-parent) verify_release_commit HEAD ;;
 latest-flag) latest_flag "${2:-}" ;;
+tag-release) tag_release "${2:-}" "${3:-}" ;;
+release-note) release_note "${2:-}" ;;
 dist-tag) dist_tag "${2:-}" ;;
 pack) pack "${2:-}" ;;
 publish) publish "${2:-}" "${3:-}" "${4:-}" ;;
+compare-builds) compare_builds "${2:-}" "${3:-}" "${4:-}" ;;
 gate) gate ;;
 *)
-	err "usage: release.sh dirs | names | version | pin-siblings | version-at <commit> | assert-published | assert-unreleased | assert-protected <env> | assert-npm | gate | release-parent | verify-release <bundle> <version> | latest-flag <version> | dist-tag <version> | pack <dir> | publish <dir> <commit> [--dry-run]"
+	err "usage: release.sh dirs | names | version | pin-siblings | version-at <commit> | expected-version <bump> | assert-bump <bump> | assert-published | assert-unreleased | assert-protected <env> | assert-npm | gate | release-parent | verify-release <bundle> <version> | latest-flag <version> | tag-release <version> <commit> | release-note <version> | dist-tag <version> | pack <dir> | publish <dir> <commit> [--dry-run] | compare-builds <dir> <rebuild dir> <commit>"
 	exit 2
 	;;
 esac

@@ -12,7 +12,12 @@ export default defineConfig({
 	test: {
 		globals: false,
 		include: ["packages/*/tests/**/*.test.ts"],
-		passWithNoTests: true,
+		// A filter that matches no test file must FAIL, not pass: a typo in a CI
+		// step, a script or a lane's command (a path written relative to a package
+		// directory, say) would otherwise print "No test files found" and exit 0,
+		// which every exit-code reader takes for green. Pinned by
+		// packages/core/tests/harden/vitest-no-tests-fails.test.ts.
+		passWithNoTests: false,
 		coverage: {
 			provider: "v8",
 			include: ["packages/*/src/**/*.ts"],

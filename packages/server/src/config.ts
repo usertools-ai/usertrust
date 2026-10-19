@@ -29,11 +29,27 @@ const ServerConfigSchema = z.object({
 	 */
 	ledgerProbeTimeoutMs: z.number().int().min(1_000).optional(),
 	/**
-	 * How long `POST /v1/authorize` waits for its governor and the ledger before answering 503
-	 * `ledger_unavailable` (server.ts). Unset means DEFAULT_LEDGER_TIMEOUT_MS. Not read in dryRun,
-	 * which needs no ledger.
+	 * How long `POST /v1/authorize` waits for its governor and the ledger, and `GET /v1/budget` for
+	 * the governor, before answering 503 `ledger_unavailable` (server.ts). Also the deadline past
+	 * which an unanswered health probe reads `unreachable`. Unset means DEFAULT_LEDGER_TIMEOUT_MS.
+	 * Not read in dryRun, which needs no ledger.
 	 */
 	ledgerTimeoutMs: z.number().int().min(100).optional(),
+	/**
+	 * Ledger reachability on `/v1/health` and `/v1/budget` (ledger-health.ts): `"child"` runs one
+	 * observer child process per distinct ledger target; `"off"` runs none, and reports `unknown`.
+	 * Unset means `"off"` for `createUsertrustServer()` (a library starts no background process its
+	 * caller did not ask for) and `"child"` for the `usertrust-server` CLI. Not read in dryRun.
+	 *
+	 * With it unset (or `"off"`), an embedded server's `/v1/health` answers `ledger: "unknown"` and
+	 * `ok: true` while its ledger is down: set `"child"` for health to report reachability.
+	 */
+	ledgerHealth: z.enum(["child", "off"]).optional(),
+	/**
+	 * How long a health observer child that exited, or failed to start, waits before it is started
+	 * again, counted from its exit. Unset means 300 000 (five minutes).
+	 */
+	healthRespawnCooldownMs: z.number().int().min(100).optional(),
 	tenants: z.array(TenantSchema).min(1),
 });
 

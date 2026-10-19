@@ -15,6 +15,10 @@
  * - Jobs: ci-gate, then build (read-only token, no OIDC: everything that runs dependency
  *   code), then publish (the `npm-publish` environment; write token, OIDC, NPM_TOKEN). No job
  *   that can write or mint an OIDC token installs, builds, tests or lints.
+ * - The build job is one definition run as two legs, `release` and `rebuild`, each uploading
+ *   its own artifact; the publish job refuses unless every tarball it would publish from
+ *   `release` is byte-identical to the one it assembles from `rebuild` (compare-builds), and
+ *   computes the version itself (expected-version) instead of reading it from the build.
  * - No checkout persists a credential; the write token reaches git only in the push step.
  * - ci-gate refuses unless the environment requires a reviewer; a 404, a 403 and an
  *   unreadable answer all refuse.
@@ -35,8 +39,9 @@
  *   already there (in the dry run, before the push); a republish skips one only if npm holds
  *   this run's exact tarball (dist.integrity and dist.shasum). Only the registry's own 404 for
  *   a package reads as "never published"; no npm_config_tag reaches npm.
- * - The publish job runs Node 24 and refuses an npm older than 11 before touching the
- *   registry; the GitHub Release is created only after every package's publish succeeded.
+ * - The publish job runs Node 24 and refuses an npm older than 11.5.1 or a Node older than
+ *   22.14.0 (npm trusted publishing's floor) before touching the registry; the GitHub Release
+ *   is created only after every package's publish succeeded.
  * - No setup-node restores a cache, and the publish job installs, packs and runs nothing.
  * - Republish gates on the release commit's parent only when the release commit changes
  *   nothing but the lockstep package.json "version" fields and the specs that name a lockstep
@@ -103,11 +108,18 @@ interface Step {
 interface Job {
 	name?: string;
 	needs?: string | string[];
+	strategy?: { "fail-fast"?: boolean; matrix?: Record<string, unknown> };
+	outputs?: Record<string, string>;
 	environment?: string | { name: string };
 	permissions?: Record<string, string>;
 	steps?: Step[];
 }
 interface Workflow {
+	on?: {
+		workflow_dispatch?: {
+			inputs?: Record<string, { type?: string; default?: unknown; required?: boolean }>;
+		};
+	};
 	env?: Record<string, string>;
 	permissions?: Record<string, string>;
 	jobs: Record<string, Job>;
@@ -163,6 +175,91 @@ describe("publish.yml", () => {
 		expect([publish.jobs.publish?.needs ?? []].flat()).toEqual(["build"]);
 		expect(envName(publish.jobs.publish as Job)).toBe("npm-publish");
 		expect(envName(publish.jobs.build as Job)).toBeUndefined();
+	});
+
+	it("the build job runs as two legs, release and rebuild, each handing on its own artifact", () => {
+		// One job definition, so the two legs run the same steps; a matrix leg is its own runner.
+		expect(publish.jobs.build?.strategy?.matrix).toEqual({ leg: ["release", "rebuild"] });
+		expect(publish.jobs.build?.strategy?.["fail-fast"]).toBe(true);
+		const uploads = jobSteps("build").filter((s) => s.uses?.startsWith("actions/upload-artifact@"));
+		expect(uploads.map((s) => s.with?.name)).toEqual(["${{ matrix.leg }}"]);
+		// No step differs by leg: nothing in the job reads the matrix but the upload's name.
+		const readers = jobSteps("build").filter((s) => JSON.stringify(s).includes("matrix."));
+		expect(readers).toEqual(uploads);
+		const downloads = jobSteps("publish").filter((s) =>
+			s.uses?.startsWith("actions/download-artifact@"),
+		);
+		expect(downloads.map((s) => [s.with?.name, s.with?.path])).toEqual([
+			["release", "${{ runner.temp }}/release"],
+			["rebuild", "${{ runner.temp }}/rebuild"],
+		]);
+	});
+
+	it("publish requires the rebuild to match, in every mode, before the dry run", () => {
+		const cmp = step("publish", "Require the rebuild to match, tarball by tarball");
+		expect(cmp.if).toBeUndefined();
+		expect(cmp.run?.trim()).toBe(
+			'bash scripts/release.sh compare-builds "${RUNNER_TEMP}/release" "${RUNNER_TEMP}/rebuild" "$COMMIT"',
+		);
+		expect(cmp.env?.COMMIT).toBe("${{ steps.source.outputs.commit }}");
+		const at = stepIndex("publish", "Require the rebuild to match, tarball by tarball");
+		expect(at).toBe(stepIndex("publish", "Select and verify what to publish") + 1);
+		expect(at).toBe(stepIndex("publish", "Publish packages (dry run)") - 1);
+	});
+
+	it("publish computes the version from the dispatched commit and the input, not the build", () => {
+		expect(publish.jobs.build?.outputs).toBeUndefined();
+		const sel = step("publish", "Select and verify what to publish");
+		expect(sel.env).toEqual({ BUMP: "${{ inputs.version }}" });
+		expect(sel.run).toContain('expected=$(bash scripts/release.sh expected-version "$BUMP")');
+		expect(sel.run).toContain(
+			'commit=$(bash scripts/release.sh verify-release "${RUNNER_TEMP}/release/release.bundle" "$expected")',
+		);
+	});
+
+	it("ci-gate requires the bump the CHANGELOG requires, before anything else is checked", () => {
+		const bump = step("ci-gate", "Require the bump the CHANGELOG requires");
+		expect(bump.if).toBe("${{ !inputs.republish }}");
+		expect(bump.env).toEqual({
+			BUMP: "${{ inputs.version }}",
+			ALLOW_EARLY_MAJOR: "${{ inputs.allow_early_major }}",
+		});
+		expect(bump.run?.trim().split("\n").at(-1)).toBe('bash scripts/release.sh assert-bump "$BUMP"');
+		expect(bump.run).toContain('if [ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]; then');
+		expect(stepIndex("ci-gate", "Require the bump the CHANGELOG requires")).toBe(
+			stepIndex("ci-gate", "Require CI success on the commit being released") - 1,
+		);
+	});
+
+	it("allow_early_major is a string, empty by default, refused on a republish, and written into the tag the notes read", () => {
+		const input = publish.on?.workflow_dispatch?.inputs?.allow_early_major;
+		expect(input).toEqual(
+			expect.objectContaining({ type: "string", default: "", required: false }),
+		);
+		// A republish skips assert-bump, the only check that reads the reason.
+		const ref = step("ci-gate", "Ensure a releasable ref");
+		expect(ref.env?.ALLOW_EARLY_MAJOR).toBe("${{ inputs.allow_early_major }}");
+		// On either ref a republish may take: the check stands before the ref's case.
+		const refRun = ref.run ?? "";
+		const check = refRun.indexOf('if [ "$REPUBLISH" = true ] && [ -n "$ALLOW_EARLY_MAJOR" ]; then');
+		expect(check).toBeGreaterThan(-1);
+		expect(check).toBeLessThan(refRun.indexOf('case "$REF" in'));
+		expect(ref.run).toContain("allow_early_major is for a new major release, not a republish");
+		// The push step writes the reason into the tag; the release step reads it from origin's
+		// tag, so a republish (no input) keeps it.
+		const push = step("publish", "Push the release commit and tag");
+		expect(push.env?.ALLOW_EARLY_MAJOR).toBe("${{ inputs.allow_early_major }}");
+		expect(push.run?.trim().split("\n")[0]).toBe(
+			'bash scripts/release.sh tag-release "$VERSION" "$COMMIT"',
+		);
+		const rel = step("publish", "Create GitHub Release");
+		expect(rel.env ?? {}).not.toHaveProperty("ALLOW_EARLY_MAJOR");
+		expect(rel.run).toContain(
+			'git fetch --quiet --no-tags --force origin "+refs/tags/v${VERSION}:refs/tags/v${VERSION}"',
+		);
+		expect(rel.run).toContain('note=$(bash scripts/release.sh release-note "$VERSION")');
+		expect(rel.run).toContain('notes=(--notes "$note")');
+		expect(rel.run).toContain('"${notes[@]}"');
 	});
 
 	it("grants nothing by default, and write and OIDC only to the publish job", () => {
@@ -260,6 +357,7 @@ describe("publish.yml", () => {
 		const order = [
 			jobSteps("publish").findIndex((s) => s.uses?.startsWith("actions/download-artifact@")),
 			stepIndex("publish", "Select and verify what to publish"),
+			stepIndex("publish", "Require the rebuild to match, tarball by tarball"),
 			stepIndex("publish", "Publish packages (dry run)"),
 			stepIndex("publish", "Push the release commit and tag"),
 			stepIndex("publish", "Publish packages"),
@@ -329,9 +427,9 @@ describe("publish.yml", () => {
 				expect(s.with?.["registry-url"], "setup-node writes no npm config").toBeUndefined();
 			}
 		}
-		// The build's reported version is read in exactly one place, which validates it.
-		const fromBuild = jobSteps("publish").filter((s) => JSON.stringify(s).includes("needs.build"));
-		expect(fromBuild.map((s) => s.name)).toEqual(["Select and verify what to publish"]);
+		// Nothing the build job reports is read: the version is computed in the publish job.
+		const fromBuild = jobSteps("publish").filter((s) => JSON.stringify(s).includes("needs."));
+		expect(fromBuild.map((s) => s.name)).toEqual([]);
 		for (const name of [
 			"Push the release commit and tag",
 			"Publish packages",
@@ -375,18 +473,19 @@ describe("publish.yml", () => {
 		]);
 	});
 
-	it("the build runs Node 22; the publish job runs Node 24 and requires npm 11 first", () => {
+	it("the build runs Node 22; the publish job runs Node 24 and requires npm 11.5.1 first", () => {
 		const setups = allSteps().filter(([, s]) => s.uses?.startsWith("actions/setup-node@"));
 		// The publish job's major only; the exact pin is the next test's.
 		expect(
 			setups.map(([j, s]) => `${j}: ${String(s.with?.["node-version"]).split(".")[0]}`),
 		).toEqual(["build: 22", "publish: 24"]);
-		// npm 11 added the refusal to apply latest implicitly to a lower version, the backstop
-		// for the dist-tag check: the step right after setup-node refuses an older npm, on every
-		// run (dry runs included), before anything reads or writes the registry.
+		// npm trusted publishing needs npm 11.5.1 and Node 22.14.0, and npm 11 added the refusal
+		// to apply latest implicitly to a lower version, the backstop for the dist-tag check:
+		// the step right after setup-node refuses an older npm or Node, on every run (dry runs
+		// included), before anything reads or writes the registry.
 		const steps = jobSteps("publish");
 		const setup = steps.findIndex((s) => s.uses?.startsWith("actions/setup-node@"));
-		const assert = stepIndex("publish", "Require npm 11 or later");
+		const assert = stepIndex("publish", "Require npm 11.5.1 and Node 22.14.0 or later");
 		expect(assert).toBe(setup + 1);
 		expect(steps[assert]?.run?.trim()).toBe("bash scripts/release.sh assert-npm");
 		expect(steps[assert]?.if).toBeUndefined();
@@ -1419,21 +1518,526 @@ describe("release.sh publish: the npm dist-tag", { timeout: 30_000 }, () => {
 });
 
 describe("release.sh assert-npm", { timeout: 30_000 }, () => {
-	it("prints node's and npm's versions, and passes on npm 11 or later", () => {
-		for (const v of ["11.0.0", "11.19.0", "12.2.0"]) {
-			const r = run(["assert-npm"], { FAKE_NPM_VERSION: v });
-			expect(r.status, `${v}: ${r.err}`).toBe(0);
-			expect(r.out).toContain(`node ${process.version}, npm ${v}`);
+	/** Runs assert-npm with `node --version` answering <node> (any other call is the real node). */
+	function assertNpm(npm: string, node: string) {
+		const bin = join(dir, "nodebin");
+		mkdirSync(bin, { recursive: true });
+		writeFileSync(
+			join(bin, "node"),
+			`#!/usr/bin/env bash\nif [ "$1" = --version ]; then echo "$FAKE_NODE_VERSION"; exit 0; fi\nexec ${JSON.stringify(process.execPath)} "$@"\n`,
+		);
+		chmodSync(join(bin, "node"), 0o755);
+		return run(["assert-npm"], {
+			FAKE_NPM_VERSION: npm,
+			FAKE_NODE_VERSION: node,
+			PATH: `${bin}:${join(dir, "bin")}:${process.env.PATH}`,
+		});
+	}
+
+	it("prints node's and npm's versions, and passes at or above the trusted-publishing floor", () => {
+		for (const [npm, node] of [
+			["11.5.1", "v22.14.0"],
+			["11.19.0", "v24.21.0"],
+			["11.10.0", "v22.22.1"],
+			["12.0.0", "v23.0.0"],
+		] as const) {
+			const r = assertNpm(npm, node);
+			expect(r.status, `${npm} ${node}: ${r.err}`).toBe(0);
+			expect(r.out).toContain(`node ${node}, npm ${npm}`);
+			expect(r.out).toContain(">= 11.5.1");
 		}
 	});
 
-	for (const v of ["10.9.9", "9.9.4", "", "eleven"]) {
+	it("reads the real node's version, and holds it to the same floor", () => {
+		const r = run(["assert-npm"], { FAKE_NPM_VERSION: "11.19.0" });
+		expect(r.out).toContain(`node ${process.version}, npm 11.19.0`);
+		// The floor is for publishing: a Node this package supports but below it (22.12, say) is
+		// refused here, which is not a failure of this test.
+		const [major = 0, minor = 0] = process.versions.node.split(".").map(Number);
+		const atFloor = major > 22 || (major === 22 && minor >= 14);
+		expect(r.status === 0, r.err).toBe(atFloor);
+	});
+
+	for (const v of [
+		"11.5.0",
+		"11.4.2",
+		"11.0.0",
+		"10.9.9",
+		"9.9.4",
+		"",
+		"eleven",
+		"11.5",
+		"11.5.1-pre",
+	]) {
 		it(`refuses npm ${JSON.stringify(v)}`, () => {
-			const r = run(["assert-npm"], { FAKE_NPM_VERSION: v });
+			const r = assertNpm(v, "v24.21.0");
 			expect(r.status).not.toBe(0);
 			expect(r.err).toContain("Refusing to release");
 		});
 	}
+
+	it("names trusted publishing's floor when it refuses npm", () => {
+		const r = assertNpm("11.5.0", "v24.21.0");
+		expect(r.err).toContain("npm 11.5.0 is older than 11.5.1");
+		expect(r.err).toContain("Node 22.14.0");
+	});
+
+	for (const v of ["v22.13.1", "v20.19.0", "v18.20.8", "", "v22", "twenty-four"]) {
+		it(`refuses node ${JSON.stringify(v)}`, () => {
+			const r = assertNpm("11.19.0", v);
+			expect(r.status).not.toBe(0);
+			expect(r.err).toContain("Refusing to release");
+		});
+	}
+});
+
+describe("release.sh expected-version", { timeout: 30_000 }, () => {
+	it("bumps HEAD's committed version as npm version does", () => {
+		for (const [bump, want] of [
+			["patch", "1.0.1"],
+			["minor", "1.1.0"],
+			["major", "2.0.0"],
+		] as const) {
+			const r = run(["expected-version", bump]);
+			expect(r.status, `${bump}: ${r.err}`).toBe(0);
+			expect(r.out.trim()).toBe(want);
+		}
+		releaseCommit("4.9.9");
+		expect(run(["expected-version", "patch"]).out.trim()).toBe("4.9.10");
+		expect(run(["expected-version", "minor"]).out.trim()).toBe("4.10.0");
+	});
+
+	it("reads the version HEAD records, not the working tree", () => {
+		// The build job bumps the working tree; the publish job never sees that.
+		writePackages("9.9.9");
+		const r = run(["expected-version", "patch"]);
+		expect(r.status, r.err).toBe(0);
+		expect(r.out.trim()).toBe("1.0.1");
+	});
+
+	for (const bump of ["", "prerelease", "PATCH", "1.0.1"]) {
+		it(`refuses the bump ${JSON.stringify(bump)}`, () => {
+			const r = run(["expected-version", bump]);
+			expect(r.status).not.toBe(0);
+			expect(r.err).toContain("not patch, minor or major");
+		});
+	}
+});
+
+describe("release.sh assert-bump", { timeout: 30_000 }, () => {
+	// The base world records 1.0.0, so a release is 1.0.1, 1.1.0 or 2.0.0.
+	const NEXT = { patch: "1.0.1", minor: "1.1.0", major: "2.0.0" } as const;
+	type Bump = keyof typeof NEXT;
+	const BUMPS = Object.keys(NEXT) as Bump[];
+
+	/** Commits CHANGELOG.md: an empty [Unreleased], then `## [<version>] - <date>` and <body>. */
+	const changelog = (version: string, body: string, unreleased = "") => {
+		writeFileSync(
+			join(repo, "CHANGELOG.md"),
+			`# Changelog\n\n## [Unreleased]\n${unreleased}\n## [${version}] - 2026-10-18\n\n${body}\n## [1.0.0] - 2026-01-01\n\n### Added\n\n- The first release.\n`,
+		);
+		git("add", "CHANGELOG.md");
+		git("commit", "-q", "-m", "changelog");
+	};
+	const entries = (...headings: string[]) =>
+		headings.map((h) => `### ${h}\n\n- An entry under ${h}.\n`).join("\n");
+	/** An annotated major tag made <days> ago, on master and pushed to origin. */
+	const majorTag = (tag: string, days: number) => {
+		const when = `${Math.floor(Date.now() / 1000) - days * 86_400} +0000`;
+		const r = spawnSync("git", ["tag", "-a", tag, "-m", tag], {
+			cwd: repo,
+			encoding: "utf8",
+			env: { ...gitEnv(), GIT_COMMITTER_DATE: when },
+		});
+		if (r.status !== 0) throw new Error(r.stderr);
+		git("push", "-q", "origin", "--tags");
+	};
+
+	const CLASSES: [string, Bump][] = [
+		["Removed", "major"],
+		["Breaking", "major"],
+		["Added", "minor"],
+		["Changed", "minor"],
+		["Deprecated", "minor"],
+		["Fixed", "patch"],
+		["Security", "patch"],
+		["Dependencies", "patch"],
+	];
+	for (const [heading, cls] of CLASSES) {
+		it(`an entry under ${heading} requires a ${cls} release, and refuses the other two`, () => {
+			changelog(NEXT[cls], entries(heading));
+			for (const bump of BUMPS) {
+				const r = run(["assert-bump", bump]);
+				if (bump === cls) {
+					expect(r.status, `${bump}: ${r.err}`).toBe(0);
+					expect(r.out).toContain(`${NEXT[cls]}: a ${cls} release`);
+				} else {
+					expect(r.status, bump).not.toBe(0);
+					expect(r.err).toContain(
+						`requires a ${cls} release (its highest class), but this dispatch is ${bump}`,
+					);
+				}
+			}
+		});
+	}
+
+	it("the highest class decides: Fixed and Added is a minor, and Removed beside them a major", () => {
+		changelog("1.1.0", entries("Read before upgrading", "Added", "Fixed", "Known issues"));
+		expect(run(["assert-bump", "minor"]).status).toBe(0);
+		expect(run(["assert-bump", "patch"]).err).toContain("requires a minor release");
+		changelog("2.0.0", entries("Fixed", "Added", "Removed"));
+		expect(run(["assert-bump", "major"]).status).toBe(0);
+		expect(run(["assert-bump", "minor"]).err).toContain("requires a major release");
+	});
+
+	it("refuses a class heading with no entry under it", () => {
+		changelog("1.0.1", `### Added\n\n${entries("Fixed")}`);
+		const r = run(["assert-bump", "patch"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain("has a ### Added heading with no entry under it");
+	});
+
+	it("refuses a section with no classed entry, notes alone included", () => {
+		for (const body of ["", "### Fixed\n", entries("Read before upgrading", "Known issues")]) {
+			changelog("1.0.1", body);
+			const r = run(["assert-bump", "patch"]);
+			expect(r.status).not.toBe(0);
+			expect(r.err).toContain("The 1.0.1 section is empty");
+		}
+	});
+
+	it("refuses while [Unreleased] still holds an entry", () => {
+		changelog("1.0.1", entries("Fixed"), "\n### Added\n\n- Not cut yet.\n");
+		const r = run(["assert-bump", "patch"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain("[Unreleased] still holds 1 entry");
+	});
+
+	it("refuses a heading that is neither a class nor a note, and an entry under no heading", () => {
+		changelog("1.0.1", `${entries("Fixed")}\n${entries("Improvements")}`);
+		let r = run(["assert-bump", "patch"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain('has a heading "Improvements", which is neither a class');
+		changelog("1.0.1", `- A stray entry.\n\n${entries("Fixed")}`);
+		r = run(["assert-bump", "patch"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain("an entry under no ### heading");
+	});
+
+	it("counts an entry of any list marker, so none hides a class", () => {
+		for (const marker of ["*", "+", "1.", "1)"]) {
+			changelog("2.0.0", `### Breaking\n\n${marker} Remove an export.\n\n${entries("Fixed")}`);
+			const r = run(["assert-bump", "patch"]);
+			expect(r.status, marker).not.toBe(0);
+			expect(r.err, marker).toContain("requires a major release");
+		}
+		changelog("1.0.1", entries("Fixed"), `\n### Added\n\n* Not cut yet.\n`);
+		expect(run(["assert-bump", "patch"]).err).toContain("[Unreleased] still holds 1 entry");
+	});
+
+	it("accepts a sub-item under an entry, and refuses an indented entry under none", () => {
+		changelog("1.0.1", `### Fixed\n\n- An entry:\n  - its sub-item;\n  * another.\n`);
+		const ok = run(["assert-bump", "patch"]);
+		expect(ok.status, ok.err).toBe(0);
+		expect(ok.out).toContain("Fixed: 1 entry (patch)");
+		changelog("2.0.0", `### Breaking\n\n  * Remove an export.\n\n${entries("Fixed")}`);
+		const r = run(["assert-bump", "major"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain('an indented entry that is not under an entry: "* Remove an export."');
+	});
+
+	it("denies by default: a line that could hide an entry from the count is refused, never skipped", () => {
+		// Each shape follows a Fixed entry. Read line by line with only entries counted, each was
+		// a patch: the removal it holds was never seen.
+		const notHeading = "reads as a heading but is not a ### heading";
+		const named = "names a heading but is not one";
+		const underRemoved = "under ### Removed that is not an entry, nor indented under one";
+		const shapes = [
+			["#### Removed\n\n- Remove an export.\n", `${notHeading}: "#### Removed"`],
+			["###Removed\n\n- Remove an export.\n", `${notHeading}: "###Removed"`],
+			[" ### Removed\n\n- Remove an export.\n", `${notHeading}: "### Removed"`],
+			["Removed\n-------\n\n- Remove an export.\n", `${named}: "Removed"`],
+			["**Removed**\n\n- Remove an export.\n", `${named}: "**Removed**"`],
+			["### Known issues\n\n**Removed**\n\n- Remove an export.\n", `${named}: "**Removed**"`],
+			[
+				"### Known issues\n\nOne thing\n---\n",
+				'a line "---", which would make the line above it a heading',
+			],
+			[
+				"## Removed\n\n- Remove an export.\n",
+				'is followed by "## Removed", which is not a version',
+			],
+			["### Removed\n\nThe export is removed.\n", `${underRemoved}: "The export is removed."`],
+			["### Removed\n\n> - Remove an export.\n", `${underRemoved}: "> - Remove an export."`],
+			["### Removed\n\n<ul><li>Remove an export.</li></ul>\n", `${underRemoved}: "<ul><li>`],
+			["### Removed\n\n\t- Remove an export.\n", `${underRemoved}: "- Remove an export."`],
+			["### Removed\n\n    - Remove an export.\n", `${underRemoved}: "- Remove an export."`],
+		] as const;
+		for (const [shape, reason] of shapes) {
+			changelog("1.0.1", `${entries("Fixed")}\n${shape}`);
+			const r = run(["assert-bump", "patch"]);
+			expect(r.status, shape).not.toBe(0);
+			expect(r.err, shape).toContain(reason);
+		}
+	});
+
+	it("accepts what a section rightly holds: an opening paragraph, a note's text, wrapped entries, link references", () => {
+		changelog(
+			"1.0.1",
+			"An opening paragraph.\n\n### Known issues\n\nThese remain open:\n\n- One.\n\n### Fixed\n\n- A fix\n  that wraps.\n  - A sub-item.\n\n[1.0.1]: https://example.com/compare\n",
+		);
+		const r = run(["assert-bump", "patch"]);
+		expect(r.status, r.err).toBe(0);
+		expect(r.out).toContain("Fixed: 1 entry (patch)");
+	});
+
+	it("refuses a line in [Unreleased] that is not a class or note heading, and accepts empty headings", () => {
+		changelog("1.0.1", entries("Fixed"), "\n### Added\n\n### Fixed\n");
+		const ok = run(["assert-bump", "patch"]);
+		expect(ok.status, ok.err).toBe(0);
+		for (const line of [
+			"> - Remove an export.",
+			"The export is removed.",
+			"#### Removed",
+			"**Removed**",
+		]) {
+			changelog("1.0.1", entries("Fixed"), `\n### Removed\n\n${line}\n`);
+			const r = run(["assert-bump", "patch"]);
+			expect(r.status, line).not.toBe(0);
+			expect(r.err, line).toContain("[Unreleased]");
+		}
+	});
+
+	it("reads every section this repository has released, refusing only the one with no entry", () => {
+		const py = /^CHANGELOG_PY='\n([\s\S]*?)\n'$/m.exec(readFileSync(SCRIPT, "utf8"))?.[1] ?? "";
+		expect(py).toContain("def refuse_disguised");
+		const text = readFileSync(join(ROOT, "CHANGELOG.md"), "utf8");
+		const heads = [...text.matchAll(/^## \[\d+\.\d+\.\d+\] - .*$/gm)];
+		let accepted = 0;
+		for (const [i, head] of heads.entries()) {
+			const next = heads[i + 1];
+			const body = text.slice(head.index ?? 0, next?.index ?? text.length);
+			const file = join(dir, "released.md");
+			writeFileSync(file, `## [Unreleased]\n\n${body}${next ? "## [0.0.1] - 2026-01-01\n" : ""}`);
+			const r = spawnSync("python3", ["-c", py, file], { encoding: "utf8" });
+			if (r.status === 0) accepted++;
+			else expect(r.stderr, head[0]).toContain("section is empty");
+		}
+		expect(accepted).toBeGreaterThanOrEqual(20);
+	});
+
+	it("refuses a section for another version than the release makes", () => {
+		changelog("1.0.2", entries("Fixed"));
+		const r = run(["assert-bump", "patch"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain(
+			"A patch release of 1.0.0 is 1.0.1, but the CHANGELOG's newest section is 1.0.2",
+		);
+	});
+
+	it("refuses a CHANGELOG with no [Unreleased] section, an undated section, or none at all", () => {
+		const r0 = run(["assert-bump", "patch"]);
+		expect(r0.status).not.toBe(0);
+		expect(r0.err).toContain("CHANGELOG.md in HEAD is not a regular file");
+		writeFileSync(
+			join(repo, "CHANGELOG.md"),
+			`# Changelog\n\n## [1.0.1] - 2026-10-18\n\n${entries("Fixed")}`,
+		);
+		git("add", "CHANGELOG.md");
+		git("commit", "-q", "-m", "no unreleased");
+		expect(run(["assert-bump", "patch"]).err).toContain(
+			"does not begin with a ## [Unreleased] section",
+		);
+		writeFileSync(
+			join(repo, "CHANGELOG.md"),
+			`## [Unreleased]\n\n## [1.0.1]\n\n${entries("Fixed")}`,
+		);
+		git("add", "CHANGELOG.md");
+		git("commit", "-q", "-m", "undated");
+		expect(run(["assert-bump", "patch"]).err).toContain(
+			'is "## [1.0.1]", not "## [major.minor.patch] - YYYY-MM-DD"',
+		);
+	});
+
+	it("reads the CHANGELOG HEAD records, not the working tree", () => {
+		changelog("1.0.1", entries("Fixed"));
+		writeFileSync(
+			join(repo, "CHANGELOG.md"),
+			`## [Unreleased]\n\n## [1.1.0] - 2026-10-18\n\n${entries("Added")}`,
+		);
+		expect(run(["assert-bump", "patch"]).status).toBe(0);
+		expect(run(["assert-bump", "minor"]).status).not.toBe(0);
+	});
+
+	it("refuses a major under 90 days after the last one, unless a reason is given", () => {
+		majorTag("v1.0.0", 10);
+		changelog("2.0.0", entries("Removed"));
+		let r = run(["assert-bump", "major"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain(
+			"v1.0.0 was released 10 days ago; a major release comes at most once every 90 days",
+		);
+		for (const blank of ["", "  \t "]) {
+			expect(run(["assert-bump", "major"], { ALLOW_EARLY_MAJOR: blank }).status).not.toBe(0);
+		}
+		r = run(["assert-bump", "major"], { ALLOW_EARLY_MAJOR: " a removal that cannot wait " });
+		expect(r.status, r.err).toBe(0);
+		expect(r.out).toContain(
+			"2.0.0: a major release 10 days after v1.0.0, allowed early: a removal that cannot wait",
+		);
+	});
+
+	it("allows a major 90 days or more after the last one, and refuses an unneeded reason", () => {
+		majorTag("v1.0.0", 90);
+		changelog("2.0.0", entries("Breaking"));
+		const r = run(["assert-bump", "major"]);
+		expect(r.status, r.err).toBe(0);
+		expect(r.out).toContain(
+			"2.0.0: a major release, as its CHANGELOG section requires, 90 days after v1.0.0.",
+		);
+		const extra = run(["assert-bump", "major"], { ALLOW_EARLY_MAJOR: "just because" });
+		expect(extra.status).not.toBe(0);
+		expect(extra.err).toContain("allow_early_major is set, but v1.0.0 is not under 90 days old");
+	});
+
+	it("the last major is the highest v<N>.0.0 on master, and one only on a side branch does not count", () => {
+		majorTag("v1.0.0", 200);
+		gitIn(join(dir, "origin.git"), "tag", "v0.0.0", "master");
+		changelog("2.0.0", entries("Removed"));
+		// A recent v7.0.0 on a commit master never took.
+		git("switch", "-q", "-c", "side");
+		writeFileSync(join(repo, "README"), "side\n");
+		git("commit", "-q", "-am", "side");
+		majorTag("v7.0.0", 1);
+		git("switch", "-q", "master");
+		const r = run(["assert-bump", "major"]);
+		expect(r.status, r.err).toBe(0);
+		expect(r.out).toContain("200 days after v1.0.0");
+	});
+
+	it("refuses a reason on a patch or a minor release", () => {
+		changelog("1.0.1", entries("Fixed"));
+		const r = run(["assert-bump", "patch"], { ALLOW_EARLY_MAJOR: "x" });
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain("allow_early_major is set, but this is a patch release");
+	});
+
+	it("refuses a bump that is not patch, minor or major", () => {
+		changelog("1.0.1", entries("Fixed"));
+		for (const bump of ["", "PATCH", "1.0.1"]) {
+			const r = run(["assert-bump", bump]);
+			expect(r.status).not.toBe(0);
+			expect(r.err).toContain("not patch, minor or major");
+		}
+	});
+});
+
+describe("release.sh compare-builds", { timeout: 30_000 }, () => {
+	/** Two packs of the same tree, as the two legs would make them, with dist/ files. */
+	function twoBuilds(): [string, string] {
+		for (const d of DIRS) {
+			mkdirSync(join(repo, "packages", d, "dist"), { recursive: true });
+			writeFileSync(join(repo, "packages", d, "dist", "index.js"), `export const name = "${d}";\n`);
+		}
+		const a = join(dir, "tarballs");
+		const b = join(dir, "rebuild");
+		expect(run(["pack", a]).status).toBe(0);
+		expect(run(["pack", b]).status).toBe(0);
+		rmSync(join(dir, "log"), { force: true });
+		return [a, b];
+	}
+
+	/** Rewrites <out>'s tarball for <d> with dist/index.js set to <body>. */
+	function changeDist(out: string, d: string, body: string, extra = false) {
+		writeFileSync(join(repo, "packages", d, "dist", "index.js"), body);
+		if (extra) writeFileSync(join(repo, "packages", d, "dist", "extra.js"), "x\n");
+		const tmp = join(dir, "repack");
+		expect(run(["pack", tmp]).status).toBe(0);
+		copyFileSync(join(tmp, `${NAMES[d]}-1.0.0.tgz`), join(out, `${NAMES[d]}-1.0.0.tgz`));
+		rmSync(join(dir, "log"), { force: true });
+	}
+
+	it("passes when every assembled tarball is byte-identical, and prints each sha256", () => {
+		const [a, b] = twoBuilds();
+		const r = run(["compare-builds", a, b, "HEAD"]);
+		expect(r.status, r.err).toBe(0);
+		// The assembler prints a line per tarball it writes; these are compare-builds' own.
+		const lines = r.out.split("\n").filter((l) => l.includes(" sha256 "));
+		expect(lines.length).toBe(6);
+		for (const [i, d] of DIRS.entries()) {
+			expect(lines[i]).toMatch(
+				new RegExp(
+					`^${NAMES[d]}-1\\.0\\.0\\.tgz sha256 [0-9a-f]{64}: the build and the rebuild agree$`,
+				),
+			);
+		}
+		// It reads the registry for nothing and publishes nothing.
+		expect(log()).toEqual([]);
+	});
+
+	it("refuses when one package's dist/ bytes differ, naming it and both digests", () => {
+		const [a, b] = twoBuilds();
+		changeDist(b, "server", 'export const name = "tampered";\n');
+		const r = run(["compare-builds", a, b, "HEAD"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toMatch(
+			/usertrust-server-1\.0\.0\.tgz: the build assembles to sha256 [0-9a-f]{64}, the rebuild to [0-9a-f]{64}\./,
+		);
+		expect(r.err).toContain("differ for: usertrust-server.");
+		expect(r.err).toContain("Refusing to publish anything");
+		// The other five still agree, and are reported as such.
+		expect(r.out.split("\n").filter((l) => l.includes(" sha256 ")).length).toBe(5);
+		expect(log()).toEqual([]);
+	});
+
+	it("refuses when the rebuild has a dist/ path the build lacks", () => {
+		const [a, b] = twoBuilds();
+		changeDist(b, "core", 'export const name = "core";\n', true);
+		const r = run(["compare-builds", a, b, "HEAD"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain("differ for: usertrust.");
+	});
+
+	it("compares what npm would receive: a root file only the build tarball carries is ignored", () => {
+		// Root files come from the release commit, never from a build tarball, so a difference
+		// there changes nothing published. The control for the two refusals above.
+		const [a, b] = twoBuilds();
+		writeFileSync(join(repo, "packages/ui/README.md"), "only in the rebuild\n");
+		const tmp = join(dir, "repack");
+		expect(run(["pack", tmp]).status).toBe(0);
+		const before = readFileSync(join(b, "usertrust-ui-1.0.0.tgz"));
+		copyFileSync(join(tmp, "usertrust-ui-1.0.0.tgz"), join(b, "usertrust-ui-1.0.0.tgz"));
+		expect(readFileSync(join(b, "usertrust-ui-1.0.0.tgz")).equals(before)).toBe(false);
+		const r = run(["compare-builds", a, b, "HEAD"]);
+		expect(r.status, r.err).toBe(0);
+	});
+
+	it("refuses a missing or refused rebuild tarball, naming the rebuild", () => {
+		const [a, b] = twoBuilds();
+		rmSync(join(b, "usertrust-ui-1.0.0.tgz"));
+		let r = run(["compare-builds", a, b, "HEAD"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain(`usertrust-ui-1.0.0.tgz is missing from ${b}`);
+		writeFileSync(
+			join(b, "usertrust-ui-1.0.0.tgz"),
+			gz(archive(member("package/package.json", "{}"), member("package/dist/.npmrc", "x"))),
+		);
+		r = run(["compare-builds", a, b, "HEAD"]);
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain("usertrust-ui-1.0.0.tgz from the rebuild was refused");
+	});
+
+	it("refuses one directory given twice, and a missing argument", () => {
+		const [a, b] = twoBuilds();
+		const same = run(["compare-builds", a, a, "HEAD"]);
+		expect(same.status).not.toBe(0);
+		expect(same.err).toContain("one directory twice");
+		for (const args of [[a, b], [a], [a, join(dir, "nope"), "HEAD"]]) {
+			const r = run(["compare-builds", ...args]);
+			expect(r.status, args.join(" ")).not.toBe(0);
+			expect(r.err).toContain("usage: compare-builds");
+		}
+	});
 });
 
 describe("release.sh assert-protected", { timeout: 30_000 }, () => {
@@ -1442,6 +2046,17 @@ describe("release.sh assert-protected", { timeout: 30_000 }, () => {
 		expect(r.status).toBe(0);
 		expect(r.out).toContain("requires 1 reviewer(s)");
 		expect(log()).toEqual(["gh|repos/owner/repo/environments/npm-publish"]);
+	});
+
+	it("passes with a warning that explains self-approval when prevent_self_review is off", () => {
+		setEnvironment(protectedEnv([reviewersRule(1, false)]));
+		const r = run(["assert-protected", "npm-publish"]);
+		expect(r.status).toBe(0);
+		expect(r.out).toContain("::warning::Environment 'npm-publish' lets whoever dispatches");
+		expect(r.out).toContain("docs/releasing.md, 'Self-approval'");
+		// The control: with it on, no warning.
+		setEnvironment(protectedEnv([reviewersRule(1, true)]));
+		expect(run(["assert-protected", "npm-publish"]).out).not.toContain("Self-approval");
 	});
 
 	it("passes with a warning when there is no deployment-branch policy", () => {
@@ -1613,6 +2228,77 @@ describe("release.sh gate (normal release)", { timeout: 30_000 }, () => {
 		const r = run(["gate"], { REQUIRED_CI_JOBS: "  " });
 		expect(r.status).not.toBe(0);
 		expect(r.err).toContain("REQUIRED_CI_JOBS is empty");
+	});
+});
+
+describe("release.sh tag-release and release-note", { timeout: 30_000 }, () => {
+	const reason = "a removal that cannot wait";
+
+	it("writes an early major's reason into the tag, which a republish reads back from origin", () => {
+		releaseCommit("2.0.0");
+		const commit = git("rev-parse", "HEAD");
+		// The build job's tag carries no reason; the publish job's replaces it, on the same commit.
+		expect(run(["release-note", "2.0.0"]).out.trim()).toBe("");
+		const r = run(["tag-release", "2.0.0", commit], { ALLOW_EARLY_MAJOR: reason });
+		expect(r.status, r.err).toBe(0);
+		expect(git("rev-parse", "v2.0.0^{commit}")).toBe(commit);
+		expect(git("for-each-ref", "--format=%(contents:subject)", "refs/tags/v2.0.0")).toBe("v2.0.0");
+		git("push", "-q", "origin", "refs/tags/v2.0.0");
+		// A republish holds only what origin has.
+		git("tag", "-d", "v2.0.0");
+		git("fetch", "-q", "--no-tags", "origin", "+refs/tags/v2.0.0:refs/tags/v2.0.0");
+		const note = run(["release-note", "2.0.0"]);
+		expect(note.status, note.err).toBe(0);
+		expect(note.out.trim()).toBe(
+			`Released less than 90 days after the previous major: \`${reason}\``,
+		);
+	});
+
+	it("writes the reason as one code span, so no mention, link or HTML in it renders", () => {
+		releaseCommit("2.0.0");
+		const commit = git("rev-parse", "HEAD");
+		const reasons = [
+			[
+				"@team see <b>this</b> [here](https://example.com)",
+				"`@team see <b>this</b> [here](https://example.com)`",
+			],
+			["uses `x` here", "``uses `x` here``"],
+			["`starts\n\nand  ends`", "`` `starts and ends` ``"],
+		] as const;
+		for (const [given, span] of reasons) {
+			const r = run(["tag-release", "2.0.0", commit], { ALLOW_EARLY_MAJOR: given });
+			expect(r.status, r.err).toBe(0);
+			expect(run(["release-note", "2.0.0"]).out.trim(), given).toBe(
+				`Released less than 90 days after the previous major: ${span}`,
+			);
+		}
+		expect(run(["tag-release", "2.0.0", commit], { ALLOW_EARLY_MAJOR: " \n " }).status).toBe(0);
+		expect(run(["release-note", "2.0.0"]).out.trim()).toBe("");
+	});
+
+	it("writes no note without a reason", () => {
+		releaseCommit("1.1.0");
+		expect(run(["tag-release", "1.1.0", git("rev-parse", "HEAD")]).status).toBe(0);
+		const note = run(["release-note", "1.1.0"]);
+		expect(note.status, note.err).toBe(0);
+		expect(note.out.trim()).toBe("");
+	});
+
+	it("refuses a missing or lightweight tag, and bad arguments", () => {
+		const missing = run(["release-note", "9.9.9"]);
+		expect(missing.status).not.toBe(0);
+		expect(missing.err).toContain("v9.9.9 is not an annotated tag here");
+		git("tag", "v3.0.0");
+		expect(run(["release-note", "3.0.0"]).err).toContain("v3.0.0 is not an annotated tag here");
+		for (const args of [
+			["tag-release", "x", "HEAD"],
+			["tag-release", "1.0.1"],
+			["release-note", ""],
+		]) {
+			const r = run(args, { ALLOW_EARLY_MAJOR: reason });
+			expect(r.status, args.join(" ")).not.toBe(0);
+			expect(r.err).toContain("usage:");
+		}
 	});
 });
 

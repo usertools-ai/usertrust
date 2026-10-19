@@ -198,7 +198,7 @@ export { detectCanaryLeak, generateCanary, injectCanary } from "./policy/canary.
 export { detectInjection } from "./policy/injection.js";
 export type { PIIDetection } from "./policy/pii.js";
 // PII detection
-export { detectPII } from "./policy/pii.js";
+export { detectPII, UNSCANNABLE } from "./policy/pii.js";
 export type { CircuitBreakerSnapshot } from "./resilience/circuit.js";
 // Circuit breaker
 export { CircuitBreaker, CircuitBreakerRegistry, CircuitOpenError } from "./resilience/circuit.js";
@@ -230,6 +230,9 @@ export {
 // id `createGovernor()` then rejects, or (worse) admit a `::` parent whose account
 // derivation lands on stranded pre-v3 cost-center money.
 export { parentUserIdRefusal } from "./shared/ids.js";
+// The check a governor gives its vault, for code that opens vaults ahead of a governor
+// (usertrust-server refuses to start on a tenant vault this refuses).
+export { securePrivateVault } from "./shared/private-fs.js";
 // Types
 export type {
 	ActionDescriptor,

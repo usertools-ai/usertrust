@@ -280,6 +280,8 @@ describe("false OK — a documented count that stops matching reality", () => {
 			sixteen: 16,
 			seventeen: 17,
 			eighteen: 18,
+			nineteen: 19,
+			twenty: 20,
 		};
 		const declaredCount = WORDS[declared as string];
 		expect(declaredCount, `unrecognised number word "${declared}"`).toBeDefined();
@@ -398,6 +400,10 @@ describe("false OK — a documented count that stops matching reality", () => {
 		const SPARED_TEXT = "aZ0 .-/é漢";
 		const sparesOrdinaryText = (re: RegExp | null): boolean =>
 			re !== null && SPARED_TEXT.replace(re, "") === SPARED_TEXT;
+		const keepsLineFeed = (re: RegExp | null): boolean => {
+			const subject = `${PRE}\n${MID}\n${POST}`;
+			return re !== null && subject.replace(re, "") === subject;
+		};
 
 		/** Parentheses are nodes; the shapes below are written without them. */
 		const unwrap = (n: import("typescript").Node): import("typescript").Node =>
@@ -482,6 +488,109 @@ describe("false OK — a documented count that stops matching reality", () => {
 			return lo === c0 && hi === c0;
 		};
 
+		/** `<id> !== 0x0a`, in any spelling of the bound: the one character a sanitizer may keep. */
+		const sparesLineFeed = (node: import("typescript").Node, id: string): boolean => {
+			const n = unwrap(node);
+			if (!ts.isBinaryExpression(n)) return false;
+			const k = n.operatorToken.kind;
+			const left = unwrap(n.left);
+			return (
+				(k === ts.SyntaxKind.ExclamationEqualsEqualsToken ||
+					k === ts.SyntaxKind.ExclamationEqualsToken) &&
+				ts.isIdentifier(left) &&
+				left.text === id &&
+				isNumericValue(unwrap(n.right), 0x0a)
+			);
+		};
+
+		/**
+		 * THE PREDICATE, WHEREVER A BRANCH TESTS IT: the identifier it tests, or null.
+		 *
+		 * The full shape alone, as one operand of `||` (which only adds characters to what is
+		 * replaced), beside a line-feed exemption on `&&` (`code !== 0x0a && <range>`, which keeps
+		 * the line breaks a multi-line message needs, as `scrubForStderr` keeps them by splitting
+		 * first), or through a `const` bound to any of those. `consts` is the file's `const`
+		 * bindings, resolved by name file-wide (a limit AGENTS.md lists); `seen` stops a cycle.
+		 */
+		const testedRange = (
+			node: import("typescript").Node,
+			consts: ReadonlyMap<string, import("typescript").Node>,
+			seen: ReadonlySet<string> = new Set(),
+		): string | null => {
+			const n = unwrap(node);
+			if (neutralisesControlRange(n)) {
+				return upperBound(unwrap((n as import("typescript").BinaryExpression).left), 0x1f);
+			}
+			if (ts.isIdentifier(n)) {
+				const init = consts.get(n.text);
+				return init === undefined || seen.has(n.text)
+					? null
+					: testedRange(init, consts, new Set([...seen, n.text]));
+			}
+			if (!ts.isBinaryExpression(n)) return null;
+			const k = n.operatorToken.kind;
+			if (k === ts.SyntaxKind.BarBarToken) {
+				return testedRange(n.left, consts, seen) ?? testedRange(n.right, consts, seen);
+			}
+			if (k === ts.SyntaxKind.AmpersandAmpersandToken) {
+				const right = testedRange(n.right, consts, seen);
+				if (right !== null && sparesLineFeed(n.left, right)) return right;
+				const left = testedRange(n.left, consts, seen);
+				if (left !== null && sparesLineFeed(n.right, left)) return left;
+			}
+			return null;
+		};
+
+		/**
+		 * Does an `if` statement's taken branch write the character back? Each value it appends
+		 * (`+=`, `.push`) must be a control-free string literal, or text that neither is the
+		 * character (a bare identifier or an indexed read) nor is computed from the code point
+		 * the predicate tested (a lossless `\uXXXX`). `clean += text.slice(from, i)`, which
+		 * copies the text BEFORE the character and moves past it, is allowed.
+		 */
+		const writesCharacterBack = (branch: import("typescript").Node, id: string): boolean => {
+			const mentions = (n: import("typescript").Node): boolean =>
+				(ts.isIdentifier(n) && n.text === id) || (ts.forEachChild(n, mentions) ?? false);
+			const keeps = (value: import("typescript").Node): boolean => {
+				let v = unwrap(value);
+				while (ts.isAsExpression(v) || ts.isNonNullExpression(v)) v = unwrap(v.expression);
+				if (ts.isStringLiteral(v) || ts.isNoSubstitutionTemplateLiteral(v))
+					return hasControl(v.text);
+				// Either side of a concatenation, and any part of a template, can carry it.
+				if (ts.isBinaryExpression(v) && v.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+					return keeps(v.left) || keeps(v.right);
+				}
+				if (ts.isTemplateExpression(v)) {
+					return (
+						hasControl(v.head.text) ||
+						v.templateSpans.some((span) => keeps(span.expression) || hasControl(span.literal.text))
+					);
+				}
+				return ts.isIdentifier(v) || ts.isElementAccessExpression(v) || mentions(v);
+			};
+			let back = false;
+			const walk = (n: import("typescript").Node): void => {
+				if (
+					ts.isBinaryExpression(n) &&
+					n.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken &&
+					keeps(n.right)
+				) {
+					back = true;
+				}
+				if (
+					ts.isCallExpression(n) &&
+					ts.isPropertyAccessExpression(n.expression) &&
+					n.expression.name.text === "push" &&
+					n.arguments.some(keeps)
+				) {
+					back = true;
+				}
+				ts.forEachChild(n, walk);
+			};
+			walk(branch);
+			return back;
+		};
+
 		const countIn = (src: string, name: string): { strong: number; weak: number } => {
 			// ASK THE COMPILER WHICH DIALECT THIS IS. A wrong `ScriptKind` makes the
 			// parser reject the file outright, and a rejected file contributes zero
@@ -515,6 +624,21 @@ describe("false OK — a documented count that stops matching reality", () => {
 				ts.forEachChild(n, collect);
 			};
 			collect(sf);
+
+			const consts = new Map<string, import("typescript").Node>();
+			const bind = (n: import("typescript").Node): void => {
+				if (
+					ts.isVariableDeclaration(n) &&
+					ts.isIdentifier(n.name) &&
+					n.initializer !== undefined &&
+					ts.isVariableDeclarationList(n.parent) &&
+					(n.parent.flags & ts.NodeFlags.Const) !== 0
+				) {
+					consts.set(n.name.text, n.initializer);
+				}
+				ts.forEachChild(n, bind);
+			};
+			bind(sf);
 
 			const usedForReplacement = (lit: import("typescript").Node): boolean => {
 				if (replacedLiterals.has(lit)) return true;
@@ -554,18 +678,25 @@ describe("false OK — a documented count that stops matching reality", () => {
 				// `ch` preserves it and a computed escape re-encodes it. Every
 				// sanitizer in this tree is `out += <range> ? "?" : ch`.
 				//
-				// RESIDUAL, and deliberate: a sanitizer written as an `if` statement
-				// rather than a conditional expression goes uncounted. That direction
-				// fails LOUDLY — the total reads low and the guard trips — which is
-				// the safe way for this matcher to be wrong.
 				// The replacement must also BE control-free. `isStringLiteral` alone
 				// accepted `? "\x1b" : ch` — a "sanitizer" that emits the escape it
 				// was meant to destroy, counted as strong. That is the read-HIGH
 				// direction: a real sanitizer could be swapped for that one and the
 				// total would still say thirteen.
-				if (ts.isConditionalExpression(n) && neutralisesControlRange(n.condition)) {
+				if (ts.isConditionalExpression(n) && testedRange(n.condition, consts) !== null) {
 					const rep = unwrap(n.whenTrue);
 					if (ts.isStringLiteral(rep) && !hasControl(rep.text)) strong++;
+				}
+				// THE SAME QUESTION, ASKED BY AN `if` STATEMENT. This was a residual
+				// once, argued safe because removing such a sanitizer would make the
+				// total read low. That holds only for one already counted: a NEW one
+				// in this form (`sanitizeMapped`, which strips the character by
+				// copying the text before it and moving past it) went uncounted with
+				// the inventory still passing. Counted when its taken branch does not
+				// write the character back.
+				if (ts.isIfStatement(n)) {
+					const id = testedRange(n.expression, consts);
+					if (id !== null && !writesCharacterBack(n.thenStatement, id)) strong++;
 				}
 				if (ts.isRegularExpressionLiteral(n)) {
 					// Classified by COVERAGE, not spelling. The stronger variant is the
@@ -587,9 +718,13 @@ describe("false OK — a documented count that stops matching reality", () => {
 					// counted, so removing a sanitizer while leaving its constant
 					// kept the inventory green. Read-HIGH, and the exact shape this
 					// file is named for.
+					// The line feed may be kept, and nothing else: the same exemption
+					// the loop path allows, so the two spellings of one sanitizer agree.
 					const re = usedForReplacement(n) ? compileClass(n.text) : null;
 					if (
-						removesEmbedded(re, 0x00, 0x1f) &&
+						removesEmbedded(re, 0x00, 0x09) &&
+						removesEmbedded(re, 0x0b, 0x1f) &&
+						(removesEmbedded(re, 0x0a, 0x0a) || keepsLineFeed(re)) &&
 						removesEmbedded(re, 0x7f, 0x7f) &&
 						sparesOrdinaryText(re)
 					) {
@@ -638,6 +773,34 @@ describe("false OK — a documented count that stops matching reality", () => {
 				"export const f=(s:string)=>s.replace(r,'?');export const r=/[\\x00-\\x1f\\x7f-\\x9f]/g;",
 				"strong",
 			],
+			[
+				// The form `sanitizeMapped` is written in: the predicate bound to a
+				// `const`, tested by an `if` beside another condition, the character
+				// dropped by copying the text before it and moving past it.
+				"an `if` statement that drops the character and keeps the line feed",
+				"export const f=(s:string,removed:Uint8Array)=>{let out='';let from=0;for(let i=0;i<s.length;i++){const code=s.charCodeAt(i);const control=code !== 0x0a && (code <= 0x1f || (code >= 0x7f && code <= 0x9f));if(removed[i]===1||control){out+=s.slice(from,i);from=i+1;}}return out+s.slice(from);};",
+				"export const f=(s:string)=>s.replace(r,'');export const r=/[\\x00-\\x09\\x0b-\\x1f\\x7f-\\x9f]/g;",
+				"strong",
+			],
+			[
+				"an `if` statement that skips the character",
+				"export const f=(s:string)=>{let out='';for(const ch of s){const code=ch.charCodeAt(0);if(code <= 0x1f || (code >= 0x7f && code <= 0x9f))continue;out+=ch;}return out;};",
+				"export const f=(s:string)=>s.replace(r,'');export const r=/[\\x00-\\x1f\\x7f-\\x9f]/g;",
+				"strong",
+			],
+			[
+				"a conditional that keeps the line feed and nothing else",
+				'export const f=(cp:number)=>cp !== 0x0a && (cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f)) ? "?" : "y";',
+				"export const f=(s:string)=>s.replace(r,'?');export const r=/[\\x00-\\x09\\x0b-\\x1f\\x7f-\\x9f]/g;",
+				"strong",
+			],
+			[
+				// Only the line feed may be kept: a tab left in is not the whole range.
+				"keeps a tab, so not the whole control range",
+				'export const f=(cp:number)=>cp !== 0x09 && (cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f)) ? "?" : "y";',
+				"export const f=(s:string)=>s.replace(r,'?');export const r=/[\\x00-\\x08\\x0a-\\x1f\\x7f-\\x9f]/g;",
+				"none",
+			],
 		];
 		for (const [label, loopForm, regexForm, expected] of EQUIVALENT_PAIRS) {
 			const viaLoop = countIn(loopForm, "pair-loop.ts");
@@ -672,6 +835,27 @@ describe("false OK — a documented count that stops matching reality", () => {
 				// inventory would still report thirteen.
 				"emits a control character as its replacement",
 				'export const f=(cp:number,ch:string)=>cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f) ? "\\x1b" : ch;',
+			],
+			// The same three, asked by an `if` statement, and one that pushes.
+			[
+				"an `if` that writes back the character it just identified",
+				"export const f=(s:string)=>{let out='';for(const ch of s){const code=ch.charCodeAt(0);if(code <= 0x1f || (code >= 0x7f && code <= 0x9f)){out+=ch;}}return out;};",
+			],
+			[
+				"an `if` that escapes losslessly",
+				'export const f=(s:string)=>{let out="";for(const ch of s){const code=ch.charCodeAt(0);if(code <= 0x1f || (code >= 0x7f && code <= 0x9f)){out+="\\\\u"+code.toString(16);}}return out;};',
+			],
+			[
+				"an `if` that emits a control character",
+				'export const f=(s:string)=>{let out="";for(const ch of s){const code=ch.charCodeAt(0);if(code <= 0x1f || (code >= 0x7f && code <= 0x9f)){out+="\\x1b";}}return out;};',
+			],
+			[
+				"an `if` that copies the text before the character, and the character",
+				"export const f=(s:string)=>{let out='';let from=0;for(let i=0;i<s.length;i++){const code=s.charCodeAt(i);if(code <= 0x1f || (code >= 0x7f && code <= 0x9f)){out+=s.slice(from,i)+s[i];from=i+1;}}return out+s.slice(from);};",
+			],
+			[
+				"an `if` that pushes the character back",
+				"export const f=(s:string)=>{const parts:string[]=[];for(let i=0;i<s.length;i++){const code=s.charCodeAt(i);if(code <= 0x1f || (code >= 0x7f && code <= 0x9f)){parts.push(s[i] as string);}}return parts.join('');};",
 			],
 		];
 		for (const [label, src] of LOOP_DECOYS) {

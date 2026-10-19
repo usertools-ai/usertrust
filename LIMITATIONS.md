@@ -613,7 +613,7 @@ Fixed in 5.0.1: a governed stream the caller aborts with its own `AbortSignal` n
 the usage it consumed, as an early `break` does, instead of voiding its hold. 5.0.0 still has
 the gap, on OpenAI and Anthropic `create({ stream: true })`.
 
-## 13. A ledger-backed server refuses authorizes while its ledger is unreachable, health still reports `ok`, and a hold it releases on SIGINT or SIGTERM may not be audited
+## 13. A ledger-backed server refuses authorizes while its ledger is unreachable, health can read `unknown` rather than the outage, and a hold it releases on SIGINT or SIGTERM may not be audited
 
 A ledger-backed `usertrust-server` waits at most `ledgerTimeoutMs` (default 5 seconds) for
 its ledger on `POST /v1/authorize`, including the wait behind the tenant's earlier
@@ -636,8 +636,14 @@ it never completes, they keep failing fast until it does: the fail-closed direct
   14 ms, and the default 5 s deadline was reached at roughly 350 concurrent authorizes for
   one tenant (300 were all served; 400 drew 503s). A slower or remote ledger reaches it
   sooner. A tenant that issues many concurrent authorizes should raise `ledgerTimeoutMs`.
-- `GET /v1/health` still reports `ok` while the ledger is down. Reachability on health is
-  a later change; a monitor cannot read an outage from health in this release.
+- `GET /v1/health` reports the ledger as `ledger` (`ok` is `false` when it is `unreachable`)
+  only where a health child observes it: the CLI's default, but not `createUsertrustServer()`'s,
+  which answers `ledger: "unknown"` and `ok: true` through an outage unless `ledgerHealth` is
+  `"child"`. Health also reads `unknown` while a tenant's governor is still being created, after
+  a tenant's config changed since start (until a restart), and while an observer child that died
+  waits out its cooldown (five minutes by default). If its replacements keep failing, `unknown`
+  lasts as long as they do. Each child holds one TigerBeetle session, per distinct configured
+  ledger target, for the life of the server.
 - `/v1/settle`, `/v1/abort` and `/v1/release` still wait for the ledger without a bound,
   and complete when it returns.
 - A client that hangs up after the server has written its `200` cannot be detected: that

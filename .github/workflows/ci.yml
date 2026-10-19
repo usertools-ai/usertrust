@@ -303,8 +303,9 @@ jobs:
           USERTRUST_TB_ADDRESS: "3000"
           # The binary downloaded above, for the suites that run their OWN cluster on a free port,
           # never the shared one above: `ledger-outage.tb.test.ts` stops and restarts its cluster,
-          # and `evicted-client.tb.test.ts` and `evicted-tenant.tb.test.ts` evict sessions from
-          # their own (the first fails, rather than skips, when this is unset).
+          # `ledger-health.tb.test.ts` stops and restarts its own and evicts sessions from it, and
+          # `evicted-client.tb.test.ts` and `evicted-tenant.tb.test.ts` evict sessions from their
+          # own (the first fails, rather than skips, when this is unset).
           USERTRUST_TB_BINARY: ${{ github.workspace }}/tigerbeetle
         # Every real-cluster suite in the repo, named explicitly rather than by
         # directory: `packages/openclaw/tests/envelope-integration.test.ts` does not
@@ -332,6 +333,7 @@ jobs:
           packages/openclaw/tests/envelope-integration.test.ts
           packages/server/tests/ledger-outage.tb.test.ts
           packages/server/tests/evicted-tenant.tb.test.ts
+          packages/server/tests/ledger-health.tb.test.ts
 
   site-build:
     name: site-build

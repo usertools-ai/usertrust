@@ -1143,7 +1143,7 @@ describe("headless governor", () => {
 
 	// ── Settle with only outputTokens (partial usage branch) ──
 
-	it("settle with only outputTokens provided uses zero for inputTokens", async () => {
+	it("settle with only outputTokens provided is an incomplete report, labelled estimated", async () => {
 		const gov = await createGovernor({
 			dryRun: true,
 			budget: 100_000,
@@ -1157,7 +1157,8 @@ describe("headless governor", () => {
 		});
 
 		expect(receipt.cost).toBeGreaterThan(0);
-		expect(receipt.usageSource).toBe("provider");
+		expect(receipt.usageSource).toBe("estimated");
+		expect(Object.hasOwn(receipt, "usage")).toBe(false);
 
 		await gov.destroy();
 	});

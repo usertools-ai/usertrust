@@ -5,6 +5,7 @@ export type { ServerConfig, TenantConfig } from "./config.js";
 export { hashKey, loadServerConfig, resolveTenant } from "./config.js";
 export type { ServerEvent } from "./events.js";
 export { EventBus } from "./events.js";
+export type { HealthChildSpawner } from "./ledger-health.js";
 export type { LedgerProbeOutcome, LedgerProbeResult, LedgerTarget } from "./ledger-probe.js";
 export {
 	classifyLedgerProbe,
@@ -13,7 +14,7 @@ export {
 	resolveLedgerTargets,
 } from "./ledger-probe.js";
 export type { GovernorFactory } from "./pool.js";
-export { GovernorPool } from "./pool.js";
+export { GovernorPool, secureTenantVaults } from "./pool.js";
 export type { UsertrustServer } from "./server.js";
 export { createUsertrustServer } from "./server.js";
 export type {

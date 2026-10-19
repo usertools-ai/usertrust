@@ -106,6 +106,8 @@ import {
 	fromProviderResponse,
 	type ImplausibleChecks,
 	implausibleUsageData,
+	incompleteReportCost,
+	isUsableCount,
 	MAX_PLAUSIBLE_TOKENS_PER_TIER,
 	mergeImplausible,
 	publishableUsageFields,
@@ -2535,8 +2537,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					return streamSettledReceipt ?? buildEstimatedStreamReceipt();
 				}
 
-				// Determine cost: use provider usage if reported, else fall back to
-				// estimate. A3: priced with the rate resolution captured at authorize;
+				// Determine cost: use provider usage if reported, else max(estimate, the
+				// usable counts). A3: priced with the rate resolution captured at authorize;
 				// A11: costFromRates floors at 1 even for 0/0 usage.
 				//
 				// D5 — ONE sanitized snapshot. `sanitizeUsage` is the single gate the
@@ -2565,7 +2567,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				);
 				// D5: the record half of the SAME snapshot the cost comes from —
 				// present iff provider-sourced, omitted (never zero-filled) otherwise.
-				// Govern prices only provider-sourced counts: an estimated settle is priced at the metered estimate.
+				// Govern prices from counts only when provider-sourced: any other settle costs
+				// max(metered estimate, its usable counts) and publishes no usage.
 				const usageAudit = publishableUsageFields(
 					usageSnapshot,
 					rateResolution.rates,
@@ -2584,33 +2587,41 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// tier from the REPORTED prompt length, the same counts `costFromRates` prices
 				// below, so the record reproduces the cost. Without provider usage the cost is
 				// the estimate, and so are the rates.
-				const settledAppliedRates =
+				// Without provider usage (an incomplete report, a stream cut before both sides arrived, or
+				// none): at least the un-inflated metering estimate, never the fattened hold (see the
+				// `meteredEstimateCost` comment at the hold-sizing site), and never less than the usable
+				// counts show (`incompleteReportCost`).
+				// The prompt length the counts' tier is chosen from (a `longPrompt` row): a provider-sourced
+				// report keeps its own; any other is held to no cheaper a tier than the prompt it was
+				// authorized with, since its input may be missing and priced as 0.
+				const countsPrompt = promptTokenCount(
+					usageSnapshot.inputTokens,
+					usageSnapshot.cacheReadTokens,
+					usageSnapshot.cacheWriteTokens,
+				);
+				const countsTierPrompt =
 					usageSnapshot.source === "provider"
-						? resolveAppliedRates(
-								rateResolution.rates,
-								promptTokenCount(
-									usageSnapshot.inputTokens,
-									usageSnapshot.cacheReadTokens,
-									usageSnapshot.cacheWriteTokens,
-								),
-							)
+						? countsPrompt
+						: Math.max(countsPrompt, estimatedInputTokens);
+				const countsCost = costFromRates(
+					rateResolution.rates,
+					usageSnapshot.inputTokens,
+					usageSnapshot.outputTokens,
+					usageSnapshot.cacheReadTokens,
+					usageSnapshot.cacheWriteTokens,
+					usageSnapshot.cacheWrite1hTokens ?? 0,
+					countsTierPrompt,
+				);
+				const incomplete =
+					usageSnapshot.source === "provider"
+						? undefined
+						: incompleteReportCost(countsCost, meteredEstimateCost);
+				const settledAppliedRates =
+					incomplete === undefined || incomplete.countsWon
+						? resolveAppliedRates(rateResolution.rates, countsTierPrompt)
 						: appliedRates;
-				let streamCost: number;
 				const usageSource: "provider" | "estimated" = usageSnapshot.source;
-				if (usageSnapshot.source === "provider") {
-					streamCost = costFromRates(
-						rateResolution.rates,
-						usageSnapshot.inputTokens,
-						usageSnapshot.outputTokens,
-						usageSnapshot.cacheReadTokens,
-						usageSnapshot.cacheWriteTokens,
-						usageSnapshot.cacheWrite1hTokens ?? 0,
-					);
-				} else {
-					// FIX: the un-inflated metering estimate, never the fattened hold
-					// (see the `meteredEstimateCost` comment at the hold-sizing site).
-					streamCost = meteredEstimateCost;
-				}
+				const streamCost = incomplete === undefined ? countsCost : incomplete.cost;
 
 				// Release in-flight hold and commit budget under mutex.
 				// The holdActive guard prevents double-release.
@@ -2982,6 +2993,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				let accCacheWrite = 0;
 				let accCacheWrite1h = 0;
 				let accUsageReported = false;
+				// D5: provider-sourced only once BOTH a usable input (message_start) and a usable output
+				// (message_delta) were seen, an explicit 0 included. A consumer that aborts before the
+				// message_delta settles the partial below at no less than the estimate.
+				let accInputSeen = false;
+				let accOutputSeen = false;
 				let accImplausible: Partial<Record<UsageTier, number>> | undefined;
 				let accImplausibleBy: ImplausibleChecks | undefined;
 				const noteImplausible = (reading: {
@@ -3021,13 +3037,14 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					if (tokens.inputTokens > accInput) {
 						deltaTokens += tokens.inputTokens - accInput;
 						accInput = tokens.inputTokens;
-						accUsageReported = true;
 					}
 					if (tokens.outputTokens > accOutput) {
 						deltaTokens += tokens.outputTokens - accOutput;
 						accOutput = tokens.outputTokens;
-						accUsageReported = true;
 					}
+					if (tokens.inputReported === true) accInputSeen = true;
+					if (tokens.outputReported === true) accOutputSeen = true;
+					accUsageReported = accInputSeen && accOutputSeen;
 					// D7: cache-tier deltas count toward deltaTokens too — a cache-heavy
 					// chunk with near-zero fresh input/output must not read as idle.
 					if (tokens.cacheReadTokens > accCacheRead) {
@@ -3086,41 +3103,29 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				});
 
 				emitter.on("finalMessage", (msg: unknown) => {
-					// A3: usage-extraction failure after a successful stream settles at
-					// ESTIMATE, never voids. F3: MERGE per-field — a finalMessage that
-					// carries only one field (or null for the other) keeps the counter
-					// accumulated from streamEvent for the MISSING field, rather than
-					// zeroing it. Reported when EITHER source carried a real number;
-					// otherwise settle on the estimate.
+					// A3: usage-extraction failure after a successful stream never voids. F3: MERGE
+					// per-field — a finalMessage that carries only one field (or null for the other)
+					// keeps the counter accumulated from streamEvent for the MISSING field, rather than
+					// zeroing it. Reported (priced from the counts) only when each of input and output
+					// was usable in one source or the other; otherwise the merged counts settle as an
+					// incomplete report, at no less than the estimate.
 					const finalUsage = readFinalMessageUsage(msg);
 					noteImplausible(finalUsage);
-					const usageReported = finalUsage.reported || accUsageReported;
-					const completion: StreamCompletion = usageReported
-						? {
-								usage: {
-									inputTokens: finalUsage.inputTokens ?? accInput,
-									outputTokens: finalUsage.outputTokens ?? accOutput,
-									cacheReadTokens: finalUsage.cacheReadTokens ?? accCacheRead,
-									cacheWriteTokens: finalUsage.cacheWriteTokens ?? accCacheWrite,
-									cacheWrite1hTokens: finalUsage.cacheWrite1hTokens ?? accCacheWrite1h,
-								},
-								chunksDelivered,
-								usageReported: true,
-								implausible: accImplausible,
-								implausibleBy: accImplausibleBy,
-							}
-						: {
-								usage: {
-									inputTokens: 0,
-									outputTokens: 0,
-									cacheReadTokens: 0,
-									cacheWriteTokens: 0,
-								},
-								chunksDelivered,
-								usageReported: false,
-								implausible: accImplausible,
-								implausibleBy: accImplausibleBy,
-							};
+					const inputSeen = finalUsage.inputTokens !== undefined || accInputSeen;
+					const outputSeen = finalUsage.outputTokens !== undefined || accOutputSeen;
+					const completion: StreamCompletion = {
+						usage: {
+							inputTokens: finalUsage.inputTokens ?? accInput,
+							outputTokens: finalUsage.outputTokens ?? accOutput,
+							cacheReadTokens: finalUsage.cacheReadTokens ?? accCacheRead,
+							cacheWriteTokens: finalUsage.cacheWriteTokens ?? accCacheWrite,
+							cacheWrite1hTokens: finalUsage.cacheWrite1hTokens ?? accCacheWrite1h,
+						},
+						chunksDelivered,
+						usageReported: inputSeen && outputSeen,
+						implausible: accImplausible,
+						implausibleBy: accImplausibleBy,
+					};
 					finalizeStreamSettle(completion)
 						.then(receiptResolve, receiptReject)
 						.finally(releaseStreamCount);
@@ -3169,19 +3174,14 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// that lacks a message_stop (receivedMessages stays empty → _emitFinal emits
 				// nothing) — only 'end' fires. Without an 'end' catch-all the PENDING hold
 				// would dangle until the TigerBeetle 300s timeout. When 'end' is the SOLE
-				// terminal (gate still pending) settle at ESTIMATE so the hold releases; on
+				// terminal (gate still pending) settle as an incomplete report so the hold releases:
+				// at no less than the estimate, nor than what the streamEvent tap accumulated. On
 				// every other terminal ('end' always fires last, after the winning settle/
 				// void) the guard makes this a no-op that must NOT touch `.receipt`.
 				emitter.on("end", () => {
 					if (finalizeState !== "pending") return;
-					finalizeStreamSettle({
-						usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
-						chunksDelivered,
-						usageReported: false,
-						// An absurd count seen on a streamEvent is not forgotten when only `end` arrives.
-						implausible: accImplausible,
-						implausibleBy: accImplausibleBy,
-					})
+					// An absurd count seen on a streamEvent is not forgotten when only `end` arrives.
+					finalizeStreamSettle({ ...partial(), usageReported: false })
 						.then(receiptResolve, receiptReject)
 						.finally(releaseStreamCount);
 				});
@@ -3359,7 +3359,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				//   - the estimate is no longer substituted for a missing provider
 				//     count while still claiming `usageSource: "provider"`. D5: provider
 				//     provenance requires provider-reported input AND output; anything
-				//     less settles at the estimate and is LABELLED estimated.
+				//     less settles at no less than the estimate and is LABELLED estimated.
 				const usageShape: UsageWireShape =
 					kind === "google"
 						? "gemini"
@@ -3373,13 +3373,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					rateResolution.rates,
 					rateResolution.rateSource !== "table",
 				);
-				// FIX: the un-inflated metering estimate, never the fattened hold
-				// (see the `meteredEstimateCost` comment at the hold-sizing site).
-				let actualCost = meteredEstimateCost;
 				const usageSource: "provider" | "estimated" = usageSnapshot.source;
 				// D5: the record half of the SAME snapshot the cost comes from. Nothing
 				// below re-reads `response.usage` — one read, one object, two uses.
-				// Govern prices only provider-sourced counts: an estimated settle is priced at the metered estimate.
+				// Govern prices from counts only when provider-sourced: any other settle costs
+				// max(metered estimate, its usable counts) and publishes no usage.
 				const usageAudit = publishableUsageFields(
 					usageSnapshot,
 					rateResolution.rates,
@@ -3394,31 +3392,43 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						`[usertrust] implausible usage for ${transferId}: charged at the estimate, not the reported counts\n`,
 					);
 				}
+				// Without provider usage (an incomplete report, or none): at least the un-inflated metering
+				// estimate, never the fattened hold (see the `meteredEstimateCost` comment at the hold-sizing
+				// site), and never less than the usable counts show (`incompleteReportCost`).
+				// The prompt length the counts' tier is chosen from (a `longPrompt` row): a provider-sourced
+				// report keeps its own; any other is held to no cheaper a tier than the prompt it was
+				// authorized with, since its input may be missing and priced as 0.
+				const countsPrompt = promptTokenCount(
+					usageSnapshot.inputTokens,
+					usageSnapshot.cacheReadTokens,
+					usageSnapshot.cacheWriteTokens,
+				);
+				const countsTierPrompt =
+					usageSnapshot.source === "provider"
+						? countsPrompt
+						: Math.max(countsPrompt, estimatedInputTokens);
+				const countsCost = costFromRates(
+					rateResolution.rates,
+					usageSnapshot.inputTokens,
+					usageSnapshot.outputTokens,
+					usageSnapshot.cacheReadTokens,
+					usageSnapshot.cacheWriteTokens,
+					usageSnapshot.cacheWrite1hTokens ?? 0,
+					countsTierPrompt,
+				);
+				const incomplete =
+					usageSnapshot.source === "provider"
+						? undefined
+						: incompleteReportCost(countsCost, meteredEstimateCost);
 				// The rates this call SETTLES at: a tiered row (`longPrompt`) re-resolves its
 				// tier from the REPORTED prompt length, the same counts `costFromRates` prices
-				// below, so the record reproduces the cost. Without provider usage the cost is
-				// the estimate, and so are the rates.
+				// below, so the record reproduces the cost. When the estimate set the cost, so
+				// do its rates.
 				const settledAppliedRates =
-					usageSnapshot.source === "provider"
-						? resolveAppliedRates(
-								rateResolution.rates,
-								promptTokenCount(
-									usageSnapshot.inputTokens,
-									usageSnapshot.cacheReadTokens,
-									usageSnapshot.cacheWriteTokens,
-								),
-							)
+					incomplete === undefined || incomplete.countsWon
+						? resolveAppliedRates(rateResolution.rates, countsTierPrompt)
 						: appliedRates;
-				if (usageSnapshot.source === "provider") {
-					actualCost = costFromRates(
-						rateResolution.rates,
-						usageSnapshot.inputTokens,
-						usageSnapshot.outputTokens,
-						usageSnapshot.cacheReadTokens,
-						usageSnapshot.cacheWriteTokens,
-						usageSnapshot.cacheWrite1hTokens ?? 0,
-					);
-				}
+				const actualCost = incomplete === undefined ? countsCost : incomplete.cost;
 
 				// h. Audit the llm_call FIRST (P3-AUDIT-FAILCLOSED). The settlement-
 				// defining event is written BEFORE the irreversible budget commit and
@@ -4829,13 +4839,19 @@ function readFinalMessageUsage(msg: unknown): {
 					implausibleBy: cacheTiers.implausibleBy,
 				};
 			}
-			// No usable headline counts: the cache readings are still reported, so an absurd tier is not lost.
+			// No usable headline counts: not reported (that is decided from input and output seen), but each
+			// usable cache tier is returned exactly as the branch above returns it, so a finalMessage that
+			// carries only cache counts still reaches the settle, where an incomplete report costs
+			// max(estimate, its counts). An absurd tier's reading is kept in `implausible`, so it is not lost.
 			return {
 				inputTokens: undefined,
 				outputTokens: undefined,
-				cacheReadTokens: undefined,
-				cacheWriteTokens: undefined,
-				cacheWrite1hTokens: undefined,
+				cacheReadTokens: readUsable ? cacheTiers.cacheReadTokens : undefined,
+				cacheWriteTokens: writeUsable ? cacheTiers.cacheWriteTokens : undefined,
+				cacheWrite1hTokens:
+					oneHourUsable || (cacheTiers.cacheWrite1hTokens ?? 0) > 0
+						? (cacheTiers.cacheWrite1hTokens ?? 0)
+						: undefined,
 				reported: false,
 				implausible: cacheTiers.implausible,
 				implausibleBy: cacheTiers.implausibleBy,
@@ -4866,6 +4882,10 @@ function extractAnthropicStreamUsage(event: unknown): {
 	cacheWrite1hTokens: number;
 	implausible?: Partial<Record<UsageTier, number>> | undefined;
 	implausibleBy?: ImplausibleChecks | undefined;
+	/** The event carried a usable input count (message_start), an explicit 0 included. */
+	inputReported?: boolean;
+	/** The event carried a usable output count (message_delta), an explicit 0 included. */
+	outputReported?: boolean;
 } {
 	const none = {
 		inputTokens: 0,
@@ -4889,6 +4909,7 @@ function extractAnthropicStreamUsage(event: unknown): {
 			const inAbsurd = Number.isFinite(inTok) && inTok > MAX_PLAUSIBLE_TOKENS_PER_TIER;
 			return {
 				inputTokens: inTok > 0 && !inAbsurd ? inTok : 0,
+				inputReported: isUsableCount(usage.input_tokens),
 				outputTokens: 0,
 				cacheReadTokens: tiers.cacheReadTokens,
 				cacheWriteTokens: tiers.cacheWriteTokens,
@@ -4906,6 +4927,7 @@ function extractAnthropicStreamUsage(event: unknown): {
 		return {
 			inputTokens: 0,
 			outputTokens: outTok > 0 && !outAbsurd ? outTok : 0,
+			outputReported: isUsableCount(usage.output_tokens),
 			cacheReadTokens: tiers.cacheReadTokens,
 			cacheWriteTokens: tiers.cacheWriteTokens,
 			cacheWrite1hTokens: tiers.cacheWrite1hTokens ?? 0,

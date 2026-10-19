@@ -172,7 +172,7 @@ describe("headless record surfaces (spec D5)", () => {
 		await gov.destroy();
 	});
 
-	it("cache-only params COUNT AS REPORTED — never a fallback to the estimate", async () => {
+	it("cache-only params are never discarded: they price above the estimate when they show more", async () => {
 		const gov = await governor();
 		const rates = getModelRates(MODEL);
 		const meteredEstimate = costFromRates(rates, 10_000, 1);
@@ -180,30 +180,29 @@ describe("headless record surfaces (spec D5)", () => {
 		const auth = await gov.authorize(AUTHORIZE);
 		const receipt = await gov.settle(auth, { cacheReadTokens: 500_000 });
 
-		// 500k reads at 3/1k = 1500 — the call really did consume that.
+		// 500k reads at 3/1k = 1500 — the call really did consume that, and it is more than the
+		// estimate. No input or output was reported, so the report is incomplete: "estimated", and
+		// no usage is published (its input and output would be fabricated zeros).
 		expect(receipt.cost).toBe(1500);
-		expect(receipt.cost).not.toBe(meteredEstimate);
-		expect(receipt.usageSource).toBe("provider");
-		expect(receipt.usage).toEqual({
-			inputTokens: 0,
-			outputTokens: 0,
-			cacheReadTokens: 500_000,
-			cacheWriteTokens: 0,
-		});
-		expectRecomputable(receipt);
+		expect(receipt.cost).toBeGreaterThan(meteredEstimate);
+		expect(receipt.usageSource).toBe("estimated");
+		expect(Object.hasOwn(receipt, "usage")).toBe(false);
 
 		await gov.destroy();
 	});
 
-	it("a cache-write-only settle is reported too", async () => {
+	it("a cache-write-only settle prices at max(estimate, its cost)", async () => {
 		const gov = await governor();
+		const rates = getModelRates(MODEL);
 		const auth = await gov.authorize(AUTHORIZE);
 		const receipt = await gov.settle(auth, { cacheWriteTokens: 8000 });
 
-		// 8000 writes at 37.5/1k = 300.
-		expect(receipt.cost).toBe(300);
-		expect(receipt.usage?.cacheWriteTokens).toBe(8000);
-		expectRecomputable(receipt);
+		// 8000 writes at 37.5/1k = 300, just under this authorize's metered estimate (301): the
+		// incomplete report takes the dearer of the two.
+		expect(costFromRates(rates, 0, 0, 0, 8000)).toBe(300);
+		expect(receipt.cost).toBe(Math.max(costFromRates(rates, 10_000, 1), 300));
+		expect(receipt.usageSource).toBe("estimated");
+		expect(Object.hasOwn(receipt, "usage")).toBe(false);
 
 		await gov.destroy();
 	});
@@ -413,20 +412,21 @@ describe("headless record surfaces (spec D5)", () => {
 	it('an "estimated" label with an unusable input or output count publishes no usage: its 0 is fabricated', async () => {
 		const gov = await governor();
 		const rates = getModelRates(MODEL);
+		const meteredEstimate = costFromRates(rates, 10_000, 1);
 		const cases: Array<[SettleParams, number]> = [
 			[
 				{ inputTokens: Number.NaN, outputTokens: 500, usageSource: "estimated" },
-				costFromRates(rates, 0, 500),
+				Math.max(meteredEstimate, costFromRates(rates, 0, 500)),
 			],
 			[
 				{ inputTokens: 1000, outputTokens: Number.NaN, usageSource: "estimated" },
-				costFromRates(rates, 1000, 0),
+				Math.max(meteredEstimate, costFromRates(rates, 1000, 0)),
 			],
 		];
 		for (const [params, cost] of cases) {
 			const auth = await gov.authorize(AUTHORIZE);
 			const receipt = await gov.settle(auth, params);
-			// Priced from the usable count, as under a provider label; never published with a made-up 0.
+			// An incomplete report: no less than the estimate, never published with a made-up 0.
 			expect(receipt.usageSource).toBe("estimated");
 			expect(receipt.cost).toBe(cost);
 			expect(Object.hasOwn(receipt, "usage")).toBe(false);
@@ -438,22 +438,19 @@ describe("headless record surfaces (spec D5)", () => {
 		await gov.destroy();
 	});
 
-	it("an input or output left out, under either label, is a 0 that is priced and published", async () => {
+	it("an input or output left out, under either label, is an incomplete report: never below the estimate", async () => {
 		const gov = await governor();
 		const rates = getModelRates(MODEL);
+		const meteredEstimate = costFromRates(rates, 10_000, 1);
 		for (const usageSource of ["provider", "estimated"] as const) {
 			const auth = await gov.authorize(AUTHORIZE);
 			const receipt = await gov.settle(auth, { outputTokens: 500, usageSource });
-			// Reporting some counts makes the ones left out 0 (the operator-boundary rule), so this is not an
-			// unusable count: the 0 priced the call, and the record carries it and recomputes.
-			expect(receipt.cost).toBe(costFromRates(rates, 0, 500));
-			expect(receipt.usage).toEqual({
-				inputTokens: 0,
-				outputTokens: 500,
-				cacheReadTokens: 0,
-				cacheWriteTokens: 0,
-			});
-			expectRecomputable(receipt, usageSource);
+			// A count left out is not a 0: the estimate, which shows more than the output alone, prices
+			// it. "estimated", and no usage (its input would be a fabricated 0).
+			expect(costFromRates(rates, 0, 500)).toBeLessThan(meteredEstimate);
+			expect(receipt.cost).toBe(meteredEstimate);
+			expect(receipt.usageSource).toBe("estimated");
+			expect(Object.hasOwn(receipt, "usage")).toBe(false);
 		}
 
 		await gov.destroy();
@@ -469,10 +466,13 @@ describe("headless record surfaces (spec D5)", () => {
 		});
 
 		// A four-tier record whose inputTokens is a fabricated 0 is the mislabel
-		// D5 kills. The cost still meters off what was usable.
+		// D5 kills. An incomplete report costs no less than the estimate.
+		const rates = getModelRates(MODEL);
 		expect(Object.hasOwn(receipt, "usage")).toBe(false);
 		expect(receipt.usageSource).toBe("estimated");
-		expect(receipt.cost).toBe(costFromRates(getModelRates(MODEL), 0, 500));
+		expect(receipt.cost).toBe(
+			Math.max(costFromRates(rates, 10_000, 1), costFromRates(rates, 0, 500)),
+		);
 
 		await gov.destroy();
 	});

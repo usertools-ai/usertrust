@@ -44,6 +44,7 @@ import {
 	fromOpenAICompletionsUsage,
 	fromOpenAIResponsesUsage,
 	type ImplausibleChecks,
+	isUsableCount,
 	MAX_PLAUSIBLE_TOKENS_PER_TIER,
 	mergeImplausible,
 	type UsageTier,
@@ -147,6 +148,10 @@ function boundedCount(
 function extractAnthropicTokens(chunk: unknown): StreamUsage & {
 	implausible?: Partial<Record<UsageTier, number>> | undefined;
 	implausibleBy?: ImplausibleChecks | undefined;
+	/** The chunk carried a usable input count (message_start), an explicit 0 included. */
+	inputReported?: boolean;
+	/** The chunk carried a usable output count (message_delta), an explicit 0 included. */
+	outputReported?: boolean;
 } {
 	if (chunk == null || typeof chunk !== "object") return NO_USAGE;
 
@@ -161,6 +166,7 @@ function extractAnthropicTokens(chunk: unknown): StreamUsage & {
 			const inputTokens = boundedCount(usage.input_tokens, "inputTokens", found);
 			return {
 				inputTokens,
+				inputReported: isUsableCount(usage.input_tokens),
 				outputTokens: 0,
 				cacheReadTokens: normalized.cacheReadTokens,
 				cacheWriteTokens: normalized.cacheWriteTokens,
@@ -179,6 +185,7 @@ function extractAnthropicTokens(chunk: unknown): StreamUsage & {
 			return {
 				inputTokens: 0,
 				outputTokens,
+				outputReported: isUsableCount(usage.output_tokens),
 				cacheReadTokens: normalized.cacheReadTokens,
 				cacheWriteTokens: normalized.cacheWriteTokens,
 				cacheWrite1hTokens: normalized.cacheWrite1hTokens ?? 0,
@@ -213,8 +220,8 @@ interface SnapshotWithProvenance extends StreamUsage {
  * the chunk carries no usage object at all.
  *
  * A present-but-unusable usage object still yields a snapshot (the counts clamp
- * to 0 — A7 sanitation) but with `reported: false`, so the settle falls back to
- * the estimate instead of billing a garbage terminal at the 1-usertoken floor
+ * to 0 — A7 sanitation) but with `reported: false`, so the settle costs no less
+ * than the estimate instead of billing a garbage terminal at the 1-usertoken floor
  * under a "provider" label.
  */
 function extractUsageSnapshot(
@@ -446,6 +453,9 @@ async function* wrapStreamImpl<T>(
 	let cacheWrite1hTokens = 0;
 	let chunksDelivered = 0;
 	let usageReported = false;
+	// Anthropic reports input (message_start) and output (message_delta) on separate chunks.
+	let anthropicInputSeen = false;
+	let anthropicOutputSeen = false;
 	let implausible: Partial<Record<UsageTier, number>> | undefined;
 	let implausibleBy: ImplausibleChecks | undefined;
 	const noteImplausible = (reading: {
@@ -513,13 +523,18 @@ async function* wrapStreamImpl<T>(
 				if (tokens.inputTokens > 0) {
 					deltaInput = Math.max(0, tokens.inputTokens - inputTokens);
 					inputTokens = tokens.inputTokens;
-					usageReported = true;
 				}
 				if (tokens.outputTokens > 0) {
 					deltaOutput = Math.max(0, tokens.outputTokens - outputTokens);
 					outputTokens = tokens.outputTokens;
-					usageReported = true;
 				}
+				// D5: provider-sourced only once BOTH a usable input and a usable output were seen (an
+				// explicit 0 counts). A stream cut before its message_delta (an error, or a consumer that
+				// stops reading) has input only, so it settles at no less than the estimate, never with
+				// its output priced as 0.
+				if (tokens.inputReported === true) anthropicInputSeen = true;
+				if (tokens.outputReported === true) anthropicOutputSeen = true;
+				if (anthropicInputSeen && anthropicOutputSeen) usageReported = true;
 				// Cache tokens alone do NOT make usage "reported" (D5: provenance needs
 				// input AND output) — but they are real billed tokens, so they still
 				// accumulate for the partial/void audit, for the cost when the headline
