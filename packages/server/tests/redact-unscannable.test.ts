@@ -28,6 +28,14 @@
  *   printed clip. Every control, DEL and C1 character and three escape sequences, inside each
  *   marker, with and without a key that swallows the marker in the original, leave no readable
  *   credential. `sanitizeMapped` gives scrubForStderr's text and where each of its units was.
+ * - Linear, as a ratio: reading twice an input takes at most three times as long (a quadratic
+ *   reader takes about four), at a size where one read takes 25 ms, each time the least of five
+ *   samples of at least 50 ms, taken in turn at both sizes with both inputs built first (one flat
+ *   string, as a caller's text arrives, where an input is built only once). A ratio over three is
+ *   measured again from new inputs, and fails only if that is over three too. What
+ *   doubles is what a quadratic reader would read again: the units of a run of
+ *   markers, a whitespace run's length, or a key's length with the text's. A time limit would fail
+ *   a slow runner, or one under coverage, and pass a quadratic reader on a fast one.
  */
 
 import { describe, expect, it } from "vitest";
@@ -70,6 +78,70 @@ function expectSame(actual: string, expected: string): void {
 
 const line = (message: string, secrets: readonly string[] = []): string =>
 	internalErrorLine(new Error(message), "t", "POST /v1/authorize", secrets);
+
+/**
+ * `make(n)` builds an input of size `n` and gives what reads it, and reading twice that input takes
+ * at most three times as long: a linear reader takes about twice, a quadratic one about four. `n`
+ * doubles (up to 64 times) until one read takes 25 ms. Both inputs are then built, read once, and
+ * kept, so each size is timed with the same heap. A sample makes the same number of reads at both
+ * sizes, enough for a sample at `n` to take 50 ms, so a garbage collection's pause is a small part of
+ * it. Samples alternate between the sizes, so a slow moment slows both, and each time is the least of
+ * five. A ratio over three is measured again from both inputs built anew, and only a second over
+ * three fails: a moment's load seldom slows both, and a quadratic reader is over three each time.
+ * Each measurement taken again is printed, marked `[linear-confirm]`. A ratio, unlike a time limit,
+ * holds on a slow runner and under coverage.
+ */
+function expectLinear(name: string, make: (n: number) => () => unknown, n: number): void {
+	const timed = (read: () => unknown, reads: number): number => {
+		const started = performance.now();
+		for (let i = 0; i < reads; i++) read();
+		return performance.now() - started;
+	};
+	let size = n;
+	let read = make(size);
+	read();
+	let one = timed(read, 1);
+	while (one < 25 && size < n * 64) {
+		size *= 2;
+		read = make(size);
+		read();
+		one = timed(read, 1);
+	}
+	const large = make(2 * size);
+	large();
+	let reads = Math.max(1, Math.ceil(50 / Math.max(one, 0.01)));
+	while (timed(read, reads) < 50) reads *= 2;
+	const ratio = (small: () => unknown, big: () => unknown): [number, string] => {
+		let once = Number.POSITIVE_INFINITY;
+		let twice = Number.POSITIVE_INFINITY;
+		for (let i = 0; i < 5; i++) {
+			once = Math.min(once, timed(small, reads));
+			twice = Math.min(twice, timed(big, reads));
+		}
+		const times = `${once.toFixed(1)} ms at ${size}, ${twice.toFixed(1)} ms at ${2 * size}, ${reads} reads a sample`;
+		return [twice / once, `${(twice / once).toFixed(2)} (${times})`];
+	};
+	const [first, firstTimes] = ratio(read, large);
+	if (first <= 3) return;
+	const small = make(size);
+	small();
+	const big = make(2 * size);
+	big();
+	const [second, times] = ratio(small, big);
+	console.log(`[linear-confirm] ${name}: ${firstTimes}, then ${times}`);
+	expect(second, `${name}: ${firstTimes}, then ${times}`).toBeLessThanOrEqual(3);
+}
+
+/**
+ * `text` as one flat string, as a caller's text arrives (JSON.parse gives one). A string built with
+ * `+` or `repeat` is a tree of parts. V8 flattens it on the first read, but keeps the tree as a
+ * pointer to the flat copy until a garbage collection the string survives replaces it with that
+ * copy. An input built once and kept for the whole measurement can then be flat at `n` and still
+ * the pointer at twice `n`, which reads slower in every sample: a linear reader measured up to 3.7
+ * times as long. Inputs a read builds again each time are not kept, so only those built once pass
+ * through here.
+ */
+const flat = (text: string): string => JSON.parse(JSON.stringify(text));
 
 describe("redactApiKeys", () => {
 	it("matches exactly what the old pattern matched, over a seeded corpus", () => {
@@ -159,7 +231,6 @@ describe("redactSecrets", () => {
 		});
 
 		it("stays linear where the key's first word recurs before long whitespace runs", () => {
-			const started = performance.now();
 			const runs = `tenant${" ".repeat(20_000)}`.repeat(100);
 			expectSame(redactSecrets(runs, [key]), runs);
 			const words = "tenant ".repeat(500_000);
@@ -167,8 +238,15 @@ describe("redactSecrets", () => {
 			const long = `tenant${" ".repeat(N)}x`;
 			expectSame(redactSecrets(long, [key]), long);
 			expectSame(redactSecrets(`tenant${" ".repeat(N)}key-0123456789`, [key]), "[redacted]");
-			expect(performance.now() - started).toBeLessThan(3_000);
-		});
+			// Twice the runs' length: a search that read a run once from each place in it takes four times.
+			const reads = (text: string) => {
+				const input = flat(text);
+				return () => redactSecrets(input, [key]);
+			};
+			expectLinear("runs", (n) => reads(`tenant${" ".repeat(n)}`.repeat(100)), 2_000);
+			expectLinear("words", (n) => reads("tenant ".repeat(n)), 50_000);
+			expectLinear("one run", (n) => reads(`tenant${" ".repeat(n)}x`), 500_000);
+		}, 60_000);
 	});
 
 	describe("finds a caller's key that whitespace splits within a word, as a hard-wrapped key is", () => {
@@ -204,7 +282,6 @@ describe("redactSecrets", () => {
 		it("stays linear on a near miss with long runs between its characters, and on fragments", () => {
 			const spaced = "tenant key-0123456789";
 			const run = " ".repeat(20_000);
-			const started = performance.now();
 			// Every character but the last, each after a run: a search that began again at each
 			// candidate start would read to the X from each one. (A pattern that kept the key's own
 			// space as a literal between two gaps split every run two ways, and took minutes.)
@@ -215,8 +292,14 @@ describe("redactSecrets", () => {
 			for (let i = 0; fragments.length < N; i++)
 				fragments += `${parts[i % parts.length]}${" ".repeat(5_000)}`;
 			expectSame(redactSecrets(fragments, [spaced]), fragments);
-			expect(performance.now() - started).toBeLessThan(3_000);
-		});
+			// Twice the runs' length, as above.
+			const nearMiss = (gap: string): string =>
+				`${Array.from("tenantkey-012345678").join(gap)}${gap}X`;
+			expectLinear("near", (n) => () => redactSecrets(nearMiss(" ".repeat(n)), [spaced]), 20_000);
+			const fragment = (n: number): string =>
+				parts.map((part) => `${part}${" ".repeat(n)}`).join("");
+			expectLinear("fragments", (n) => () => redactSecrets(fragment(n), [spaced]), 5_000);
+		}, 60_000);
 	});
 
 	describe("finds every kind of match on the same text, so none hides another", () => {
@@ -300,14 +383,18 @@ describe("redactSecrets", () => {
 
 		it("stays linear on a key that repeats its own start", () => {
 			const text = "a".repeat(100_000);
-			let started = performance.now();
 			expectSame(redactSecrets(text, [`${"a".repeat(1000)}b`]), text);
-			expect(performance.now() - started).toBeLessThan(100);
 			const pairs = "a ".repeat(N / 2);
-			started = performance.now();
 			expectSame(redactSecrets(pairs, [`${"a".repeat(40)}b`]), pairs);
-			expect(performance.now() - started).toBeLessThan(3_000);
-		});
+			// The key grows with the text: a search that began again after each false start reads the key's
+			// length from each place, and takes four times as long.
+			const reads = (text: string, key: string) => {
+				const input = flat(text);
+				return () => redactSecrets(input, [key]);
+			};
+			expectLinear("one run", (n) => reads("a".repeat(n), `${"a".repeat(n / 100)}b`), 100_000);
+			expectLinear("pairs", (n) => reads("a ".repeat(n), `${"a".repeat(n / 5_000)}b`), 200_000);
+		}, 60_000);
 	});
 });
 
@@ -335,11 +422,15 @@ describe("joinLines", () => {
 	}, 60_000);
 
 	it("reads a 10.4M-character whitespace run in one pass", () => {
-		const started = performance.now();
 		expectSame(joinLines(`a${" ".repeat(N)}b`), `a${" ".repeat(N)}b`);
 		expectSame(joinLines(`a${" ".repeat(N / 2)}\n${" ".repeat(N / 2)}b`), "a b");
-		expect(performance.now() - started).toBeLessThan(2_000);
-	});
+		expectLinear("no line break", (n) => () => joinLines(`a${" ".repeat(n)}b`), 500_000);
+		expectLinear(
+			"one line break",
+			(n) => () => joinLines(`a${" ".repeat(n)}\n${" ".repeat(n)}b`),
+			250_000,
+		);
+	}, 60_000);
 });
 
 describe("internalErrorLine redacts the whole message before anything is cut", () => {
@@ -491,9 +582,8 @@ describe("internalErrorLine redacts the whole message before anything is cut", (
 	});
 
 	it("joins lines in one pass, so a long whitespace run finishes fast", () => {
-		const started = performance.now();
 		const out = line(`${" ".repeat(500_000)}end`);
-		expect(performance.now() - started).toBeLessThan(1_000);
+		expectLinear("whitespace", (n) => () => line(`${" ".repeat(n)}end`), 100_000);
 		expect(out).toBe(`${LINE}Error: ${" ".repeat(MAX_PRINTED_CHARS - "Error: ".length)}\u2026`);
 	}, 30_000);
 });
@@ -621,7 +711,7 @@ describe("internalErrorLine reads the original and the sanitized text, and redac
 		expect(joined).toBeGreaterThan(500);
 	});
 
-	it("a run of joined tokens is read once: 100,000 of them in under 3 seconds", () => {
+	it("a run of joined tokens is read once: twice as many take at most three times as long", () => {
 		const TAB = C(9);
 		for (const unit of [
 			`Bearer${TAB}x${TAB}`,
@@ -629,13 +719,11 @@ describe("internalErrorLine reads the original and the sanitized text, and redac
 			`y${TAB}api_key=x${TAB}`,
 			`tenantBearer${TAB}x${TAB}tenantapi_key=x${TAB}`,
 		]) {
-			const message = unit.repeat(100_000);
-			const t = performance.now();
-			const printed = line(message, ["tenant"]).slice(LINE.length);
-			expect(performance.now() - t, unit).toBeLessThan(3_000);
+			const printed = line(unit.repeat(100_000), ["tenant"]).slice(LINE.length);
 			expect(redactSecrets(printed, ["tenant"]), unit).toBe(printed);
+			expectLinear(unit, (n) => () => line(unit.repeat(n), ["tenant"]), 10_000);
 		}
-	}, 60_000);
+	}, 120_000);
 
 	it("no match hides a marker inside it: each search goes on from inside its matches", () => {
 		const SECRET = "S3CRET";
@@ -686,7 +774,7 @@ describe("internalErrorLine reads the original and the sanitized text, and redac
 		expect(redactApiKeys(`api_key=x.x-api-key: ${SECRET}`)).toBe(`api_key=[redacted] ${SECRET}`);
 	});
 
-	it("searching from inside each match reads each value once: 100,000 units in under 3 seconds", () => {
+	it("searching from inside each match reads each value once: twice the units take at most three times as long", () => {
 		for (const unit of [
 			"api_key=",
 			"x-api-key: api_key=",
@@ -696,14 +784,12 @@ describe("internalErrorLine reads the original and the sanitized text, and redac
 			"Bearer x.Bearer ",
 			"Bearer x.api_key= ",
 		]) {
-			const message = unit.repeat(100_000);
-			const t = performance.now();
-			const printed = line(message).slice(LINE.length);
-			redactSecrets(message);
-			expect(performance.now() - t, unit).toBeLessThan(3_000);
+			const printed = line(unit.repeat(100_000)).slice(LINE.length);
 			expect(printed.includes("api_key=a"), unit).toBe(false);
+			expectLinear(`line ${unit}`, (n) => () => line(unit.repeat(n)), 10_000);
+			expectLinear(`redactSecrets ${unit}`, (n) => () => redactSecrets(unit.repeat(n)), 10_000);
 		}
-	}, 60_000);
+	}, 120_000);
 
 	it("a marker sanitizing joins to a credential's end is read there, and its credential replaced", () => {
 		// The original splits the marker, the spaced view splits it again, and the sanitized text glues
@@ -748,7 +834,7 @@ describe("internalErrorLine reads the original and the sanitized text, and redac
 		}
 		expect(failed.slice(0, 10)).toEqual([]);
 		expect(whole).toBeGreaterThan(5_000);
-		// Read once: a run of such credentials, 100,000 of them, in under 3 seconds.
+		// Read once: twice as many such credentials take at most three times as long.
 		for (const unit of [
 			`api_key=a${C(9)}`,
 			`Bearer a${C(9)}`,
@@ -758,12 +844,9 @@ describe("internalErrorLine reads the original and the sanitized text, and redac
 			`api_key=a${C(9)}api_key="`,
 			`api_key=a${C(9)}x-api-key: 'b' `,
 		]) {
-			const message = unit.repeat(100_000);
-			const t = performance.now();
-			line(message);
-			expect(performance.now() - t, JSON.stringify(unit)).toBeLessThan(3_000);
+			expectLinear(JSON.stringify(unit), (n) => () => line(unit.repeat(n)), 10_000);
 		}
-	}, 60_000);
+	}, 120_000);
 
 	it("a token runs on past the caller's key it ends inside, as long as the part grows", () => {
 		// The token ends at the key's whitespace, the key's match ends before what is glued to it, and
@@ -794,20 +877,18 @@ describe("internalErrorLine reads the original and the sanitized text, and redac
 			expect(line(message, secrets), JSON.stringify(message)).toBe(`${LINE}Error: ${printed}`);
 		}
 		// Linear: a part that grows 100,000 times, the token running on through each key's match into
-		// the next, in under 3 seconds.
+		// the next; twice as many take at most three times as long.
 		const timed: [string, string, string, string, string][] = [
 			["Bearer ", "t kx", "t k", "", "Bearer [redacted]"],
 			["api_key=", "t kx", "t k", "", "api_key=[redacted]"],
 			['api_key="', 'xk"z', 'k"z', '" end', 'api_key="[redacted]" end'],
 		];
 		for (const [head, unit, key, tail, printed] of timed) {
-			const message = `${head}${unit.repeat(100_000)}UPSTREAM${tail}`;
-			const t = performance.now();
-			const out = line(message, [key]);
-			expect(performance.now() - t, head).toBeLessThan(3_000);
-			expect(out, head).toBe(`${LINE}Error: ${printed}`);
+			const message = (n: number): string => `${head}${unit.repeat(n)}UPSTREAM${tail}`;
+			expect(line(message(100_000), [key]), head).toBe(`${LINE}Error: ${printed}`);
+			expectLinear(head, (n) => () => line(message(n), [key]), 10_000);
 		}
-	}, 60_000);
+	}, 120_000);
 
 	it("a key's match that takes what ends a credential: the credential runs on past it", () => {
 		const rows: [string, string[], string][] = [
@@ -829,21 +910,19 @@ describe("internalErrorLine reads the original and the sanitized text, and redac
 		for (const [message, secrets, printed] of rows) {
 			expect(line(message, secrets), JSON.stringify(message)).toBe(`${LINE}Error: ${printed}`);
 		}
-		// Linear: 100,000 of the key's matches, each taking the delimiter after the last, in under 3
-		// seconds.
+		// Linear: 100,000 of the key's matches, each taking the delimiter after the last; twice as many
+		// take at most three times as long.
 		const timed: [string, string, string, string][] = [
 			["Bearer x", "'t", "UPSTREAM end", "Bearer [redacted] end"],
 			["api_key=x", "'t", "UPSTREAM;x", "api_key=[redacted];x"],
 			['api_key="x', 'k"', "UPSTREAM end", 'api_key="[redacted]"'],
 		];
 		for (const [head, key, tail, printed] of timed) {
-			const message = `${head}${key.repeat(100_000)}${tail}`;
-			const t = performance.now();
-			const out = line(message, [key]);
-			expect(performance.now() - t, head).toBeLessThan(3_000);
-			expect(out, head).toBe(`${LINE}Error: ${printed}`);
+			const message = (n: number): string => `${head}${key.repeat(n)}${tail}`;
+			expect(line(message(100_000), [key]), head).toBe(`${LINE}Error: ${printed}`);
+			expectLinear(head, (n) => () => line(message(n), [key]), 10_000);
 		}
-	}, 60_000);
+	}, 120_000);
 
 	it("a marker right after the caller's key: the boundary the replacement makes is read in the text", () => {
 		expect(line(`tenantBearer ${VALUE}`, ["tenant"])).toBe(
@@ -886,7 +965,7 @@ describe("internalErrorLine reads the original and the sanitized text, and redac
 		expect(cases).toBeGreaterThan(1_000);
 	});
 
-	it("the search after the key reads each value once: markers after a key 100,000 times, each in under 3 seconds", () => {
+	it("the search after the key reads each value once: twice the markers after a key take at most three times as long", () => {
 		// Each value after a key's match ran to the end of the text, and was read again from the next
 		// match: `tenantapi-key=` 8,000 times took about 2 s, and the time grew as N squared.
 		for (const unit of [
@@ -898,13 +977,11 @@ describe("internalErrorLine reads the original and the sanitized text, and redac
 			"tenantBearer ",
 			"tenantBearer x",
 		]) {
-			const message = unit.repeat(100_000);
-			const t = performance.now();
-			const printed = line(message, ["tenant"]).slice(LINE.length);
-			expect(performance.now() - t, unit).toBeLessThan(3_000);
+			const printed = line(unit.repeat(100_000), ["tenant"]).slice(LINE.length);
 			expect(redactSecrets(printed, ["tenant"]), unit).toBe(printed);
+			expectLinear(unit, (n) => () => line(unit.repeat(n), ["tenant"]), 10_000);
 		}
-	}, 60_000);
+	}, 120_000);
 
 	it("a key's overlapping matches end in order, and a marker after each is found", () => {
 		expect(redactSecrets(`aaaBearer ${VALUE}`, ["aa"])).toBe("[redacted]Bearer [redacted]");
