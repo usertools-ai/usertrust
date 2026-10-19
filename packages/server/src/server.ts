@@ -289,9 +289,15 @@ function applyRedactions(text: string, sources: readonly Iterator<Redaction>[]):
 	}
 }
 
-/** Each `Bearer <token>`: the whitespace and the token, replaced by one space and `[redacted]`. */
+/**
+ * Each `Bearer <token>`: the whitespace and the token, replaced by one space and `[redacted]`. The
+ * search goes on from inside each match, so a token cannot hide a `Bearer` that ends it
+ * (`Bearer a.Bearer <token>`). Linear: a `Bearer` inside a token needs whitespace after it, so it
+ * ends the token, and no character is read more than twice.
+ */
 function* bearerSpans(text: string): Generator<Redaction> {
-	for (const m of text.matchAll(BEARER_TOKEN)) {
+	const bearer = new RegExp(BEARER_TOKEN);
+	for (let m = bearer.exec(text); m !== null; m = bearer.exec(text)) {
 		const [whole, word] = m as unknown as [string, string];
 		yield {
 			start: m.index + word.length,
@@ -299,6 +305,7 @@ function* bearerSpans(text: string): Generator<Redaction> {
 			replacement: ` ${REDACTED}`,
 			rest: BEARER_REST,
 		};
+		bearer.lastIndex = m.index + word.length;
 	}
 }
 
@@ -314,17 +321,38 @@ function* bearerSpans(text: string): Generator<Redaction> {
  * unclosed run of letters in that pattern, on a run of escapes in its unrolled form. Nothing here
  * repeats a group, so it reads text of any length in one linear pass. Its matches are the old
  * pattern's, exactly (the agreement test pins that).
+ *
+ * `overlapping` (what the redaction uses): the search goes on from where each value starts, not
+ * from where it ends, so a value cannot hide a marker inside it. Otherwise `api_key=` in
+ * `Bearer x.api_key= x-api-key: "<v>"` takes `x-api-key:` for its value, and the value after that
+ * is logged. (The patterns once ran one after the other, `Bearer` first, and the token's
+ * replacement had already removed the inner marker.) Linear: an unquoted value that starts inside
+ * the last one ends where it does, so that end is reused; and a quoted value cannot start inside
+ * one with the same quote (its opening quote would close the outer one), so no character is read
+ * by more than one quoted value of each kind.
  */
-function* apiKeySpans(text: string): Generator<Redaction> {
+function* apiKeySpans(text: string, overlapping = false): Generator<Redaction> {
 	const start = new RegExp(API_KEY_START);
 	const unquoted = new RegExp(UNQUOTED_VALUE);
+	let unquotedFrom = -1;
+	let unquotedEnd = -1;
 	for (let m = start.exec(text); m !== null; m = start.exec(text)) {
-		const value = apiKeyValue(text, m[3] ?? "", start.lastIndex, unquoted);
+		const quote = m[3] ?? "";
+		const valueAt = start.lastIndex;
+		if (overlapping && quote === "" && valueAt >= unquotedFrom && valueAt < unquotedEnd) {
+			yield { start: valueAt, end: unquotedEnd, replacement: REDACTED, rest: UNQUOTED_REST };
+			continue;
+		}
+		const value = apiKeyValue(text, quote, valueAt, unquoted);
 		// No value here. The old pattern looked again from the next character, but the only start
 		// inside this one (`api-key` in `x-api-key`) meets the same separator and fails too.
 		if (value === undefined) continue;
+		if (quote === "") {
+			unquotedFrom = valueAt;
+			unquotedEnd = value.end;
+		}
 		yield value;
-		start.lastIndex = value.end;
+		if (!overlapping) start.lastIndex = value.end;
 	}
 }
 
@@ -514,12 +542,13 @@ export function redactSecrets(text: string, secrets: readonly string[] = []): st
 
 /**
  * Every kind of match in `text`: each `Bearer <token>`, each api-key value (also where a match of
- * one of `secrets` ends, see `markersAfterKeys`) and each of `secrets`.
+ * one of `secrets` ends, see `markersAfterKeys`) and each of `secrets`. No match hides another:
+ * each search goes on from inside its matches.
  */
 function spansIn(text: string, secrets: readonly string[]): Generator<Redaction>[] {
 	return [
 		bearerSpans(text),
-		apiKeySpans(text),
+		apiKeySpans(text, true),
 		markersAfterKeys(text, secrets),
 		...secrets.map((secret) => secretSpans(text, secret)),
 	];

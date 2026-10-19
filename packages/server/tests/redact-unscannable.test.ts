@@ -637,6 +637,74 @@ describe("internalErrorLine reads the original and the sanitized text, and redac
 		}
 	}, 60_000);
 
+	it("no match hides a marker inside it: each search goes on from inside its matches", () => {
+		const SECRET = "S3CRET";
+		// A marker inside a Bearer token: `api_key=` took `x-api-key:` for its value, and the search
+		// went on after it, past the value that followed (5.1.0 replaced the token first).
+		expect(redactSecrets(`Authorization: Bearer x.api_key= x-api-key: "${SECRET}"`)).toBe(
+			'Authorization: Bearer [redacted] [redacted] "[redacted]"',
+		);
+		expect(line(`Bearer x.api_key=${C(10)}x-api-key: "${SECRET}"`)).toBe(
+			`${LINE}Error: Bearer [redacted] [redacted] "[redacted]"`,
+		);
+		expect(line(`Bearer x.api_key= api-key: '${SECRET}'`)).toBe(
+			`${LINE}Error: Bearer [redacted] [redacted] '[redacted]'`,
+		);
+		expect(line(`Bearer x.api-key: x-api-key='${SECRET}'`)).toBe(
+			`${LINE}Error: Bearer [redacted] [redacted]'[redacted]'`,
+		);
+		// A marker inside an api-key value, and a Bearer that ends a token.
+		expect(line(`api_key:TOK0${ESC}]0;t${BEL}x.X-A${C(9)}pi-Key = ${SECRET}`)).not.toContain(
+			SECRET,
+		);
+		expect(redactSecrets(`api_key=x.x-api-key: ${SECRET}`)).toBe("api_key=[redacted] [redacted]");
+		expect(redactSecrets(`Bearer a.Bearer ${SECRET}`)).toBe("Bearer [redacted] [redacted]");
+		expect(line(`bearer TOK1&xx.BEARER${C(9)}${SECRET}`, ["earer"])).not.toContain(SECRET);
+		// The same, with each removed character or sequence inside the inner or the outer marker, where
+		// the marker reads whole once sanitized (a line break, or a CSI that takes the letter after it,
+		// leaves no marker: 5.1.0 printed those too).
+		const failed: string[] = [];
+		let whole = 0;
+		for (const inside of INSIDE) {
+			for (const split of [
+				(s: string) => `Bearer x.api_k${s}ey= x-api-key: "${SECRET}"`,
+				(s: string) => `Bearer x.api_key= x-api${s}-key: "${SECRET}"`,
+				(s: string) => `Bea${s}rer x.api_key= x-api-key: "${SECRET}"`,
+				(s: string) => `Bearer x.Bea${s}rer ${SECRET}`,
+				(s: string) => `api_key=x.x-api${s}-key: ${SECRET}`,
+			]) {
+				const message = split(inside);
+				if (joinLines(scrubForStderr(message, Number.POSITIVE_INFINITY)) !== split("")) continue;
+				whole++;
+				const printed = line(message);
+				if (printed.includes(SECRET)) failed.push(`${JSON.stringify(message)}: ${printed}`);
+			}
+		}
+		expect(failed.slice(0, 10)).toEqual([]);
+		expect(whole).toBeGreaterThan(5 * 60);
+		// `redactApiKeys` alone still matches the old pattern, which went on after each value.
+		expect(redactApiKeys(`api_key=x.x-api-key: ${SECRET}`)).toBe(`api_key=[redacted] ${SECRET}`);
+	});
+
+	it("searching from inside each match reads each value once: 100,000 units in under 3 seconds", () => {
+		for (const unit of [
+			"api_key=",
+			"x-api-key: api_key=",
+			"api_key=\"api_key='",
+			"api_key='x-api-key=",
+			"Bearer ",
+			"Bearer x.Bearer ",
+			"Bearer x.api_key= ",
+		]) {
+			const message = unit.repeat(100_000);
+			const t = performance.now();
+			const printed = line(message).slice(LINE.length);
+			redactSecrets(message);
+			expect(performance.now() - t, unit).toBeLessThan(3_000);
+			expect(printed.includes("api_key=a"), unit).toBe(false);
+		}
+	}, 60_000);
+
 	it("a marker right after the caller's key: the boundary the replacement makes is read in the text", () => {
 		expect(line(`tenantBearer ${VALUE}`, ["tenant"])).toBe(
 			`${LINE}Error: [redacted]Bearer [redacted]`,
