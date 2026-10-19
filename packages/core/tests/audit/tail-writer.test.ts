@@ -874,6 +874,10 @@ describe("the writer's own limits: a line it could not read back, a new log's di
 		...digests(),
 		quarantine: existsSync(join(auditDir(), "quarantine")),
 	});
+	/** `legacyBigTail(pad)`'s line is `pad` plus this many bytes (each row asserts the length it gets). */
+	const LEGACY_LINE_OVERHEAD = 304;
+	/** The longest last line quarantine-tail keeps a record's room beside: the read bound, less that room and three newlines. */
+	const ROOM_EDGE = 64 * MIB - MAX_RECORD_LINE_BYTES - 3;
 
 	it("quarantine-tail on a legacy last line over the read bound, a torn fragment after it: refused in a dry run and a real one before anything is changed, since the writer could not record the cut", async () => {
 		const legacy = await legacyBigTail(64 * MIB);
@@ -923,7 +927,7 @@ describe("the writer's own limits: a line it could not read back, a new log's di
 	it("quarantine-tail on a legacy last line under the read bound with no room beside it for the record of the cut: refused before anything is changed", async () => {
 		// A last line 400 bytes under the bound: the cut log is one the writer reads (its last two lines and
 		// three newlines fit the bound), but the cut's record, about 500 bytes, would not fit beside it.
-		const legacy = await legacyBigTail(64 * MIB - 704);
+		const legacy = await legacyBigTail(64 * MIB - 400 - LEGACY_LINE_OVERHEAD);
 		expect(legacy).toBe(64 * MIB - 400);
 		expect(legacy + Buffer.byteLength(lines()[0] as string) + 3).toBeLessThanOrEqual(64 * MIB);
 		writeFileSync(logPath(), '{"kind":"llm', { flag: "a" });
@@ -938,10 +942,34 @@ describe("the writer's own limits: a line it could not read back, a new log's di
 		expect(deadLetters()).toHaveLength(0);
 	});
 
+	it("quarantine-tail on a legacy last line exactly at the edge of the room it keeps for the record: repaired, and its cut recorded", async () => {
+		const legacy = await legacyBigTail(ROOM_EDGE - LEGACY_LINE_OVERHEAD);
+		expect(legacy).toBe(ROOM_EDGE);
+		writeFileSync(logPath(), '{"kind":"llm', { flag: "a" });
+		expect(message(await outcome(quarantineTornTail(root)))).toBe("resolved");
+		expect(JSON.parse(lines().at(-1) as string)).toMatchObject({
+			kind: "audit.quarantine.torn_tail",
+			sequence: 3,
+		});
+		expect(verifyVault(join(root, VAULT_DIR))).toMatchObject({ valid: true, chainLength: 3 });
+	});
+
+	it("quarantine-tail on a legacy last line one byte past that edge: refused before anything is changed", async () => {
+		const legacy = await legacyBigTail(ROOM_EDGE + 1 - LEGACY_LINE_OVERHEAD);
+		expect(legacy).toBe(ROOM_EDGE + 1);
+		writeFileSync(logPath(), '{"kind":"llm', { flag: "a" });
+		const before = repairState();
+		expect(message(await outcome(quarantineTornTail(root)))).toMatch(
+			new RegExp(`last line \\(${legacy} bytes\\) leaves no room for the record of the cut`),
+		);
+		expect(repairState(), "nothing saved, nothing cut").toEqual(before);
+		expect(deadLetters()).toHaveLength(0);
+	});
+
 	it("CONTROL: quarantine-tail on a 50 MiB legacy last line, a torn fragment after it: repaired, its cut recorded on a line under the room the repair keeps for it", async () => {
 		await legacyBigTail(50 * MIB);
 		writeFileSync(logPath(), '{"kind":"llm', { flag: "a" });
-		expect((await quarantineTornTail(root)).recorded).toHaveLength(1);
+		expect(message(await outcome(quarantineTornTail(root)))).toBe("resolved");
 		const record = lines().at(-1) as string;
 		expect(JSON.parse(record)).toMatchObject({ kind: "audit.quarantine.torn_tail", sequence: 3 });
 		expect(Buffer.byteLength(record)).toBeLessThan(MAX_RECORD_LINE_BYTES);
