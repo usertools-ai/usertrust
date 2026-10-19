@@ -1157,9 +1157,84 @@ process's lock. The lock records `bootId` (Linux `/proc/sys/kernel/random/boot_i
 1. The same PID in the same namespace (or a lock that names none) is a crashed earlier instance of
    this PID, and is reclaimed.
 2. A lock from another namespace, or one whose namespace cannot be compared, is HELD, whatever its
-   boot id.
+   boot id — with ONE exception: another namespace's lock whose LEASE has expired (below) is
+   reclaimed.
 3. A lock whose boot id and this boot's are both known and differ EXACTLY is reclaimed.
 4. Otherwise `kill(pid, 0)` decides, as before.
+
+**The lease is the only proof of a dead holder that crosses PID namespaces.** A writer that records
+its `pidNs` also declares `leaseRenewMs` (5 s) in its lock, and renews the lock file's mtime on that
+interval with `futimes`, through an fd proven to be its own lock (create-time inode AND writerId,
+read through that fd) — never by path, so a holder that lost its lock can never renew the lock that
+replaced it. It declares the lease only if `futimes` succeeded on the lock's own inode at create;
+a filesystem that cannot set an mtime gets a lock with no lease. Another namespace's lock with a
+lease is reclaimed only when BOTH hold:
+- its mtime is more than `max(60 s, 6 × leaseRenewMs)` behind `Date.now()` — the lease's own wall
+  time; a monotonic clock restarts at every boot and cannot be compared with a file's timestamp. An
+  mtime ahead of the clock is fresh.
+- THIS process has seen that same file at that same mtime for at least `max(30 s, 3 × leaseRenewMs)`
+  of its own monotonic clock (`performance.now()`). The first look at a lease starts the window; a
+  renewal, or another file, starts it over; the acquire that completes it reclaims.
+
+The second condition is what makes the first safe. One kernel has one monotonic clock, and it stops
+during a suspend; Node's timers run on it. After a host suspend, or a wall-clock step forward (WSL
+corrects its clock after a resume), every lease reads as expired at once, but a LIVE holder is awake
+whenever the observer is, and renews within one interval of the observer's window. The wall-clock
+margin makes an observer wait well past a brief stall of the holder's renewals (a long GC pause); a
+holder stalled past its own 20 s bound gives the lock up itself (below). A lock with no lease, or a
+malformed one, is held as before.
+
+*Split brain.* A lease cannot be atomic with the append, and Node has no kernel lock to fence with,
+so the residual window is stated rather than hidden. A holder loses its lock only after it has not
+renewed for 60 s of wall time AND 30 s of the taker's awake time: frozen (SIGSTOP, a paused
+container, a debugger) or blocked. Every append re-verifies the lock (one read: inode AND writerId)
+before it writes, and everything from that check to the fsync is synchronous, so a holder that was
+frozen anywhere else finds the taker's lock at its next append and is refused (the taker's lease is
+fresh). Only a holder frozen INSIDE that synchronous span, between its check and its write, can land
+one more event after the taker has appended — one event, chained from a stale tail, which `verify`
+reports as a broken chain; its next append is refused. The renewal timer is `unref()`d and runs only
+while a leased lock is held.
+
+**A holder whose renewals FAIL stops writing before anyone can reclaim.** A live, active holder whose
+`futimes` keeps failing (EMFILE on the open, EIO) would otherwise keep appending while its lease
+expired, and an append in flight across the takeover forks the chain. Each held lease keeps
+`renewedAt`, the monotonic time read BEFORE the call that set the mtime others see (the create's
+write, a successful renewal's `futimes`); a failed renewal never moves it. Past
+`LEASE_HOLDER_BOUND_MS` (20 s) without a success, the lease has LAPSED: the timer gives the lock up
+instead of renewing it, and the append's own check (in the same synchronous span as its ownership
+check, before the write) does the same if the timer has not run. Either way the append that meets it
+is refused with `AuditLeaseLapsedError` — degraded and dead-lettered like any failed append — and
+the lock is unlinked if it is still this lock. The next append takes the vault afresh: a new lock
+(leased only if `futimes` works then), and the tail re-read from the log. A renewal that succeeds
+after the bound never revives the lapsed lease. Two edges: a lapsed lock whose file cannot be
+removed STAYS registered, marked lapsed, as the cleanup record (never renewed, never an owner, never
+a write; each append retries the removal and the first that succeeds goes on, and `release()`
+reports it if it still cannot); and a lapse is reported as that ACQUISITION's, not the writer's: an
+acquire that finds a healthy newer acquisition of this writer at the vault (the writer lost the old
+one while stalled and took the vault again) drops the report, so it never refuses an append under
+the newer one. An acquisition whose file is not at the path last seen (lost, superseded, or moved
+with a renamed vault) keeps its entry, marked lapsed, so `release()` still finds a lock that moved
+with its vault through the caller's current spelling.
+*The margin.* An observer reclaims only after its OWN monotonic observation of an unchanged mtime for
+`max(30 s, 3 × leaseRenewMs)`, and it cannot see an mtime before it is set, so no observer reclaims
+earlier than `renewedAt + 30 s`. Its wall-clock condition gives the holder nothing (a clock step makes
+it true at once), so the bound is set against the 30 s, never the 60 s. 20 s leaves 10 s for the
+append's synchronous span, and at a 5 s interval three renewals in a row may fail (or run late) before
+the bound. The tests pin `holderBound < confirm` (and so `< stale`).
+
+Two rules keep that bound true:
+- **Only a holder whose every write goes through `appendEvent` leases.** `withAuditWriterLock` (a
+  snapshot restore renames files under it, across awaits) and the torn-tail quarantine
+  (`createUnleasedAuditWriter`: it cuts the log) never declare a lease. Paused past the threshold,
+  either would otherwise resume and overwrite or cut the events a new holder appended meanwhile. Their
+  locks are held from another namespace, as before.
+- **`lockOwner()` re-reads the lock file, and names the ACQUISITION, not the writer.** The registry
+  keeps a lost lock's entry until release, so "registered" is not "holds it now"; a former holder that
+  still answered `lockOwner()` would publish `effective-budget.json` over the new holder's record. And
+  a holder that lost its lock and took it back keeps its writerId: had `lockOwner()` returned that,
+  the budget registration would read "already published under this owner" and leave the interim
+  holder's record standing. Every acquisition gets a fresh random id. A read that fails answers "not
+  the owner".
 
 *Prevents:*
 - A previous boot's lock whose PID a live, unrelated process now carries reading as held forever.
@@ -1168,19 +1243,29 @@ process's lock. The lock records `bootId` (Linux `/proc/sys/kernel/random/boot_i
 - A host and a systemd-nspawn container (or two of them) reclaiming each other's LIVE locks: nspawn
   gives each container a PRIVATE boot id on the host's kernel. That is why step 2 comes before step
   3; do not reorder them.
+- A writer in a PID namespace that is new at every boot (WSL2 gives each boot a new one, and its
+  shutdown kills the writer without a release) finding its own previous boot's lock held forever:
+  its lease stops being renewed, and it is reclaimed.
+- A live holder's lock being reclaimed after a host suspend or a clock step: the monotonic
+  confirmation window. Do not reclaim on the wall-clock age alone.
 
 Rules:
 - An unknown boot id on either side is never stale.
-- Never reclaim on a time estimate; an uptime-derived boot time moves with the wall clock.
+- Never reclaim on a time estimate; an uptime-derived boot time moves with the wall clock. A lease is
+  not an estimate: it is the holder's own renewal, observed unrenewed by this process on its
+  monotonic clock.
 - Cache only a SUCCESSFUL identity read.
 - A lock file's fields are untrusted text. Print them only through `describeLockPid` (a non-negative
   safe integer, else `<invalid>`) or `describeLockField` (the value when it has its shape, else
   `<invalid>`) — never `String(pid)` or a raw `${pid}`: a restored vault's lock can carry a `pid`
   string full of terminal controls.
 
-A crashed container restarted into a new PID namespace therefore finds its old lock held, even
-after a reboot, until it is removed by hand (LIMITATIONS §5). That is the price of never reclaiming a live sibling's lock. A
-vault shared between kernels is outside the model.
+A crashed container restarted into a new PID namespace therefore finds its old lock held until its
+lease has expired and been confirmed (about a minute after its last renewal); a lock with no lease
+(written before leases, or on a filesystem that cannot set an mtime) stays held until it is removed
+by hand (LIMITATIONS §5). Every refusal of another namespace's lock prints the safe recovery steps.
+That is the price of never reclaiming a live sibling's lock. A vault shared between kernels is
+outside the model: its processes share neither a monotonic clock nor a suspend.
 
 **The lock's threat model: accidental concurrent writers, not an adversary.** The lock stops two
 processes, or two writers in one process, from appending to one vault at once. It does not defend

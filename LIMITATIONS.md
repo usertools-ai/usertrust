@@ -439,17 +439,43 @@ The lock's liveness check works on one kernel, and it fails toward "held":
 - **A vault shared between kernels is unsupported.** A lock is judged by its
   PID, which means nothing on another host or VM, and by its boot id, which
   differs there. Share a vault only between processes on one machine.
-- **A lock from another PID namespace is never reclaimed automatically.** One
-  container cannot probe another container's processes, so a lock written in a
-  different PID namespace on the same kernel is treated as held, even when that
-  writer is gone, and whatever its boot id says: systemd-nspawn gives a
-  container a private boot id on the host's kernel, so a differing boot id does
-  not prove a previous boot across namespaces. A container that crashed without
-  releasing its lock and was restarted into a NEW PID namespace therefore finds
-  that lock held, even after a reboot. Remove
-  `.usertrust/audit/.audit-writer.lock` by hand once you know that writer is
-  gone, or run the writer in a PID namespace that survives its restarts (for
-  example the host's).
+- **A lock from another PID namespace is reclaimed only once its lease has
+  expired.** One container cannot probe another container's processes, and a
+  differing boot id proves nothing across namespaces (systemd-nspawn gives a
+  container a private boot id on the host's kernel). So a lock written in a
+  different PID namespace on the same kernel is held while its writer renews
+  its lease: a writer on Linux renews the lock file's modification time every
+  5 seconds. Once a lease has gone unrenewed for more than 60 seconds, and the
+  process that finds it has itself seen it unrenewed for 30 seconds, the lock
+  is reclaimed. So a writer that restarts into a NEW PID namespace (a container
+  restarted after a crash, or WSL2 after every restart) recovers its vault on
+  its own, about a minute after the old writer's last renewal. The appends it
+  makes until then are refused and dead-lettered, as for a second process.
+  A writer whose renewals fail for 20 seconds (a full file-descriptor table,
+  an I/O error) stops writing under its lease: the append that finds it is
+  refused and dead-lettered, and the lock is given up. That is before any
+  writer in another namespace could reclaim it (30 seconds at the earliest),
+  so the chain cannot fork under a write. The next append takes the lock
+  again, and re-reads the chain's tail.
+  Three cases still need a hand:
+  - A lock written by a usertrust version that does not renew a lease (5.1.0
+    and earlier) is never reclaimed from another namespace. Such a lock left
+    behind by an upgrade needs one removal by hand.
+  - A writer whose filesystem cannot set a file's modification time writes a
+    lock with no lease. So do a snapshot restore and `usertrust audit
+    quarantine-tail`, which change the audit files in ways an append's own
+    check does not guard: a lock either leaves behind after a crash is removed
+    by hand.
+  - A writer that is frozen (SIGSTOP, a paused container) or blocked for more
+    than a minute loses its lock to a writer in another namespace. Its next
+    append is refused. Only a writer frozen in the middle of an append can add
+    one more event, and `usertrust verify` then reports the chain broken there.
+
+  Every refusal prints the safe recovery steps: confirm that no process can
+  still be writing the vault, from every host, WSL distribution and container
+  that can reach it; then remove exactly `.usertrust/audit/.audit-writer.lock`;
+  then run `usertrust verify`. To avoid the wait entirely, run the writer in a
+  PID namespace that survives its restarts (for example the host's).
 - **Off Linux, and without a readable boot id,** a lock left by a crash before a
   reboot is reclaimed only if its PID is free now. (On Linux, a lock from this
   PID namespace, or one that names none, is reclaimed when its boot id differs.) If an unrelated live process
