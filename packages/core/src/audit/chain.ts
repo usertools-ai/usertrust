@@ -16,6 +16,7 @@ import {
 	constants as fsConstants,
 	fstatSync,
 	fsyncSync,
+	futimesSync,
 	linkSync,
 	lstatSync,
 	mkdirSync,
@@ -342,6 +343,17 @@ class AsyncMutex {
 // boot's — both known — is taken as written before a reboot, its PID naming nothing now. A vault
 // shared between kernels (two hosts, two VMs) is outside the model: no PID probe means anything
 // there.
+//
+// The one proof that crosses namespaces is a LEASE. A writer that records its PID namespace also
+// renews the lock file's mtime every LEASE_RENEW_MS (futimes, through an fd proven to be its own
+// lock), and says so in the lock (`leaseRenewMs`). Another namespace's lock that declares a lease
+// is reclaimed only when BOTH hold: its mtime is more than LEASE_STALE_MS behind this clock, and
+// this process has itself seen it unrenewed — the same file, the same mtime — across
+// LEASE_CONFIRM_MS of its own MONOTONIC clock. One kernel has one monotonic clock, and it stops
+// for a suspend: a live holder is awake whenever this observer is, and its timer renews within
+// that window. The wall-clock age alone would reclaim a live lock after a host suspend or a
+// clock step forward. A lock with no lease (an earlier version's) is held, as before. See
+// AGENTS.md ("Staleness is judged on one kernel") for the split-brain analysis.
 
 const LOCK_FILE_NAME = ".audit-writer.lock";
 
@@ -354,7 +366,33 @@ interface HeldLock {
 	 * can also be RENAMED while held, the lock file moving with it; see {@link releaseLocks}.
 	 */
 	path: string;
+	/** The lock declares a lease (`leaseRenewMs`), so {@link renewLeases} must keep renewing it. */
+	leased: boolean;
 }
+
+/**
+ * How often a holder renews its lease: the lock file's mtime, set through an fd proven to be its own
+ * lock ({@link renewLease}). Recorded in the lock as `leaseRenewMs`.
+ */
+const LEASE_RENEW_MS = 10_000;
+/**
+ * The least wall-clock age (now − the lock's mtime) at which another namespace's lease counts as
+ * expired: six renewals missed. A reader uses `max(this, 6 × the lock's leaseRenewMs)`, so a lock
+ * declaring a slower renewal waits longer and never shorter. The margin is for a live holder whose
+ * renewals stall (a blocked event loop, a long GC pause): it keeps its lock through a stall shorter
+ * than this.
+ */
+const LEASE_STALE_MS = 60_000;
+/**
+ * The least time this process must itself have seen a lease unrenewed — the same lock file, the same
+ * mtime — on its MONOTONIC clock before it reclaims it: three renewals. A reader uses
+ * `max(this, 3 × leaseRenewMs)`. This is what makes the wall-clock age safe to use: after a host
+ * suspend, or a wall-clock step forward, every lease reads as expired at once, but a live holder's
+ * timer renews within one interval of the observer's own awake time, and the observation resets.
+ */
+const LEASE_CONFIRM_MS = 30_000;
+/** The slowest renewal a lock may declare and still be honoured as a lease: an hour. */
+const LEASE_RENEW_MAX_MS = 3_600_000;
 
 /**
  * writerId → (lock-file `dev:ino` → {@link HeldLock}): every lock every LIVE writer in this process
@@ -398,6 +436,12 @@ interface LockFileView {
 	bootId: unknown;
 	/** The writer's PID namespace, if it recorded one (see {@link thisPidNamespace}). */
 	pidNs: unknown;
+	/** The holder's lease renewal interval, if it declared a lease (see {@link LEASE_RENEW_MS}). */
+	leaseRenewMs: unknown;
+	/** The file's mtime — a leased lock's last renewal — exactly, to tell one renewal from the next. */
+	mtimeNs: bigint;
+	/** The same mtime in milliseconds since the epoch, for its age on this clock. */
+	mtimeMs: number;
 }
 
 /** `O_NOFOLLOW` where the platform has it (not Windows, which has no such flag). */
@@ -425,25 +469,41 @@ function readLockFile(lockPath: string): LockFileView | undefined {
 		throw err;
 	}
 	try {
-		const st = fstatSync(fd, { bigint: true });
-		const content = readFileSync(fd, "utf-8");
-		let claim: { pid?: unknown; writerId?: unknown; bootId?: unknown; pidNs?: unknown } | undefined;
-		try {
-			const parsed: unknown = JSON.parse(content);
-			if (parsed !== null && typeof parsed === "object") claim = parsed;
-		} catch {
-			/* read, but corrupt: no claim */
-		}
-		return {
-			identity: `${st.dev}:${st.ino}`,
-			pid: claim?.pid,
-			writerId: claim?.writerId,
-			bootId: claim?.bootId,
-			pidNs: claim?.pidNs,
-		};
+		return readLockFd(fd);
 	} finally {
 		closeSync(fd);
 	}
+}
+
+/** {@link readLockFile} on an fd the caller opened: its identity, mtime and claim, all from that fd. */
+function readLockFd(fd: number): LockFileView {
+	const st = fstatSync(fd, { bigint: true });
+	const content = readFileSync(fd, "utf-8");
+	let claim:
+		| {
+				pid?: unknown;
+				writerId?: unknown;
+				bootId?: unknown;
+				pidNs?: unknown;
+				leaseRenewMs?: unknown;
+		  }
+		| undefined;
+	try {
+		const parsed: unknown = JSON.parse(content);
+		if (parsed !== null && typeof parsed === "object") claim = parsed;
+	} catch {
+		/* read, but corrupt: no claim */
+	}
+	return {
+		identity: `${st.dev}:${st.ino}`,
+		pid: claim?.pid,
+		writerId: claim?.writerId,
+		bootId: claim?.bootId,
+		pidNs: claim?.pidNs,
+		leaseRenewMs: claim?.leaseRenewMs,
+		mtimeNs: st.mtimeNs,
+		mtimeMs: Number(st.mtimeNs / 1_000_000n),
+	};
 }
 
 /**
@@ -554,8 +614,12 @@ function describeLockField(value: unknown, shape: RegExp): string {
 	return typeof value === "string" && shape.test(value) ? value : "<invalid>";
 }
 
-/** The lock's content: who holds it, and — where they can be read — on which boot and namespace. */
-function lockContentFor(writerId: string): string {
+/**
+ * The lock's content: who holds it, and — where they can be read — on which boot and namespace.
+ * `leased`: the holder will renew the file's mtime every {@link LEASE_RENEW_MS} (see
+ * {@link createLock} for when a lock declares that).
+ */
+function lockContentFor(writerId: string, leased: boolean): string {
 	const bootId = thisBootId();
 	const pidNs = thisPidNamespace();
 	return JSON.stringify({
@@ -564,7 +628,102 @@ function lockContentFor(writerId: string): string {
 		startedAt: new Date().toISOString(),
 		...(bootId === undefined ? {} : { bootId }),
 		...(pidNs === undefined ? {} : { pidNs }),
+		...(leased ? { leaseRenewMs: LEASE_RENEW_MS } : {}),
 	});
+}
+
+// ── Leases: the proof that crosses PID namespaces ──
+
+/**
+ * What this process has seen of each other-namespace lease, by lock path: which file, at which mtime,
+ * and since when (this process's MONOTONIC clock) it has seen exactly that. A different file or a new
+ * mtime — a renewal — starts the observation over.
+ */
+const leaseWatch = new Map<string, { identity: string; mtimeNs: bigint; since: number }>();
+
+/** A lock's declared renewal interval, when it is one this code honours; else the lock has no lease. */
+function leaseRenewMsOf(lock: LockFileView): number | undefined {
+	const ms = lock.leaseRenewMs;
+	return typeof ms === "number" && Number.isSafeInteger(ms) && ms > 0 && ms <= LEASE_RENEW_MAX_MS
+		? ms
+		: undefined;
+}
+
+type LeaseVerdict =
+	/** The lock declares no lease (an earlier version's), or one this code does not honour. */
+	| { kind: "none" }
+	/** Renewed within the stale threshold (or its mtime is ahead of this clock). */
+	| { kind: "fresh"; ageMs: number; staleMs: number; confirmMs: number }
+	/** Past the threshold, but this process has not yet seen it unrenewed for long enough. */
+	| { kind: "confirming"; ageMs: number; staleMs: number; remainingMs: number }
+	/** Past the threshold, and seen unrenewed for at least the confirmation window: the holder is gone. */
+	| { kind: "expired"; ageMs: number; unchangedMs: number };
+
+/**
+ * Judge another namespace's lease. Both conditions must hold for `expired`, and either one alone is
+ * not enough:
+ *  - its mtime is more than the stale threshold behind this clock (`Date.now()`: the lease's own
+ *    wall time, never a monotonic clock, which restarts at every boot and is not comparable with a
+ *    timestamp in a file). An mtime AHEAD of this clock is fresh: fail toward live.
+ *  - this process has seen the same file at the same mtime for at least the confirmation window of
+ *    its own monotonic clock. Every call records what it sees, so the first look at a lease starts
+ *    the window and a later acquire completes it.
+ */
+function judgeLease(lockPath: string, lock: LockFileView): LeaseVerdict {
+	const renewMs = leaseRenewMsOf(lock);
+	if (renewMs === undefined) return { kind: "none" };
+	const staleMs = Math.max(LEASE_STALE_MS, 6 * renewMs);
+	const confirmMs = Math.max(LEASE_CONFIRM_MS, 3 * renewMs);
+	const now = performance.now();
+	const seen = leaseWatch.get(lockPath);
+	let since = now;
+	if (seen !== undefined && seen.identity === lock.identity && seen.mtimeNs === lock.mtimeNs) {
+		since = seen.since;
+	} else {
+		leaseWatch.set(lockPath, { identity: lock.identity, mtimeNs: lock.mtimeNs, since });
+	}
+	const ageMs = Date.now() - lock.mtimeMs;
+	// `!(a > b)`, not `a <= b`: an age that is not a number is never expired.
+	if (!(ageMs > staleMs)) return { kind: "fresh", ageMs, staleMs, confirmMs };
+	const unchangedMs = now - since;
+	if (unchangedMs < confirmMs) {
+		return { kind: "confirming", ageMs, staleMs, remainingMs: confirmMs - unchangedMs };
+	}
+	return { kind: "expired", ageMs, unchangedMs };
+}
+
+/** Milliseconds as whole seconds for a message (an mtime ahead of the clock reads as 0s). */
+function secondsOf(ms: number): string {
+	return `${Math.max(0, Math.round(ms / 1000))}s`;
+}
+
+/**
+ * The safe recovery steps a refusal that is never resolved from here prints: confirm that nothing
+ * writes the vault any more (on every platform it may run on), remove exactly this one file, and
+ * verify the chain. The vault root is the lock's directory's grandparent
+ * (`<root>/.usertrust/audit/.audit-writer.lock`).
+ */
+function recoverySteps(lockPath: string): string {
+	const vaultRoot = dirname(dirname(dirname(lockPath)));
+	return ` To recover by hand, only once no process can still be writing this vault: (1) confirm that no writer is running in any host, WSL distribution or container that can reach the vault. On Linux, WSL and macOS run \`ps -eo pid,args | grep -iE 'usertrust|node'\`; on Windows, \`wsl --list --running\` lists the running WSL distributions (run the ps command in each), \`docker ps\` lists the containers, and \`tasklist /FI "IMAGENAME eq node.exe"\` lists native Node processes. (2) Remove exactly this file and nothing else: ${lockPath} (\`rm -- <file>\` on Linux, WSL and macOS; \`Remove-Item -LiteralPath <file>\` in PowerShell). (3) Verify the chain: \`usertrust verify ${vaultRoot}\`.`;
+}
+
+/** Why another namespace's lock is held, by what its lease says. */
+function foreignHeldMessage(lockPath: string, lock: LockFileView, lease: LeaseVerdict): string {
+	const head = `Audit writer lock held by PID ${describeLockPid(lock.pid)} in another PID namespace (${describeLockField(lock.pidNs, PID_NS)}). This process cannot probe that namespace.`;
+	let why: string;
+	switch (lease.kind) {
+		case "fresh":
+			why = ` Its holder renewed its lease ${secondsOf(lease.ageMs)} ago, so it is treated as live. If that holder is gone, the lock is reclaimed automatically once the lease has gone unrenewed for more than ${secondsOf(lease.staleMs)} and this process has seen it unrenewed for ${secondsOf(lease.confirmMs)}, at an append after that.`;
+			break;
+		case "confirming":
+			why = ` Its lease was last renewed ${secondsOf(lease.ageMs)} ago, more than the ${secondsOf(lease.staleMs)} after which a holder counts as gone. It is reclaimed automatically at the first append after this process has seen it unrenewed for another ${secondsOf(lease.remainingMs)}; nothing needs to be done by hand if its holder is gone.`;
+			break;
+		default:
+			why =
+				" The lock carries no lease (it was written by a usertrust version that does not renew one), so it is never reclaimed automatically from another namespace.";
+	}
+	return `${head}${why}${recoverySteps(lockPath)} Lock file: ${lockPath}`;
 }
 
 /**
@@ -575,7 +734,8 @@ function lockContentFor(writerId: string): string {
  * instance of this PID. Anything else is another process's lock: HELD if its namespace is another
  * one, or cannot be compared — FIRST, whatever its boot id, since a private boot id (a
  * systemd-nspawn container's) would otherwise make a live writer beside it look like a previous
- * boot's; then reclaimed if it was written before this boot (exact boot ids, both known);
+ * boot's — except another namespace's lock whose LEASE has expired ({@link judgeLease}), which is
+ * reclaimed; then reclaimed if it was written before this boot (exact boot ids, both known);
  * otherwise judged by `kill(pid, 0)`, as before.
  */
 function tryCleanStaleLock(lockPath: string, lock: LockFileView): void {
@@ -592,11 +752,23 @@ function tryCleanStaleLock(lockPath: string, lock: LockFileView): void {
 			unlinkSync(lockPath);
 			return;
 		}
-		if (namespace === "foreign" || namespace === "unknown") {
+		if (namespace === "foreign") {
+			// A PID probe means nothing here, and neither does a differing boot id (nspawn). Only a
+			// lease the holder stopped renewing proves it gone: see judgeLease. No lease, held.
+			const lease = judgeLease(lockPath, lock);
+			if (lease.kind === "expired") {
+				console.warn(
+					`[AUDIT] Reclaiming a lock from another PID namespace whose lease expired (PID ${describeLockPid(pid)}, namespace ${describeLockField(lock.pidNs, PID_NS)}; last renewed ${secondsOf(lease.ageMs)} ago, seen unrenewed for ${secondsOf(lease.unchangedMs)}).`,
+				);
+				leaseWatch.delete(lockPath);
+				unlinkSync(lockPath);
+				return;
+			}
+			throw new AuditWriterLockHeldError(foreignHeldMessage(lockPath, lock, lease));
+		}
+		if (namespace === "unknown") {
 			throw new AuditWriterLockHeldError(
-				namespace === "foreign"
-					? `Audit writer lock held by PID ${describeLockPid(pid)} in another PID namespace (${describeLockField(lock.pidNs, PID_NS)}). This process cannot probe that namespace, so the lock is never reclaimed from here; remove the lock file by hand only once that writer is gone. Lock file: ${lockPath}`
-					: `Audit writer lock held by PID ${describeLockPid(pid)} in a PID namespace this process cannot compare with its own. The lock is never reclaimed from here; remove the lock file by hand only once that writer is gone. Lock file: ${lockPath}`,
+				`Audit writer lock held by PID ${describeLockPid(pid)} in a PID namespace this process cannot compare with its own. The lock is never reclaimed from here.${recoverySteps(lockPath)} Lock file: ${lockPath}`,
 			);
 		}
 		if (writtenBeforeThisBoot(lock)) {
@@ -676,8 +848,17 @@ function removeTemp(tmp: string): void {
  * A temp file already at `tmp` is this writer's own leftover: the name carries the writer's random
  * id, and one writer never takes two locks at once (every acquire is synchronous). It is removed
  * and the create made afresh.
+ *
+ * `wantLease`: the lock should declare a lease. It does so only if this very file's mtime can be
+ * set through its fd — the inode the lock will be, so the renewal that must follow is the call
+ * proven to work here. A lock that declared a lease its holder could not renew would read as
+ * expired to another namespace while that holder is live. `leased` says what was declared.
  */
-function writeLockTemp(tmp: string, content: string): string {
+function writeLockTemp(
+	tmp: string,
+	contentFor: (leased: boolean) => string,
+	wantLease: boolean,
+): { identity: string; leased: boolean } {
 	const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | O_NOFOLLOW;
 	let fd: number;
 	try {
@@ -690,9 +871,19 @@ function writeLockTemp(tmp: string, content: string): string {
 	try {
 		try {
 			const st = fstatSync(fd, { bigint: true });
-			writeFully(fd, content);
+			let leased = false;
+			if (wantLease) {
+				try {
+					const now = new Date();
+					futimesSync(fd, now, now);
+					leased = true;
+				} catch {
+					/* this filesystem cannot renew a lease: the lock declares none, and is judged as before */
+				}
+			}
+			writeFully(fd, contentFor(leased));
 			fsyncSync(fd);
-			return `${st.dev}:${st.ino}`;
+			return { identity: `${st.dev}:${st.ino}`, leased };
 		} finally {
 			closeSync(fd);
 		}
@@ -794,9 +985,15 @@ function sweepLeftoverTemps(dir: string): void {
  * this writer's id: an inode alone is reused on Linux), so no lock is left behind for other
  * processes either.
  */
-function createLock(lockPath: string, lockContent: string, writerId: string): boolean {
+function createLock(lockPath: string, writerId: string): boolean {
 	const tmp = `${lockPath}.${writerId}.tmp`;
-	const identity = writeLockTemp(tmp, lockContent);
+	// A lease is declared only where another namespace could judge this lock, i.e. where the lock
+	// names this process's namespace. Elsewhere (no /proc) no reader ever consults it.
+	const { identity, leased } = writeLockTemp(
+		tmp,
+		(withLease) => lockContentFor(writerId, withLease),
+		thisPidNamespace() !== undefined,
+	);
 	try {
 		linkSync(tmp, lockPath);
 	} catch (err) {
@@ -837,8 +1034,69 @@ function createLock(lockPath: string, lockContent: string, writerId: string): bo
 		mine = new Map();
 		heldLocks.set(writerId, mine);
 	}
-	mine.set(identity, { path: lockPath });
+	mine.set(identity, { path: lockPath, leased });
+	if (leased) startLeaseRenewal();
 	return true;
+}
+
+/** The one timer that renews every leased lock this process holds; running only while there is one. */
+let leaseTimer: ReturnType<typeof setInterval> | undefined;
+
+function startLeaseRenewal(): void {
+	if (leaseTimer !== undefined) return;
+	leaseTimer = setInterval(renewLeases, LEASE_RENEW_MS);
+	// The renewal never keeps a process alive: a process that is otherwise done exits, and its
+	// lease then lapses, which is what a lease is for.
+	leaseTimer.unref?.();
+}
+
+/** Stop the timer once no lock any writer here holds is leased. */
+function stopLeaseRenewalIfIdle(): void {
+	if (leaseTimer === undefined) return;
+	for (const locks of heldLocks.values()) {
+		for (const lock of locks.values()) if (lock.leased) return;
+	}
+	clearInterval(leaseTimer);
+	leaseTimer = undefined;
+}
+
+/** Renew every leased lock every live writer in this process holds. */
+function renewLeases(): void {
+	const now = new Date();
+	for (const [writerId, locks] of heldLocks) {
+		for (const [identity, lock] of locks) {
+			if (lock.leased) renewLease(lock.path, identity, writerId, now);
+		}
+	}
+}
+
+/**
+ * Renew one lease: set the lock file's mtime to `now` — through an fd whose file is PROVEN to be
+ * this lock (its create-time inode AND this writer's id, read through that same fd), so a renewal can
+ * never touch a lock another writer took after this one lost it: `futimes` acts on the inode, not on
+ * a path that may name someone else's file by now. Never throws (it runs on a timer): a lock that is
+ * gone, moved or another's is simply not renewed. Losing the lock is noticed where it matters, at the
+ * next append, which verifies its own lock before it writes.
+ */
+function renewLease(path: string, identity: string, writerId: string, now: Date): void {
+	let fd: number;
+	try {
+		fd = openSync(path, fsConstants.O_RDONLY | O_NOFOLLOW);
+	} catch {
+		return;
+	}
+	try {
+		const file = readLockFd(fd);
+		if (file.identity === identity && file.writerId === writerId) futimesSync(fd, now, now);
+	} catch {
+		/* not renewed this time; the next tick tries again */
+	} finally {
+		try {
+			closeSync(fd);
+		} catch {
+			/* opened read-only: nothing was written through it */
+		}
+	}
 }
 
 /**
@@ -900,8 +1158,7 @@ function acquireProcessLock(logPath: string, writerId: string): boolean {
 	// writer's. Anything else falls through to the create.
 	if (heldLocks.has(writerId) && verifyOwnLock(lockPath, writerId)) return false;
 
-	const lockContent = lockContentFor(writerId);
-	if (createLock(lockPath, lockContent, writerId)) {
+	if (createLock(lockPath, writerId)) {
 		sweepLeftoverTemps(dir);
 		return true;
 	}
@@ -923,7 +1180,7 @@ function acquireProcessLock(logPath: string, writerId: string): boolean {
 
 	// Second attempt after stale lock cleanup. If another process raced us and
 	// already re-created the lock, EEXIST here means they won — report as held.
-	if (createLock(lockPath, lockContent, writerId)) {
+	if (createLock(lockPath, writerId)) {
 		sweepLeftoverTemps(dir);
 		return true;
 	}
@@ -954,6 +1211,7 @@ function releaseLocks(writerId: string, logPath: string): void {
 	const held = heldLocks.get(writerId);
 	if (held === undefined) return;
 	heldLocks.delete(writerId);
+	stopLeaseRenewalIfIdle();
 	let spelled: string | undefined;
 	try {
 		spelled = join(realpathSync(dirname(logPath)), LOCK_FILE_NAME);
