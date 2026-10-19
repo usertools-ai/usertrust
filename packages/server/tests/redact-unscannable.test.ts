@@ -31,7 +31,8 @@
  * - Linear, as a ratio: reading twice an input takes at most three times as long (a quadratic
  *   reader takes about four), at a size where one read takes 25 ms, each time the least of five
  *   samples of at least 50 ms, taken in turn at both sizes with both inputs built first (one flat
- *   string, as a caller's text arrives, where an input is built only once). What
+ *   string, as a caller's text arrives, where an input is built only once). A ratio over three is
+ *   measured again from new inputs, and fails only if that is over three too. What
  *   doubles is what a quadratic reader would read again: the units of a run of
  *   markers, a whitespace run's length, or a key's length with the text's. A time limit would fail
  *   a slow runner, or one under coverage, and pass a quadratic reader on a fast one.
@@ -85,7 +86,10 @@ const line = (message: string, secrets: readonly string[] = []): string =>
  * kept, so each size is timed with the same heap. A sample makes the same number of reads at both
  * sizes, enough for a sample at `n` to take 50 ms, so a garbage collection's pause is a small part of
  * it. Samples alternate between the sizes, so a slow moment slows both, and each time is the least of
- * five. A ratio, unlike a time limit, holds on a slow runner and under coverage.
+ * five. A ratio over three is measured again from both inputs built anew, and only a second over
+ * three fails: a moment's load seldom slows both, and a quadratic reader is over three each time.
+ * Each measurement taken again is printed, marked `[linear-confirm]`. A ratio, unlike a time limit,
+ * holds on a slow runner and under coverage.
  */
 function expectLinear(name: string, make: (n: number) => () => unknown, n: number): void {
 	const timed = (read: () => unknown, reads: number): number => {
@@ -107,14 +111,25 @@ function expectLinear(name: string, make: (n: number) => () => unknown, n: numbe
 	large();
 	let reads = Math.max(1, Math.ceil(50 / Math.max(one, 0.01)));
 	while (timed(read, reads) < 50) reads *= 2;
-	let once = Number.POSITIVE_INFINITY;
-	let twice = Number.POSITIVE_INFINITY;
-	for (let i = 0; i < 5; i++) {
-		once = Math.min(once, timed(read, reads));
-		twice = Math.min(twice, timed(large, reads));
-	}
-	const times = `${once.toFixed(1)} ms at ${size}, ${twice.toFixed(1)} ms at ${2 * size}, ${reads} reads a sample`;
-	expect(twice / once, `${name}: ${times}`).toBeLessThanOrEqual(3);
+	const ratio = (small: () => unknown, big: () => unknown): [number, string] => {
+		let once = Number.POSITIVE_INFINITY;
+		let twice = Number.POSITIVE_INFINITY;
+		for (let i = 0; i < 5; i++) {
+			once = Math.min(once, timed(small, reads));
+			twice = Math.min(twice, timed(big, reads));
+		}
+		const times = `${once.toFixed(1)} ms at ${size}, ${twice.toFixed(1)} ms at ${2 * size}, ${reads} reads a sample`;
+		return [twice / once, `${(twice / once).toFixed(2)} (${times})`];
+	};
+	const [first, firstTimes] = ratio(read, large);
+	if (first <= 3) return;
+	const small = make(size);
+	small();
+	const big = make(2 * size);
+	big();
+	const [second, times] = ratio(small, big);
+	console.log(`[linear-confirm] ${name}: ${firstTimes}, then ${times}`);
+	expect(second, `${name}: ${firstTimes}, then ${times}`).toBeLessThanOrEqual(3);
 }
 
 /**
