@@ -550,6 +550,34 @@ describe("internalErrorLine reads the original and the sanitized text, and redac
 		expect(line(message, ["SECRETKEY"])).toBe(`${LINE}Error: Bea[redacted]junkrer ${VALUE}`);
 	});
 
+	it("a separator sanitizing removes still separates: the token after it is redacted", () => {
+		const TAB = C(9);
+		// The original's pattern takes the escape sequence for the token, and sanitizing joins
+		// `Bearer` to the token; in the text with a space for each removed run, the token reads.
+		expect(line(`Authorization: Bearer${TAB}${ESC}[31m${TAB}${VALUE}`)).toBe(
+			`${LINE}Error: Authorization: Bearer [redacted]`,
+		);
+		expect(line(`Bearer${ESC}[31m${VALUE} end`)).toBe(`${LINE}Error: Bearer [redacted] end`);
+		const failed: string[] = [];
+		for (const [marker, sep] of MARKERS) {
+			for (const inside of INSIDE) {
+				// The marker's own separator stays (`x-api-key` names no value without `:` or `=`), and the
+				// removed characters stand before it, after it, or between tabs after it.
+				const head = sep.trimEnd();
+				for (const between of [
+					`${inside}${sep}`,
+					`${head}${inside}`,
+					`${head}${C(9)}${inside}${C(9)}`,
+				]) {
+					const printed = line(`tenant ${marker}${between}${VALUE} end`).slice(LINE.length);
+					if (printed.includes(VALUE))
+						failed.push(`${JSON.stringify(between)}: ${JSON.stringify(printed)}`);
+				}
+			}
+		}
+		expect(failed.slice(0, 10)).toEqual([]);
+	});
+
 	it("an unclosed quote at the end, found in both texts, is replaced once", () => {
 		expect(line(`api_key="`)).toBe(`${LINE}Error: api_key="[redacted]"`);
 		expect(line(`api_key="${BEL}`)).toBe(`${LINE}Error: api_key="[redacted]"`);

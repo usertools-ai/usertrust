@@ -458,26 +458,81 @@ function* inSanitized(spans: Generator<Redaction>, at: Int32Array): Generator<Re
 }
 
 /**
+ * The sanitized text with one space where sanitizing removed a run between two characters it kept
+ * (`Bearer\t\x1b[31m\t<token>` reads `Bearer <token>`), and, for each unit, the unit of the
+ * sanitized text it stands at: a space, at the character after its run, and marked in `gap`.
+ */
+function withGaps(
+	clean: string,
+	at: Int32Array,
+): { text: string; to: Int32Array; gap: Uint8Array } {
+	let gaps = 0;
+	for (let j = 1; j < clean.length; j++) if ((at[j] ?? 0) !== (at[j - 1] ?? 0) + 1) gaps++;
+	const to = new Int32Array(clean.length + gaps);
+	const gap = new Uint8Array(clean.length + gaps);
+	let text = "";
+	let n = 0;
+	let from = 0;
+	for (let j = 0; j < clean.length; j++) {
+		if (j > 0 && (at[j] ?? 0) !== (at[j - 1] ?? 0) + 1) {
+			text += `${clean.slice(from, j)} `;
+			from = j;
+			gap[n] = 1;
+			to[n++] = j;
+		}
+		to[n++] = j;
+	}
+	return { text: text + clean.slice(from), to, gap };
+}
+
+/**
+ * `spans`, found in the text `withGaps` made, at the same characters of the sanitized text. A
+ * part's spaces stand for nothing there: one that holds only spaces is dropped; an empty one (an
+ * unclosed quote at the end) stays, in its place.
+ */
+function* fromGaps(
+	spans: Generator<Redaction>,
+	{ to, gap }: { to: Int32Array; gap: Uint8Array },
+	length: number,
+): Generator<Redaction> {
+	for (const part of spans) {
+		const start = part.start < to.length ? (to[part.start] ?? length) : length;
+		const last = part.end - 1;
+		const end =
+			part.end === part.start
+				? start
+				: gap[last] === 1
+					? (to[last] ?? length)
+					: (to[last] ?? length) + 1;
+		if (end > start || part.end === part.start) yield { ...part, start, end };
+	}
+}
+
+/**
  * `text` sanitized as `scrubForStderr` sanitizes it (never clipped), with every credential in it
- * redacted: what `redactSecrets` finds in the ORIGINAL text and what it finds in the SANITIZED
- * text, together, replaced once in the sanitized text. Both views are read because each can show
- * what the other hides: in the original, the delimiters the patterns read are still there
- * (removing a tab joins `Bearer\t<token>` into one word, and an escape sequence can take a key's
- * first character with it); in the sanitized text, a marker or a key a control character split is
- * whole (`Bea\0rer`, `x-api\x07-key`), and a key that would take part of the marker in the
- * original cannot hide it there. The replacement is made in the sanitized text itself, and nothing
- * removes a character after it: every character the result holds outside a placeholder stands
- * next to the ones it stood next to in the sanitized text, which was read. (Redacting the original
- * and sanitizing after could join what was apart: an OSC sequence whose terminator a redaction
- * took runs further, and the characters on either side of it meet.) No match is ever looked for in
- * redacted text. On `RangeError`, the whole text is replaced, as `redactSecrets` does.
+ * redacted: what `redactSecrets` finds in three views of it, together, replaced once in the
+ * sanitized text. Each view can show what the others hide. In the ORIGINAL text, the delimiters
+ * the patterns read are still there, and an escape sequence cannot take a key's first character
+ * with it. In the SANITIZED text, a marker or a key a control character split is whole (`Bea\0rer`,
+ * `x-api\x07-key`), and a key that would take part of the marker in the original cannot hide it
+ * there. In the sanitized text with one space for each run it removed, a separator made of removed
+ * characters still separates: `Bearer\t\x1b[31m\t<token>` is one word once sanitized, and in the
+ * original the pattern takes the escape sequence for the token. The replacement is made in the
+ * sanitized text itself, and nothing removes a character after it: every character the result
+ * holds outside a placeholder stands next to the ones it stood next to in the sanitized text,
+ * which was read. (Redacting the original and sanitizing after could join what was apart: an OSC
+ * sequence whose terminator a redaction took runs further, and the characters on either side of
+ * it meet.) No match is ever looked for in redacted text. On `RangeError`, the whole text is
+ * replaced, as `redactSecrets` does.
  */
 export function redactSanitized(text: string, secrets: readonly string[] = []): string {
 	try {
 		const { clean, at } = sanitizeMapped(text);
+		const spaced = withGaps(clean, at);
 		return applyRedactions(clean, [
 			...spansIn(text, secrets).map((spans) => inSanitized(spans, at)),
 			...spansIn(clean, secrets),
+			...spansIn(spaced.text, secrets).map((spans) => fromGaps(spans, spaced, clean.length)),
 		]);
 	} catch (err) {
 		if (err instanceof RangeError) return UNREADABLE;
