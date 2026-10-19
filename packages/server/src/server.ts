@@ -215,6 +215,9 @@ const BEARER_AT = /(Bearer)\s+[^\s"',;]+/iy;
 const API_KEY_AT = /(x-api-key|api[-_]key)(["']?\s*[:=]\s*)(["']?)/iy;
 /** An unquoted api-key value: it ends at whitespace, a quote, `,`, `;` or `&`. */
 const UNQUOTED_VALUE = /[^\s"',;&]+/y;
+/** What a `Bearer` token, or an unquoted api-key value, can still hold from a given point on. */
+const BEARER_REST = /[^\s"',;]*/y;
+const UNQUOTED_REST = /[^\s"',;&]*/y;
 const BACKSLASH = 0x5c;
 
 /**
@@ -240,6 +243,8 @@ interface Redaction {
 	start: number;
 	end: number;
 	replacement: string;
+	/** For a token (a `Bearer` token, an unquoted api-key value): what it can still hold after `end`. */
+	rest?: RegExp;
 }
 
 const REDACTED = "[redacted]";
@@ -292,6 +297,7 @@ function* bearerSpans(text: string): Generator<Redaction> {
 			start: m.index + word.length,
 			end: m.index + whole.length,
 			replacement: ` ${REDACTED}`,
+			rest: BEARER_REST,
 		};
 	}
 }
@@ -329,14 +335,12 @@ function apiKeyValue(
 	from: number,
 	unquoted: RegExp,
 ): Redaction | undefined {
-	let end: number;
-	if (quote !== "") end = quotedEnd(text, from, quote);
-	else {
-		unquoted.lastIndex = from;
-		if (!unquoted.test(text)) return undefined;
-		end = unquoted.lastIndex;
+	if (quote !== "") {
+		return { start: from, end: quotedEnd(text, from, quote), replacement: `${REDACTED}${quote}` };
 	}
-	return { start: from, end, replacement: `${REDACTED}${quote}` };
+	unquoted.lastIndex = from;
+	if (!unquoted.test(text)) return undefined;
+	return { start: from, end: unquoted.lastIndex, replacement: REDACTED, rest: UNQUOTED_REST };
 }
 
 /** The UTF-16 code units a marker can start with: `B`, `b`, `X`, `x`, `A`, `a`. */
@@ -387,6 +391,7 @@ function* markersAfterKeys(text: string, secrets: readonly string[]): Generator<
 				start: at + (token[1] ?? "").length,
 				end: at + token[0].length,
 				replacement: ` ${REDACTED}`,
+				rest: BEARER_REST,
 			};
 			continue;
 		}
@@ -396,7 +401,7 @@ function* markersAfterKeys(text: string, secrets: readonly string[]): Generator<
 		const quote = name[3] ?? "";
 		const valueAt = apiKey.lastIndex;
 		if (quote === "" && valueAt >= unquotedFrom && valueAt < unquotedEnd) {
-			yield { start: valueAt, end: unquotedEnd, replacement: REDACTED };
+			yield { start: valueAt, end: unquotedEnd, replacement: REDACTED, rest: UNQUOTED_REST };
 			continue;
 		}
 		const value = apiKeyValue(text, quote, valueAt, unquoted);
@@ -597,6 +602,34 @@ function* fromGaps(
 }
 
 /**
+ * `spans`, at their characters in the sanitized text `clean`, with each token run on through what it
+ * can still hold there. A token found in the original text or the spaced view ends at a delimiter
+ * that sanitizing may remove, and what stood after it is then joined to the token:
+ * `Bearer\tpart-one\tpart-two` reads `Bearerpart-onepart-two`, and redacting `part-one` alone
+ * would print `Bearer [redacted]part-two`, a line the patterns read differently. Run on, a token's
+ * replacement ends where the token ends in the text it is written in. Linear: a source's tokens of
+ * one kind end in order, so the reach of the last one is reused for an end inside it.
+ */
+function* throughTokens(spans: Iterable<Redaction>, clean: string): Generator<Redaction> {
+	const reached = new Map<RegExp, { from: number; reach: number }>();
+	for (const part of spans) {
+		const rest = part.rest;
+		if (rest === undefined) {
+			yield part;
+			continue;
+		}
+		let run = reached.get(rest);
+		if (run === undefined || part.end < run.from || part.end > run.reach) {
+			rest.lastIndex = part.end;
+			rest.test(clean);
+			run = { from: part.end, reach: rest.lastIndex };
+			reached.set(rest, run);
+		}
+		yield { ...part, end: run.reach };
+	}
+}
+
+/**
  * `text` sanitized as `scrubForStderr` sanitizes it (never clipped), with every credential in it
  * redacted: what `redactSecrets` finds in three views of it, together, replaced once in the
  * sanitized text. Each view can show what the others hide. In the ORIGINAL text, the delimiters
@@ -605,7 +638,8 @@ function* fromGaps(
  * `x-api\x07-key`), and a key that would take part of the marker in the original cannot hide it
  * there. In the sanitized text with one space for each run it removed, a separator made of removed
  * characters still separates: `Bearer\t\x1b[31m\t<token>` is one word once sanitized, and in the
- * original the pattern takes the escape sequence for the token. The replacement is made in the
+ * original the pattern takes the escape sequence for the token. A token from any view runs on
+ * through what sanitizing joined to its end (`throughTokens`). The replacement is made in the
  * sanitized text itself, and nothing removes a character after it: every character the result
  * holds outside a placeholder stands next to the ones it stood next to in the sanitized text,
  * which was read. (Redacting the original and sanitizing after could join what was apart: an OSC
@@ -617,11 +651,14 @@ export function redactSanitized(text: string, secrets: readonly string[] = []): 
 	try {
 		const { clean, at } = sanitizeMapped(text);
 		const spaced = withGaps(clean, at);
-		return applyRedactions(clean, [
-			...spansIn(text, secrets).map((spans) => inSanitized(spans, at)),
-			...spansIn(clean, secrets),
-			...spansIn(spaced.text, secrets).map((spans) => fromGaps(spans, spaced, clean.length)),
-		]);
+		return applyRedactions(
+			clean,
+			[
+				...spansIn(text, secrets).map((spans) => inSanitized(spans, at)),
+				...spansIn(clean, secrets),
+				...spansIn(spaced.text, secrets).map((spans) => fromGaps(spans, spaced, clean.length)),
+			].map((spans) => throughTokens(spans, clean)),
+		);
 	} catch (err) {
 		if (err instanceof RangeError) return UNREADABLE;
 		throw err;

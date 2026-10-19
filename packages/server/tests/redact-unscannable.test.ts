@@ -578,6 +578,65 @@ describe("internalErrorLine reads the original and the sanitized text, and redac
 		expect(failed.slice(0, 10)).toEqual([]);
 	});
 
+	it("a token runs on through what sanitizing joins to its end", () => {
+		const TAB = C(9);
+		// The original and the spaced view end the token at the second tab; once sanitized, what
+		// followed it is joined to it, and no pattern reads the marker there.
+		expect(line(`Authorization: Bearer${TAB}part-one${TAB}part-two`)).toBe(
+			`${LINE}Error: Authorization: Bearer [redacted]`,
+		);
+		expect(line(`Authorization: Bearer${TAB}Bearer${TAB}${VALUE}`)).toBe(
+			`${LINE}Error: Authorization: Bearer [redacted]`,
+		);
+		// An unquoted api-key value, where only the original reads the marker (a word boundary).
+		expect(line(`x${TAB}api_key=part-one${TAB}part-two`)).toBe(`${LINE}Error: xapi_key=[redacted]`);
+		// It stops where the token would: at a delimiter sanitizing keeps.
+		expect(line(`Bearer${TAB}part-one${TAB}part-two;rest`)).toBe(
+			`${LINE}Error: Bearer [redacted];rest`,
+		);
+		expect(line(`x${TAB}api_key=one${TAB}two&rest`)).toBe(`${LINE}Error: xapi_key=[redacted]&rest`);
+		const failed: string[] = [];
+		let joined = 0;
+		for (const [marker, sep] of MARKERS) {
+			const head = sep.trimEnd();
+			for (const inside of INSIDE) {
+				for (const between of [sep, `${inside}${sep}`, `${head}${inside}`, `${head}${TAB}`]) {
+					for (const after of [inside, `${TAB}${inside}${TAB}`]) {
+						for (const before of ["tenant ", `tenant${TAB}`]) {
+							const message = `${before}${marker}${between}${VALUE}${after}tail end`;
+							const printed = line(message).slice(LINE.length);
+							if (scrubForStderr(message, Number.POSITIVE_INFINITY).includes(`${VALUE}tail`))
+								joined++;
+							if (redactSecrets(printed) !== printed)
+								failed.push(`${JSON.stringify(message)}: not a fixed point: ${printed}`);
+							if (printed.includes(VALUE))
+								failed.push(`${JSON.stringify(message)}: ${JSON.stringify(printed)}`);
+						}
+					}
+				}
+			}
+		}
+		expect(failed.slice(0, 10)).toEqual([]);
+		// Positive control: sanitizing joins the tail to the value in many of them.
+		expect(joined).toBeGreaterThan(500);
+	});
+
+	it("a run of joined tokens is read once: 100,000 of them in under 3 seconds", () => {
+		const TAB = C(9);
+		for (const unit of [
+			`Bearer${TAB}x${TAB}`,
+			`api_key=x${TAB}`,
+			`y${TAB}api_key=x${TAB}`,
+			`tenantBearer${TAB}x${TAB}tenantapi_key=x${TAB}`,
+		]) {
+			const message = unit.repeat(100_000);
+			const t = performance.now();
+			const printed = line(message, ["tenant"]).slice(LINE.length);
+			expect(performance.now() - t, unit).toBeLessThan(3_000);
+			expect(redactSecrets(printed, ["tenant"]), unit).toBe(printed);
+		}
+	}, 60_000);
+
 	it("a marker right after the caller's key: the boundary the replacement makes is read in the text", () => {
 		expect(line(`tenantBearer ${VALUE}`, ["tenant"])).toBe(
 			`${LINE}Error: [redacted]Bearer [redacted]`,
