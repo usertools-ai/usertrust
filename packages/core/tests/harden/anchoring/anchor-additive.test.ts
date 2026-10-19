@@ -469,11 +469,22 @@ describe("HARDEN: anchoring additive proofs", () => {
 		// from the walk's own snapshot (`sequenceSegments`, in both packages), so
 		// no file is opened twice. NO vendored source, no new dependency, and
 		// `dependencies` is still `{}`. 47 lines of headroom.
+		//
+		// 11800 → 11900, for the audit tail's review round (2026-10-19). Post-change
+		// total 11807, so 11800 failed by 7 (the merge of 5.1.0 had left 6 lines).
+		// WHAT WAS ADDED, both mirrored from core as the parity contract requires:
+		// `stable-read.ts` reads a segment the directory lists that then does not
+		// open as one that could not be read, never as no segment (+6); and
+		// `tail-read.ts`'s `readLogTail` reads a log's bytes in hand as well as a
+		// descriptor (+7, most of it the signature wrapped and its doc), so
+		// `quarantine-tail` checks the log a cut leaves with the writer's own read.
+		// NO vendored source, no new import, and `dependencies` is still `{}`. 93
+		// lines of headroom.
 		let total = 0;
 		for (const file of readdirSync(VERIFY_SRC).filter((f) => f.endsWith(".ts"))) {
 			total += readFileSync(join(VERIFY_SRC, file), "utf-8").split("\n").length;
 		}
-		expect(total).toBeLessThan(11800);
+		expect(total).toBeLessThan(11900);
 	});
 
 	it("7. mirror parity: anchor-verify.ts is byte-identical across packages modulo import paths", () => {
