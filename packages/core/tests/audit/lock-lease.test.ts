@@ -281,6 +281,32 @@ describe("another namespace's lock with a lease: reclaimed only once the lease i
 		expectHeld(chain, v, bytes);
 	});
 
+	it("a RENEWAL restarts the confirmation window: a lease renewed after the first look is not reclaimed on time measured from that look, even when the renewal already reads stale (a wall-clock step)", async () => {
+		vi.useFakeTimers({ toFake: ["performance"] });
+		const chain = await processIn(THIS_NS);
+		const v = vault();
+		// (a) The first look: an expired lease, so this process records that file, that mtime, and now.
+		const bytes = plantLock(
+			v,
+			{ pid: DEAD_PID, bootId: OTHER_BOOT, pidNs: OTHER_NS, leaseRenewMs: RENEW_MS },
+			TEN_MINUTES_AGO(),
+		);
+		expect(expectHeld(chain, v, bytes)).toContain("reclaimed automatically at the first append");
+		const looked = mtimeNsOf(v);
+		// (b) The holder renews: a NEW mtime on the same file. (c) It already reads past the stale
+		// threshold on this clock (the wall clock stepped forward), and the confirmation window,
+		// counted from the FIRST look, has passed.
+		const renewed = new Date(Date.now() - 9 * 60_000);
+		utimesSync(lockOf(v), renewed, renewed);
+		expect(mtimeNsOf(v), "control: the renewal changed the mtime").not.toBe(looked);
+		passMonotonic(CONFIRM_MS + 1);
+		// (d) Still confirming: the window restarted at the renewal, so the lock is held.
+		expect(expectHeld(chain, v, bytes)).toContain("reclaimed automatically at the first append");
+		// Control: once the RENEWED lease has itself gone unrenewed for the window, it is reclaimed.
+		passMonotonic(CONFIRM_MS);
+		expectReclaimed(chain, v);
+	});
+
 	it("a lease whose mtime is AHEAD of this clock is fresh (fail toward live)", async () => {
 		vi.useFakeTimers({ toFake: ["performance"] });
 		const chain = await processIn(THIS_NS);
