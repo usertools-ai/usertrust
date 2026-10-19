@@ -660,12 +660,35 @@ const PII_PATTERNS: PIIPattern[] = [
 // ---------------------------------------------------------------------------
 
 /**
+ * The type reported for a value the patterns could not finish reading: V8 throws `RangeError`
+ * (call stack exhausted) when some regular-expression shapes run over a run of millions of
+ * characters. Such a value is treated as holding a secret, never as clean: `pii: "block"`
+ * refuses it and `pii: "redact"` replaces it whole.
+ */
+export const UNSCANNABLE = "unscannable";
+
+/** The conservative result for data the walk itself could not finish: everything flagged. */
+const UNSCANNABLE_DETECTION = (): PIIDetection => ({
+	found: true,
+	types: [UNSCANNABLE],
+	paths: [`(${UNSCANNABLE})`],
+});
+
+/**
  * Detect PII in any value by recursively scanning strings in objects/arrays.
  *
- * Returns which PII types were found and at which dot-paths.
+ * Returns which PII types were found and at which dot-paths. Never throws `RangeError`: a string
+ * the patterns cannot finish is reported as `unscannable` at its path (its siblings are scanned
+ * as usual), and data the walk cannot finish is reported as `unscannable` as a whole. Any other
+ * error is not caught.
  */
 export function detectPII(data: unknown): PIIDetection {
-	return detectIn(data, false);
+	try {
+		return detectIn(data, false);
+	} catch (err) {
+		if (err instanceof RangeError) return UNSCANNABLE_DETECTION();
+		throw err;
+	}
 }
 
 function detectIn(data: unknown, signalSent: boolean): PIIDetection {
@@ -948,12 +971,9 @@ function matches(pattern: PIIPattern, value: string, view: string): boolean {
 }
 
 function scanString(value: string, currentPath: string, types: Set<string>, paths: string[]): void {
-	const view = normalizedView(value);
-	for (const pattern of PII_PATTERNS) {
-		if (matches(pattern, value, view)) {
-			types.add(pattern.type);
-			paths.push(currentPath ? `${currentPath}(${pattern.type})` : `(${pattern.type})`);
-		}
+	for (const type of scannedTypes(value)) {
+		types.add(type);
+		paths.push(currentPath ? `${currentPath}(${type})` : `(${type})`);
 	}
 }
 
@@ -984,16 +1004,25 @@ export interface RedactOptions {
  */
 export function redactPII(data: unknown, options: RedactOptions = {}): RedactedData {
 	const signalSent = options.signalSent === true;
-	const detection = detectIn(data, signalSent);
-	if (!detection.found) {
-		return { data, detection };
+	try {
+		const detection = detectIn(data, signalSent);
+		if (!detection.found) {
+			return { data, detection };
+		}
+		const redacted = redactValue(data, {
+			anywhere: new WeakMap(),
+			atPrefix: new Map(),
+			signalSent,
+		});
+		return { data: redacted, detection };
+	} catch (err) {
+		// Data the walk could not finish is replaced whole: nothing of it is forwarded. A string
+		// the patterns could not finish never gets here (scannedTypes), so this is the backstop.
+		if (err instanceof RangeError) {
+			return { data: `[REDACTED:${UNSCANNABLE}]`, detection: UNSCANNABLE_DETECTION() };
+		}
+		throw err;
 	}
-	const redacted = redactValue(data, {
-		anywhere: new WeakMap(),
-		atPrefix: new Map(),
-		signalSent,
-	});
-	return { data: redacted, detection };
 }
 
 /**
@@ -1028,6 +1057,21 @@ function matchedTypes(value: string): string[] {
 	return PII_PATTERNS.filter((pattern) => matches(pattern, value, view)).map(
 		(pattern) => pattern.type,
 	);
+}
+
+/**
+ * The types `value` holds, failing closed: when the patterns throw `RangeError` on it, the value
+ * is `unscannable` (and redaction replaces it whole), never clean. Only this value: the walk
+ * goes on to its siblings. Any other error is not caught, so a real bug is never reported as an
+ * unscannable value.
+ */
+function scannedTypes(value: string): string[] {
+	try {
+		return matchedTypes(value);
+	} catch (err) {
+		if (err instanceof RangeError) return [UNSCANNABLE];
+		throw err;
+	}
 }
 
 function defineData(obj: object, key: string, value: unknown, enumerable: boolean): void {
@@ -1119,7 +1163,7 @@ function redactValue(root: unknown, clones: Clones): unknown {
 	let top: RedactFrame | undefined;
 	const copy = (value: unknown, path: string): unknown => {
 		if (typeof value === "string") {
-			const types = matchedTypes(value);
+			const types = scannedTypes(value);
 			return types.length > 0 ? `[REDACTED:${types.join(",")}]` : value;
 		}
 		if (Array.isArray(value)) {

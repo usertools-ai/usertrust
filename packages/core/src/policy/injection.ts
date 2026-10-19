@@ -18,6 +18,7 @@
  */
 
 import type { InjectionDetection } from "../shared/types.js";
+import { UNSCANNABLE } from "./pii.js";
 
 // ---------------------------------------------------------------------------
 // Layer 1: Keyword combo matching
@@ -200,9 +201,35 @@ function scanString(value: string, currentPath: string, state: ScanState): void 
 	}
 }
 
+/**
+ * Marks a string (or, at the root, the whole data) the checks could not finish reading: V8 throws
+ * `RangeError` (call stack exhausted) when some regular-expression shapes run over a run of
+ * millions of characters. It is reported as suspected injection at the highest score, never as
+ * clean, so `injection: "block"` refuses it.
+ */
+function markUnscannable(currentPath: string, state: ScanState): void {
+	state.patterns.add(UNSCANNABLE);
+	state.paths.push(currentPath ? `${currentPath}(${UNSCANNABLE})` : `(${UNSCANNABLE})`);
+	state.score = 1;
+}
+
+/**
+ * `scanString`, failing closed for this string only: a `RangeError` marks it unscannable and the
+ * walk goes on to its siblings. Any other error is not caught, so a real bug is never reported as
+ * an unscannable string.
+ */
+function scanStringClosed(value: string, currentPath: string, state: ScanState): void {
+	try {
+		scanString(value, currentPath, state);
+	} catch (err) {
+		if (!(err instanceof RangeError)) throw err;
+		markUnscannable(currentPath, state);
+	}
+}
+
 function scanValue(value: unknown, currentPath: string, state: ScanState): void {
 	if (typeof value === "string") {
-		scanString(value, currentPath, state);
+		scanStringClosed(value, currentPath, state);
 		return;
 	}
 
@@ -231,7 +258,10 @@ function scanValue(value: unknown, currentPath: string, state: ScanState): void 
  * Detect prompt injection attempts in any value by recursively scanning
  * strings in objects/arrays.
  *
- * Returns which injection patterns were matched and at which dot-paths.
+ * Returns which injection patterns were matched and at which dot-paths. Never throws `RangeError`:
+ * a string the checks cannot finish is reported as `unscannable` at its path, and data the walk
+ * cannot finish (nested deeper than the call stack) is reported as `unscannable` as a whole, both
+ * at score 1. Any other error is not caught.
  */
 export function detectInjection(data: unknown): InjectionDetection {
 	const state: ScanState = {
@@ -240,7 +270,12 @@ export function detectInjection(data: unknown): InjectionDetection {
 		paths: [],
 	};
 
-	scanValue(data, "", state);
+	try {
+		scanValue(data, "", state);
+	} catch (err) {
+		if (!(err instanceof RangeError)) throw err;
+		markUnscannable("", state);
+	}
 
 	return {
 		detected: state.patterns.size > 0,

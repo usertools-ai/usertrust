@@ -10,9 +10,13 @@
  * detectInjection threw on a long enough run of letters or digits: a plain 6M run of `b` was
  * enough, through the 64-hex rule.
  *
+ * A large bounded count overflows the same way: `[a-z]{20,6000000}` throws on a 10.4M run where
+ * `[a-z]{20,3000000}` does not (measured on Node 23.6).
+ *
  * Pinned:
  * - Every `X{n,}` in a regex in packages/<pkg>/src is gone: a guard reads every source file and
- *   fails on any outside a comment, so a new one cannot come back unnoticed.
+ *   fails on any outside a comment, so a new one cannot come back unnoticed. The guard fails on a
+ *   bounded count of 1000 or more, `X{n,1000}`, too: none is in the source, and none should be.
  * - Each rewritten rule is in its source exactly as listed here, and gives the old rule's
  *   matches (each match's index and groups) on a seeded corpus built from its prefixes and
  *   classes, wherever the old rule did not throw.
@@ -27,8 +31,8 @@ import { describe, expect, it } from "vitest";
 
 const ROOT = resolve(import.meta.dirname, "../../../..");
 
-/** An open counted quantifier: `{n,}` with no upper bound. */
-const OPEN_COUNT = /\{\d+,\}/;
+/** An open counted quantifier, `{n,}` with no upper bound, or one bounded at 1000 or more. */
+const OPEN_COUNT = /\{\d+,(?:\d\d\d\d+)?\}/;
 
 /** Source files under packages/<pkg>/src: .ts, .tsx, .js, .mjs and .cjs, recursively. */
 function sources(): string[] {
@@ -65,7 +69,7 @@ function openCounts(text: string): number[] {
 }
 
 describe("the source guard", () => {
-	it("no source file holds `{n,}` outside a comment", () => {
+	it("no source file holds `{n,}` or `{n,1000}` outside a comment", () => {
 		const files = sources();
 		// The walk reaches every package: core's PII and injection modules among them.
 		expect(files.some((f) => f.endsWith("packages/core/src/policy/pii.ts"))).toBe(true);
@@ -80,7 +84,7 @@ describe("the source guard", () => {
 		expect(found).toEqual([]);
 	});
 
-	it("the guard reports a regex literal, a RegExp string and a nested one, and skips comments", () => {
+	it("the guard reports a regex literal, a RegExp string, a nested one and a large bound, and skips comments", () => {
 		const text = [
 			"const a = /x{2,}/g;",
 			'const b = new RegExp("[0-9]{16,}");',
@@ -89,8 +93,10 @@ describe("the source guard", () => {
 			"// /x{3,}/ in a comment",
 			"const ok = /x{2}x*/g;",
 			"const bounded = /x{0,2}/g;",
+			"const large = /[a-z]{20,1000}/g;",
+			"const under = /[a-z]{20,999}/g;",
 		].join("\n");
-		expect(openCounts(text)).toEqual([1, 2, 3]);
+		expect(openCounts(text)).toEqual([1, 2, 3, 8]);
 	});
 });
 

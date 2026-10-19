@@ -1458,7 +1458,7 @@ first, clip second.
 repaint the terminal of the auditor running the command — forging a passing verdict, which is the
 entire product for a verification tool.
 
-There are **eighteen** sanitizers, in two variants: **twelve** neutralise C1 and **six** do not. Do
+There are **nineteen** sanitizers, in two variants: **thirteen** neutralise C1 and **six** do not. Do
 not consolidate them onto the weaker one — and note that the two counts are pinned SEPARATELY,
 because swapping a stronger sanitizer for a weaker one moves both by one and leaves the total
 untouched. A total is not an inventory.
@@ -1473,7 +1473,8 @@ behavioural property**: `/[\x00-\x1f\x7f-\x9f](?=\w)/g` satisfies every structur
 fixed probe context, and still leaves ESC untouched in `\x1b[2J`. There is no fixed point to reach,
 so the claim is bounded instead. Known limits, all of which let a NON-sanitizer be counted: a
 replacement argument that preserves or re-emits (`"$&"`, `(ch) => ch`), a ternary whose result is
-never appended, an identifier resolved file-wide rather than by scope, and context-dependent
+never appended, an `if` whose taken branch appends the character through a call (`s.charAt(i)`,
+`s.slice(from, i + 1)`), an identifier resolved file-wide rather than by scope, and context-dependent
 patterns as above. Behavioural safety is established by the tests that exercise these paths, not
 here.
 
@@ -1579,6 +1580,15 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   multi-line refusal needs; then clips at 4096 code points, after sanitizing. Only the printed
   text is scrubbed: `probeLedger()` throws the raw message, for an embedder that renders it its
   own way. A local copy, not an import: `scrubForTerminal` is not a public export of `usertrust`.
+- The stronger variant beside it: `sanitizeMapped` in `server/src/cli/scrub.ts`, which the server's
+  error log redaction reads. It sanitizes as `scrubForStderr` does, never clips, and records where
+  each kept character stood, so a credential found in either text is replaced in the printed one.
+  It is written as a loop with an `if` statement: the predicate is bound to a `const`, keeps the
+  line feed (`code !== 0x0a && ...`), and the character is dropped by copying the text before it
+  and moving past it. The count guard counts that form: an `if` testing the predicate whose taken
+  branch does not append the character back. It missed it at first, because an `if` was a
+  residual the guard argued was safe (removing one would make the total read low) and that is
+  true only of one already counted.
 
 **THE INVENTORY'S SCOPE IS DECLARED HERE, and the guard matches this sentence.** It covers
 `packages/*/src` — the TypeScript build inputs, which are what `files: ["dist"]` publishes — plus
