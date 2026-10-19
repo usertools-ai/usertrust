@@ -352,6 +352,12 @@ function startsMarker(code: number): boolean {
  * print `[redacted]Bearer <token>`. So the marker is looked for there in the text itself, never in
  * redacted text. The keys' matches end in order (each is found at its end, left to right), so they
  * are merged as they come, and only where a marker could start is a pattern tried.
+ *
+ * Linear: no value is read twice. An unquoted value that starts inside the last one ends where it
+ * does (no character in between ends a value), so that end is reused. A quoted value cannot start
+ * inside one with the same quote: its opening quote follows `:`, `=` or whitespace, never a
+ * backslash, so the outer value closes on it. A token after `Bearer` ends at whitespace, and
+ * `Bearer` needs whitespace after it, so no token holds the next one.
  */
 function* markersAfterKeys(text: string, secrets: readonly string[]): Generator<Redaction> {
 	const keys = secrets.map((secret) => secretSpans(text, secret));
@@ -359,6 +365,8 @@ function* markersAfterKeys(text: string, secrets: readonly string[]): Generator<
 	const bearer = new RegExp(BEARER_AT);
 	const apiKey = new RegExp(API_KEY_AT);
 	const unquoted = new RegExp(UNQUOTED_VALUE);
+	let unquotedFrom = -1;
+	let unquotedEnd = -1;
 	for (let last = -1; ; ) {
 		let at = -1;
 		let from = -1;
@@ -384,9 +392,20 @@ function* markersAfterKeys(text: string, secrets: readonly string[]): Generator<
 		}
 		apiKey.lastIndex = at;
 		const name = apiKey.exec(text);
-		const value =
-			name === null ? undefined : apiKeyValue(text, name[3] ?? "", apiKey.lastIndex, unquoted);
-		if (value !== undefined) yield value;
+		if (name === null) continue;
+		const quote = name[3] ?? "";
+		const valueAt = apiKey.lastIndex;
+		if (quote === "" && valueAt >= unquotedFrom && valueAt < unquotedEnd) {
+			yield { start: valueAt, end: unquotedEnd, replacement: REDACTED };
+			continue;
+		}
+		const value = apiKeyValue(text, quote, valueAt, unquoted);
+		if (value === undefined) continue;
+		if (quote === "") {
+			unquotedFrom = valueAt;
+			unquotedEnd = value.end;
+		}
+		yield value;
 	}
 }
 

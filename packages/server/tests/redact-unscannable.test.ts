@@ -619,6 +619,26 @@ describe("internalErrorLine reads the original and the sanitized text, and redac
 		expect(cases).toBeGreaterThan(1_000);
 	});
 
+	it("the search after the key reads each value once: markers after a key 100,000 times, each in under 3 seconds", () => {
+		// Each value after a key's match ran to the end of the text, and was read again from the next
+		// match: `tenantapi-key=` 8,000 times took about 2 s, and the time grew as N squared.
+		for (const unit of [
+			"tenantapi-key=",
+			'tenantapi-key="',
+			"tenantapi-key='",
+			"tenantapi-key=\"tenantapi-key='",
+			"tenantx-api-key: ",
+			"tenantBearer ",
+			"tenantBearer x",
+		]) {
+			const message = unit.repeat(100_000);
+			const t = performance.now();
+			const printed = line(message, ["tenant"]).slice(LINE.length);
+			expect(performance.now() - t, unit).toBeLessThan(3_000);
+			expect(redactSecrets(printed, ["tenant"]), unit).toBe(printed);
+		}
+	}, 60_000);
+
 	it("a key's overlapping matches end in order, and a marker after each is found", () => {
 		expect(redactSecrets(`aaaBearer ${VALUE}`, ["aa"])).toBe("[redacted]Bearer [redacted]");
 		expect(redactSecrets(`xyBearer ${VALUE} xyapi-key: ${VALUE}`, ["xy", "x"])).toBe(
