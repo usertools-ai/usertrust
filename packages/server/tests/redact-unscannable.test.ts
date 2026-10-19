@@ -30,7 +30,8 @@
  *   credential. `sanitizeMapped` gives scrubForStderr's text and where each of its units was.
  * - Linear, as a ratio: reading twice an input takes at most three times as long (a quadratic
  *   reader takes about four), at a size where one read takes 25 ms, each time the least of five
- *   samples of at least 50 ms after a warm-up. What doubles is what a quadratic reader would read again: the units of a run of
+ *   samples of at least 50 ms, taken in turn at both sizes with both inputs built first. What
+ *   doubles is what a quadratic reader would read again: the units of a run of
  *   markers, a whitespace run's length, or a key's length with the text's. A time limit would fail
  *   a slow runner, or one under coverage, and pass a quadratic reader on a fast one.
  */
@@ -79,36 +80,38 @@ const line = (message: string, secrets: readonly string[] = []): string =>
 /**
  * `make(n)` builds an input of size `n` and gives what reads it, and reading twice that input takes
  * at most three times as long: a linear reader takes about twice, a quadratic one about four. `n`
- * doubles (up to 64 times) until one read takes 25 ms. A sample then makes the same number of reads
- * at both sizes, enough for a sample at `n` to take 50 ms, so a garbage collection's pause is a small
- * part of it, and each time is the least of five samples after a warm-up. A ratio, unlike a time
- * limit, holds on a slow runner and under coverage.
+ * doubles (up to 64 times) until one read takes 25 ms. Both inputs are then built, read once, and
+ * kept, so each size is timed with the same heap. A sample makes the same number of reads at both
+ * sizes, enough for a sample at `n` to take 50 ms, so a garbage collection's pause is a small part of
+ * it. Samples alternate between the sizes, so a slow moment slows both, and each time is the least of
+ * five. A ratio, unlike a time limit, holds on a slow runner and under coverage.
  */
 function expectLinear(name: string, make: (n: number) => () => unknown, n: number): void {
-	const timed = (size: number, reads: number): number => {
-		const read = make(size);
-		read();
-		let best = Number.POSITIVE_INFINITY;
-		for (let i = 0; i < 5; i++) {
-			const started = performance.now();
-			for (let j = 0; j < reads; j++) read();
-			best = Math.min(best, performance.now() - started);
-		}
-		return best;
+	const timed = (read: () => unknown, reads: number): number => {
+		const started = performance.now();
+		for (let i = 0; i < reads; i++) read();
+		return performance.now() - started;
 	};
 	let size = n;
-	let once = timed(size, 1);
-	while (once < 25 && size < n * 64) {
+	let read = make(size);
+	read();
+	let one = timed(read, 1);
+	while (one < 25 && size < n * 64) {
 		size *= 2;
-		once = timed(size, 1);
+		read = make(size);
+		read();
+		one = timed(read, 1);
 	}
-	let reads = Math.max(1, Math.ceil(50 / Math.max(once, 0.01)));
-	once = timed(size, reads);
-	while (once < 50) {
-		reads *= 2;
-		once = timed(size, reads);
+	const large = make(2 * size);
+	large();
+	let reads = Math.max(1, Math.ceil(50 / Math.max(one, 0.01)));
+	while (timed(read, reads) < 50) reads *= 2;
+	let once = Number.POSITIVE_INFINITY;
+	let twice = Number.POSITIVE_INFINITY;
+	for (let i = 0; i < 5; i++) {
+		once = Math.min(once, timed(read, reads));
+		twice = Math.min(twice, timed(large, reads));
 	}
-	const twice = timed(2 * size, reads);
 	const times = `${once.toFixed(1)} ms at ${size}, ${twice.toFixed(1)} ms at ${2 * size}, ${reads} reads a sample`;
 	expect(twice / once, `${name}: ${times}`).toBeLessThanOrEqual(3);
 }
