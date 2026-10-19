@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.1.0] - 2026-10-18
+
 ### Read before upgrading
 
 - **Results can change for existing callers.** The two entries under Added are new detections: text that 5.0.5 reported clean can now be flagged under `pii: "warn"`, blocked under `pii: "block"` and rewritten under `pii: "redact"`. No export, option, default or output shape changed, so no code change is needed. Text 5.0.5 flagged is still flagged, except the placeholders described under Fixed.
@@ -31,6 +33,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`detectPII`, `redactPII` and `detectInjection` could throw `RangeError` on inputs containing a very long run of letters or digits.** From about 6 million characters in one run (6 MB of plain text; a run of `b` was enough), V8's regular-expression engine ran out of stack on the patterns with an open counted quantifier (`[a-z]{20,}` and the like), and the scan threw "Maximum call stack size exceeded" instead of returning. That covered the 64-character hex rule, the 16-or-more digit rule, every token prefix with a minimum length (`sk-`, `ghp_`, `ghu_`, `npm_`, `glpat-`, `Bearer`, JWTs, `whsec_` and the rest), and the base64 rule in injection detection. Each is now written as the minimum count followed by an open run (`[a-z]{20}[a-z]*`), which matches exactly the same text, and detection completes at 10 million characters. A test fails on any open counted quantifier in the packages' source, so one cannot come back unnoticed.
 
 - **A placeholder after a prefix 5.0.5 added is no longer reported as a secret.** 5.0.5 flagged placeholder values such as `rk_live_XXXX...`: one capital, repeated, satisfied the capital rule those prefixes take. The payload after each of them must now also hold at least four distinct characters. This covers `ghu_`, the stateless `ghs_` and fine-grained `github_pat_` GitHub tokens, `ASIA`, `rk_live_`, `rk_test_`, `sk_org_`, `xapp-`, `xwfp-`, `xoxe-<n>-`, and GitLab's twelve prefixes besides `glpat-`. The prefixes released before 5.0.5 are unchanged.
+
+### Known issues
+
+These remain open in this release:
+
+- A ledger-backed usertrust-server stopped by SIGINT or SIGTERM with a pending hold, or with an authorize still reserving, can exit before ending it: the hold or reservation may stay reserved until the ledger's 300 s timeout, and its release may not be recorded.
+
+- An eviction learned in the instant between a governor's shutdown request and the `destroy()` that follows it (no `await` between them) still aborts the process. The voids, audit flush and lock release have already run. What is lost is the exit status (134, which a supervisor reads as a crash) and anything the process does after `destroy()`.
+
+- `GET /v1/health` still reports `ok` while the ledger is down, so a monitor cannot read an outage from health in this release. Read the `503 ledger_unavailable` answers on `POST /v1/authorize` instead.
+
+- `/v1/settle`, `/v1/abort` and `/v1/release` still wait for the ledger without a bound during an outage, and complete when it returns. `ledgerTimeoutMs` applies to `POST /v1/authorize` only.
+
+- An authorize that ends without a ledger reply (an evicted client session) may still have reserved, and that reservation expires at the hold timeout (300 seconds).
+
+- A tenant's authorizes are served one at a time, so a burst counts against `ledgerTimeoutMs` too. Measured on an Apple M4 Pro against a local single-node TigerBeetle, the default 5 s deadline was reached at roughly 350 concurrent authorizes for one tenant, and a slower or remote ledger reaches it sooner. A tenant that issues many concurrent authorizes should raise `ledgerTimeoutMs`.
+
+- A `TrustTBClient` whose session the cluster evicted while it was idle still aborts the process when `TrustTBClient.destroy()` is called directly on it, with no request since. Make one ledger request before `destroy()`, or end the process with `process.exit()` without calling `destroy()`.
+
+- A process that holds an evicted ledger client it has dropped does not exit on its own after `destroy()`. End such a process with `process.exit()` after `destroy()`.
+
+- A Google request field that only your client's `@google/genai` version reads is not sent. Keep the `@google/genai` that usertrust resolves at the same version as your client's.
+
+- In `trust()`, a provider count that is present but not a count (a string, NaN or a negative) still costs the estimate exactly, even when the call's other counts are usable.
+
+This list is not complete. LIMITATIONS.md gives the full account: section 13, "A ledger-backed server refuses authorizes while its ledger is unreachable, health still reports `ok`, and a hold it releases on SIGINT or SIGTERM may not be audited", and section 14, "A ledger client the cluster evicted cannot be released, and keeps its process from exiting on its own".
 
 ## [5.0.5] - 2026-10-18
 
