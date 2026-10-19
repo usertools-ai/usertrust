@@ -16,6 +16,8 @@ const seam = vi.hoisted(() => ({
 	 * attempt from then is inconsistent, though its first reading is the same as the one before. */
 	flipListingsFrom: undefined as number | undefined,
 	listings: 0,
+	/** A name every audit-directory listing carries that no open finds: a name the OS hands back changed. */
+	phantomName: undefined as string | undefined,
 	/** Runs once, at this numbered lstat of the quarantine path: an attempt's very last read. */
 	atQuarantineLstat: undefined as { n: number; run: () => void } | undefined,
 	quarantineLstats: 0,
@@ -24,6 +26,9 @@ vi.mock("node:fs", async (importOriginal) => {
 	const fs = await importOriginal<typeof import("node:fs")>();
 	const readdirSync = ((p: unknown, ...rest: unknown[]) => {
 		const names = (fs.readdirSync as (...a: unknown[]) => unknown)(p, ...rest);
+		if (seam.phantomName !== undefined && String(p) === seam.auditDir && Array.isArray(names)) {
+			return [...names, seam.phantomName];
+		}
 		if (
 			seam.flipListingsFrom !== undefined &&
 			String(p) === seam.auditDir &&
@@ -56,6 +61,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { verifyVaultReading as standaloneVerifyVaultReading } from "../../../verify/src/index.js";
 import { canonicalize } from "../../src/audit/canonical.js";
 import { createAuditWriter } from "../../src/audit/chain.js";
 import { readVaultSnapshot, writerMayHoldLock } from "../../src/audit/stable-read.js";
@@ -71,6 +77,7 @@ beforeEach(() => {
 	seam.auditDir = join(root, VAULT_DIR, "audit");
 	seam.flipListingsFrom = undefined;
 	seam.listings = 0;
+	seam.phantomName = undefined;
 	seam.atQuarantineLstat = undefined;
 	seam.quarantineLstats = 0;
 	vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -212,6 +219,19 @@ describe("verify on a live vault", () => {
 		seam.flipListingsFrom = 4;
 		const read = readVaultSnapshot(auditDir(), { attempts: 5, delayMs: 1 });
 		expect(read.kind).toBe("busy");
+	});
+
+	it("a segment the directory lists but no open finds is evidence nobody read: a failure in both verifiers, never an empty valid chain", () => {
+		mkdirSync(auditDir(), { recursive: true });
+		seam.phantomName = "events.0001.jsonl";
+		for (const read of [verifyVaultReading, standaloneVerifyVaultReading]) {
+			const { result } = read(vaultDir(), { attempts: 2, delayMs: 1 });
+			expect(result.valid).toBe(false);
+			expect(result.errors).toContain("Audit segment could not be read: events.0001.jsonl");
+		}
+		// CONTROL: without the phantom name, the same empty directory is an empty, valid chain.
+		seam.phantomName = undefined;
+		expect(verifyVaultReading(vaultDir()).result).toMatchObject({ valid: true, chainLength: 0 });
 	});
 
 	it("verifyVaultBounded reads with its caller's bound: a vault that keeps changing is busy after exactly that many attempts", async () => {

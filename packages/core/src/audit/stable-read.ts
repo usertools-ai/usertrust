@@ -174,7 +174,13 @@ function attempt(
 		const read = acquireWholeFile(join(auditDir, name), Math.min(MAX_SEGMENT_BYTES, left));
 		changed ||= read.changed;
 		if (read.file.kind === "read") left -= read.file.bytes.length;
-		segments.push({ name, file: read.file });
+		// A name the directory LISTS that then opens as absent is evidence nobody read, never no segment: a name
+		// the OS hands back changed (bytes that are not UTF-8 come back as U+FFFD, and that path does not open)
+		// stays listed on every attempt. A segment removed between the listings is caught by the second one.
+		const listed = audit.kind === "ok" && audit.names.includes(name);
+		const file: FileObservation =
+			read.file.kind === "absent" && listed ? { kind: "unavailable", code: "ENOENT" } : read.file;
+		segments.push({ name, file });
 	}
 	const consistent =
 		!changed &&
