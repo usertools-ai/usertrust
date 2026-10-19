@@ -262,14 +262,15 @@ alive, and exits within about 250 ms when the server process dies, SIGKILL inclu
   **configure every tenant of one cluster with identical `tigerbeetle.addresses`**. The 30 s probe
   makes the health session less likely to be the one a full cluster evicts, never immune: a child
   whose session is evicted exits and is started again after the cooldown.
-- **When it reads `unknown`.** Before a new child's first answer (at most `ledgerTimeoutMs`, after
-  which a probe sent to it and unanswered reads `unreachable`); when a child is not ready within
+- **When it reads `unknown`.** Before a new child's first answer (the child has `ledgerTimeoutMs`
+  to say it is ready; its first probe's `ledgerTimeoutMs` counts from when it is sent, after which
+  an unanswered probe reads `unreachable`, so a slow start is never read as an outage); when a child is not ready within
   `ledgerTimeoutMs` (say its TigerBeetle load hangs): the ledger was never asked, so it reads
   `unknown` (`not_ready`), never `unreachable`, and the child is killed and started again after the
   cooldown; after a probe answered with an error; while a
   child that exited, was evicted or failed to start waits out `healthRespawnCooldownMs` (default
   300000, counted from its exit) to be started again; and with `"off"`. After a child dies,
-  `unknown` lasts at most the cooldown plus `ledgerTimeoutMs`, **only if its replacement starts
+  `unknown` lasts at most the cooldown plus two `ledgerTimeoutMs`, **only if its replacement starts
   and survives to its first probe**. If every replacement fails (it cannot spawn, or crashes at
   load), `unknown` lasts as long as that does, and is never read as `unreachable`: a failing
   observer says nothing about the ledger. Each failure is logged once per kind per cooldown.
