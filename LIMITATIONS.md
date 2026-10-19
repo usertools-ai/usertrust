@@ -454,7 +454,10 @@ The lock's liveness check works on one kernel, and it fails toward "held":
     and earlier) is never reclaimed from another namespace. Such a lock left
     behind by an upgrade needs one removal by hand.
   - A writer whose filesystem cannot set a file's modification time writes a
-    lock with no lease.
+    lock with no lease. So do a snapshot restore and `usertrust audit
+    quarantine-tail`, which change the audit files in ways an append's own
+    check does not guard: a lock either leaves behind after a crash is removed
+    by hand.
   - A writer that is frozen (SIGSTOP, a paused container) or blocked for more
     than a minute loses its lock to a writer in another namespace. Its next
     append is refused. Only a writer frozen in the middle of an append can add

@@ -1194,6 +1194,16 @@ one more event after the taker has appended — one event, chained from a stale 
 reports as a broken chain; its next append is refused. The renewal timer is `unref()`d and runs only
 while a leased lock is held.
 
+Two rules keep that bound true:
+- **Only a holder whose every write goes through `appendEvent` leases.** `withAuditWriterLock` (a
+  snapshot restore renames files under it, across awaits) and the torn-tail quarantine
+  (`createUnleasedAuditWriter`: it cuts the log) never declare a lease. Paused past the threshold,
+  either would otherwise resume and overwrite or cut the events a new holder appended meanwhile. Their
+  locks are held from another namespace, as before.
+- **`lockOwner()` re-reads the lock file.** The registry keeps a lost lock's entry until release, so
+  "registered" is not "holds it now"; a former holder that still answered `lockOwner()` would publish
+  `effective-budget.json` over the new holder's record. A read that fails answers "not the owner".
+
 *Prevents:*
 - A previous boot's lock whose PID a live, unrelated process now carries reading as held forever.
 - A sibling container's live writer being reclaimed: containers on one host share the boot id, and

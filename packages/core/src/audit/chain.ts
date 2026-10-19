@@ -985,14 +985,15 @@ function sweepLeftoverTemps(dir: string): void {
  * this writer's id: an inode alone is reused on Linux), so no lock is left behind for other
  * processes either.
  */
-function createLock(lockPath: string, writerId: string): boolean {
+function createLock(lockPath: string, writerId: string, leasable: boolean): boolean {
 	const tmp = `${lockPath}.${writerId}.tmp`;
 	// A lease is declared only where another namespace could judge this lock, i.e. where the lock
-	// names this process's namespace. Elsewhere (no /proc) no reader ever consults it.
+	// names this process's namespace (elsewhere, with no /proc, no reader ever consults it), and only
+	// for a holder whose every write re-checks the lock first (`leasable`: see acquireProcessLock).
 	const { identity, leased } = writeLockTemp(
 		tmp,
 		(withLease) => lockContentFor(writerId, withLease),
-		thisPidNamespace() !== undefined,
+		leasable && thisPidNamespace() !== undefined,
 	);
 	try {
 		linkSync(tmp, lockPath);
@@ -1129,6 +1130,21 @@ function verifyOwnLockFile(file: LockFileView, lockPath: string, writerId: strin
 	return true;
 }
 
+/**
+ * Does `writerId` hold the lock of the log at `logPath` RIGHT NOW: registered here AND the file at
+ * that path is its own (a fresh read)? Registration alone is not enough: another namespace may have
+ * reclaimed an expired lease since, and the registry keeps a lost lock's entry until release. A read
+ * that fails answers no (fail toward "not the holder": the caller publishes nothing).
+ */
+function ownsLockNow(logPath: string, writerId: string): boolean {
+	if (!heldLocks.has(writerId)) return false;
+	try {
+		return verifyOwnLock(join(realpathSync(dirname(logPath)), LOCK_FILE_NAME), writerId);
+	} catch {
+		return false;
+	}
+}
+
 /** {@link verifyOwnLockFile} on a fresh read of `lockPath`; a read that fails throws. */
 function verifyOwnLock(lockPath: string, writerId: string): boolean {
 	const file = readLockFile(lockPath);
@@ -1144,8 +1160,15 @@ function verifyOwnLock(lockPath: string, writerId: string): boolean {
  * Every decision is made from the lock FILE in the requested directory — whose it is, read from
  * the file — never from a directory's identity or a remembered path. A lock file that cannot be
  * read makes this THROW: it is never reclaimed.
+ *
+ * `leasable`: the lock may declare a lease, so another namespace may reclaim it once its renewals
+ * stop. Only a holder whose EVERY write to the vault goes through `appendEvent`, which re-checks the
+ * lock before it writes, may say so. A holder that mutates the vault in other ways under the lock (a
+ * snapshot restore's renames, a quarantine's cut) has no such check, and after losing a lease while
+ * paused it would overwrite or cut the new holder's events: its lock declares no lease, and is held
+ * from another namespace as before.
  */
-function acquireProcessLock(logPath: string, writerId: string): boolean {
+function acquireProcessLock(logPath: string, writerId: string, leasable: boolean): boolean {
 	// The physical spelling (the JS realpath: lstat + readlink, no /proc — never `.native`, which
 	// needs /proc on musl). An absent directory throws ENOENT here, before anything is created
 	// (#182.1).
@@ -1158,7 +1181,7 @@ function acquireProcessLock(logPath: string, writerId: string): boolean {
 	// writer's. Anything else falls through to the create.
 	if (heldLocks.has(writerId) && verifyOwnLock(lockPath, writerId)) return false;
 
-	if (createLock(lockPath, writerId)) {
+	if (createLock(lockPath, writerId, leasable)) {
 		sweepLeftoverTemps(dir);
 		return true;
 	}
@@ -1180,7 +1203,7 @@ function acquireProcessLock(logPath: string, writerId: string): boolean {
 
 	// Second attempt after stale lock cleanup. If another process raced us and
 	// already re-created the lock, EEXIST here means they won — report as held.
-	if (createLock(lockPath, writerId)) {
+	if (createLock(lockPath, writerId, leasable)) {
 		sweepLeftoverTemps(dir);
 		return true;
 	}
@@ -1262,7 +1285,8 @@ export async function withAuditWriterLock<T>(
 	fn: () => Promise<T> | T,
 ): Promise<T> {
 	const writerId = randomUUID();
-	acquireProcessLock(logPath, writerId);
+	// Never leased: `fn` mutates the vault without the per-append ownership check.
+	acquireProcessLock(logPath, writerId, false);
 	let result: T;
 	try {
 		result = await fn();
@@ -1440,6 +1464,26 @@ export function createAuditWriter(
 	return createAuditWriterAt({ auditDir, dlqDir: join(vaultPath, VAULT_DIR, "dlq") }, options);
 }
 
+/**
+ * {@link createAuditWriter} for a holder that also mutates the vault OUTSIDE `appendEvent` while it
+ * holds the lock (the torn-tail quarantine cuts the log): its lock declares no lease, so it is never
+ * reclaimed from another namespace while it might still cut. Internal: not exported from the package.
+ */
+export function createUnleasedAuditWriter(
+	vaultPath: string,
+	options: CreateAuditWriterOptions = {},
+): AuditWriter {
+	const auditDir = join(vaultPath, VAULT_DIR, "audit");
+	if (!existsSync(auditDir)) {
+		mkdirPrivate(auditDir);
+	}
+	return createAuditWriterAt(
+		{ auditDir, dlqDir: join(vaultPath, VAULT_DIR, "dlq") },
+		options,
+		false,
+	);
+}
+
 /** Where a writer writes: its audit directory (the log, `.meta`, the lock) and its dead-letter directory. */
 interface AuditWriterPaths {
 	auditDir: string;
@@ -1450,6 +1494,7 @@ interface AuditWriterPaths {
 function createAuditWriterAt(
 	{ auditDir, dlqDir }: AuditWriterPaths,
 	options: CreateAuditWriterOptions = {},
+	leasable = true,
 ): AuditWriter {
 	const logPath = join(auditDir, "events.jsonl");
 
@@ -1460,7 +1505,7 @@ function createAuditWriterAt(
 	let writeFailures = 0;
 	// Eager: a second writer fails HERE. The append's own acquire then only verifies this
 	// writer's lock (the file carries this writer's id and inode) and creates nothing.
-	if (options.lockAtCreate === true) acquireProcessLock(logPath, writerId);
+	if (options.lockAtCreate === true) acquireProcessLock(logPath, writerId, leasable);
 
 	async function appendEvent(input: AppendEventInput): Promise<AuditEvent> {
 		const release = await mutex.acquire();
@@ -1477,7 +1522,7 @@ function createAuditWriterAt(
 			// A lock created by THIS call means this writer did not hold it a moment ago (first
 			// append, or its earlier lock was found stale), and another writer may have appended
 			// meanwhile. Its cached tail is then not the chain's tail: chaining from it forks.
-			if (acquireProcessLock(logPath, writerId)) lastEventCache.clear();
+			if (acquireProcessLock(logPath, writerId, leasable)) lastEventCache.clear();
 
 			const last = getLastEvent(logPath, lastEventCache);
 			const previousHash = last?.hash ?? GENESIS_HASH;
@@ -1598,7 +1643,7 @@ function createAuditWriterAt(
 		isDegraded: isDegradedFn,
 		flush,
 		release: releaseWriter,
-		lockOwner: () => (heldLocks.has(writerId) ? writerId : undefined),
+		lockOwner: () => (ownsLockNow(logPath, writerId) ? writerId : undefined),
 	};
 }
 

@@ -39,6 +39,8 @@ const proc = vi.hoisted(() => ({
 	/** When set, every `futimesSync` fails with this code: a filesystem that cannot set an mtime. */
 	futimesError: undefined as string | undefined,
 	futimesCalls: 0,
+	/** The content of every lock this run created: read from the temp file as it is linked into place. */
+	linkedLocks: [] as string[],
 }));
 vi.mock("node:fs", async (importOriginal) => {
 	const fs = await importOriginal<typeof import("node:fs")>();
@@ -65,7 +67,14 @@ vi.mock("node:fs", async (importOriginal) => {
 		}
 		return fs.futimesSync(...args);
 	}) as typeof fs.futimesSync;
-	const wrapped = { readFileSync, readlinkSync, futimesSync };
+	const linkSync = ((existing: string, target: string) => {
+		const result = fs.linkSync(existing, target);
+		if (String(target).endsWith(".audit-writer.lock")) {
+			proc.linkedLocks.push(fs.readFileSync(existing, "utf-8"));
+		}
+		return result;
+	}) as typeof fs.linkSync;
+	const wrapped = { readFileSync, readlinkSync, futimesSync, linkSync };
 	return { ...fs, ...wrapped, default: { ...fs, ...wrapped } };
 });
 
@@ -105,6 +114,7 @@ afterEach(() => {
 	proc.pidNs = { value: THIS_NS };
 	proc.futimesError = undefined;
 	proc.futimesCalls = 0;
+	proc.linkedLocks = [];
 });
 proc.bootId = { value: `${THIS_BOOT}\n` };
 proc.pidNs = { value: THIS_NS };
@@ -391,6 +401,64 @@ describe("two writers in two namespaces: the lease decides, and a holder that lo
 		// The chain the taker extended is one chain: its event follows the holder's first.
 		const [first, second] = readFileSync(logOf(v), "utf-8").trim().split("\n");
 		expect(JSON.parse(second as string).previousHash).toBe(JSON.parse(first as string).hash);
+	});
+});
+
+describe("a lock's owner is the holder of the file NOW, and holders that write outside appendEvent never lease", () => {
+	it("P2: a holder that lost its lock to another namespace no longer reports itself as the lock's owner — it cannot publish the vault's budget record over the new holder's", async () => {
+		vi.useFakeTimers({ toFake: ["performance"] });
+		const holder = await processIn(OTHER_NS);
+		const v = vault();
+		const held = acquire(holder, v).writer;
+		expect(held?.lockOwner?.(), "control: the holder owns it").toBeDefined();
+		utimesSync(lockOf(v), TEN_MINUTES_AGO(), TEN_MINUTES_AGO());
+		const holderBytes = readFileSync(lockOf(v), "utf-8");
+
+		const taker = await processIn(THIS_NS);
+		expectHeld(taker, v, holderBytes);
+		passMonotonic(CONFIRM_MS);
+		const { writer: took } = acquire(taker, v);
+		expect(took).toBeDefined();
+		expect(took?.lockOwner?.(), "the taker owns it").toBeDefined();
+		expect(held?.lockOwner?.(), "the holder that lost it does not").toBeUndefined();
+	});
+
+	it("P1: a snapshot restore's scoped lock (withAuditWriterLock) declares no lease: it renames files outside appendEvent, so another namespace must never reclaim it mid-restore", async () => {
+		vi.useFakeTimers({ toFake: ["performance", "setInterval", "clearInterval"] });
+		const chain = await processIn(THIS_NS);
+		const v = vault();
+		let inside: Record<string, unknown> | undefined;
+		let timers = -1;
+		await chain.withAuditWriterLock(join(v, ".usertrust", "audit", "events.jsonl"), () => {
+			inside = readLock(v);
+			timers = vi.getTimerCount();
+		});
+		expect(inside, "control: the scoped lock was held, in this namespace").toMatchObject({
+			pidNs: THIS_NS,
+		});
+		expect(inside).not.toHaveProperty("leaseRenewMs");
+		expect(timers).toBe(0);
+	});
+
+	it("P1: the torn-tail quarantine's lock declares no lease: it cuts the log outside appendEvent", async () => {
+		const chain = await processIn(THIS_NS);
+		const { quarantineTornTail } = await import("../../src/audit/quarantine.js");
+		const v = vault();
+		const w = chain.createAuditWriter(v);
+		await w.appendEvent({ kind: "test", actor: "t", data: { n: 1 } });
+		w.release();
+		writeFileSync(logOf(v), `${readFileSync(logOf(v), "utf-8")}{"torn`);
+		proc.linkedLocks = [];
+		const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const result = await quarantineTornTail(v);
+		quiet.mockRestore();
+		expect(result.torn, "control: the repair ran").toBeDefined();
+		expect(proc.linkedLocks.length, "control: it took the lock").toBeGreaterThan(0);
+		for (const content of proc.linkedLocks) {
+			const lock = JSON.parse(content) as Record<string, unknown>;
+			expect(lock.pidNs).toBe(THIS_NS);
+			expect(lock).not.toHaveProperty("leaseRenewMs");
+		}
 	});
 });
 
