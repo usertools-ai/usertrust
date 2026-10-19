@@ -76,9 +76,9 @@ const NAMED_ENTITIES: Readonly<Record<string, string>> = {
 function visibleText(text: string): string {
 	return text
 		.replace(
-			/&(?:#(\d+)|#[xX]([0-9a-fA-F]+)|([A-Za-z][A-Za-z0-9]*));/g,
+			/(?<!\\)&(?:#(\d+)|#[xX]([0-9a-fA-F]+)|([A-Za-z][A-Za-z0-9]*));/g,
 			(whole, dec, hex, name) => {
-				if (name !== undefined) return NAMED_ENTITIES[name] ?? whole;
+				if (name !== undefined) return Object.hasOwn(NAMED_ENTITIES, name) ? (NAMED_ENTITIES[name] as string) : whole;
 				const code = dec !== undefined ? Number.parseInt(dec, 10) : Number.parseInt(hex, 16);
 				return Number.isInteger(code) && code >= 0 && code <= 0x10ffff
 					? String.fromCodePoint(code)
@@ -465,6 +465,11 @@ describe("no 'governor' in text a person reads", () => {
 			// A, B and the attribute are caught; D is clean; a plain JS string is NOT decoded (E).
 			expect(found).toHaveLength(3);
 			expect(visibleText("gover&#110;&#111;r")).toBe("governor");
+			// A name that only exists on Object.prototype is not an entity (it must not eat the word before it),
+			// and a backslash-escaped entity renders literally, so it is not decoded.
+			expect(visibleText("governor&constructor;")).toBe("governor&constructor;");
+			expect(visibleText("governor&toString;")).toBe("governor&toString;");
+			expect(visibleText("\\&#103;overnor")).toBe("\\&#103;overnor");
 		});
 	});
 });
