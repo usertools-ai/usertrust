@@ -1984,28 +1984,62 @@ describe("the final response, written after Stop — SessionEnd and a bounded wa
 	});
 });
 
+// `make(n)` builds an input of size `n` and gives what reads it, and reading twice
+// that input takes at most three times as long: a linear reader takes about twice,
+// a quadratic one about four. Each time is the best of three after a warm-up, and
+// `n` doubles (up to 64 times) until one read takes 25 ms, so the ratio is not
+// noise. A ratio, unlike a time limit, holds on a slow runner and under coverage.
+function expectLinear(name: string, make: (n: number) => () => unknown, n: number): void {
+	const timed = (size: number): number => {
+		const read = make(size);
+		read();
+		let best = Number.POSITIVE_INFINITY;
+		for (let i = 0; i < 3; i++) {
+			const started = performance.now();
+			read();
+			best = Math.min(best, performance.now() - started);
+		}
+		return best;
+	};
+	let size = n;
+	let once = timed(size);
+	while (once < 25 && size < n * 64) {
+		size *= 2;
+		once = timed(size);
+	}
+	const twice = timed(2 * size);
+	const times = `${once.toFixed(1)} ms at ${size}, ${twice.toFixed(1)} ms at ${2 * size}`;
+	expect(twice / once, `${name}: ${times}`).toBeLessThanOrEqual(3);
+}
+
 describe("the remainder's grouping by model", () => {
-	it("is linear: a 50 000-message backlog is grouped in well under a hook's budget, in order", async () => {
+	it("is linear: twice the backlog takes at most three times as long, grouped in order", async () => {
 		// @ts-expect-error TS7016: the hooks are plain .mjs, without type declarations.
 		const { groupByModel } = await import("../hooks/transcript.mjs");
 		// A long outage's claimed-but-unposted backlog: one model, a few of another.
-		const backlog = Array.from({ length: 50_000 }, (_, i) => ({
-			id: `msg_${i}`,
-			model: i % 1_000 === 999 ? HAIKU : SONNET,
-		}));
-		const started = performance.now();
-		const groups = groupByModel(backlog) as Map<string, Array<{ id: string }>>;
-		const took = performance.now() - started;
-		// Appending in place takes milliseconds. Copying a model's array for every
-		// message, as the remainder once did, takes seconds at this size: every settle
-		// point would spend its budget here before posting anything.
-		expect(took).toBeLessThan(200);
+		const backlogOf = (n: number) =>
+			Array.from({ length: n }, (_, i) => ({
+				id: `msg_${i}`,
+				model: i % 1_000 === 999 ? HAIKU : SONNET,
+			}));
+		const groups = groupByModel(backlogOf(50_000)) as Map<string, Array<{ id: string }>>;
+		// Appending in place is linear. Copying a model's array for every message, as
+		// the remainder once did, is quadratic, and took seconds at 50,000 messages:
+		// every settle point would spend its budget here before posting anything.
+		expectLinear(
+			"groupByModel",
+			(n) => {
+				const backlog = backlogOf(n);
+				return () => groupByModel(backlog);
+			},
+			5_000,
+		);
 		expect([...groups.keys()]).toEqual([SONNET, HAIKU]);
 		expect(groups.get(SONNET)?.length).toBe(49_950);
 		expect(groups.get(SONNET)?.[1_000]?.id).toBe("msg_1001");
 		const haiku = groups.get(HAIKU)?.map((m) => m.id) ?? [];
 		expect(haiku.slice(0, 2)).toEqual(["msg_999", "msg_1999"]);
-	});
+	}, 60_000);
 });
 
 describe("per-subagent attribution", () => {
