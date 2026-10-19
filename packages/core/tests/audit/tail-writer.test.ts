@@ -114,7 +114,7 @@ vi.mock("node:fs", async (importOriginal) => {
 
 const { AuditTailMismatchError, AuditTornTailError, createAuditWriter, openSharedAuditWriter } =
 	await import("../../src/audit/chain.js");
-const { quarantineTornTail } = await import("../../src/audit/quarantine.js");
+const { MAX_RECORD_LINE_BYTES, quarantineTornTail } = await import("../../src/audit/quarantine.js");
 const { verifyVault, verifyVaultReading } = await import("../../src/audit/verify.js");
 const { readChainDeadLetters } = await import("../../src/audit/dead-letters.js");
 const { canonicalize } = await import("../../src/audit/canonical.js");
@@ -944,7 +944,7 @@ describe("the writer's own limits: a line it could not read back, a new log's di
 		expect((await quarantineTornTail(root)).recorded).toHaveLength(1);
 		const record = lines().at(-1) as string;
 		expect(JSON.parse(record)).toMatchObject({ kind: "audit.quarantine.torn_tail", sequence: 3 });
-		expect(Buffer.byteLength(record)).toBeLessThan(1024);
+		expect(Buffer.byteLength(record)).toBeLessThan(MAX_RECORD_LINE_BYTES);
 		expect(verifyVault(join(root, VAULT_DIR))).toMatchObject({ valid: true, chainLength: 3 });
 	});
 

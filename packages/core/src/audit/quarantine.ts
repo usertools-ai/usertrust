@@ -406,7 +406,7 @@ function writeEvidence(auditDir: string, cut: Cut, tailBytes: Buffer): void {
 }
 
 /** The most bytes a cut's record takes as a line: 561 with every number at 2^53, so with room to spare. */
-const MAX_RECORD_LINE_BYTES = 1024;
+export const MAX_RECORD_LINE_BYTES = 1024;
 
 /**
  * Refused unless the writer could append the repair's records. Each cut is recorded by an append onto
