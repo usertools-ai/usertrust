@@ -1986,43 +1986,71 @@ describe("the final response, written after Stop — SessionEnd and a bounded wa
 
 // `make(n)` builds an input of size `n` and gives what reads it, and reading twice
 // that input takes at most three times as long: a linear reader takes about twice,
-// a quadratic one about four. Each time is the best of three after a warm-up, and
-// `n` doubles (up to 64 times) until one read takes 25 ms, so the ratio is not
-// noise. A ratio, unlike a time limit, holds on a slow runner and under coverage.
+// a quadratic one about four. `n` doubles (up to 64 times) until one read takes
+// 25 ms. A sample then makes the same number of reads at both sizes, enough for a
+// sample at `n` to take 50 ms, so a garbage collection's pause is a small part of
+// it, and each time is the least of five samples after a warm-up. A ratio, unlike
+// a time limit, holds on a slow runner and under coverage.
 function expectLinear(name: string, make: (n: number) => () => unknown, n: number): void {
-	const timed = (size: number): number => {
+	const timed = (size: number, reads: number): number => {
 		const read = make(size);
 		read();
 		let best = Number.POSITIVE_INFINITY;
-		for (let i = 0; i < 3; i++) {
+		for (let i = 0; i < 5; i++) {
 			const started = performance.now();
-			read();
+			for (let j = 0; j < reads; j++) read();
 			best = Math.min(best, performance.now() - started);
 		}
 		return best;
 	};
 	let size = n;
-	let once = timed(size);
+	let once = timed(size, 1);
 	while (once < 25 && size < n * 64) {
 		size *= 2;
-		once = timed(size);
+		once = timed(size, 1);
 	}
-	const twice = timed(2 * size);
-	const times = `${once.toFixed(1)} ms at ${size}, ${twice.toFixed(1)} ms at ${2 * size}`;
+	let reads = Math.max(1, Math.ceil(50 / Math.max(once, 0.01)));
+	once = timed(size, reads);
+	while (once < 50) {
+		reads *= 2;
+		once = timed(size, reads);
+	}
+	const twice = timed(2 * size, reads);
+	const times = `${once.toFixed(1)} ms at ${size}, ${twice.toFixed(1)} ms at ${2 * size}, ${reads} reads a sample`;
 	expect(twice / once, `${name}: ${times}`).toBeLessThanOrEqual(3);
 }
 
 describe("the remainder's grouping by model", () => {
-	it("is linear: twice the backlog takes at most three times as long, grouped in order", async () => {
+	// A long outage's claimed-but-unposted backlog: one model, a few of another.
+	const backlogOf = (n: number) =>
+		Array.from({ length: n }, (_, i) => ({
+			id: `msg_${i}`,
+			model: i % 1_000 === 999 ? HAIKU : SONNET,
+		}));
+
+	it("groups a 50,000-message backlog in order, within a fifth of SessionEnd's 1.5 s budget", async () => {
 		// @ts-expect-error TS7016: the hooks are plain .mjs, without type declarations.
 		const { groupByModel } = await import("../hooks/transcript.mjs");
-		// A long outage's claimed-but-unposted backlog: one model, a few of another.
-		const backlogOf = (n: number) =>
-			Array.from({ length: n }, (_, i) => ({
-				id: `msg_${i}`,
-				model: i % 1_000 === 999 ? HAIKU : SONNET,
-			}));
-		const groups = groupByModel(backlogOf(50_000)) as Map<string, Array<{ id: string }>>;
+		const backlog = backlogOf(50_000);
+		// The remainder is grouped in SessionEnd, whose budget is 1.5 s by default
+		// (session-end.mjs). This is a budget, not a claim about growth: a grouping
+		// that is linear but slow passes the ratio below and still spends the budget.
+		// The hook groups the backlog once, so the first grouping is the one timed. It
+		// takes a few milliseconds, under coverage too, about a hundredth of this bound.
+		const started = performance.now();
+		const groups = groupByModel(backlog) as Map<string, Array<{ id: string }>>;
+		const took = performance.now() - started;
+		expect(took, `grouped 50,000 in ${took.toFixed(1)} ms`).toBeLessThan(300);
+		expect([...groups.keys()]).toEqual([SONNET, HAIKU]);
+		expect(groups.get(SONNET)?.length).toBe(49_950);
+		expect(groups.get(SONNET)?.[1_000]?.id).toBe("msg_1001");
+		const haiku = groups.get(HAIKU)?.map((m) => m.id) ?? [];
+		expect(haiku.slice(0, 2)).toEqual(["msg_999", "msg_1999"]);
+	});
+
+	it("is linear: twice the backlog takes at most three times as long", async () => {
+		// @ts-expect-error TS7016: the hooks are plain .mjs, without type declarations.
+		const { groupByModel } = await import("../hooks/transcript.mjs");
 		// Appending in place is linear. Copying a model's array for every message, as
 		// the remainder once did, is quadratic, and took seconds at 50,000 messages:
 		// every settle point would spend its budget here before posting anything.
@@ -2034,11 +2062,6 @@ describe("the remainder's grouping by model", () => {
 			},
 			5_000,
 		);
-		expect([...groups.keys()]).toEqual([SONNET, HAIKU]);
-		expect(groups.get(SONNET)?.length).toBe(49_950);
-		expect(groups.get(SONNET)?.[1_000]?.id).toBe("msg_1001");
-		const haiku = groups.get(HAIKU)?.map((m) => m.id) ?? [];
-		expect(haiku.slice(0, 2)).toEqual(["msg_999", "msg_1999"]);
 	}, 60_000);
 });
 
