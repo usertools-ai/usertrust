@@ -2,6 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { useEffect, useRef, useState } from "react";
+import markUrl from "../../brand/usertrust-mark.svg?inline";
 import type { SummaryPayload } from "../shared/api.js";
 import { budgetAsOf, budgetDisplay, budgetSourceWord } from "../shared/budget-display.js";
 import {
@@ -66,7 +67,8 @@ function TopBar(props: {
 	return (
 		<header className="ut-top">
 			{props.kit && <KitMark />}
-			<span className="ut-bword">usertrust</span>
+			{/* Bundled into the page as a data URL (`?inline`): it shows offline and costs no request. */}
+			<img className="ut-logo" src={markUrl} alt="usertrust" height={24} decoding="async" />
 			<span className="ut-title">ledger</span>
 			{path !== null && (
 				<button
@@ -158,9 +160,9 @@ function BudgetFact(props: { s: SummaryPayload }): React.JSX.Element {
 					<span className="v">
 						{budget.pct.toFixed(1)}% <small>left</small>
 					</span>
-					{/* Decorative: the figure above it is the value. */}
+					{/* Decorative: the figure above it is the value. The fill is what is USED; the figure says what is left. */}
 					<div className="ut-meter" aria-hidden="true">
-						<i style={{ width: `${budget.pct}%`, background: `var(--${budget.fill})` }} />
+						<i style={{ width: `${budget.usedPct}%`, background: `var(--${budget.fill})` }} />
 					</div>
 					{s.remainingUt < 0 ? (
 						<span className="ut-why red">

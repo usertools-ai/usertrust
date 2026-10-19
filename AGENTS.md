@@ -51,8 +51,14 @@ are not. Each of the six names any other it depends on at exactly its own versio
 such as `"*"`: the release sets and checks those pins (docs/releasing.md, "Sibling dependencies
 are pinned").
 
-**No brand asset is committed to this repository**: no font file of any kind (Usertools Sans and
-every other face, first-party or OFL), no logo or mark, no lattice code. `site/` loads them at
+**No brand asset is committed to this repository**, with ONE settled exception: no font file of any
+kind (Usertools Sans and every other face, first-party or OFL), no logo or mark, no lattice code.
+The exception is `packages/ui/brand/usertrust-mark.svg`, the logo `usertrust-ui` bundles into its
+header so the dashboard shows it offline, and `packages/ui/brand/LICENSE` beside it. It is NOT
+Apache-2.0 (the LICENSE there and `TRADEMARKS.md` say so). `site/scripts/no-brand-assets.test.mts`
+allows those two paths by exact name (`BRAND_EXCEPTIONS`); a third file in that folder, or a second
+mark anywhere, fails it, and `packages/ui/tests/brand-mark.test.ts` pins the mark's sha256 so a
+modified mark fails too. A fork that modifies the mark must remove it (`TRADEMARKS.md`). `site/` loads them at
 runtime from the brand kit, `https://usertrust.ai/kit/`, served with `access-control-allow-origin: *`:
 `site/app/globals.css` and `site/app/r/brand.css` point `@font-face` at `kit/fonts/` with
 `font-display: swap` and system fallback stacks, and server-rendered images (`/og`, the receipt
