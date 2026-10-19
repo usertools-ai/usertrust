@@ -1204,9 +1204,14 @@ write, a successful renewal's `futimes`); a failed renewal never moves it. Past
 instead of renewing it, and the append's own check (in the same synchronous span as its ownership
 check, before the write) does the same if the timer has not run. Either way the append that meets it
 is refused with `AuditLeaseLapsedError` — degraded and dead-lettered like any failed append — and
-the lock leaves the registry and is unlinked if it is still this lock. The next append takes the
-vault afresh: a new lock (leased only if `futimes` works then), and the tail re-read from the log.
-A renewal that succeeds after the bound never revives the lapsed lease.
+the lock is unlinked if it is still this lock. The next append takes the vault afresh: a new lock
+(leased only if `futimes` works then), and the tail re-read from the log. A renewal that succeeds
+after the bound never revives the lapsed lease. Two edges: a lapsed lock whose file cannot be
+removed STAYS registered, marked lapsed, as the cleanup record (never renewed, never an owner, never
+a write; each append retries the removal and the first that succeeds goes on, and `release()`
+reports it if it still cannot); and an acquisition whose file is no longer its own (lost to another
+writer, or superseded by this writer's newer acquisition) is retired silently when its old lease
+runs out, so a healthy newer acquisition's append is never refused for it.
 *The margin.* An observer reclaims only after its OWN monotonic observation of an unchanged mtime for
 `max(30 s, 3 × leaseRenewMs)`, and it cannot see an mtime before it is set, so no observer reclaims
 earlier than `renewedAt + 30 s`. Its wall-clock condition gives the holder nothing (a clock step makes

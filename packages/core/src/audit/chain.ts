@@ -385,6 +385,12 @@ interface HeldLock {
 	renewedAt: number;
 	/** The code of the last renewal that failed since the last one that succeeded, for the refusal's message. */
 	renewalError?: string | undefined;
+	/**
+	 * The lease lapsed, and its file could not be removed: the entry stays ONLY as the cleanup record
+	 * ({@link lapseLease}). It is never renewed, never names an owner, and never authorizes a write;
+	 * the next append, and release, try the removal again.
+	 */
+	lapsed?: true;
 }
 
 /**
@@ -1123,11 +1129,11 @@ function startLeaseRenewal(): void {
 	leaseTimer.unref?.();
 }
 
-/** Stop the timer once no lock any writer here holds is leased. */
+/** Stop the timer once no lock any writer here holds is leased (and not lapsed). */
 function stopLeaseRenewalIfIdle(): void {
 	if (leaseTimer === undefined) return;
 	for (const locks of heldLocks.values()) {
-		for (const lock of locks.values()) if (lock.leased) return;
+		for (const lock of locks.values()) if (lock.leased && lock.lapsed !== true) return;
 	}
 	clearInterval(leaseTimer);
 	leaseTimer = undefined;
@@ -1142,9 +1148,18 @@ function renewLeases(): void {
 	const now = new Date();
 	for (const [writerId, locks] of heldLocks) {
 		for (const [identity, lock] of locks) {
-			if (!lock.leased) continue;
-			if (leaseLapsed(lock)) lapseLease(writerId, identity, lock);
-			else renewLease(lock, identity, writerId, now);
+			// A lapsed entry waiting for its file's removal: the next append, or release, retries it.
+			if (!lock.leased || lock.lapsed === true) continue;
+			if (!leaseLapsed(lock)) {
+				renewLease(lock, identity, writerId, now);
+				continue;
+			}
+			const outcome = lapseLease(writerId, identity, lock);
+			// A LOST acquisition (its file is no longer this lock: another writer took the vault, or this
+			// writer took it again under a new acquisition) is retired silently. Its loss is reported where
+			// it matters, by the next append's ownership check, and a report here would refuse an append
+			// under a healthy newer acquisition.
+			if (outcome !== "lost") lapsedLeases.set(writerId, lapseMessage(lock, outcome));
 		}
 	}
 }
@@ -1166,31 +1181,52 @@ function describeCode(code: string | undefined): string {
 }
 
 /**
- * Give up a lease that lapsed. The lock leaves the registry (it is not renewed again, and
- * `lockOwner()` no longer names it), and its file is removed if it is still this lock (inode AND
- * writerId; a lock another writer put there is left alone). Removed rather than left: this writer will
- * not write under it again, and a lock left in place would only keep this namespace's other
- * processes waiting on a live PID; its next append takes the vault afresh — a new lock, a new lease if
- * the mtime can be set, and the tail re-read from the log. A removal that fails leaves the file: it is
- * then a same-PID lock nobody here holds, which this process reclaims at that next append. The
- * reason is recorded for that append, which is refused with it.
+ * What giving up a lapsed lease did:
+ *  - `removed`: its file was this lock, and is gone; the entry left the registry.
+ *  - `lost`: its file is no longer this lock (absent, or another acquisition's): there is nothing of
+ *    this acquisition's to remove, and the entry left the registry.
+ *  - `stranded`: its file could not be read or removed (`code`). The entry STAYS, marked lapsed, as the
+ *    cleanup record: the next append and `release()` retry the removal, and a release that still
+ *    cannot remove it reports it (`AuditLockReleaseError`, the teardown warning).
  */
-function lapseLease(writerId: string, identity: string, lock: HeldLock): void {
+type LapseOutcome = "removed" | "lost" | { stranded: string };
+
+/**
+ * Give up a lease that lapsed. It is not renewed again, `lockOwner()` no longer names it, and it never
+ * authorizes a write again. Its file is removed if it is still this lock (inode AND writerId; a lock
+ * another writer put there is left alone). Removed rather than left: this writer will not write under
+ * it again, and a lock left in place would only keep this namespace's other processes waiting on a
+ * live PID. The writer's next append takes the vault afresh — a new lock, a new lease if the mtime can
+ * be set, and the tail re-read from the log.
+ */
+function lapseLease(writerId: string, identity: string, lock: HeldLock): LapseOutcome {
+	lock.lapsed = true;
+	stopLeaseRenewalIfIdle();
+	let outcome: LapseOutcome;
+	try {
+		const file = readLockFile(lock.path);
+		if (file?.identity === identity && file.writerId === writerId) {
+			unlinkSync(lock.path);
+			outcome = "removed";
+		} else {
+			outcome = "lost";
+		}
+	} catch (err) {
+		return { stranded: describeCode(errorCode(err)) };
+	}
 	const mine = heldLocks.get(writerId);
 	mine?.delete(identity);
 	if (mine?.size === 0) heldLocks.delete(writerId);
-	stopLeaseRenewalIfIdle();
-	let removed = "the lock was given up";
-	try {
-		const file = readLockFile(lock.path);
-		if (file?.identity === identity && file.writerId === writerId) unlinkSync(lock.path);
-	} catch (err) {
-		removed = `the lock could not be removed (${describeCode(errorCode(err))}) and is reclaimed at the next append`;
-	}
-	lapsedLeases.set(
-		writerId,
-		`Audit writer lease lapsed: no renewal of this writer's lock succeeded for ${secondsOf(performance.now() - lock.renewedAt)} (last renewal error: ${lock.renewalError === undefined ? "none — no renewal ran" : describeCode(lock.renewalError)}), more than the ${secondsOf(LEASE_HOLDER_BOUND_MS)} after which this writer stops: a writer in another PID namespace could begin to reclaim the lock ${secondsOf(LEASE_CONFIRM_MS)} after its last renewal. This append is refused so no takeover can land under a write; ${removed}. The next append takes the vault's lock afresh. Lock file: ${lock.path}`,
-	);
+	return outcome;
+}
+
+/** The refusal for a lapsed lease, naming its cause and what became of its lock. */
+function lapseMessage(lock: HeldLock, outcome: LapseOutcome): string {
+	const what =
+		typeof outcome === "object"
+			? `the lock could not be removed (${outcome.stranded}): each append retries, and release reports it if it still cannot`
+			: "the lock was given up";
+	return `Audit writer lease lapsed: no renewal of this writer's lock succeeded for ${secondsOf(performance.now() - lock.renewedAt)} (last renewal error: ${lock.renewalError === undefined ? "none — no renewal ran" : describeCode(lock.renewalError)}), more than the ${secondsOf(LEASE_HOLDER_BOUND_MS)} after which this writer stops: a writer in another PID namespace could begin to reclaim the lock ${secondsOf(LEASE_CONFIRM_MS)} after its last renewal. This append is refused so no takeover can land under a write; ${what}. The next append takes the vault's lock afresh. Lock file: ${lock.path}`;
 }
 
 /**
@@ -1275,7 +1311,9 @@ function currentAcquisition(logPath: string, writerId: string): string | undefin
 		const file = readLockFile(lockPath);
 		if (file === undefined || !verifyOwnLockFile(file, lockPath, writerId)) return undefined;
 		const lock = heldLocks.get(writerId)?.get(file.identity);
-		return lock === undefined || leaseLapsed(lock) ? undefined : lock.acquisitionId;
+		return lock === undefined || lock.lapsed === true || leaseLapsed(lock)
+			? undefined
+			: lock.acquisitionId;
 	} catch {
 		return undefined;
 	}
@@ -1323,13 +1361,18 @@ function acquireProcessLock(logPath: string, writerId: string, leasable: boolean
 			// write after it (no await between them): renewals that failed for too long stop the write
 			// before any observer can reclaim the lock under it.
 			const lock = heldLocks.get(writerId)?.get(file.identity);
-			if (lock !== undefined && leaseLapsed(lock)) {
-				lapseLease(writerId, file.identity, lock);
-				const reason = lapsedLeases.get(writerId) ?? "Audit writer lease lapsed.";
-				lapsedLeases.delete(writerId);
-				throw new AuditLeaseLapsedError(reason);
+			if (lock !== undefined && (lock.lapsed === true || leaseLapsed(lock))) {
+				// Lapsed NOW: refused. Lapsed earlier (already reported) with its file still here: the
+				// removal is retried, and only once it succeeds does this append go on, to take the vault
+				// afresh below.
+				const reported = lock.lapsed === true;
+				const outcome = lapseLease(writerId, file.identity, lock);
+				if (!reported || typeof outcome === "object") {
+					throw new AuditLeaseLapsedError(lapseMessage(lock, outcome));
+				}
+			} else {
+				return false;
 			}
-			return false;
 		}
 	}
 

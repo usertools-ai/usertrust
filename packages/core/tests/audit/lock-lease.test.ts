@@ -42,6 +42,8 @@ const proc = vi.hoisted(() => ({
 	futimesCalls: 0,
 	/** The content of every lock this run created: read from the temp file as it is linked into place. */
 	linkedLocks: [] as string[],
+	/** When set, unlinking a lock file (`.audit-writer.lock`) fails with this code. */
+	unlinkLockError: undefined as string | undefined,
 }));
 vi.mock("node:fs", async (importOriginal) => {
 	const fs = await importOriginal<typeof import("node:fs")>();
@@ -75,7 +77,15 @@ vi.mock("node:fs", async (importOriginal) => {
 		}
 		return result;
 	}) as typeof fs.linkSync;
-	const wrapped = { readFileSync, readlinkSync, futimesSync, linkSync };
+	const unlinkSync = ((path: Parameters<typeof fs.unlinkSync>[0]) => {
+		if (proc.unlinkLockError !== undefined && String(path).endsWith(".audit-writer.lock")) {
+			throw Object.assign(new Error(`${proc.unlinkLockError}: injected unlink`), {
+				code: proc.unlinkLockError,
+			});
+		}
+		return fs.unlinkSync(path);
+	}) as typeof fs.unlinkSync;
+	const wrapped = { readFileSync, readlinkSync, futimesSync, linkSync, unlinkSync };
 	return { ...fs, ...wrapped, default: { ...fs, ...wrapped } };
 });
 
@@ -118,6 +128,7 @@ afterEach(() => {
 	proc.futimesError = undefined;
 	proc.futimesCalls = 0;
 	proc.linkedLocks = [];
+	proc.unlinkLockError = undefined;
 });
 proc.bootId = { value: `${THIS_BOOT}\n` };
 proc.pidNs = { value: THIS_NS };
@@ -700,5 +711,76 @@ describe("a holder whose renewals fail stops writing BEFORE any observer could r
 		quiet();
 		await expect(append(held, 2)).rejects.toBeInstanceOf(holder.AuditLeaseLapsedError);
 		expect(linesOf(v)).toBe(1);
+	});
+
+	it("P2: a lapsed lock whose file cannot be removed keeps its cleanup record — it never authorizes a write, each append retries the removal, and the first that succeeds takes the vault afresh", async () => {
+		vi.useFakeTimers({ toFake: ["performance", "setInterval", "clearInterval"] });
+		const chain = await processIn(THIS_NS);
+		const v = vault();
+		const { writer } = acquire(chain, v);
+		await append(writer, 1);
+		proc.futimesError = "EIO";
+		proc.unlinkLockError = "EIO";
+		vi.advanceTimersByTime(HOLDER_BOUND_MS + RENEW_MS);
+		expect(existsSync(lockOf(v)), "control: the removal failed, the file is still there").toBe(
+			true,
+		);
+		quiet();
+		await expect(append(writer, 2)).rejects.toThrow(/could not be removed \(EIO\)/);
+		await expect(append(writer, 3), "still stranded: still refused").rejects.toBeInstanceOf(
+			chain.AuditLeaseLapsedError,
+		);
+		expect(writer?.lockOwner?.(), "a lapsed lock names no owner").toBeUndefined();
+		expect(linesOf(v)).toBe(1);
+		proc.unlinkLockError = undefined;
+		await append(writer, 4);
+		expect(linesOf(v)).toBe(2);
+		expect(readLock(v)).not.toHaveProperty("leaseRenewMs");
+		chainIntact(v, 2);
+	});
+
+	it("P2: …and a release that still cannot remove it REPORTS it (AuditLockReleaseError), never forgets it", async () => {
+		vi.useFakeTimers({ toFake: ["performance", "setInterval", "clearInterval"] });
+		const chain = await processIn(THIS_NS);
+		const v = vault();
+		const writer = chain.createAuditWriter(v, { lockAtCreate: true });
+		await append(writer, 1);
+		proc.futimesError = "EIO";
+		proc.unlinkLockError = "EIO";
+		quiet();
+		vi.advanceTimersByTime(HOLDER_BOUND_MS + RENEW_MS);
+		expect(existsSync(lockOf(v)), "control: stranded").toBe(true);
+		expect(() => writer.release()).toThrow(chain.AuditLockReleaseError);
+		proc.unlinkLockError = undefined;
+		rmSync(lockOf(v));
+	});
+
+	it("P2: an acquisition SUPERSEDED by this writer's newer one (lost while stalled, then taken again) is retired silently when its old lease runs out — the healthy newer acquisition's appends are not refused", async () => {
+		// The monotonic clock is a plain stub, so it can move without firing the renewal timer (a stalled
+		// holder); the timer fires only when the test advances it.
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		let mono = 1_000_000;
+		vi.spyOn(performance, "now").mockImplementation(() => mono);
+		const holder = await processIn(OTHER_NS);
+		const v = vault();
+		const held = acquire(holder, v).writer;
+		await append(held, 1);
+		utimesSync(lockOf(v), TEN_MINUTES_AGO(), TEN_MINUTES_AGO());
+		const bytes = readFileSync(lockOf(v), "utf-8");
+		const taker = await processIn(THIS_NS);
+		expectHeld(taker, v, bytes);
+		mono += CONFIRM_MS + 1;
+		const { writer: took } = acquire(taker, v);
+		expect(took, "control: the taker reclaimed the lock").toBeDefined();
+		took?.release();
+		// The holder wakes, and its append takes the vault again: a new acquisition.
+		await append(held, 2);
+		expect(readLock(v).pidNs).toBe(OTHER_NS);
+		// Its timer now runs: the OLD acquisition's lease is long past the bound.
+		vi.advanceTimersByTime(RENEW_MS);
+		await append(held, 3);
+		expect(held?.isDegraded(), "no append was refused").toBe(false);
+		expect(linesOf(v)).toBe(3);
+		chainIntact(v, 3);
 	});
 });
