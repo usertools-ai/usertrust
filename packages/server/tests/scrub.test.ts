@@ -39,4 +39,14 @@ describe("scrubForStderr", () => {
 		expect(out).toBe(`${"x".repeat(MAX_PRINTED_CHARS - 1)}y…`);
 		expect(out).not.toContain("[2J");
 	});
+
+	it("clips to the max it is given, in code points, and not at all at Infinity", () => {
+		expect(scrubForStderr("ab\x1b[2Jcd", 3)).toBe("abc\u2026");
+		// Two code units each: three of them fit a max of 3, though their length is 6.
+		const face = String.fromCodePoint(0x1f600);
+		expect(scrubForStderr(face.repeat(3), 3)).toBe(face.repeat(3));
+		expect(scrubForStderr(face.repeat(3), 2)).toBe(`${face.repeat(2)}\u2026`);
+		const long = "x".repeat(MAX_PRINTED_CHARS * 3);
+		expect(scrubForStderr(`${long}\x1b[2J`, Number.POSITIVE_INFINITY)).toBe(long);
+	});
 });

@@ -63,6 +63,7 @@ Each string is tested against these patterns. A match anywhere inside the string
 | `jwt` | `eyJ...` three-part JSON Web Tokens |
 | `private_key` | a PEM `-----BEGIN ... PRIVATE KEY-----` header |
 | `generic_secret` | Slack (`xox...`), SendGrid (`SG.`), GitLab (`glpat-`) and npm (`npm_`) tokens, and hex strings of 64 or more characters |
+| `unscannable` | not a pattern: a value the patterns could not finish reading, because V8's regular-expression engine ran out of stack on a run of millions of characters. It is treated as holding a secret: refused under `"block"` and replaced whole with `[REDACTED:unscannable]` under `"redact"`. The values beside it are checked as usual |
 
 **Not detected:** personal names, postal addresses, dates of birth, IPv6 addresses, national identifiers other than the US Social Security number, bank account and IBAN numbers, health information, and any value written in a form the patterns above do not match (for example `name at example dot com`, or a number split across fields).
 
