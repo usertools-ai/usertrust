@@ -10,7 +10,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -92,6 +92,8 @@ describe("a vault only usertrust 5.0.0 wrote", () => {
 			const bytes = readFileSync(join(vaultPath, file.path));
 			expect(createHash("sha256").update(bytes).digest("hex"), file.path).toBe(file.sha256);
 		}
+		// At rest after a clean shutdown, 5.0.0 leaves no writer lock: its destroy() released it.
+		expect(VAULT_5_0_0.map((f) => f.path)).not.toContain("audit/.audit-writer.lock");
 		expect(verifyVault(vaultPath)).toMatchObject({
 			valid: true,
 			errors: [],
@@ -208,5 +210,41 @@ describe("a vault only usertrust 5.0.0 wrote", () => {
 			{ timeout: 10_000, interval: 100 },
 		);
 		expect(shown?.budgetWrittenAt).not.toBe(OLD);
+	});
+
+	it("red-first (a confident wrong figure): while a 5.0.0 process holds the vault (its lock is there), the new server's budget is not published; the budget stays unknown", {
+		timeout: 20_000,
+	}, async () => {
+		// The lock a 5.0.0 writer holds: its own format (pid, writer id, start), with no lease. A rolling upgrade: that
+		// process still runs, enforcing a budget of its own, and never publishes a record.
+		const lock = join(vaultPath, "audit", ".audit-writer.lock");
+		const content = JSON.stringify({
+			pid: 1,
+			writerId: "00000000-0000-4000-8000-000000000000",
+			startedAt: "2026-10-01T00:00:00.000Z",
+		});
+		writeFileSync(lock, content, { mode: 0o600 });
+		ui = await createUiServer(join(stateDir, TENANT), { port: 0 });
+		api = createUsertrustServer({
+			config: serverConfig(VAULT_5_0_0_BUDGET + 10_000),
+			log: () => {},
+		});
+		const { port } = await api.listen();
+		// The new server's governor is running (its status answers), and it published nothing.
+		expect(await status(port)).toBe(VAULT_5_0_0_BUDGET + 10_000 - VAULT_5_0_0_SPENT);
+		expect(existsSync(join(vaultPath, "effective-budget.json"))).toBe(false);
+		expect(loadState(vaultPath).summary).toMatchObject({
+			budget: null,
+			budgetSource: "unpublished",
+			remainingUt: null,
+		});
+		// After more than two of the dashboard's polls: still unknown, never the new server's figure.
+		await new Promise((r) => setTimeout(r, 2_500));
+		expect(await summary(ui.port)).toMatchObject({
+			budget: null,
+			budgetSource: "unpublished",
+			remainingUt: null,
+		});
+		expect(readFileSync(lock, "utf-8")).toBe(content);
 	});
 });

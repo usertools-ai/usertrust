@@ -214,10 +214,38 @@ function stagingPath(vaultDir: string): string {
 }
 
 /**
- * Publish WITHOUT the vault's writer lock, and only where nothing is at the record's path: the record is staged whole
- * and then LINKED into place, and a link fails if the name exists, so a record that appeared meanwhile stands. Never
- * moves, replaces or removes anything at the record's path, never throws and never warns: a failure leaves the path as
- * it was (readers of an empty slot say not yet published, as before this publish existed).
+ * The audit writer's lock file, relative to the `.usertrust` directory: `audit/.audit-writer.lock`, the name every
+ * release's writer (5.0.0 included) creates while it holds the vault (`LOCK_FILE_NAME` in audit/chain.ts; a test pins
+ * the two together).
+ */
+const WRITER_LOCK = join("audit", ".audit-writer.lock");
+
+/** True only if nothing is at `path` (lstat: a dangling symbolic link is something). Any other error is "something". */
+function nothingAt(path: string): boolean {
+	try {
+		lstatSync(path);
+		return false;
+	} catch (err) {
+		return (err as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
+	}
+}
+
+/**
+ * Publish WITHOUT the vault's writer lock, and only when no other writer can be enforcing on the vault and nothing is
+ * at the record's path. The record is staged whole and then LINKED into place, and a link fails if the name exists, so
+ * a record that appeared meanwhile stands. Never moves, replaces or removes anything at the record's path, never throws
+ * and never warns: a failure leaves the path as it was (readers of an empty slot say not yet published).
+ *
+ * A writer lock file that exists is another writer's: this is called only when this process does not hold the lock
+ * (`lockOwner()` reads none). That writer may be a release that never publishes a record (5.0.0), enforcing a budget of
+ * its own, so this process's budget is not published beside it: readers stay at not yet published, never a confident
+ * wrong figure. A lock file at all, stale or live, counts: telling a crashed writer's from a live one is the lock's own
+ * job, done at the first append, which then publishes under the lock.
+ *
+ * Residual, declared: the lock is checked just before the link, and a writer that takes it after the check is not seen.
+ * A writer takes it lazily, at its first append, so an older-release process that is running but has not yet appended
+ * holds no lock yet; if it then appends first, it holds the lock and enforces its budget while this record says this
+ * process's, for as long as it holds the lock.
  */
 function publishIntoEmptySlot(
 	vaultDir: string,
@@ -226,17 +254,13 @@ function publishIntoEmptySlot(
 ): void {
 	const io: EffectiveRecordIo = { ...REAL_IO, ...seams };
 	const target = join(vaultDir, EFFECTIVE_BUDGET_FILE);
-	try {
-		// Anything at the path (a record, or anything else) stands: nothing is staged for it. lstat, so a dangling
-		// symbolic link counts as something there too.
-		lstatSync(target);
-		return;
-	} catch (err) {
-		if ((err as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") return;
-	}
+	// Anything at the record's path (a record, or anything else) stands: nothing is staged for it.
+	if (!nothingAt(target)) return;
 	const tmp = stagingPath(vaultDir);
 	try {
 		io.write(tmp, recordText(body));
+		// Checked last, right before the link: another writer's lock means another budget may be enforced.
+		if (!nothingAt(join(vaultDir, WRITER_LOCK))) return;
 		io.link(tmp, target);
 	} catch {
 		// not published: the slot is as it was

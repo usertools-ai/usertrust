@@ -670,6 +670,83 @@ describe("a publish without the lock", () => {
 	});
 });
 
+// A writer lock this process does not hold is another writer's, which may enforce a budget of its own: a release that
+// never publishes a record (5.0.0), in a rolling upgrade. Publishing this process's budget into the empty slot beside it
+// would show a confident wrong figure where readers said "unknown". So, without the lock, nothing is published while a
+// writer lock file exists, whatever it holds: telling a stale one from a live one is the lock's job, at the first append.
+describe("a publish without the lock, beside another writer's lock", () => {
+	const none = (): undefined => undefined;
+	const lockPath = (): string => join(vaultDir, "audit", ".audit-writer.lock");
+	const stagingFiles = (): string[] => readdirSync(vaultDir).filter((f) => f.endsWith(".tmp"));
+	const OLD = "2026-01-02T03:04:05.000Z";
+
+	beforeEach(() => {
+		mkdirSync(join(vaultDir, "audit"), { recursive: true, mode: 0o700 });
+	});
+
+	it.each([
+		[
+			"a 5.0.0-format lock (pid, writer id, start; no lease)",
+			JSON.stringify({ pid: 1, writerId: "00000000-0000-4000-8000-000000000000", startedAt: OLD }),
+		],
+		["an empty lock file", ""],
+		["a lock file that is not JSON", "{torn"],
+	] as const)(
+		"red-first (a foreign writer's budget): %s and an empty slot: nothing is published, the budget stays unknown",
+		(_n, content) => {
+			writeFileSync(lockPath(), content, { mode: 0o600 });
+			const a = registerEnforcedBudget(vaultDir, 2_000, none);
+			expect(readEffectiveBudget(vaultDir)).toEqual({ state: "absent" });
+			expect(loadBudgetConfig(vaultDir).source).toBe("unpublished");
+			a.release();
+			expect(readEffectiveBudget(vaultDir)).toEqual({ state: "absent" });
+			expect(stagingFiles()).toEqual([]);
+			// The lock is never touched.
+			expect(readFileSync(lockPath(), "utf-8")).toBe(content);
+		},
+	);
+
+	it("a dangling symbolic link at the lock's path counts as a lock", () => {
+		symlinkSync(join(base, "nowhere"), lockPath());
+		const a = registerEnforcedBudget(vaultDir, 2_000, none);
+		expect(readEffectiveBudget(vaultDir)).toEqual({ state: "absent" });
+		a.release();
+	});
+
+	it("red-first (checked too early): a lock that lands after the staging stops the link", () => {
+		const write = (path: string, data: string): void => {
+			writeFileSync(path, data, { mode: 0o600, flag: "wx" });
+			writeFileSync(lockPath(), "{}", { mode: 0o600 });
+		};
+		const a = registerEnforcedBudget(vaultDir, 2_000, none, { write });
+		expect(readEffectiveBudget(vaultDir)).toEqual({ state: "absent" });
+		expect(stagingFiles()).toEqual([]);
+		a.release();
+	});
+
+	it("the lock checked is the one a writer takes: the same path", async () => {
+		const h = openSharedAuditWriter(base);
+		expect(existsSync(lockPath())).toBe(false);
+		await h.appendEvent({ kind: "llm_call", actor: "local", data: {} });
+		expect(existsSync(lockPath())).toBe(true);
+		h.release();
+		expect(existsSync(lockPath())).toBe(false);
+	});
+
+	it("this process's own lock: a governor whose process holds it publishes under it, as before", async () => {
+		const a = await createGovernor({ dryRun: true, vaultBase: base, budget: 3_000 });
+		await appendOnce(a);
+		expect(existsSync(lockPath())).toBe(true);
+		// An empty slot while this process holds the lock: a governor starting now publishes, under the lock.
+		rmSync(join(vaultDir, EFFECTIVE_BUDGET_FILE));
+		const b = await createGovernor({ dryRun: true, vaultBase: base, budget: 3_000 });
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 3_000, source: "governor" });
+		expect(rawRecord().pid).toBe(process.pid);
+		await b.destroy();
+		await a.destroy();
+	});
+});
+
 // The failure path's own warning must not fail the governor (rule (b) of the review's stop rule): stderr can fail where
 // the record did. With the lock held, a second governor's start and the first's destroy both publish.
 describe("the record's warning is best-effort too", () => {
