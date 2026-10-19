@@ -14,14 +14,14 @@
  * - `unknown` otherwise: no reply yet, the child dead or evicted and waiting to respawn, a spawn
  *   that failed, a probe answered with an error, or a child that is not ready.
  *
- * A child's first probe is outstanding from the moment it is spawned, and is sent to it once it
- * says it is ready (a message sent before the child listens could be lost), so its deadline counts
- * from the spawn. A child that is not ready within `ledgerTimeoutMs` (say its TigerBeetle load
- * hangs) never had the ledger asked, so that is the observer failing, not the ledger: it reads
- * `unknown` (`not_ready`), is killed, and is respawned after the cooldown. Then a probe every 30 s
- * while none is outstanding, and at most once per
- * `ledgerTimeoutMs` more when `/v1/health` asks (`poke`). A child that exits, or a
- * spawn that fails, is respawned after `respawnCooldownMs`, counted from the exit. Nothing here
+ * A child's first probe is sent to it once it says it is ready (a message sent before the child
+ * listens could be lost), and its deadline counts from that send: a slow start is not a late
+ * answer. A child not ready within `ledgerTimeoutMs` of its spawn (say its TigerBeetle load hangs)
+ * never had the ledger asked, so that is the observer failing, not the ledger: it reads `unknown`
+ * (`not_ready`), is killed, and is respawned after the cooldown. Then a probe every 30 s while
+ * none is outstanding, and at most once per `ledgerTimeoutMs` more when `/v1/health` asks
+ * (`poke`). A child that exits, or a spawn that fails, is respawned after `respawnCooldownMs`,
+ * counted from the exit. Nothing here
  * holds this process open: the child, its IPC channel and every timer (the keep-alive, a pending
  * respawn and a child's ready deadline) are unref'd, and the child
  * has no stdio pipe (a live pipe keeps a finished parent alive even after `unref()`).
@@ -226,7 +226,8 @@ export class LedgerHealth {
 			return;
 		}
 		t.child = child;
-		// The first probe is outstanding from the spawn: its deadline counts from now.
+		// The first probe is pending from the spawn, but is sent (and its deadline starts, re-stamped
+		// in `onMessage`) only once the child says it is ready. The not-ready deadline counts from here.
 		const now = performance.now();
 		t.outstanding = { n: ++t.seq, sentAt: now };
 		t.lastProbeAt = now;
@@ -271,8 +272,13 @@ export class LedgerHealth {
 		if (m.ready === true) {
 			t.ready = true;
 			this.clearReadyTimer(t);
-			if (t.outstanding !== undefined && !t.sent) this.send(t, t.outstanding.n);
-			else this.probe(t);
+			if (t.outstanding !== undefined && !t.sent) {
+				// The first probe goes out now: its deadline counts from this send, not from the spawn.
+				const now = performance.now();
+				t.outstanding.sentAt = now;
+				t.lastProbeAt = now;
+				this.send(t, t.outstanding.n);
+			} else this.probe(t);
 		} else if (typeof m.reply === "number") {
 			if (t.outstanding?.n !== m.reply) return;
 			t.outstanding = undefined;
