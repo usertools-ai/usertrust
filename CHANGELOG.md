@@ -9,9 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Read before upgrading
 
-- **Results can change for existing callers.** The first two entries under Added are new detections: text that 5.0.5 reported clean can now be flagged under `pii: "warn"`, blocked under `pii: "block"` and rewritten under `pii: "redact"`. No option, default or output shape changed, and no export was removed or renamed, so no code change is needed. Text 5.0.5 flagged is still flagged, except the placeholders described under Fixed.
+- **A new detection type and injection pattern, `unscannable`, can appear in results.** It marks a value the detectors could not finish reading (see Added). Where a detector would have thrown `RangeError` on such a value, `detectPII` and `redactPII` now report it as type `unscannable`, `pii: "redact"` replaces it with `[REDACTED:unscannable]`, and `detectInjection` reports it at score 1, so `pii: "block"` and `injection: "block"` refuse the call. Code that handles each type name or pattern name it knows (to label or route a detection, say) meets one more.
 
-- **A new detection type and injection pattern, `unscannable`, can appear in results.** It marks a value the detectors could not finish reading (see Added). Where 5.0.5 threw `RangeError` on such a value, `detectPII` and `redactPII` now report it as type `unscannable`, `pii: "redact"` replaces it with `[REDACTED:unscannable]`, and `detectInjection` reports it at score 1, so `pii: "block"` and `injection: "block"` refuse the call. Code that handles each type name or pattern name it knows (to label or route a detection, say) meets one more.
+### Added
+
+- **A value the detectors cannot finish reading is reported as `unscannable`: never thrown, never passed as clean.** V8's regular-expression engine throws `RangeError` ("Maximum call stack size exceeded") on some pattern shapes over a run of millions of characters. Under Fixed, every such shape the detectors had is removed; this is the backstop for any shape that is missed or added later.
+  - `detectPII` reports the type `unscannable` at that value's path, and `redactPII` (`pii: "redact"`) replaces that value whole with `[REDACTED:unscannable]`. The values beside it are scanned and redacted as usual. If the walk itself cannot finish, the whole data is reported as `unscannable`, and `redactPII` returns `[REDACTED:unscannable]` in its place.
+  - `detectInjection` reports the pattern `unscannable` at that value's path, or for the whole data, at score 1. That includes a value that refers to itself, on which `detectInjection` threw `RangeError` before.
+  - Only `RangeError` is caught. Any other error still throws, so a bug is never reported as an unscannable value.
+  - The name is exported as `UNSCANNABLE`.
+
+### Fixed
+
+- **`usertrust-server` logged a very long error message as "(the error could not be read)".** Before writing an internal error to its log, the server redacts api-key values, and the pattern it used could not finish on an unclosed quoted value of about 10 million characters, so the line lost the error's reason. A regular expression now finds only where a value starts, and a loop finds where a quoted one ends: it reads a message of any length, and redacts exactly what the pattern did. If a pattern still cannot finish, the message is replaced by `[redacted: the message could not be scanned]`.
+
+- **`usertrust-server` could log the first part of the caller's own key.** The server replaces the caller's key in an internal error's message before and after removing escape sequences and control characters, so a key split by one is still found once it is removed. But the message was clipped to 4,096 characters between the removal and the second replacement: a split key that reached across the clip was cut first, and its first part was logged as it was. The key is now replaced, and the patterns run, on the whole message both before and after the removal, and the message is clipped only after that.
+
+- **`usertrust-server` could log the second part of a caller's key that a line break or other whitespace split.** When an error's message quoted the caller's key with a line break, a tab or a control character inside it (in place of a space the key holds, or within a word, as a hard-wrapped key has), the plain replacement did not find it, and the `Bearer` or api-key pattern, if any, then took the key's first part and left the rest in the log line; with neither, the whole key was logged. The caller's key is now found with any run of whitespace or control characters, or none, between any two of its characters. It is found on the same text as the `Bearer` and api-key patterns, before anything is replaced, so neither can take part of the other's match: a caller's key that was, or held, the word `Bearer` or an api-key name no longer replaces that word and leaves the token after it in the log line.
+
+## [5.1.0] - 2026-10-18
+
+### Read before upgrading
+
+- **Results can change for existing callers.** The two entries under Added are new detections: text that 5.0.5 reported clean can now be flagged under `pii: "warn"`, blocked under `pii: "block"` and rewritten under `pii: "redact"`. No export, option, default or output shape changed, so no code change is needed. Text 5.0.5 flagged is still flagged, except the placeholders described under Fixed.
 
 ### Added
 
@@ -28,23 +48,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   A value flagged before is still flagged, and redaction still replaces the whole value. Any other character stays as it is, including superscript, subscript, circled, parenthesized and mathematical letters and digits: a footnote marker glued to a number would otherwise read as one more digit and turn it into a phone, SSN or card number. So a value written entirely in superscripts is not read. The view is never more than three times the value's length, and the scan stays linear (full NFKC can turn one character into 18). The view's 1.1 MB lookup table is allocated with the first value that is not ASCII, not when the module is imported.
 
-- **A value the detectors cannot finish reading is reported as `unscannable`: never thrown, never passed as clean.** V8's regular-expression engine throws `RangeError` ("Maximum call stack size exceeded") on some pattern shapes over a run of millions of characters. Under Fixed, every such shape the detectors had is removed; this is the backstop for any shape that is missed or added later.
-  - `detectPII` reports the type `unscannable` at that value's path, and `redactPII` (`pii: "redact"`) replaces that value whole with `[REDACTED:unscannable]`. The values beside it are scanned and redacted as usual. If the walk itself cannot finish, the whole data is reported as `unscannable`, and `redactPII` returns `[REDACTED:unscannable]` in its place.
-  - `detectInjection` reports the pattern `unscannable` at that value's path, or for the whole data, at score 1. That includes a value that refers to itself, on which `detectInjection` threw `RangeError` before.
-  - Only `RangeError` is caught. Any other error still throws, so a bug is never reported as an unscannable value.
-  - The name is exported as `UNSCANNABLE`.
-
 ### Fixed
 
 - **`detectPII`, `redactPII` and `detectInjection` could throw `RangeError` on inputs containing a very long run of letters or digits.** From about 6 million characters in one run (6 MB of plain text; a run of `b` was enough), V8's regular-expression engine ran out of stack on the patterns with an open counted quantifier (`[a-z]{20,}` and the like), and the scan threw "Maximum call stack size exceeded" instead of returning. That covered the 64-character hex rule, the 16-or-more digit rule, every token prefix with a minimum length (`sk-`, `ghp_`, `ghu_`, `npm_`, `glpat-`, `Bearer`, JWTs, `whsec_` and the rest), and the base64 rule in injection detection. Each is now written as the minimum count followed by an open run (`[a-z]{20}[a-z]*`), which matches exactly the same text, and detection completes at 10 million characters. A test fails on any open counted quantifier in the packages' source, so one cannot come back unnoticed.
 
-- **`usertrust-server` logged a very long error message as "(the error could not be read)".** Before writing an internal error to its log, the server redacts api-key values, and the pattern it used could not finish on an unclosed quoted value of about 10 million characters, so the line lost the error's reason. A regular expression now finds only where a value starts, and a loop finds where a quoted one ends: it reads a message of any length, and redacts exactly what the pattern did. If a pattern still cannot finish, the message is replaced by `[redacted: the message could not be scanned]`.
-
-- **`usertrust-server` could log the first part of the caller's own key.** The server replaces the caller's key in an internal error's message before and after removing escape sequences and control characters, so a key split by one is still found once it is removed. But the message was clipped to 4,096 characters between the removal and the second replacement: a split key that reached across the clip was cut first, and its first part was logged as it was. The key is now replaced, and the patterns run, on the whole message both before and after the removal, and the message is clipped only after that.
-
-- **`usertrust-server` could log the second part of a caller's key that a line break or other whitespace split.** When an error's message quoted the caller's key with a line break, a tab or a control character inside it (in place of a space the key holds, or within a word, as a hard-wrapped key has), the plain replacement did not find it, and the `Bearer` or api-key pattern, if any, then took the key's first part and left the rest in the log line; with neither, the whole key was logged. The caller's key is now found with any run of whitespace or control characters, or none, between any two of its characters. It is found on the same text as the `Bearer` and api-key patterns, before anything is replaced, so neither can take part of the other's match: a caller's key that was, or held, the word `Bearer` or an api-key name no longer replaces that word and leaves the token after it in the log line.
-
 - **A placeholder after a prefix 5.0.5 added is no longer reported as a secret.** 5.0.5 flagged placeholder values such as `rk_live_XXXX...`: one capital, repeated, satisfied the capital rule those prefixes take. The payload after each of them must now also hold at least four distinct characters. This covers `ghu_`, the stateless `ghs_` and fine-grained `github_pat_` GitHub tokens, `ASIA`, `rk_live_`, `rk_test_`, `sk_org_`, `xapp-`, `xwfp-`, `xoxe-<n>-`, and GitLab's twelve prefixes besides `glpat-`. The prefixes released before 5.0.5 are unchanged.
+
+### Known issues
+
+These remain open in this release:
+
+- A ledger-backed usertrust-server stopped by SIGINT or SIGTERM with a pending hold, or with an authorize still reserving, can exit before ending it: the hold or reservation may stay reserved until the ledger's 300 s timeout, and its release may not be recorded.
+
+- An eviction learned in the instant between a governor's shutdown request and the `destroy()` that follows it (no `await` between them) still aborts the process. The voids, audit flush and lock release have already run. What is lost is the exit status (134, which a supervisor reads as a crash) and anything the process does after `destroy()`.
+
+- `GET /v1/health` still reports `ok` while the ledger is down, so a monitor cannot read an outage from health in this release. Read the `503 ledger_unavailable` answers on `POST /v1/authorize` instead.
+
+- `/v1/settle`, `/v1/abort` and `/v1/release` still wait for the ledger without a bound during an outage, and complete when it returns. `ledgerTimeoutMs` applies to `POST /v1/authorize` only.
+
+- An authorize that ends without a ledger reply (an evicted client session) may still have reserved, and that reservation expires at the hold timeout (300 seconds).
+
+- A tenant's authorizes are served one at a time, so a burst counts against `ledgerTimeoutMs` too. Measured on an Apple M4 Pro against a local single-node TigerBeetle, the default 5 s deadline was reached at roughly 350 concurrent authorizes for one tenant, and a slower or remote ledger reaches it sooner. A tenant that issues many concurrent authorizes should raise `ledgerTimeoutMs`.
+
+- A `TrustTBClient` whose session the cluster evicted while it was idle still aborts the process when `TrustTBClient.destroy()` is called directly on it, with no request since. Make one ledger request before `destroy()`, or end the process with `process.exit()` without calling `destroy()`.
+
+- A process that holds an evicted ledger client it has dropped does not exit on its own after `destroy()`. End such a process with `process.exit()` after `destroy()`.
+
+- A Google request field that only your client's `@google/genai` version reads is not sent. Keep the `@google/genai` that usertrust resolves at the same version as your client's.
+
+- In `trust()`, a provider count that is present but not a count (a string, NaN or a negative) still costs the estimate exactly, even when the call's other counts are usable.
+
+This list is not complete. LIMITATIONS.md gives the full account: section 13, "A ledger-backed server refuses authorizes while its ledger is unreachable, health still reports `ok`, and a hold it releases on SIGINT or SIGTERM may not be audited", and section 14, "A ledger client the cluster evicted cannot be released, and keeps its process from exiting on its own".
 
 ## [5.0.5] - 2026-10-18
 
