@@ -1251,7 +1251,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	// 2. Initialize subsystems
 	const vaultPath = vaultBase;
 	// This governor's budget on its vault's record (budget/effective-record.ts); set once it has started. Its first
-	// successful append means this process holds the vault's writer lock, which is when the record may be published.
+	// successful append means this process holds the vault's writer lock, which is when the record may be replaced.
 	let enforcedBudget: EnforcedBudgetRegistration | undefined;
 	const audit: AuditWriter =
 		(isTestEnv ? opts?._audit : undefined) ??
@@ -2975,8 +2975,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	// The budget this governor ENFORCES, recorded for vault readers (the ledger UI, inspect, health, report): they see
 	// only the vault, and the budget may have come from opts, a config file outside it, or the default. Registered LAST,
 	// once the governor is fully initialised: a start that fails later (an invalid policy) enforces nothing and must not
-	// replace the record of a governor that is running. Published only while this process holds the vault's writer lock
-	// (from the first successful append), so a process that never gets the lock never overwrites the holder's record.
+	// replace the record of a governor that is running. Published here, at the start: a vault with no record (a new one,
+	// or one only an earlier release wrote) gets this governor's budget now, not at its first call. An existing record
+	// is replaced only while this process holds the vault's writer lock (from the first successful append), so a process
+	// that never gets the lock never overwrites the holder's record.
 	// Advisory: it never throws, and a failed write removes any earlier record rather than leave a stale one.
 	enforcedBudget = registerEnforcedBudget(join(vaultBase, VAULT_DIR), config.budget, () =>
 		audit.lockOwner?.(),

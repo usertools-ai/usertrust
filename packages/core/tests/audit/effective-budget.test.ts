@@ -16,6 +16,7 @@ import {
 	mkdirSync,
 	readdirSync,
 	readFileSync,
+	renameSync,
 	rmSync,
 	statSync,
 	symlinkSync,
@@ -76,8 +77,8 @@ function writeConfig(path: string, budget: number): void {
 	writeFileSync(path, JSON.stringify({ budget }), { mode: 0o600 });
 }
 
-/** One governed call. A governor publishes its budget only once this process holds the vault's writer lock: from its
- *  first successful append. */
+/** One governed call. A governor replaces an existing record only once this process holds the vault's writer lock: from
+ *  its first successful append. */
 async function appendOnce(gov: Governor): Promise<void> {
 	const auth = await gov.authorize({
 		model: "claude-haiku-5-5",
@@ -449,16 +450,44 @@ describe("several live governors on one vault", () => {
 });
 
 // Cross-process (the maintainers' ruling on the review): a governor takes the vault's writer lock LAZILY, at its
-// first append, so two processes can each hold a registry. The record is published only while THIS process holds
-// the lock: before the first successful append nothing is published, and a process that never gets the lock never
-// overwrites the holder's record.
-describe("the record is published only under the vault's writer lock", () => {
-	it("red-first (published at construction): a governor that has not appended publishes nothing", async () => {
+// first append, so two processes can each hold a registry. A record is REPLACED only while THIS process holds the
+// lock, so a process that never gets the lock never overwrites the holder's record. Before its first append a governor
+// publishes only where no record stands: a vault that has none (a new one, or one only a release without the record
+// wrote) read "not yet published" until the first governed call, however long the governor had been running.
+describe("the record is replaced only under the vault's writer lock", () => {
+	it("red-first (not yet published until a call): a governor that has not appended publishes on a vault with no record", async () => {
+		expect(readEffectiveBudget(vaultDir)).toEqual({ state: "absent" });
 		const gov = await createGovernor({ dryRun: true, vaultBase: base, budget: 1_234 });
-		expect(readEffectiveBudget(vaultDir)).toEqual({ state: "absent" });
-		expect(loadBudgetConfig(vaultDir).source).toBe("unpublished");
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 1_234, source: "governor" });
+		expect(rawRecord().pid).toBe(process.pid);
+		// Owner-only, like every record, and nothing staged is left behind.
+		expect(statSync(join(vaultDir, EFFECTIVE_BUDGET_FILE)).mode & 0o777).toBe(0o600);
+		expect(readdirSync(vaultDir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+		// Its destroy, with no call, leaves the record as it was: read "as of" its writtenAt, as any last governor's.
+		const published = readFileSync(join(vaultDir, EFFECTIVE_BUDGET_FILE));
 		await gov.destroy();
-		expect(readEffectiveBudget(vaultDir)).toEqual({ state: "absent" });
+		expect(readFileSync(join(vaultDir, EFFECTIVE_BUDGET_FILE)).equals(published)).toBe(true);
+	});
+
+	it("trust(): a client that has not called publishes on a vault with no record", async () => {
+		const g = await trust(chatClient(), { dryRun: true, vaultBase: base, budget: 1_234 });
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 1_234, source: "governor" });
+		await g.destroy();
+	});
+
+	it("red-first (published over the holder's): a governor that has not appended never replaces another writer's record", async () => {
+		const OLD = "2026-01-02T03:04:05.000Z";
+		writeFileSync(
+			join(vaultDir, EFFECTIVE_BUDGET_FILE),
+			JSON.stringify({ budget: 9_000, writtenAt: OLD, pid: 1, processStartedAt: OLD }),
+		);
+		const before = readFileSync(join(vaultDir, EFFECTIVE_BUDGET_FILE));
+		const gov = await createGovernor({ dryRun: true, vaultBase: base, budget: 1_234 });
+		expect(readFileSync(join(vaultDir, EFFECTIVE_BUDGET_FILE)).equals(before)).toBe(true);
+		// Its first append takes the lock: now it replaces it.
+		await appendOnce(gov);
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 1_234, source: "governor" });
+		await gov.destroy();
 	});
 
 	it("its first successful append publishes", async () => {
@@ -515,6 +544,111 @@ describe("the record is published only under the vault's writer lock", () => {
 		expect(h.lockOwner?.()).toMatch(/^[0-9a-f-]{36}$/);
 		h.release();
 		expect(h.lockOwner?.()).toBeUndefined();
+	});
+});
+
+// Before its first append a governor publishes WITHOUT the lock, so the publish must never take the place of another
+// writer's record: it fills an empty slot, or replaces this process's own unheld record (the live set changed), and
+// nothing else. `lockOwner` reads none throughout, as for every governor that has not appended.
+describe("a publish without the lock", () => {
+	const none = (): undefined => undefined;
+	const stagingFiles = (): string[] => readdirSync(vaultDir).filter((f) => f.endsWith(".tmp"));
+
+	it("red-first (one of two): two governors in this process that disagree read as several, and the rest after one leaves", () => {
+		const a = registerEnforcedBudget(vaultDir, 2_000, none);
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 2_000, source: "governor" });
+		const b = registerEnforcedBudget(vaultDir, 5_000, none);
+		expect(readEffectiveBudget(vaultDir)).toMatchObject({ state: "several", governors: 2 });
+		b.release();
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 2_000, source: "governor" });
+		a.release();
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 2_000, source: "governor" });
+		expect(stagingFiles()).toEqual([]);
+	});
+
+	it("a later governor in this process replaces this process's own unheld record, after the last one left", () => {
+		registerEnforcedBudget(vaultDir, 2_000, none).release();
+		const b = registerEnforcedBudget(vaultDir, 5_000, none);
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 5_000, source: "governor" });
+		b.release();
+	});
+
+	it("red-first (published over the holder's): once another writer replaced it, nothing published here without the lock replaces that", () => {
+		const a = registerEnforcedBudget(vaultDir, 2_000, none);
+		// The lock holder, in another process, publishes its own.
+		recordEffectiveBudget(vaultDir, 9_999);
+		const holders = readFileSync(join(vaultDir, EFFECTIVE_BUDGET_FILE));
+		const b = registerEnforcedBudget(vaultDir, 5_000, none);
+		expect(readFileSync(join(vaultDir, EFFECTIVE_BUDGET_FILE)).equals(holders)).toBe(true);
+		b.release();
+		expect(readFileSync(join(vaultDir, EFFECTIVE_BUDGET_FILE)).equals(holders)).toBe(true);
+		a.release();
+	});
+
+	it.each([
+		["linked back", {}],
+		[
+			"renamed back where it cannot be linked",
+			{
+				link: (): void => {
+					throw Object.assign(new Error("EPERM: operation not permitted, link"), {
+						code: "EPERM",
+					});
+				},
+			},
+		],
+	] as const)(
+		"red-first (lost the holder's): a record that replaced this process's own between the check and the move is %s",
+		(_how, linkSeam) => {
+			const a = registerEnforcedBudget(vaultDir, 2_000, none);
+			const target = join(vaultDir, EFFECTIVE_BUDGET_FILE);
+			let holders: Buffer | undefined;
+			// The holder publishes in the instant between this process reading its own record and moving it aside.
+			const racingRename = (from: string, to: string): void => {
+				if (from === target && holders === undefined) {
+					recordEffectiveBudget(vaultDir, 9_999);
+					holders = readFileSync(target);
+				}
+				renameSync(from, to);
+			};
+			const b = registerEnforcedBudget(vaultDir, 5_000, none, {
+				...linkSeam,
+				rename: racingRename,
+			});
+			expect(holders).toBeDefined();
+			expect(readFileSync(target).equals(holders as Buffer)).toBe(true);
+			expect(stagingFiles()).toEqual([]);
+			b.release();
+			a.release();
+		},
+	);
+
+	it("a failed publish without the lock says nothing and leaves no figure that is not the live set's", () => {
+		const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		const refuse = (): void => {
+			throw Object.assign(new Error("EPERM: operation not permitted, link"), { code: "EPERM" });
+		};
+		// No record: still none, so readers stay at "not yet published", as before this publish existed.
+		const a = registerEnforcedBudget(vaultDir, 2_000, none, { link: refuse });
+		expect(readEffectiveBudget(vaultDir)).toEqual({ state: "absent" });
+		a.release();
+		// This process's own record, about to describe the wrong live set: removed, never left as the figure.
+		const c = registerEnforcedBudget(vaultDir, 2_000, none);
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 2_000, source: "governor" });
+		const d = registerEnforcedBudget(vaultDir, 5_000, none, { link: refuse });
+		expect(readEffectiveBudget(vaultDir)).toEqual({ state: "absent" });
+		expect(stagingFiles()).toEqual([]);
+		expect(err).not.toHaveBeenCalled();
+		d.release();
+		c.release();
+	});
+
+	it("something at the record's path that is not a regular file is left alone", () => {
+		mkdirSync(join(vaultDir, EFFECTIVE_BUDGET_FILE));
+		const a = registerEnforcedBudget(vaultDir, 2_000, none);
+		expect(statSync(join(vaultDir, EFFECTIVE_BUDGET_FILE)).isDirectory()).toBe(true);
+		expect(stagingFiles()).toEqual([]);
+		a.release();
 	});
 });
 
@@ -714,7 +848,9 @@ describe("a failed publish is retried under the same lock owner", () => {
 	it("red-first (never retried): through createGovernor, a write that failed once is published by the next call", async () => {
 		const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
 		const gov = await createGovernor({ dryRun: true, vaultBase: base, budget: 1_234 });
-		// A non-empty directory at the record's path refuses the rename and the removal.
+		// A non-empty directory at the record's path (in place of the one its start published) refuses the rename and
+		// the removal.
+		rmSync(join(vaultDir, EFFECTIVE_BUDGET_FILE), { force: true });
 		mkdirSync(join(vaultDir, EFFECTIVE_BUDGET_FILE));
 		writeFileSync(join(vaultDir, EFFECTIVE_BUDGET_FILE, "x"), "x");
 		await appendOnce(gov);
@@ -743,6 +879,8 @@ describe("destroy() and the record", () => {
 	it("red-first (released first): createGovernor, a settle in flight lands during the drain; the record is this process's", async () => {
 		const post = gate();
 		const engine = parkedPostEngine(post.wait);
+		// Another writer's record stands, so only an append (the lock) replaces it.
+		const before = writeOldRecord();
 		const gov = await createGovernor({ vaultBase: base, budget: 1_234, _engine: engine });
 		const auth = await gov.authorize({
 			model: "claude-haiku-5-5",
@@ -751,8 +889,8 @@ describe("destroy() and the record", () => {
 		});
 		const settling = gov.settle(auth, { inputTokens: 1, outputTokens: 1 });
 		await vi.waitFor(() => expect(engine.postPendingSpend).toHaveBeenCalled());
-		// Nothing has appended yet: nothing is published.
-		expect(readEffectiveBudget(vaultDir)).toEqual({ state: "absent" });
+		// Nothing has appended yet: the other writer's record is untouched.
+		expect(readFileSync(join(vaultDir, EFFECTIVE_BUDGET_FILE)).equals(before)).toBe(true);
 		const destroying = gov.destroy();
 		post.open();
 		await settling;
@@ -764,10 +902,11 @@ describe("destroy() and the record", () => {
 	it("red-first (released first): trust(), a call in flight lands during the drain; the record is this process's", async () => {
 		const call = gate();
 		const client = parkedChatClient(call.wait);
+		const before = writeOldRecord();
 		const g = await trust(client, { dryRun: true, vaultBase: base, budget: 1_234 });
 		const calling = callOnce(g);
 		await vi.waitFor(() => expect(client.chat.completions.create).toHaveBeenCalled());
-		expect(readEffectiveBudget(vaultDir)).toEqual({ state: "absent" });
+		expect(readFileSync(join(vaultDir, EFFECTIVE_BUDGET_FILE)).equals(before)).toBe(true);
 		const destroying = g.destroy();
 		call.open();
 		await calling;
@@ -777,13 +916,14 @@ describe("destroy() and the record", () => {
 	});
 
 	it("red-first (released first): createGovernor, a hold destroy() records is its first append; the record is published", async () => {
+		const before = writeOldRecord();
 		const gov = await createGovernor({ dryRun: true, vaultBase: base, budget: 1_234 });
 		await gov.authorize({
 			model: "claude-haiku-5-5",
 			estimatedInputTokens: 10,
 			maxOutputTokens: 1,
 		});
-		expect(readEffectiveBudget(vaultDir)).toEqual({ state: "absent" });
+		expect(readFileSync(join(vaultDir, EFFECTIVE_BUDGET_FILE)).equals(before)).toBe(true);
 		// destroy() ends the hold and records it (`hold_released`): this governor's first append.
 		await gov.destroy();
 		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 1_234, source: "governor" });
