@@ -78,7 +78,8 @@ function visibleText(text: string): string {
 		.replace(
 			/(?<!\\)&(?:#(\d+)|#[xX]([0-9a-fA-F]+)|([A-Za-z][A-Za-z0-9]*));/g,
 			(whole, dec, hex, name) => {
-				if (name !== undefined) return Object.hasOwn(NAMED_ENTITIES, name) ? (NAMED_ENTITIES[name] as string) : whole;
+				if (name !== undefined)
+					return Object.hasOwn(NAMED_ENTITIES, name) ? (NAMED_ENTITIES[name] as string) : whole;
 				const code = dec !== undefined ? Number.parseInt(dec, 10) : Number.parseInt(hex, 16);
 				return Number.isInteger(code) && code >= 0 && code <= 0x10ffff
 					? String.fromCodePoint(code)
