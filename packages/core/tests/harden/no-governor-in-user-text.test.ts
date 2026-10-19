@@ -48,6 +48,46 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
  */
 const WORD = /(?<![A-Za-z0-9_])governors?(?![A-Za-z0-9_])/i;
 
+/** The named entities a page or an MDX file is likely to use; an unknown name is left as written. */
+const NAMED_ENTITIES: Readonly<Record<string, string>> = {
+	amp: "&",
+	lt: "<",
+	gt: ">",
+	quot: '"',
+	apos: "'",
+	nbsp: "\u00a0",
+	lsquo: "\u2018",
+	rsquo: "\u2019",
+	ldquo: "\u201c",
+	rdquo: "\u201d",
+	mdash: "\u2014",
+	ndash: "\u2013",
+	hellip: "\u2026",
+	shy: "\u00ad",
+	zwj: "\u200d",
+	zwnj: "\u200c",
+};
+
+/**
+ * What a reader sees of `text`: HTML entities decoded (numeric, hex and the named ones above),
+ * then the characters that render as nothing (soft hyphen, zero-width joiners, the byte-order
+ * mark) removed. Without it `govern&#111;r` and `gov&shy;ernor` render "governor" and pass.
+ */
+function visibleText(text: string): string {
+	return text
+		.replace(
+			/&(?:#(\d+)|#[xX]([0-9a-fA-F]+)|([A-Za-z][A-Za-z0-9]*));/g,
+			(whole, dec, hex, name) => {
+				if (name !== undefined) return NAMED_ENTITIES[name] ?? whole;
+				const code = dec !== undefined ? Number.parseInt(dec, 10) : Number.parseInt(hex, 16);
+				return Number.isInteger(code) && code >= 0 && code <= 0x10ffff
+					? String.fromCodePoint(code)
+					: whole;
+			},
+		)
+		.replace(/[\u00ad\u200b-\u200d\u2060\ufeff]/g, "");
+}
+
 interface Hit {
 	file: string;
 	line: number;
@@ -97,7 +137,13 @@ function scanSource(file: string, text: string): Hit[] {
 	const kind = /\.tsx$/.test(file) ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
 	const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, kind);
 	const hits: Hit[] = [];
-	const record = (node: ts.Node, value: string): void => {
+	const record = (node: ts.Node, raw: string): void => {
+		// JSX text, and a JSX attribute's string, are entity-decoded when rendered; a plain
+		// JS string is not.
+		const value =
+			ts.isJsxText(node) || (ts.isStringLiteral(node) && ts.isJsxAttribute(node.parent))
+				? visibleText(raw)
+				: raw;
 		if (!WORD.test(value)) return;
 		const line = source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
 		hits.push({ file, line, text: value });
@@ -152,7 +198,8 @@ function proseFiles(root: string): string[] {
 
 /**
  * Prose lines of one markdown/MDX file: fenced blocks dropped, inline code spans blanked (a span
- * of N backticks closes at the next run of exactly N), link targets and bare URLs blanked.
+ * of N backticks closes at the next run of exactly N), link destinations (not titles) and bare
+ * URLs blanked, and entities decoded.
  */
 function scanProse(file: string, text: string): Hit[] {
 	const hits: Hit[] = [];
@@ -169,10 +216,17 @@ function scanProse(file: string, text: string): Hit[] {
 			fence = m[1];
 			continue;
 		}
-		const prose = raw
-			.replace(/(`+)(?:(?!\1)[\s\S])*?\1/g, " ")
-			.replace(/\]\([^)]*\)/g, "] ")
-			.replace(/https?:\/\/\S+/g, " ");
+		const prose = visibleText(
+			raw
+				.replace(/(`+)(?:(?!\1)[\s\S])*?\1/g, " ")
+				// A link's DESTINATION is a path; its TITLE is text a reader sees on hover.
+				.replace(
+					/\]\(\s*(?:<[^>]*>|[^\s)]*)(?:\s+("[^"]*"|'[^']*'|\([^)]*\)))?\s*\)/g,
+					(_whole, title: string | undefined) => `] ${title ?? ""}`,
+				)
+				.replace(/^(\s*\[[^\]]+\]:)\s*(?:<[^>]*>|\S+)/, "$1 ")
+				.replace(/https?:\/\/\S+/g, " "),
+		);
 		if (WORD.test(prose)) hits.push({ file, line: i + 1, text: raw.trim() });
 	}
 	return hits;
@@ -368,6 +422,49 @@ describe("no 'governor' in text a person reads", () => {
 				"README.md:7: Several governors share one ledger.",
 				"site/content/docs/x.mdx:2: title: Governor setup",
 			]);
+		});
+
+		it("reads a link's TITLE as text and only its destination as a path", () => {
+			const root = fixture({
+				"README.md": [
+					'[Setup](/docs "Ask the governor")',
+					"[Setup](/docs/governor)",
+					"[Setup](</docs/governor> 'safe title')",
+					"[Setup](/docs (the governors page))",
+					'[ref]: /docs/governor "a governor title"',
+					"[ref2]: /docs/governor",
+				].join("\n"),
+			});
+			expect(checkProse(root)).toEqual([
+				'README.md:1: [Setup](/docs "Ask the governor")',
+				"README.md:4: [Setup](/docs (the governors page))",
+				'README.md:5: [ref]: /docs/governor "a governor title"',
+			]);
+		});
+
+		it("reads HTML entities the way a page renders them, in prose and in JSX text", () => {
+			const root = fixture({
+				"README.md": [
+					"The govern&#111;r enforces it.",
+					"The gover&#x6E;or enforces it.",
+					"The gov&shy;ernor enforces it.",
+					"The gov&zwnj;ernors enforce it.",
+					"Terms &amp; conditions, AT&amp;T, &rsquo;quoted&rsquo;, &unknown; stay clean.",
+					"A `govern&#111;r` code span is still code.",
+				].join("\n"),
+				"packages/x/src/a.tsx": [
+					"export const A = () => <p>the govern&#111;r</p>;",
+					"export const B = () => <p>gov&shy;ernor</p>;",
+					'export const C = () => <p title="a govern&#111;r">x</p>;',
+					"export const D = () => <p>Terms &amp; conditions&rsquo;</p>;",
+					'export const E = "govern&#111;r";',
+				].join("\n"),
+			});
+			expect(checkProse(root).map((p) => p.split(":")[1])).toEqual(["1", "2", "3", "4"]);
+			const found = checkLiterals(root, []).map((p) => p.replace(/^.*?a\.tsx: /, ""));
+			// A, B and the attribute are caught; D is clean; a plain JS string is NOT decoded (E).
+			expect(found).toHaveLength(3);
+			expect(visibleText("gover&#110;&#111;r")).toBe("governor");
 		});
 	});
 });
