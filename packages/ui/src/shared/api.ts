@@ -28,7 +28,8 @@ export interface SummaryPayload {
 	/**
 	 * `empty`: no events and nothing wrong, a project before its first governed call. It is never set beside a
 	 * failure: a log deleted while its anchor still records events has no events either, and is `valid: false`.
-	 * `busy`: the vault kept changing while it was read, so there is no verdict (`valid` means nothing).
+	 * `busy`: the vault kept changing while it was read, so there is no verdict (`valid` means nothing). It is never
+	 * set beside a deletion an earlier load latched: that is a failure whatever this read saw.
 	 */
 	chain: {
 		events: number;

@@ -526,7 +526,8 @@ function loadPass(
 				empty: valid && events.length === 0,
 				breakIndex: integrity.breakIndex,
 				errors,
-				...(vault.busy === true ? { busy: true } : {}),
+				// A latched deletion is a failure whatever this read saw: `busy` (no verdict) is for a read with none.
+				...(vault.busy === true && !deletionDetected ? { busy: true } : {}),
 			},
 			anchorFile: anchorFile(vaultPath),
 			remote: readRemoteSettings(vaultPath),

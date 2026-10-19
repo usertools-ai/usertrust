@@ -83,6 +83,18 @@ describe("the UI on a vault with no verdict", () => {
 		expect(state.summary.chain).toMatchObject({ valid: false, busy: true });
 	});
 
+	it("a deletion an earlier load latched stays a failure through a busy read: broken, never 'no verdict'", () => {
+		stand.vault = "busy";
+		const vault = join(tempDir, ".usertrust");
+		const latched = loadState(vault, undefined, true, ["events"]).summary.chain;
+		expect(latched.valid).toBe(false);
+		expect(latched.busy).toBeUndefined();
+		expect(latched.errors.join(" ")).toMatch(/deletion detected/);
+		expect(chainStatus(latched)).toBe("broken");
+		// CONTROL: the same busy read with nothing latched is no verdict.
+		expect(chainStatus(loadState(vault).summary.chain)).toBe("busy");
+	});
+
 	it("a load reads the vault with a bounded snapshot read: 3 attempts at most, 10 ms apart, never the verifier's 26 at 100 ms", () => {
 		loadState(join(tempDir, ".usertrust"));
 		expect(stand.reads.length).toBeGreaterThan(0);
