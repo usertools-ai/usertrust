@@ -109,6 +109,18 @@ describe("a writer built from a caller's spelling meets the lock beside the log"
 		expect(readdirSync(lexicalAudit())).toEqual([]);
 	});
 
+	it("a writer through the `..` link names its own acquisition as the lock's owner: lockOwner reads the lock it took, beside the log", () => {
+		const w = createAuditWriter(join(t, "proj"), { lockAtCreate: true });
+		try {
+			expect(readdirSync(physicalAudit())).toContain(".audit-writer.lock");
+			expect(w.lockOwner?.()).toEqual(expect.any(String));
+		} finally {
+			w.release();
+		}
+		// CONTROL: released, it owns nothing.
+		expect(w.lockOwner?.()).toBeUndefined();
+	});
+
 	it("CONTROL: with no other writer, `usertrust secret add` through the same link appends its event to the log the OS opens", async () => {
 		const holder = await liveHolder();
 		holder.release();
