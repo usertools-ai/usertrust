@@ -143,6 +143,8 @@ async function start(
 		log?: (line: string) => void;
 		/** The health child's keep-alive probe interval; unset is the server's default (30 s). */
 		healthKeepAliveMs?: number;
+		/** The fake governor's `release` resolves this long after it starts (a slow shutdown). */
+		releaseDelayMs?: number;
 	} = {},
 ): Promise<Started> {
 	const stateDir = await mkdtemp(join(tmpdir(), "utsrv-health-"));
@@ -170,10 +172,14 @@ async function start(
 	if (opts.unset === true) delete config.ledgerHealth;
 	const server = createUsertrustServer({
 		config,
-		factory: async () => {
-			const used = (await resolveTenantTargets(config)).get("acme");
+		factory: async (governorOpts) => {
+			// The ledger THIS tenant's config names now (found by its configPath; "acme" when it has none).
+			const id = config.tenants.find((t) => t.configPath === governorOpts.configPath)?.id ?? "acme";
+			const used = (await resolveTenantTargets(config)).get(id);
 			await opts.gate;
-			const { governor } = createFakeGovernor();
+			const { governor } = createFakeGovernor(
+				opts.releaseDelayMs !== undefined ? { releaseDelayMs: opts.releaseDelayMs } : {},
+			);
 			return { ...governor, config: { tigerbeetle: used } } as unknown as Governor;
 		},
 		...(opts.spawner !== undefined ? { spawnHealthChild: opts.spawner.spawnChild } : {}),
@@ -671,6 +677,83 @@ describe("a tenant contributes only what its own governor verified", () => {
 		expect(stderr.filter((line) => line.includes("changed after start"))).toHaveLength(1);
 	});
 
+	/** A fake child that answers probes until `path` reads "down". */
+	async function downSwitch(): Promise<string> {
+		const path = join(await mkdtemp(join(tmpdir(), "utsrv-down-")), "state");
+		await writeFile(path, "up");
+		return path;
+	}
+
+	it("a target no tenant still uses is out of health's aggregate: it going down reads the mismatch's unknown, ok true", async () => {
+		const path = await downSwitch();
+		const { base, config } = await start({ spawner: fakeSpawner(`file:${path}`), file: A });
+		expect(
+			await until(
+				() => ledgerOf(base),
+				(l) => l === "reachable",
+			),
+		).toBe("reachable");
+		// The tenant's config moves to B before its governor exists: it resolves on B, a mismatch.
+		await writeFile(config.tenants[0]?.configPath as string, JSON.stringify(B));
+		expect((await budget(base)).body.ledger).toBe("unknown");
+		// A, which nobody uses now, stops answering. Health polls keep probing it past the deadline.
+		await writeFile(path, "down");
+		const readings = new Set<string>();
+		const until2 = Date.now() + 2.5 * DEADLINE_MS + 500;
+		while (Date.now() < until2) {
+			const h = await health(base);
+			readings.add(`${h.body.ledger}/${h.body.ok}`);
+			await sleep(50);
+		}
+		expect([...readings]).toEqual(["unknown/true"]);
+	}, 15_000);
+
+	it("a target another tenant still uses stays in the aggregate: with one tenant mismatched, A going down reads unreachable, ok false", async () => {
+		const path = await downSwitch();
+		const dir = await mkdtemp(join(tmpdir(), "utsrv-two-"));
+		const configs = [join(dir, "t1.json"), join(dir, "t2.json")];
+		for (const c of configs) await writeFile(c, JSON.stringify(A));
+		const KEY2 = "ut_health_key_2";
+		const { base } = await start({
+			spawner: fakeSpawner(`file:${path}`),
+			overrides: {
+				tenants: [
+					{
+						id: "acme",
+						keyHash: hashKey(KEY),
+						budget: 1_000_000,
+						configPath: configs[0] as string,
+					},
+					{
+						id: "beta",
+						keyHash: hashKey(KEY2),
+						budget: 1_000_000,
+						configPath: configs[1] as string,
+					},
+				],
+			},
+		});
+		expect(
+			await until(
+				() => ledgerOf(base),
+				(l) => l === "reachable",
+			),
+		).toBe("reachable");
+		// acme moves to B (a mismatch); beta stays on A and its governor verifies.
+		await writeFile(configs[0] as string, JSON.stringify(B));
+		expect((await budget(base)).body.ledger).toBe("unknown");
+		const betaBudget = await fetch(`${base}/v1/budget`, {
+			headers: { authorization: `Bearer ${KEY2}` },
+		});
+		expect(((await betaBudget.json()) as { ledger: string }).ledger).toBe("reachable");
+		await writeFile(path, "down");
+		const h = await until(
+			() => health(base),
+			(r) => r.body.ledger === "unreachable",
+		);
+		expect(h.body).toMatchObject({ ok: false, ledger: "unreachable" });
+	}, 15_000);
+
 	it("every health diagnostic goes through the server's log sink, none straight to stderr", async () => {
 		const A2 = { ...A, tigerbeetle: { clusterId: 0, addresses: ["127.0.0.1:3303"] } };
 		const lines: string[] = [];
@@ -770,6 +853,68 @@ describe("the observer's lifecycle", () => {
 		expect(spawner.spawned()).toBe(20);
 		for (const pid of spawner.pids) expect(await goneWithin(pid, 2_000)).toBe(true);
 	}, 60_000);
+
+	it("a stopped observer reads unknown at once: a target that was reachable, and the aggregate", async () => {
+		const health = new LedgerHealth([TARGET], {
+			ledgerTimeoutMs: DEADLINE_MS,
+			spawnChild: fakeSpawner("reply").spawnChild,
+			log: () => {},
+		});
+		const key = targetKey(TARGET);
+		health.start();
+		await until(
+			() => health.state(key),
+			(st) => st === "reachable",
+		);
+		expect(health.aggregate()).toBe("reachable");
+		health.stop();
+		expect(health.state(key)).toBe("unknown");
+		expect(health.aggregate()).toBe("unknown");
+	});
+
+	it("a stopped observer never turns an abandoned probe into unreachable: stop() with a sent probe outstanding, past ledgerTimeoutMs, still reads unknown", async () => {
+		const spawner = fakeSpawner("silent");
+		const health = new LedgerHealth([TARGET], {
+			ledgerTimeoutMs: DEADLINE_MS,
+			spawnChild: spawner.spawnChild,
+			log: () => {},
+		});
+		const key = targetKey(TARGET);
+		health.start();
+		// The silent child is ready and was sent its probe, which it never answers.
+		await until(
+			() => spawner.probes(),
+			(n) => n >= 1,
+		);
+		health.stop();
+		expect(health.state(key)).toBe("unknown");
+		await sleep(DEADLINE_MS + 200);
+		expect(health.state(key)).toBe("unknown");
+		expect(health.aggregate()).toBe("unknown");
+		expect(health.observer(key)).toEqual({ failures: 0, lastFailure: null });
+	});
+
+	it("close() begun, release still slow: /v1/health reads unknown, not the dead observer's last reachable", async () => {
+		const { server, base } = await start({ spawner: fakeSpawner("reply"), releaseDelayMs: 1_500 });
+		expect(
+			await until(
+				() => ledgerOf(base),
+				(l) => l === "reachable",
+			),
+		).toBe("reachable");
+		// A pending hold, whose release on shutdown is slow.
+		const auth = await fetch(`${base}/v1/authorize`, {
+			method: "POST",
+			headers: { authorization: `Bearer ${KEY}`, "content-type": "application/json" },
+			body: JSON.stringify({ model: "m", estimatedInputTokens: 1, maxOutputTokens: 1 }),
+		});
+		expect(auth.status).toBe(200);
+		const closing = server.close();
+		// close() has begun and is waiting on the release: the HTTP server still answers.
+		const h = await health(base);
+		expect(h.body.ledger).toBe("unknown");
+		await closing;
+	});
 
 	it("after close() nothing respawns", async () => {
 		const spawner = fakeSpawner("exit");

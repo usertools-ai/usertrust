@@ -587,13 +587,21 @@ export function createUsertrustServer(opts: {
 	}
 
 	/**
-	 * Health's aggregate: the worst over the targets, and `unknown` while a tenant's governor is
-	 * being created or reads a ledger other than the one watched for it.
+	 * Health's aggregate: the worst over the targets STILL IN USE, and `unknown` while a tenant's
+	 * governor is being created or reads a ledger other than the one watched for it. A target in use
+	 * is one some tenant not verified as mismatched still has: a tenant whose config moved to another
+	 * ledger no longer keeps its old target in the aggregate (nobody uses it), but the mismatch itself
+	 * reads `unknown`. A target another tenant still uses stays in, so an outage there reads
+	 * `unreachable`.
 	 */
 	function aggregateLedger(): LedgerState | "none" {
 		if (config.dryRun) return "none";
 		if (health === undefined) return "unknown";
-		const states: LedgerState[] = [health.aggregate()];
+		const inUse = new Set<string>();
+		for (const [id, key] of tenantTargets ?? []) {
+			if (verified.get(id) !== false) inUse.add(key);
+		}
+		const states: LedgerState[] = [...inUse].map((key) => health?.state(key) ?? "unknown");
 		if (initializing.size > 0) states.push("unknown");
 		if ([...verified.values()].some((matches) => !matches)) states.push("unknown");
 		return worstState(states);

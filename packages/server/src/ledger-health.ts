@@ -7,7 +7,7 @@
  * `lookupAccounts([])` over IPC. The server process loads no native TigerBeetle code for this: a
  * blocked io_uring or a native panic kills only the child, which then reads `unknown`.
  *
- * A target is:
+ * A target is (once `stop()` has run, every target is `unknown`):
  * - `unreachable` while a probe that WAS SENT to the child is outstanding past `ledgerTimeoutMs`
  *   (this has precedence, and applies before the first reply too);
  * - `reachable` when its last probe got a reply and none is overdue;
@@ -151,7 +151,8 @@ export class LedgerHealth {
 	/**
 	 * The ONE terminal stop, synchronous: from here on nothing is probed or spawned, every timer is
 	 * cleared and every child is SIGKILLed. A late reply, exit or spawn result is ignored. A second
-	 * call does nothing.
+	 * call does nothing. After `stop()` every target reads `unknown`: a dead observer says nothing
+	 * about the ledger, neither its last `reachable` nor an abandoned probe's `unreachable`.
 	 */
 	stop(): void {
 		if (this.closing) return;
@@ -161,6 +162,11 @@ export class LedgerHealth {
 			if (t.respawn !== undefined) clearTimeout(t.respawn);
 			t.respawn = undefined;
 			this.clearReadyTimer(t);
+			// Probe state goes too (the counters stay): `state()` must read `unknown` from here on.
+			t.outstanding = undefined;
+			t.lastOutcome = "none";
+			t.ready = false;
+			t.sent = false;
 			const child = t.child;
 			t.child = undefined;
 			child?.kill("SIGKILL");
