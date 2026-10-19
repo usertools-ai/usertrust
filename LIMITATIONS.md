@@ -443,12 +443,18 @@ The lock's liveness check works on one kernel, and it fails toward "held":
   container a private boot id on the host's kernel). So a lock written in a
   different PID namespace on the same kernel is held while its writer renews
   its lease: a writer on Linux renews the lock file's modification time every
-  10 seconds. Once a lease has gone unrenewed for more than 60 seconds, and the
+  5 seconds. Once a lease has gone unrenewed for more than 60 seconds, and the
   process that finds it has itself seen it unrenewed for 30 seconds, the lock
   is reclaimed. So a writer that restarts into a NEW PID namespace (a container
   restarted after a crash, or WSL2 after every restart) recovers its vault on
   its own, about a minute after the old writer's last renewal. The appends it
   makes until then are refused and dead-lettered, as for a second process.
+  A writer whose renewals fail for 20 seconds (a full file-descriptor table,
+  an I/O error) stops writing under its lease: the append that finds it is
+  refused and dead-lettered, and the lock is given up. That is before any
+  writer in another namespace could reclaim it (30 seconds at the earliest),
+  so the chain cannot fork under a write. The next append takes the lock
+  again, and re-reads the chain's tail.
   Three cases still need a hand:
   - A lock written by a usertrust version that does not renew a lease (5.1.0
     and earlier) is never reclaimed from another namespace. Such a lock left

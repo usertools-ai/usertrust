@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { verifyChain } from "../../src/audit/verify.js";
 
 /**
  * The lease: the one proof that a lock's holder is gone which works ACROSS PID namespaces.
@@ -84,10 +85,12 @@ const THIS_NS = "pid:[4026531836]";
 const OTHER_NS = "pid:[4026532999]";
 /** A PID no process has (above every pid_max): `kill(pid, 0)` answers ESRCH. */
 const DEAD_PID = 999999999;
-/** The shipped lease constants, as a reader applies them to a lock declaring a 10 s renewal. */
-const RENEW_MS = 10_000;
+/** The shipped lease constants, as a reader applies them to a lock declaring a 5 s renewal. */
+const RENEW_MS = 5_000;
 const STALE_MS = 60_000;
 const CONFIRM_MS = 30_000;
+/** The holder's bound: past this without a successful renewal, it stops writing under its lease. */
+const HOLDER_BOUND_MS = 20_000;
 const TEN_MINUTES_AGO = () => new Date(Date.now() - 10 * 60_000);
 
 type Chain = typeof import("../../src/audit/chain.js");
@@ -395,7 +398,7 @@ describe("two writers in two namespaces: the lease decides, and a holder that lo
 	});
 
 	it("P1: a holder that stopped renewing loses the lock to another namespace, and its next append is REFUSED — the chain does not fork", async () => {
-		// Only the monotonic clock is faked: the holder's real 10 s renewal timer never fires during
+		// Only the monotonic clock is faked: the holder's real 5 s renewal timer never fires during
 		// this test — a holder frozen (SIGSTOP, a paused container) or blocked past the threshold.
 		vi.useFakeTimers({ toFake: ["performance"] });
 		const holder = await processIn(OTHER_NS);
@@ -574,5 +577,128 @@ describe("the documented thresholds", () => {
 		expectHeld(chain, v, bytes);
 		passMonotonic(CONFIRM_MS + 1);
 		expectHeld(chain, v, bytes);
+	});
+});
+
+describe("a holder whose renewals fail stops writing BEFORE any observer could reclaim its lock", () => {
+	const quiet = () => {
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+	};
+	const append = (w: ReturnType<Chain["createAuditWriter"]> | undefined, n: number) =>
+		w?.appendEvent({ kind: "test", actor: "holder", data: { n } });
+	const chainIntact = (v: string, events: number) => {
+		const result = verifyChain(logOf(v));
+		expect(result.errors).toEqual([]);
+		expect(result.valid).toBe(true);
+		expect(result.eventsVerified).toBe(events);
+	};
+
+	it("P1: renewals fail from the 2nd onward — past the bound the timer gives the lock up, the next append is REFUSED, the chain is intact, and the append after it takes the lock afresh", async () => {
+		vi.useFakeTimers({ toFake: ["performance", "setInterval", "clearInterval"] });
+		const chain = await processIn(THIS_NS);
+		const v = vault();
+		const { writer } = acquire(chain, v);
+		expect(readLock(v).leaseRenewMs, "control: leased").toBe(RENEW_MS);
+		await append(writer, 1);
+		proc.futimesError = "EIO";
+		const callsBefore = proc.futimesCalls;
+		// Up to the bound itself the holder still writes: every renewal so far failed, none lapsed it.
+		vi.advanceTimersByTime(HOLDER_BOUND_MS);
+		expect(proc.futimesCalls - callsBefore, "control: the renewals ran, and failed").toBe(
+			HOLDER_BOUND_MS / RENEW_MS,
+		);
+		await append(writer, 2);
+		expect(linesOf(v)).toBe(2);
+		// The next tick finds the lease past the bound: the lock is given up, not renewed.
+		vi.advanceTimersByTime(RENEW_MS);
+		expect(existsSync(lockOf(v)), "the lapsed lock was given up").toBe(false);
+		quiet();
+		const refused = append(writer, 3);
+		await expect(refused).rejects.toBeInstanceOf(chain.AuditLeaseLapsedError);
+		await expect(refused).rejects.toThrow(/lease lapsed.*EIO/);
+		expect(writer?.isDegraded(), "degraded, and dead-lettered as any failed append").toBe(true);
+		expect(linesOf(v)).toBe(2);
+		chainIntact(v, 2);
+		// Recovery: the next append takes the vault's lock afresh and re-reads the tail. The mtime still
+		// cannot be set, so the new lock declares no lease: no other namespace will reclaim it.
+		await append(writer, 4);
+		expect(linesOf(v)).toBe(3);
+		expect(readLock(v)).not.toHaveProperty("leaseRenewMs");
+		chainIntact(v, 3);
+	});
+
+	it("P1: renewals that never ran (a stalled timer) past the bound — the append's own check refuses it, before the write", async () => {
+		// Only the monotonic clock is faked: the real 5 s timer never fires during this test.
+		vi.useFakeTimers({ toFake: ["performance"] });
+		const chain = await processIn(THIS_NS);
+		const v = vault();
+		const { writer } = acquire(chain, v);
+		await append(writer, 1);
+		passMonotonic(HOLDER_BOUND_MS + 1);
+		quiet();
+		const refused = append(writer, 2);
+		await expect(refused).rejects.toBeInstanceOf(chain.AuditLeaseLapsedError);
+		await expect(refused).rejects.toThrow(/no renewal ran/);
+		expect(linesOf(v)).toBe(1);
+		expect(existsSync(lockOf(v)), "the lapsed lock was given up").toBe(false);
+		chainIntact(v, 1);
+		await append(writer, 3);
+		expect(readLock(v).leaseRenewMs, "a fresh lock, with a fresh lease").toBe(RENEW_MS);
+		chainIntact(v, 2);
+	});
+
+	it("one failed renewal followed by a success does NOT trip it: appends continue past the bound", async () => {
+		vi.useFakeTimers({ toFake: ["performance", "setInterval", "clearInterval"] });
+		const chain = await processIn(THIS_NS);
+		const v = vault();
+		const { writer } = acquire(chain, v);
+		await append(writer, 1);
+		proc.futimesError = "EMFILE";
+		vi.advanceTimersByTime(RENEW_MS);
+		proc.futimesError = undefined;
+		for (let n = 2; n <= 6; n++) {
+			vi.advanceTimersByTime(RENEW_MS);
+			await append(writer, n);
+		}
+		expect(
+			performance.now(),
+			"control: well past the bound since the lock was taken",
+		).toBeGreaterThan(HOLDER_BOUND_MS);
+		expect(linesOf(v)).toBe(6);
+		expect(writer?.isDegraded()).toBe(false);
+		expect(readLock(v).leaseRenewMs).toBe(RENEW_MS);
+		chainIntact(v, 6);
+	});
+
+	it("the bound is STRICTLY below the observer's earliest reclaim: the holder refuses while an observer that has watched the same mtime since it was set still cannot reclaim", async () => {
+		const { LEASE_TIMING } = await processIn(THIS_NS);
+		// The observer needs max(confirmMs, 3 × renew) of its own monotonic observation, and that alone
+		// bounds it (a clock step can satisfy its wall-clock condition at once).
+		expect(LEASE_TIMING.holderBoundMs).toBeLessThan(LEASE_TIMING.confirmMs);
+		expect(LEASE_TIMING.holderBoundMs).toBeLessThan(LEASE_TIMING.staleMs);
+		expect(LEASE_TIMING.confirmMs).toBeGreaterThanOrEqual(3 * LEASE_TIMING.renewMs);
+		// …and it tolerates a failed renewal with an interval of slack.
+		expect(LEASE_TIMING.holderBoundMs).toBeGreaterThanOrEqual(3 * LEASE_TIMING.renewMs);
+		expect(LEASE_TIMING.holderBoundMs).toBe(HOLDER_BOUND_MS);
+
+		// Behaviour: a holder whose renewals stopped, and an observer that looked the moment its mtime
+		// was set — with the wall clock already stepped past the stale threshold.
+		vi.useFakeTimers({ toFake: ["performance"] });
+		const holder = await processIn(OTHER_NS);
+		const v = vault();
+		const held = acquire(holder, v).writer;
+		await append(held, 1);
+		utimesSync(lockOf(v), TEN_MINUTES_AGO(), TEN_MINUTES_AGO());
+		const bytes = readFileSync(lockOf(v), "utf-8");
+		const observer = await processIn(THIS_NS);
+		expectHeld(observer, v, bytes);
+		passMonotonic(HOLDER_BOUND_MS + 1);
+		// …the observer cannot reclaim yet (it has watched for less than its window)…
+		expect(expectHeld(observer, v, bytes)).toContain("reclaimed automatically at the first append");
+		// …and the holder has already stopped.
+		quiet();
+		await expect(append(held, 2)).rejects.toBeInstanceOf(holder.AuditLeaseLapsedError);
+		expect(linesOf(v)).toBe(1);
 	});
 });

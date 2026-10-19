@@ -1163,7 +1163,7 @@ process's lock. The lock records `bootId` (Linux `/proc/sys/kernel/random/boot_i
 4. Otherwise `kill(pid, 0)` decides, as before.
 
 **The lease is the only proof of a dead holder that crosses PID namespaces.** A writer that records
-its `pidNs` also declares `leaseRenewMs` (10 s) in its lock, and renews the lock file's mtime on that
+its `pidNs` also declares `leaseRenewMs` (5 s) in its lock, and renews the lock file's mtime on that
 interval with `futimes`, through an fd proven to be its own lock (create-time inode AND writerId,
 read through that fd) — never by path, so a holder that lost its lock can never renew the lock that
 replaced it. It declares the lease only if `futimes` succeeded on the lock's own inode at create;
@@ -1180,8 +1180,9 @@ The second condition is what makes the first safe. One kernel has one monotonic 
 during a suspend; Node's timers run on it. After a host suspend, or a wall-clock step forward (WSL
 corrects its clock after a resume), every lease reads as expired at once, but a LIVE holder is awake
 whenever the observer is, and renews within one interval of the observer's window. The wall-clock
-margin is for a live holder whose renewals stall: it keeps its lock through any stall shorter than
-60 s. A lock with no lease, or a malformed one, is held as before.
+margin makes an observer wait well past a brief stall of the holder's renewals (a long GC pause); a
+holder stalled past its own 20 s bound gives the lock up itself (below). A lock with no lease, or a
+malformed one, is held as before.
 
 *Split brain.* A lease cannot be atomic with the append, and Node has no kernel lock to fence with,
 so the residual window is stated rather than hidden. A holder loses its lock only after it has not
@@ -1193,6 +1194,25 @@ fresh). Only a holder frozen INSIDE that synchronous span, between its check and
 one more event after the taker has appended — one event, chained from a stale tail, which `verify`
 reports as a broken chain; its next append is refused. The renewal timer is `unref()`d and runs only
 while a leased lock is held.
+
+**A holder whose renewals FAIL stops writing before anyone can reclaim.** A live, active holder whose
+`futimes` keeps failing (EMFILE on the open, EIO) would otherwise keep appending while its lease
+expired, and an append in flight across the takeover forks the chain. Each held lease keeps
+`renewedAt`, the monotonic time read BEFORE the call that set the mtime others see (the create's
+write, a successful renewal's `futimes`); a failed renewal never moves it. Past
+`LEASE_HOLDER_BOUND_MS` (20 s) without a success, the lease has LAPSED: the timer gives the lock up
+instead of renewing it, and the append's own check (in the same synchronous span as its ownership
+check, before the write) does the same if the timer has not run. Either way the append that meets it
+is refused with `AuditLeaseLapsedError` — degraded and dead-lettered like any failed append — and
+the lock leaves the registry and is unlinked if it is still this lock. The next append takes the
+vault afresh: a new lock (leased only if `futimes` works then), and the tail re-read from the log.
+A renewal that succeeds after the bound never revives the lapsed lease.
+*The margin.* An observer reclaims only after its OWN monotonic observation of an unchanged mtime for
+`max(30 s, 3 × leaseRenewMs)`, and it cannot see an mtime before it is set, so no observer reclaims
+earlier than `renewedAt + 30 s`. Its wall-clock condition gives the holder nothing (a clock step makes
+it true at once), so the bound is set against the 30 s, never the 60 s. 20 s leaves 10 s for the
+append's synchronous span, and at a 5 s interval three renewals in a row may fail (or run late) before
+the bound. The tests pin `holderBound < confirm` (and so `< stale`).
 
 Two rules keep that bound true:
 - **Only a holder whose every write goes through `appendEvent` leases.** `withAuditWriterLock` (a

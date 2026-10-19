@@ -376,31 +376,87 @@ interface HeldLock {
 	 * not see that another holder came and went in between.
 	 */
 	acquisitionId: string;
+	/**
+	 * A leased lock's last SUCCESSFUL renewal, on this process's monotonic clock (`performance.now()`),
+	 * read BEFORE the call that set the mtime another process sees (the create's write, or a renewal's
+	 * `futimes`), so it is never later than that mtime. A failed renewal never moves it. See
+	 * {@link LEASE_HOLDER_BOUND_MS}.
+	 */
+	renewedAt: number;
+	/** The code of the last renewal that failed since the last one that succeeded, for the refusal's message. */
+	renewalError?: string | undefined;
 }
 
 /**
  * How often a holder renews its lease: the lock file's mtime, set through an fd proven to be its own
  * lock ({@link renewLease}). Recorded in the lock as `leaseRenewMs`.
  */
-const LEASE_RENEW_MS = 10_000;
+const LEASE_RENEW_MS = 5_000;
 /**
  * The least wall-clock age (now − the lock's mtime) at which another namespace's lease counts as
- * expired: six renewals missed. A reader uses `max(this, 6 × the lock's leaseRenewMs)`, so a lock
- * declaring a slower renewal waits longer and never shorter. The margin is for a live holder whose
- * renewals stall (a blocked event loop, a long GC pause): it keeps its lock through a stall shorter
- * than this.
+ * expired. A reader uses `max(this, 6 × the lock's leaseRenewMs)`, so a lock declaring a slower
+ * renewal waits longer and never shorter. It makes an observer wait well past a brief stall of a
+ * live holder's renewals; it is NOT what keeps a holder safe, since a wall-clock step satisfies it at
+ * once (see LEASE_HOLDER_BOUND_MS).
  */
 const LEASE_STALE_MS = 60_000;
 /**
  * The least time this process must itself have seen a lease unrenewed — the same lock file, the same
- * mtime — on its MONOTONIC clock before it reclaims it: three renewals. A reader uses
- * `max(this, 3 × leaseRenewMs)`. This is what makes the wall-clock age safe to use: after a host
- * suspend, or a wall-clock step forward, every lease reads as expired at once, but a live holder's
- * timer renews within one interval of the observer's own awake time, and the observation resets.
+ * mtime — on its MONOTONIC clock before it reclaims it. A reader uses `max(this, 3 × leaseRenewMs)`.
+ * This is what makes the wall-clock age safe to use: after a host suspend, or a wall-clock step
+ * forward, every lease reads as expired at once, but a live holder's timer renews within one interval
+ * of the observer's own awake time, and the observation resets.
  */
 const LEASE_CONFIRM_MS = 30_000;
+/**
+ * How long a HOLDER may go without a successful renewal before it stops writing under its lease: past
+ * this, on its own monotonic clock since {@link HeldLock.renewedAt}, the lease has LAPSED. The next
+ * append that meets it is refused, and the lock is given up ({@link lapseLease}).
+ *
+ * Why this bound, and why it holds. A holder whose renewals fail (EMFILE on the open, EIO from
+ * `futimes`) still looks live to itself; if it went on appending, an observer in another namespace
+ * would reclaim the lock from a LIVE, ACTIVE writer, and an append in flight across the takeover forks
+ * the chain. So the holder must stop STRICTLY BEFORE the earliest moment any observer can reclaim,
+ * counted from the last mtime that observer can see — the last successful renewal, `renewedAt`:
+ *  - The observer needs its OWN monotonic observation of that same mtime for at least
+ *    `max(LEASE_CONFIRM_MS, 3 × leaseRenewMs)` ≥ 30 s (judgeLease). It cannot see an mtime before it
+ *    is set, and `renewedAt` is read before the call that sets it; one kernel has one monotonic clock.
+ *    So no observer reclaims earlier than `renewedAt + 30 s`.
+ *  - Its wall-clock condition (age > 60 s) gives the holder NO guarantee: a wall-clock step forward
+ *    makes it true at once. The bound is therefore set against the 30 s, never the 60 s.
+ *  - The holder checks the bound at the start of the append's synchronous span, which then runs to
+ *    the fsync with no await. 20 s leaves 10 s of that 30 s for the span itself.
+ *  - And it tolerates ordinary failure: at a 5 s renewal interval, three renewals in a row may fail,
+ *    or the timer may run late, before the fourth (at 20 s) must succeed. One transient failure
+ *    followed by a success never comes near it.
+ */
+const LEASE_HOLDER_BOUND_MS = 20_000;
 /** The slowest renewal a lock may declare and still be honoured as a lease: an hour. */
 const LEASE_RENEW_MAX_MS = 3_600_000;
+
+/**
+ * The lease timings, for the tests that pin their relationships (the holder's bound must stay below the
+ * observer's earliest reclaim). Internal: not exported from the package.
+ */
+export const LEASE_TIMING = Object.freeze({
+	renewMs: LEASE_RENEW_MS,
+	staleMs: LEASE_STALE_MS,
+	confirmMs: LEASE_CONFIRM_MS,
+	holderBoundMs: LEASE_HOLDER_BOUND_MS,
+});
+
+/**
+ * A holder's lease lapsed: its renewals failed (or did not run) for longer than
+ * {@link LEASE_HOLDER_BOUND_MS}, so another namespace may soon reclaim its lock. The append that met
+ * it is refused (the writer degrades and dead-letters it, as for any failed append), and the lock was
+ * given up. The next append takes the vault's lock afresh, re-reading the chain's tail.
+ */
+export class AuditLeaseLapsedError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "AuditLeaseLapsedError";
+	}
+}
 
 /**
  * writerId → (lock-file `dev:ino` → {@link HeldLock}): every lock every LIVE writer in this process
@@ -866,7 +922,7 @@ function writeLockTemp(
 	tmp: string,
 	contentFor: (leased: boolean) => string,
 	wantLease: boolean,
-): { identity: string; leased: boolean } {
+): { identity: string; leased: boolean; stampedAt: number } {
 	const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | O_NOFOLLOW;
 	let fd: number;
 	try {
@@ -879,6 +935,9 @@ function writeLockTemp(
 	try {
 		try {
 			const st = fstatSync(fd, { bigint: true });
+			// Read BEFORE the write that sets the mtime others see: the lease's first renewal, never later
+			// than that mtime (see LEASE_HOLDER_BOUND_MS).
+			const stampedAt = performance.now();
 			let leased = false;
 			if (wantLease) {
 				try {
@@ -891,7 +950,7 @@ function writeLockTemp(
 			}
 			writeFully(fd, contentFor(leased));
 			fsyncSync(fd);
-			return { identity: `${st.dev}:${st.ino}`, leased };
+			return { identity: `${st.dev}:${st.ino}`, leased, stampedAt };
 		} finally {
 			closeSync(fd);
 		}
@@ -998,7 +1057,7 @@ function createLock(lockPath: string, writerId: string, leasable: boolean): bool
 	// A lease is declared only where another namespace could judge this lock, i.e. where the lock
 	// names this process's namespace (elsewhere, with no /proc, no reader ever consults it), and only
 	// for a holder whose every write re-checks the lock first (`leasable`: see acquireProcessLock).
-	const { identity, leased } = writeLockTemp(
+	const { identity, leased, stampedAt } = writeLockTemp(
 		tmp,
 		(withLease) => lockContentFor(writerId, withLease),
 		leasable && thisPidNamespace() !== undefined,
@@ -1043,7 +1102,12 @@ function createLock(lockPath: string, writerId: string, leasable: boolean): bool
 		mine = new Map();
 		heldLocks.set(writerId, mine);
 	}
-	mine.set(identity, { path: lockPath, leased, acquisitionId: randomUUID() });
+	mine.set(identity, {
+		path: lockPath,
+		leased,
+		acquisitionId: randomUUID(),
+		renewedAt: stampedAt,
+	});
 	if (leased) startLeaseRenewal();
 	return true;
 }
@@ -1069,14 +1133,64 @@ function stopLeaseRenewalIfIdle(): void {
 	leaseTimer = undefined;
 }
 
-/** Renew every leased lock every live writer in this process holds. */
+/**
+ * Renew every leased lock every live writer in this process holds — or, for one whose renewals have
+ * failed past {@link LEASE_HOLDER_BOUND_MS}, give it up ({@link lapseLease}) instead: a renewal that
+ * succeeds after that point must not revive a lease an observer may already be about to reclaim.
+ */
 function renewLeases(): void {
 	const now = new Date();
 	for (const [writerId, locks] of heldLocks) {
 		for (const [identity, lock] of locks) {
-			if (lock.leased) renewLease(lock.path, identity, writerId, now);
+			if (!lock.leased) continue;
+			if (leaseLapsed(lock)) lapseLease(writerId, identity, lock);
+			else renewLease(lock, identity, writerId, now);
 		}
 	}
+}
+
+/** Has this held lease gone without a successful renewal for longer than the holder's bound? */
+function leaseLapsed(lock: HeldLock): boolean {
+	return lock.leased && performance.now() - lock.renewedAt > LEASE_HOLDER_BOUND_MS;
+}
+
+/**
+ * Why each writer's lease lapsed, until the append that reports it (one entry per writer; the next
+ * acquire consumes it and refuses with {@link AuditLeaseLapsedError}).
+ */
+const lapsedLeases = new Map<string, string>();
+
+/** An errno code fit for a message, else `unknown`. */
+function describeCode(code: string | undefined): string {
+	return code !== undefined && /^[A-Z0-9_]{1,32}$/.test(code) ? code : "unknown";
+}
+
+/**
+ * Give up a lease that lapsed. The lock leaves the registry (it is not renewed again, and
+ * `lockOwner()` no longer names it), and its file is removed if it is still this lock (inode AND
+ * writerId; a lock another writer put there is left alone). Removed rather than left: this writer will
+ * not write under it again, and a lock left in place would only keep this namespace's other
+ * processes waiting on a live PID; its next append takes the vault afresh — a new lock, a new lease if
+ * the mtime can be set, and the tail re-read from the log. A removal that fails leaves the file: it is
+ * then a same-PID lock nobody here holds, which this process reclaims at that next append. The
+ * reason is recorded for that append, which is refused with it.
+ */
+function lapseLease(writerId: string, identity: string, lock: HeldLock): void {
+	const mine = heldLocks.get(writerId);
+	mine?.delete(identity);
+	if (mine?.size === 0) heldLocks.delete(writerId);
+	stopLeaseRenewalIfIdle();
+	let removed = "the lock was given up";
+	try {
+		const file = readLockFile(lock.path);
+		if (file?.identity === identity && file.writerId === writerId) unlinkSync(lock.path);
+	} catch (err) {
+		removed = `the lock could not be removed (${describeCode(errorCode(err))}) and is reclaimed at the next append`;
+	}
+	lapsedLeases.set(
+		writerId,
+		`Audit writer lease lapsed: no renewal of this writer's lock succeeded for ${secondsOf(performance.now() - lock.renewedAt)} (last renewal error: ${lock.renewalError === undefined ? "none — no renewal ran" : describeCode(lock.renewalError)}), more than the ${secondsOf(LEASE_HOLDER_BOUND_MS)} after which this writer stops: a writer in another PID namespace could begin to reclaim the lock ${secondsOf(LEASE_CONFIRM_MS)} after its last renewal. This append is refused so no takeover can land under a write; ${removed}. The next append takes the vault's lock afresh. Lock file: ${lock.path}`,
+	);
 }
 
 /**
@@ -1085,20 +1199,29 @@ function renewLeases(): void {
  * never touch a lock another writer took after this one lost it: `futimes` acts on the inode, not on
  * a path that may name someone else's file by now. Never throws (it runs on a timer): a lock that is
  * gone, moved or another's is simply not renewed. Losing the lock is noticed where it matters, at the
- * next append, which verifies its own lock before it writes.
+ * next append, which verifies its own lock before it writes. A failure is recorded, and only a success
+ * moves `renewedAt`: renewals that keep failing lapse the lease (LEASE_HOLDER_BOUND_MS).
  */
-function renewLease(path: string, identity: string, writerId: string, now: Date): void {
+function renewLease(lock: HeldLock, identity: string, writerId: string, now: Date): void {
 	let fd: number;
 	try {
-		fd = openSync(path, fsConstants.O_RDONLY | O_NOFOLLOW);
-	} catch {
+		fd = openSync(lock.path, fsConstants.O_RDONLY | O_NOFOLLOW);
+	} catch (err) {
+		lock.renewalError = errorCode(err) ?? "unknown";
 		return;
 	}
 	try {
 		const file = readLockFd(fd);
-		if (file.identity === identity && file.writerId === writerId) futimesSync(fd, now, now);
-	} catch {
-		/* not renewed this time; the next tick tries again */
+		if (file.identity === identity && file.writerId === writerId) {
+			// Read BEFORE the futimes: never later than the mtime it sets (see LEASE_HOLDER_BOUND_MS).
+			const before = performance.now();
+			futimesSync(fd, now, now);
+			lock.renewedAt = before;
+			lock.renewalError = undefined;
+		}
+	} catch (err) {
+		// Not renewed: `renewedAt` stays where the last SUCCESS left it, and the bound counts on.
+		lock.renewalError = errorCode(err) ?? "unknown";
 	} finally {
 		try {
 			closeSync(fd);
@@ -1151,16 +1274,11 @@ function currentAcquisition(logPath: string, writerId: string): string | undefin
 		const lockPath = join(realpathSync(dirname(logPath)), LOCK_FILE_NAME);
 		const file = readLockFile(lockPath);
 		if (file === undefined || !verifyOwnLockFile(file, lockPath, writerId)) return undefined;
-		return heldLocks.get(writerId)?.get(file.identity)?.acquisitionId;
+		const lock = heldLocks.get(writerId)?.get(file.identity);
+		return lock === undefined || leaseLapsed(lock) ? undefined : lock.acquisitionId;
 	} catch {
 		return undefined;
 	}
-}
-
-/** {@link verifyOwnLockFile} on a fresh read of `lockPath`; a read that fails throws. */
-function verifyOwnLock(lockPath: string, writerId: string): boolean {
-	const file = readLockFile(lockPath);
-	return file !== undefined && verifyOwnLockFile(file, lockPath, writerId);
 }
 
 /**
@@ -1191,7 +1309,29 @@ function acquireProcessLock(logPath: string, writerId: string, leasable: boolean
 	// create (and fsync) a temp file only to meet EEXIST. The same decision from the same read the
 	// create's EEXIST would lead to: the file carries this writer's id and inode, so it is this
 	// writer's. Anything else falls through to the create.
-	if (heldLocks.has(writerId) && verifyOwnLock(lockPath, writerId)) return false;
+	// A lease that lapsed since this writer's last append (its renewal timer gave the lock up) is
+	// reported here, once: this append is refused, and the next one takes the vault afresh.
+	const lapsed = lapsedLeases.get(writerId);
+	if (lapsed !== undefined) {
+		lapsedLeases.delete(writerId);
+		throw new AuditLeaseLapsedError(lapsed);
+	}
+	if (heldLocks.has(writerId)) {
+		const file = readLockFile(lockPath);
+		if (file !== undefined && verifyOwnLockFile(file, lockPath, writerId)) {
+			// The holder's bound, checked in the same synchronous span as the ownership check and the
+			// write after it (no await between them): renewals that failed for too long stop the write
+			// before any observer can reclaim the lock under it.
+			const lock = heldLocks.get(writerId)?.get(file.identity);
+			if (lock !== undefined && leaseLapsed(lock)) {
+				lapseLease(writerId, file.identity, lock);
+				const reason = lapsedLeases.get(writerId) ?? "Audit writer lease lapsed.";
+				lapsedLeases.delete(writerId);
+				throw new AuditLeaseLapsedError(reason);
+			}
+			return false;
+		}
+	}
 
 	if (createLock(lockPath, writerId, leasable)) {
 		sweepLeftoverTemps(dir);
@@ -1243,6 +1383,7 @@ function acquireProcessLock(logPath: string, writerId: string, leasable: boolean
  * refuse its vaults in this process for good.
  */
 function releaseLocks(writerId: string, logPath: string): void {
+	lapsedLeases.delete(writerId);
 	const held = heldLocks.get(writerId);
 	if (held === undefined) return;
 	heldLocks.delete(writerId);
