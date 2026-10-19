@@ -5,6 +5,7 @@ export type { ServerConfig, TenantConfig } from "./config.js";
 export { hashKey, loadServerConfig, resolveTenant } from "./config.js";
 export type { ServerEvent } from "./events.js";
 export { EventBus } from "./events.js";
+export type { HealthChildSpawner } from "./ledger-health.js";
 export type { LedgerProbeOutcome, LedgerProbeResult, LedgerTarget } from "./ledger-probe.js";
 export {
 	classifyLedgerProbe,
