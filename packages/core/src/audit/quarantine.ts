@@ -14,8 +14,9 @@
  *  - an unterminated last line that DOES parse is not torn, and is refused (that repair is an
  *    operator's decision, not this tool's).
  *
- * The repair, under the vault's writer lock (taken through `createAuditWriter`'s `lockAtCreate`,
- * so a live writer in this or another process refuses it), in this order:
+ * The repair, under the vault's writer lock (taken through `createUnleasedAuditWriter`'s
+ * `lockAtCreate`, so a live writer in this or another process refuses it, and with no lease, so no
+ * other namespace reclaims it mid-repair), in this order:
  *  1. the log is fsync'd, and a `.meta` anchor one behind, or absent, is brought to the verified
  *     head (the genesis anchor for an empty chain) — before anything is appended, so no later
  *     failure can leave it in a state no run accepts (two behind, or absent on two events);
@@ -64,7 +65,7 @@ import { join } from "node:path";
 import { GENESIS_HASH, VAULT_DIR } from "../shared/constants.js";
 import {
 	type AuditWriter,
-	createAuditWriter,
+	createUnleasedAuditWriter,
 	isUnsupportedDirSync,
 	releaseAuditWriterForTeardown,
 	writeAnchorAtomically,
@@ -582,7 +583,9 @@ export async function quarantineTornTail(
 	if (!existsSync(auditDir)) {
 		throw new AuditQuarantineRefusedError(`there is no audit directory at ${auditDir}`);
 	}
-	const writer = createAuditWriter(vaultRoot, { lockAtCreate: true });
+	// Unleased: the repair cuts the log outside appendEvent, so its lock must never be reclaimed
+	// from another namespace while it is paused mid-repair.
+	const writer = createUnleasedAuditWriter(vaultRoot, { lockAtCreate: true });
 	let result: QuarantineResult;
 	try {
 		result = await repairUnderLock(writer, auditDir, logPath, qDir);
