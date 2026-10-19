@@ -754,6 +754,63 @@ describe("a tenant contributes only what its own governor verified", () => {
 		expect(h.body).toMatchObject({ ok: false, ledger: "unreachable" });
 	}, 15_000);
 
+	it("a governor created through server.pool.get after listen(), on another ledger than the watched one, reads unknown on health and on the tenant's budget", async () => {
+		const { server, base, config } = await start({ spawner: fakeSpawner("reply"), file: A });
+		expect(
+			await until(
+				() => ledgerOf(base),
+				(l) => l === "reachable",
+			),
+		).toBe("reachable");
+		await writeFile(config.tenants[0]?.configPath as string, JSON.stringify(B));
+		// Created directly: no authenticated route is involved.
+		await server.pool.get(config.tenants[0] as ServerConfig["tenants"][number]);
+		expect(await ledgerOf(base)).toBe("unknown");
+		expect((await budget(base)).body.ledger).toBe("unknown");
+	});
+
+	it("a governor created through server.pool.get BEFORE listen(), whose config then changes: re-verified against the targets health watches, so unknown", async () => {
+		const stateDir = await mkdtemp(join(tmpdir(), "utsrv-health-"));
+		const configPath = join(stateDir, "tenant.config.json");
+		await writeFile(configPath, JSON.stringify(A));
+		const config: ServerConfig = {
+			host: "127.0.0.1",
+			port: 0,
+			stateDir,
+			enforcement: "enforce",
+			pendingTtlMs: 300_000,
+			dryRun: false,
+			ledgerTimeoutMs: DEADLINE_MS,
+			ledgerHealth: "child",
+			tenants: [{ id: "acme", keyHash: hashKey(KEY), budget: 1_000_000, configPath }],
+		};
+		const tenant = config.tenants[0] as ServerConfig["tenants"][number];
+		const server = createUsertrustServer({
+			config,
+			// The governor reads the ledger the tenant's config names when it is created.
+			factory: async () => {
+				const used = (await resolveTenantTargets(config)).get("acme");
+				const { governor } = createFakeGovernor();
+				return { ...governor, config: { tigerbeetle: used } } as unknown as Governor;
+			},
+			spawnHealthChild: fakeSpawner("reply").spawnChild,
+		});
+		servers.push(server);
+		await server.pool.get(tenant);
+		await writeFile(configPath, JSON.stringify(B));
+		const { port } = await server.listen();
+		const base = `http://127.0.0.1:${port}`;
+		// Health watches B (the file at start); the cached governor uses A.
+		await sleep(DEADLINE_MS / 3);
+		const readings = new Set<unknown>();
+		for (let i = 0; i < 10; i++) {
+			readings.add(await ledgerOf(base));
+			await sleep(50);
+		}
+		expect([...readings]).toEqual(["unknown"]);
+		expect((await budget(base)).body.ledger).toBe("unknown");
+	});
+
 	it("every health diagnostic goes through the server's log sink, none straight to stderr", async () => {
 		const A2 = { ...A, tigerbeetle: { clusterId: 0, addresses: ["127.0.0.1:3303"] } };
 		const lines: string[] = [];

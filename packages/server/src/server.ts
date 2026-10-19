@@ -467,7 +467,10 @@ export function createUsertrustServer(opts: {
 		return mapped;
 	}
 	const bus = new EventBus();
-	const pool = opts.factory ? new GovernorPool(config, opts.factory) : new GovernorPool(config);
+	// Every governor creation is tracked for health, whichever way it is reached: an internal route, or
+	// an embedder calling `server.pool.get(tenant)` itself. Tracking only in the routes would leave
+	// such a governor unverified.
+	const pool = new GovernorPool(config, opts.factory, trackCreation);
 	const pending = new Map<string, PendingEntry>();
 	// `${tenantId}\0${transferId}` of settles that completed in this process (FIFO, bounded by
 	// RECENTLY_SETTLED_MEMORY) and of settles in flight, so a concurrent or repeated settle is told
@@ -539,24 +542,23 @@ export function createUsertrustServer(opts: {
 	 * the server started.
 	 */
 	const verified = new Map<string, boolean>();
+	/** Each tenant's resolved governor: health re-verifies those created before it started. */
+	const resolvedGovernors = new Map<string, Governor>();
 
 	/**
-	 * The tenant's governor, as `pool.get` gives it, tracking its creation for health: initializing
-	 * until it resolves, then verified against the target health watches for the tenant.
+	 * The pool's `onCreate`: a governor is initializing until it resolves, then verified against the
+	 * target health watches for the tenant.
 	 */
-	function acquire(tenant: TenantConfig): Promise<Governor> {
-		const created = pool.get(tenant);
-		if (!verified.has(tenant.id) && !initializing.has(tenant.id)) {
-			initializing.add(tenant.id);
-			created.then(
-				(governor) => {
-					initializing.delete(tenant.id);
-					verify(tenant, governor);
-				},
-				() => initializing.delete(tenant.id),
-			);
-		}
-		return created;
+	function trackCreation(tenant: TenantConfig, created: Promise<Governor>): void {
+		initializing.add(tenant.id);
+		created.then(
+			(governor) => {
+				initializing.delete(tenant.id);
+				resolvedGovernors.set(tenant.id, governor);
+				verify(tenant, governor);
+			},
+			() => initializing.delete(tenant.id),
+		);
 	}
 
 	function verify(tenant: TenantConfig, governor: Governor): void {
@@ -627,6 +629,12 @@ export function createUsertrustServer(opts: {
 		}
 		if (healthStopped) return;
 		tenantTargets = new Map([...byTenant].map(([id, target]) => [id, targetKey(target)]));
+		// A governor created before this (through `server.pool.get`, before `listen()`) was verified
+		// against no targets: check it against the ones health actually watches.
+		for (const [id, governor] of resolvedGovernors) {
+			const tenant = config.tenants.find((t) => t.id === id);
+			if (tenant !== undefined) verify(tenant, governor);
+		}
 		health = new LedgerHealth([...byTenant.values()], {
 			ledgerTimeoutMs,
 			...(config.healthRespawnCooldownMs === undefined
@@ -903,7 +911,7 @@ export function createUsertrustServer(opts: {
 
 		let governor: Governor;
 		try {
-			governor = await acquire(tenant);
+			governor = await pool.get(tenant);
 		} catch (err) {
 			// Today's answer to a governor that could not be created; consumed if the request ended.
 			if (leave("answered")) throw err;
@@ -1026,7 +1034,7 @@ export function createUsertrustServer(opts: {
 		// the entry so a transient settle error stays retryable.
 		try {
 			const claimedNow = await claim(tenant.id, transferId, entry, "settle", true, async () => {
-				const governor = await acquire(tenant);
+				const governor = await pool.get(tenant);
 				const receipt = await governor.settle(entry.auth, usage);
 				// A settle that reached the ledger and did not confirm (`settled: false`, recorded as
 				// ambiguous) may STILL have charged: its retry is told so (409 settlement_ambiguous), never
@@ -1140,7 +1148,7 @@ export function createUsertrustServer(opts: {
 			return;
 		}
 		try {
-			const governor = await acquire(tenant);
+			const governor = await pool.get(tenant);
 			const record = () =>
 				governor.recordUnheldSettlement({
 					transferId,
@@ -1240,7 +1248,7 @@ export function createUsertrustServer(opts: {
 		let outcome: AbortOutcome | typeof NOT_CLAIMED;
 		try {
 			outcome = await claim(tenant.id, transferId, entry, "abort", true, async () => {
-				const governor = await acquire(tenant);
+				const governor = await pool.get(tenant);
 				return governor.abort(entry.auth, parsed.data.error);
 			});
 		} catch (err) {
@@ -1290,7 +1298,7 @@ export function createUsertrustServer(opts: {
 		let outcome: ReleaseOutcome | typeof NOT_CLAIMED;
 		try {
 			outcome = await claim(tenant.id, transferId, entry, "release", true, async () => {
-				const governor = await acquire(tenant);
+				const governor = await pool.get(tenant);
 				return governor.release(entry.auth, reason, { releaseClass });
 			});
 		} catch (err) {
@@ -1396,7 +1404,7 @@ export function createUsertrustServer(opts: {
 		}
 		requestCaller.set(res, { tenantId: tenant.id, key });
 		if (req.method === "GET" && url === "/v1/budget") {
-			const acquiring = acquire(tenant);
+			const acquiring = pool.get(tenant);
 			let governor: Governor | undefined;
 			if (config.dryRun) {
 				governor = await acquiring;
@@ -1495,7 +1503,7 @@ export function createUsertrustServer(opts: {
 			false,
 			async (): Promise<ReleaseOutcome | undefined> => {
 				try {
-					const governor = await acquire(tenant);
+					const governor = await pool.get(tenant);
 					return await governor.release(entry.auth, reason);
 				} catch (err) {
 					// Best-effort — the Governor's own destroy()/reconciliation voids
