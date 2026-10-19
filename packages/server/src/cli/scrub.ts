@@ -18,6 +18,32 @@ const CONTROL_CHARACTERS = /[\x00-\x1f\x7f-\x9f]/g;
 const LINE_SEPARATORS = new RegExp(`[${String.fromCodePoint(0x2028, 0x2029)}]`, "g");
 
 /**
+ * `text` sanitized as `scrubForStderr` sanitizes it, never clipped, and where each of its UTF-16
+ * code units stood in `text`: unit `j` of `clean` is unit `at[j]` of `text` (U+2028 and U+2029
+ * there, `\n` here). The escape sequences are those the same search finds in `text`; then each
+ * C0, DEL and C1 unit but the line break is removed. One pass after that search, so a caller can
+ * find something in either text and act on the other at the same place.
+ */
+export function sanitizeMapped(text: string): { clean: string; at: Int32Array } {
+	const lines = text.replace(LINE_SEPARATORS, "\n");
+	const removed = new Uint8Array(lines.length);
+	for (const m of lines.matchAll(ESCAPE_SEQUENCES)) removed.fill(1, m.index, m.index + m[0].length);
+	const at = new Int32Array(lines.length);
+	let clean = "";
+	let kept = 0;
+	let from = 0;
+	for (let i = 0; i < lines.length; i++) {
+		const code = lines.charCodeAt(i);
+		const control = code !== 0x0a && (code <= 0x1f || (code >= 0x7f && code <= 0x9f));
+		if (removed[i] === 1 || control) {
+			clean += lines.slice(from, i);
+			from = i + 1;
+		} else at[kept++] = i;
+	}
+	return { clean: clean + lines.slice(from), at: at.subarray(0, kept) };
+}
+
+/**
  * Text the CLI prints at an operator's terminal that carries configured values (a ledger
  * address, a config path, a child's stderr). Turns U+2028 and U+2029 into `\n`, so they are
  * line breaks like any other (a caller that joins lines on `\n` folds them too, and an OSC body

@@ -13,7 +13,7 @@ import type {
 	ReleaseOutcome,
 } from "usertrust";
 import { sanitizeReleaseReason } from "usertrust";
-import { scrubForStderr } from "./cli/scrub.js";
+import { sanitizeMapped, scrubForStderr } from "./cli/scrub.js";
 import type { ServerConfig, TenantConfig } from "./config.js";
 import { DEFAULT_LEDGER_TIMEOUT_MS, resolveTenant } from "./config.js";
 import { EventBus } from "./events.js";
@@ -261,13 +261,15 @@ function applyRedactions(text: string, sources: readonly Iterator<Redaction>[]):
 			}
 		});
 		if (first === undefined) return out + text.slice(kept);
+		const start = first.start;
 		let end = first.end;
 		heads[from] = sources[from]?.next() ?? { done: true, value: undefined };
-		// Every part that starts inside this one joins it, which can take it further.
+		// Every part that starts inside this one, or where it starts, joins it, which can take it
+		// further. (So an empty part found twice, in two views of a text, is replaced once.)
 		for (let joined = true; joined; ) {
 			joined = false;
 			heads.forEach((head, s) => {
-				if (!head.done && head.value.start < end) {
+				if (!head.done && (head.value.start < end || head.value.start === start)) {
 					end = Math.max(end, head.value.end);
 					heads[s] = sources[s]?.next() ?? { done: true, value: undefined };
 					joined = true;
@@ -414,10 +416,68 @@ function* secretSpans(text: string, secret: string): Generator<Redaction> {
  */
 export function redactSecrets(text: string, secrets: readonly string[] = []): string {
 	try {
-		return applyRedactions(text, [
-			bearerSpans(text),
-			apiKeySpans(text),
-			...secrets.map((secret) => secretSpans(text, secret)),
+		return applyRedactions(text, spansIn(text, secrets));
+	} catch (err) {
+		if (err instanceof RangeError) return UNREADABLE;
+		throw err;
+	}
+}
+
+/** Every kind of match in `text`: each `Bearer <token>`, each api-key value and each of `secrets`. */
+function spansIn(text: string, secrets: readonly string[]): Generator<Redaction>[] {
+	return [
+		bearerSpans(text),
+		apiKeySpans(text),
+		...secrets.map((secret) => secretSpans(text, secret)),
+	];
+}
+
+/** The index in the sanitized text of its first unit at or after unit `i` of the original. */
+function sanitizedIndex(at: Int32Array, i: number): number {
+	let lo = 0;
+	let hi = at.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if ((at[mid] ?? 0) < i) lo = mid + 1;
+		else hi = mid;
+	}
+	return lo;
+}
+
+/**
+ * `spans`, found in the original text, at the same characters of the sanitized one: a part keeps
+ * those of its characters sanitizing kept. One whose characters were all removed is dropped (there
+ * is nothing of it to print); an empty one (an unclosed quote at the end) stays, in its place.
+ */
+function* inSanitized(spans: Generator<Redaction>, at: Int32Array): Generator<Redaction> {
+	for (const part of spans) {
+		const start = sanitizedIndex(at, part.start);
+		const end = sanitizedIndex(at, part.end);
+		if (end > start || part.end === part.start) yield { ...part, start, end };
+	}
+}
+
+/**
+ * `text` sanitized as `scrubForStderr` sanitizes it (never clipped), with every credential in it
+ * redacted: what `redactSecrets` finds in the ORIGINAL text and what it finds in the SANITIZED
+ * text, together, replaced once in the sanitized text. Both views are read because each can show
+ * what the other hides: in the original, the delimiters the patterns read are still there
+ * (removing a tab joins `Bearer\t<token>` into one word, and an escape sequence can take a key's
+ * first character with it); in the sanitized text, a marker or a key a control character split is
+ * whole (`Bea\0rer`, `x-api\x07-key`), and a key that would take part of the marker in the
+ * original cannot hide it there. The replacement is made in the sanitized text itself, and nothing
+ * removes a character after it: every character the result holds outside a placeholder stands
+ * next to the ones it stood next to in the sanitized text, which was read. (Redacting the original
+ * and sanitizing after could join what was apart: an OSC sequence whose terminator a redaction
+ * took runs further, and the characters on either side of it meet.) No match is ever looked for in
+ * redacted text. On `RangeError`, the whole text is replaced, as `redactSecrets` does.
+ */
+export function redactSanitized(text: string, secrets: readonly string[] = []): string {
+	try {
+		const { clean, at } = sanitizeMapped(text);
+		return applyRedactions(clean, [
+			...spansIn(text, secrets).map((spans) => inSanitized(spans, at)),
+			...spansIn(clean, secrets),
 		]);
 	} catch (err) {
 		if (err instanceof RangeError) return UNREADABLE;
@@ -440,19 +500,12 @@ export function joinLines(text: string): string {
  * `500 internal`: which tenant, which route, and the error's own name and message, so a
  * tenant refused at its first request (its vault, say) says why somewhere. It carries no key,
  * header or request body of its own. The message is the server's or governor's text, which can
- * quote what a caller sent, so credentials in it are REDACTED (`redactSecrets`, with the caller's
- * own key in `secrets`), and escape sequences and control characters are removed
- * (`scrubForStderr`).
- *
- * Every redaction runs on the WHOLE text, and nothing is cut until no credential can come back
- * together. The credentials are redacted first, while the delimiters the patterns read are still
- * there (removing a tab joins `Bearer\t<token>` into one word, and an escape sequence can take a
- * key's first character with it). The text is then sanitized without a clip, its lines are
- * joined into one in one pass (`joinLines`), and it is redacted again, since removing a control
- * character a caller put inside a key joins it. (No pattern reads a line break differently from
- * other whitespace, so joining can make no new match, and one pass after both is enough.) Only
- * then is it clipped to `MAX_PRINTED_CHARS`: a cut any earlier could keep a key's first part,
- * which no pass after it can recognize.
+ * quote what a caller sent, so its escape sequences and control characters are removed and the
+ * credentials in it REDACTED, in one step (`redactSanitized`, with the caller's own key in
+ * `secrets`), on the WHOLE text. Its lines are then joined into one in one pass (`joinLines`; no
+ * pattern reads a line break differently from other whitespace, so joining makes no new match).
+ * Only then is it clipped to `MAX_PRINTED_CHARS`: a cut any earlier could keep a key's first part,
+ * which no search after it can recognize.
  */
 export function internalErrorLine(
 	err: unknown,
@@ -462,8 +515,7 @@ export function internalErrorLine(
 ): string {
 	const name = err instanceof Error ? err.name : typeof err;
 	const message = err instanceof Error ? err.message : String(err);
-	const raw = redactSecrets(`${name}: ${message}`, secrets);
-	const joined = redactSecrets(joinLines(scrubForStderr(raw, Number.POSITIVE_INFINITY)), secrets);
+	const joined = joinLines(redactSanitized(`${name}: ${message}`, secrets));
 	// The clip is LAST: it only drops the end of text already redacted, so it can expose nothing.
 	const text = scrubForStderr(joined);
 	const tenant = tenantId === undefined ? "-" : scrubForStderr(tenantId);

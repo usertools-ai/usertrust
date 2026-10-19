@@ -20,14 +20,18 @@
  *   builds no pattern from the key: a key of any length is found, and the search stays linear on a
  *   near miss with long runs between the key's characters and on a key that repeats its own start.
  * - `joinLines` joins what `/\s*\n\s*\/g` joined, in one pass: 10.4M spaces finish fast.
- * - `internalErrorLine` redacts before sanitizing, while the delimiters the patterns read are still
- *   there (`Bearer\t<token>`); sanitizes the whole text and redacts again, so a key a control
- *   character split is found once joined; joins the lines and redacts again; and cuts only after
- *   that, at the printed clip.
+ * - `internalErrorLine` looks for credentials in the original text, where the delimiters the
+ *   patterns read are still there (`Bearer\t<token>`), and in the sanitized text, where a key or a
+ *   marker a control character split is whole; replaces what both find once, in the sanitized
+ *   text, so nothing is removed after a replacement (an OSC sequence a replacement shortened would
+ *   otherwise join a marker to its value); joins the lines; and cuts only after that, at the
+ *   printed clip. Every control, DEL and C1 character and three escape sequences, inside each
+ *   marker, with and without a key that swallows the marker in the original, leave no readable
+ *   credential. `sanitizeMapped` gives scrubForStderr's text and where each of its units was.
  */
 
 import { describe, expect, it } from "vitest";
-import { MAX_PRINTED_CHARS } from "../src/cli/scrub.js";
+import { MAX_PRINTED_CHARS, sanitizeMapped, scrubForStderr } from "../src/cli/scrub.js";
 import { internalErrorLine, joinLines, redactApiKeys, redactSecrets } from "../src/server.js";
 import { OLD_API_KEY_VALUE, redactWith } from "./helpers/old-api-key-pattern.js";
 
@@ -378,13 +382,13 @@ describe("internalErrorLine redacts the whole message before anything is cut", (
 		});
 	});
 
-	it("replaces a key before sanitizing, where an escape sequence would eat its first character", () => {
-		// `ESC T` is one escape sequence: removing it leaves `enant-...`, which no later split on the
-		// key can find. Replaced first, the key is gone; the ESC left before the marker then reads
-		// `ESC [ r` as one sequence and takes the marker's first two characters with it.
+	it("finds a key in the original, where an escape sequence would eat its first character", () => {
+		// `ESC T` is one escape sequence: removing it leaves `enant-...`, which no search of the
+		// sanitized text can find. The original holds the key whole; what sanitizing kept of it is
+		// replaced, and nothing is removed after that, so the placeholder is printed whole.
 		const key = "Tenant-key-0123456789";
 		const out = line(`\x1b${key}`, [key]);
-		expect(out).toBe(`${LINE}Error: edacted]`);
+		expect(out).toBe(`${LINE}Error: [redacted]`);
 		expect(out).not.toContain("enant-key");
 	});
 
@@ -492,4 +496,158 @@ describe("internalErrorLine redacts the whole message before anything is cut", (
 		expect(performance.now() - started).toBeLessThan(1_000);
 		expect(out).toBe(`${LINE}Error: ${" ".repeat(MAX_PRINTED_CHARS - "Error: ".length)}\u2026`);
 	}, 30_000);
+});
+
+const C = (...codes: number[]): string => String.fromCharCode(...codes);
+const ESC = C(0x1b);
+const BEL = C(0x07);
+
+/** Each control, DEL and C1 character, three escape sequences, and the line and paragraph separators. */
+const INSIDE: string[] = [];
+for (let c = 0; c <= 0x1f; c++) INSIDE.push(C(c));
+for (let c = 0x7f; c <= 0x9f; c++) INSIDE.push(C(c));
+INSIDE.push(`${ESC}[31m`, `${ESC}]0;t${BEL}`, `${C(0x9b)}1m`, C(0x2028), C(0x2029));
+
+/** Each marker, and what stands between it and its value. */
+const MARKERS: Array<[string, string]> = [
+	["Bearer", " "],
+	["bearer", " "],
+	["x-api-key", ": "],
+	["api-key", "="],
+	["api_key", ": "],
+];
+
+const VALUE = "upstream-secret-XYZ";
+
+describe("internalErrorLine reads the original and the sanitized text, and redacts the sanitized one once", () => {
+	it("a marker a control character splits, which a caller's key would swallow in the original", () => {
+		expect(line(`tenant Bea${C(0)}rer ${VALUE}`, ["tenantBearer"])).toBe(
+			`${LINE}Error: [redacted] [redacted]`,
+		);
+		expect(line(`tenant x-api${BEL}-key: ${VALUE}`, ["tenantx-api-key"])).toBe(
+			`${LINE}Error: [redacted]: [redacted]`,
+		);
+	});
+
+	it("positive control: the original alone, then sanitized, prints those values", () => {
+		const viaOriginal = (message: string, key: string): string =>
+			joinLines(
+				scrubForStderr(redactSecrets(`Error: ${message}`, [key]), Number.POSITIVE_INFINITY),
+			);
+		expect(viaOriginal(`tenant Bea${C(0)}rer ${VALUE}`, "tenantBearer")).toContain(VALUE);
+		expect(viaOriginal(`tenant x-api${BEL}-key: ${VALUE}`, "tenantx-api-key")).toContain(VALUE);
+	});
+
+	it("nothing is removed after redacting: an OSC sequence a key's span ends cannot join a marker", () => {
+		// The OSC's terminator is inside the key. Redacting the original first and sanitizing after,
+		// the OSC runs past the placeholder to the next terminator, and `Bea` meets `rer <value>`.
+		const message = `Bea${ESC}]SEC${BEL}RETKEYjunk${BEL}rer ${VALUE}`;
+		const redactedFirst = joinLines(
+			scrubForStderr(redactSecrets(`Error: ${message}`, ["SECRETKEY"]), Number.POSITIVE_INFINITY),
+		);
+		expect(redactedFirst).toBe(`Error: Bearer ${VALUE}`);
+		// Here the sanitized text is redacted: no marker reads in it, and none in the line.
+		expect(line(message, ["SECRETKEY"])).toBe(`${LINE}Error: Bea[redacted]junkrer ${VALUE}`);
+	});
+
+	it("an unclosed quote at the end, found in both texts, is replaced once", () => {
+		expect(line(`api_key="`)).toBe(`${LINE}Error: api_key="[redacted]"`);
+		expect(line(`api_key="${BEL}`)).toBe(`${LINE}Error: api_key="[redacted]"`);
+	});
+
+	it("every control, DEL, C1 character and escape sequence inside each marker, with and without a key that swallows it", () => {
+		const failed: string[] = [];
+		let readable = 0;
+		let withKey = 0;
+		for (const [marker, sep] of MARKERS) {
+			for (let p = 1; p < marker.length; p++) {
+				for (const inside of INSIDE) {
+					const split = `${marker.slice(0, p)}${inside}${marker.slice(p)}`;
+					const message = `tenant ${split}${sep}${VALUE} end`;
+					// Whether the marker and its value read whole once sanitized.
+					const whole = joinLines(scrubForStderr(message, Number.POSITIVE_INFINITY)).includes(
+						`${marker}${sep}${VALUE}`,
+					);
+					for (const secrets of [[], [`tenant${marker}`]]) {
+						if (secrets.length > 0) withKey++;
+						if (whole) readable++;
+						const out = line(message, secrets);
+						const printed = out.slice(LINE.length);
+						const name = `${JSON.stringify(split)} key=${secrets.length}`;
+						// No credential reads in what is printed: redacting it again changes nothing.
+						if (redactSecrets(printed, secrets) !== printed)
+							failed.push(`${name}: not a fixed point`);
+						if (whole && printed.includes(VALUE))
+							failed.push(`${name}: ${JSON.stringify(printed)}`);
+					}
+				}
+			}
+		}
+		expect(failed.slice(0, 10)).toEqual([]);
+		// The sweep reaches the markers the sanitizing joins, with and without a key.
+		expect(readable).toBeGreaterThan(2_000);
+		expect(withKey).toBeGreaterThan(1_000);
+	});
+});
+
+describe("sanitizeMapped", () => {
+	/** Texts holding every character INSIDE holds, between letters and line breaks, and pairs. */
+	function corpus(): string[] {
+		const parts = [
+			...INSIDE,
+			"a",
+			"B",
+			"[",
+			"]",
+			"1",
+			";",
+			"\n",
+			" ",
+			C(0xd83d, 0xde00),
+			C(0xd83d),
+		];
+		let seed = 4_242;
+		const next = (): number => {
+			seed = (seed * 1_103_515_245 + 12_345) % 2 ** 31;
+			return seed;
+		};
+		const out: string[] = [];
+		for (let i = 0; i < 20_000; i++) {
+			let t = "";
+			const n = next() % 24;
+			for (let k = 0; k < n; k++) t += parts[next() % parts.length];
+			out.push(t);
+		}
+		return out;
+	}
+
+	it("gives scrubForStderr's text, and each of its units at the unit of the original it was", () => {
+		const failed: string[] = [];
+		for (const text of corpus()) {
+			const { clean, at } = sanitizeMapped(text);
+			let ok =
+				clean === scrubForStderr(text, Number.POSITIVE_INFINITY) && at.length === clean.length;
+			for (let j = 0; ok && j < clean.length; j++) {
+				const from = at[j] ?? -1;
+				const was = text[from];
+				const lineBreak = was === C(0x2028) || was === C(0x2029);
+				ok =
+					(j === 0 || from > (at[j - 1] ?? -1)) &&
+					(was === clean[j] || (lineBreak && clean[j] === "\n"));
+			}
+			if (!ok) failed.push(JSON.stringify(text));
+		}
+		expect(failed.slice(0, 5)).toEqual([]);
+	});
+
+	it("a part found in the sanitized text maps back to exactly the original characters it read", () => {
+		const message = `x Bea${C(0)}rer ${VALUE} and x-api${ESC}[31m-key: ${VALUE}`;
+		const { clean, at } = sanitizeMapped(message);
+		for (const word of ["Bearer", "x-api-key", VALUE]) {
+			const j = clean.indexOf(word);
+			expect(j).toBeGreaterThan(-1);
+			const back = Array.from({ length: word.length }, (_, k) => message[at[j + k] ?? -1]).join("");
+			expect(back).toBe(word);
+		}
+	});
 });
