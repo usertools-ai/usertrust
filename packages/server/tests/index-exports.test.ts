@@ -13,6 +13,8 @@ import {
 	AbortRequestSchema,
 	type AbortResponse,
 	AuthorizeRequestSchema,
+	type createUsertrustServer,
+	type HealthChildSpawner,
 	type ReleaseRequest,
 	ReleaseRequestSchema,
 	type ReleaseResponse,
@@ -43,5 +45,12 @@ describe("the package index exports every route's wire contract", () => {
 			transferId: string;
 			voidError?: string;
 		}>();
+	});
+});
+
+describe("the package index exports what createUsertrustServer's options need", () => {
+	it("HealthChildSpawner is the spawnHealthChild option's type, so an embedder can name it", () => {
+		type Options = Parameters<typeof createUsertrustServer>[0];
+		expectTypeOf<NonNullable<Options["spawnHealthChild"]>>().toEqualTypeOf<HealthChildSpawner>();
 	});
 });

@@ -17,6 +17,14 @@ import { sanitizeMapped, scrubForStderr } from "./cli/scrub.js";
 import type { ServerConfig, TenantConfig } from "./config.js";
 import { DEFAULT_LEDGER_TIMEOUT_MS, resolveTenant } from "./config.js";
 import { EventBus } from "./events.js";
+import {
+	type HealthChildSpawner,
+	LedgerHealth,
+	type LedgerState,
+	targetKey,
+	worstState,
+} from "./ledger-health.js";
+import { type LedgerTarget, resolveTenantTargets } from "./ledger-probe.js";
 import type { GovernorFactory } from "./pool.js";
 import { GovernorPool } from "./pool.js";
 import type { SettleRequest } from "./wire.js";
@@ -1118,6 +1126,16 @@ export function createUsertrustServer(opts: {
 	 * them.
 	 */
 	log?: (line: string) => void;
+	/**
+	 * How a ledger health observer child is started (`config.ledgerHealth: "child"`). For tests:
+	 * a server leaves it unset.
+	 */
+	spawnHealthChild?: HealthChildSpawner;
+	/**
+	 * The health child's keep-alive probe interval, in ms. Defaults to `HEALTH_KEEPALIVE_MS` (30 s).
+	 * For tests: a server leaves it unset.
+	 */
+	healthKeepAliveMs?: number;
 }): UsertrustServer {
 	const { config } = opts;
 	const sink = opts.log;
@@ -1191,7 +1209,10 @@ export function createUsertrustServer(opts: {
 		return mapped;
 	}
 	const bus = new EventBus();
-	const pool = opts.factory ? new GovernorPool(config, opts.factory) : new GovernorPool(config);
+	// Every governor creation is tracked for health, whichever way it is reached: an internal route, or
+	// an embedder calling `server.pool.get(tenant)` itself. Tracking only in the routes would leave
+	// such a governor unverified.
+	const pool = new GovernorPool(config, opts.factory, trackCreation);
 	const pending = new Map<string, PendingEntry>();
 	// `${tenantId}\0${transferId}` of settles that completed in this process (FIFO, bounded by
 	// RECENTLY_SETTLED_MEMORY) and of settles in flight, so a concurrent or repeated settle is told
@@ -1242,6 +1263,137 @@ export function createUsertrustServer(opts: {
 		})();
 		claimed.set(key, { kind, done: run.then(noop, noop) });
 		return run;
+	}
+
+	/**
+	 * Ledger reachability (ledger-health.ts), present only with `config.ledgerHealth: "child"`
+	 * outside dryRun, from `listen()` until `close()` (or a failed `listen()`).
+	 */
+	let health: LedgerHealth | undefined;
+	/** `stopHealth()` ran: health never starts after it, even from a `listen()` already under way. */
+	let healthStopped = false;
+	/** `close()` has begun: a `listen()` still under way must not go on to create a listener. */
+	let closeStarted = false;
+	/** Each tenant's ledger target, as resolved when health started: its key. */
+	let tenantTargets: Map<string, string> | undefined;
+	/** Tenants whose governor is being created: they contribute `unknown` until it is verified. */
+	const initializing = new Set<string>();
+	/**
+	 * Tenants whose governor exists, and whether the ledger it USES (`governor.config.tigerbeetle`)
+	 * is the one health watches for it. A mismatch reads `unknown`: the tenant's config changed after
+	 * the server started.
+	 */
+	const verified = new Map<string, boolean>();
+	/** Each tenant's resolved governor: health re-verifies those created before it started. */
+	const resolvedGovernors = new Map<string, Governor>();
+
+	/**
+	 * The pool's `onCreate`: a governor is initializing until it resolves, then verified against the
+	 * target health watches for the tenant.
+	 */
+	function trackCreation(tenant: TenantConfig, created: Promise<Governor>): void {
+		initializing.add(tenant.id);
+		created.then(
+			(governor) => {
+				initializing.delete(tenant.id);
+				resolvedGovernors.set(tenant.id, governor);
+				verify(tenant, governor);
+			},
+			() => initializing.delete(tenant.id),
+		);
+	}
+
+	function verify(tenant: TenantConfig, governor: Governor): void {
+		const expected = tenantTargets?.get(tenant.id);
+		if (expected === undefined) {
+			verified.set(tenant.id, true);
+			return;
+		}
+		const used = governor.config?.tigerbeetle;
+		const matches =
+			used !== undefined &&
+			targetKey({ clusterId: used.clusterId, addresses: [...used.addresses] }) === expected;
+		verified.set(tenant.id, matches);
+		if (!matches) {
+			log(
+				`usertrust-server: tenant ${scrubForStderr(tenant.id)}'s ledger config changed after start; restart the server to watch its ledger`,
+			);
+		}
+	}
+
+	/** The tenant's ledger, as its `/v1/budget` reports it. */
+	function tenantLedger(tenant: TenantConfig): LedgerState | "none" {
+		if (config.dryRun) return "none";
+		const key = tenantTargets?.get(tenant.id);
+		if (health === undefined || key === undefined) return "unknown";
+		if (initializing.has(tenant.id) || verified.get(tenant.id) !== true) return "unknown";
+		return health.state(key);
+	}
+
+	/**
+	 * Health's aggregate: the worst over the targets STILL IN USE, and `unknown` while a tenant's
+	 * governor is being created or reads a ledger other than the one watched for it. A target in use
+	 * is one some tenant not verified as mismatched still has: a tenant whose config moved to another
+	 * ledger no longer keeps its old target in the aggregate (nobody uses it), but the mismatch itself
+	 * reads `unknown`. A target another tenant still uses stays in, so an outage there reads
+	 * `unreachable`.
+	 */
+	function aggregateLedger(): LedgerState | "none" {
+		if (config.dryRun) return "none";
+		if (health === undefined) return "unknown";
+		const inUse = new Set<string>();
+		for (const [id, key] of tenantTargets ?? []) {
+			if (verified.get(id) !== false) inUse.add(key);
+		}
+		const states: LedgerState[] = [...inUse].map((key) => health?.state(key) ?? "unknown");
+		if (initializing.size > 0) states.push("unknown");
+		if ([...verified.values()].some((matches) => !matches)) states.push("unknown");
+		return worstState(states);
+	}
+
+	/**
+	 * Start health for `listen()`: one child per distinct target the tenants resolve to. Targets
+	 * that cannot be resolved (a tenant's config cannot be read) leave health off, reading unknown,
+	 * with one log line: never a throw out of `listen()`.
+	 */
+	async function startHealth(): Promise<void> {
+		if (config.dryRun || config.ledgerHealth !== "child" || health !== undefined || healthStopped) {
+			return;
+		}
+		let byTenant: Map<string, LedgerTarget>;
+		try {
+			byTenant = await resolveTenantTargets(config);
+		} catch {
+			log(
+				"usertrust-server: ledger health is off: the tenants' ledger targets could not be resolved",
+			);
+			return;
+		}
+		if (healthStopped) return;
+		tenantTargets = new Map([...byTenant].map(([id, target]) => [id, targetKey(target)]));
+		// A governor created before this (through `server.pool.get`, before `listen()`) was verified
+		// against no targets: check it against the ones health actually watches.
+		for (const [id, governor] of resolvedGovernors) {
+			const tenant = config.tenants.find((t) => t.id === id);
+			if (tenant !== undefined) verify(tenant, governor);
+		}
+		health = new LedgerHealth([...byTenant.values()], {
+			ledgerTimeoutMs,
+			...(config.healthRespawnCooldownMs === undefined
+				? {}
+				: { respawnCooldownMs: config.healthRespawnCooldownMs }),
+			...(opts.spawnHealthChild === undefined ? {} : { spawnChild: opts.spawnHealthChild }),
+			...(opts.healthKeepAliveMs === undefined ? {} : { keepAliveMs: opts.healthKeepAliveMs }),
+			// Through the server's one log path, as every other diagnostic of it.
+			log: (line) => log(`usertrust-server: ledger health: ${line}`),
+		});
+		health.start();
+	}
+
+	/** The one terminal stop of health, for `close()` and a failed `listen()`: synchronous, idempotent. */
+	function stopHealth(): void {
+		healthStopped = true;
+		health?.stop();
 	}
 
 	// Per tenant, and served only on the authenticated /v1/budget: the unauthenticated /v1/health
@@ -1974,8 +2126,11 @@ export function createUsertrustServer(opts: {
 	async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
 		const url = req.url ?? "/";
 		if (req.method === "GET" && url === "/v1/health") {
+			health?.poke();
+			const ledger = aggregateLedger();
 			sendJson(res, 200, {
-				ok: true,
+				ok: ledger !== "unreachable",
+				ledger,
 				name: SERVER_NAME,
 				version: SERVER_VERSION,
 				capabilities: config.dryRun ? DRY_RUN_CAPABILITIES : SERVER_CAPABILITIES,
@@ -1991,11 +2146,41 @@ export function createUsertrustServer(opts: {
 		}
 		requestCaller.set(res, { tenantId: tenant.id, key });
 		if (req.method === "GET" && url === "/v1/budget") {
-			const governor = await pool.get(tenant);
+			const acquiring = pool.get(tenant);
+			let governor: Governor | undefined;
+			if (config.dryRun) {
+				governor = await acquiring;
+			} else {
+				// Bounded as authorize is: a governor that cannot be created while the ledger is down
+				// must not hold the answer.
+				let timer: NodeJS.Timeout | undefined;
+				governor = await Promise.race([
+					acquiring,
+					new Promise<undefined>((resolve) => {
+						timer = setTimeout(() => resolve(undefined), ledgerTimeoutMs);
+						timer.unref();
+					}),
+				]).finally(() => clearTimeout(timer));
+			}
+			if (governor === undefined) {
+				sendJson(res, 503, {
+					error: "ledger_unavailable",
+					reason: `the tenant's governor was not ready within ${ledgerTimeoutMs} ms; retry later`,
+					retryAfterMs: ledgerTimeoutMs,
+					ledger: tenantLedger(tenant),
+				});
+				return;
+			}
+			const key = tenantTargets?.get(tenant.id);
 			sendJson(res, 200, {
 				remaining: governor.budgetRemaining(),
 				settlementsUnrecoverable: settlementsUnrecoverable.get(tenant.id) ?? 0,
 				voidsOwed: [...owed.values()].filter((entry) => entry.tenantId === tenant.id).length,
+				ledger: tenantLedger(tenant),
+				ledgerObserver:
+					health !== undefined && key !== undefined
+						? health.observer(key)
+						: { failures: 0, lastFailure: null },
 			});
 			return;
 		}
@@ -2114,7 +2299,13 @@ export function createUsertrustServer(opts: {
 		pool,
 		pendingCount: () => pending.size,
 		sweepExpired,
-		listen(): Promise<{ port: number }> {
+		async listen(): Promise<{ port: number }> {
+			await startHealth();
+			// startHealth() yields, so close() can run in that window: it finds no httpServer and
+			// finishes. Creating one now would leave a listener and a sweeper nobody closes.
+			if (closeStarted) {
+				throw new Error("usertrust-server: close() ran before listen() finished; not listening");
+			}
 			return new Promise((resolve, reject) => {
 				httpServer = createServer((req, res) => {
 					route(req, res).catch((err: unknown) => {
@@ -2122,19 +2313,37 @@ export function createUsertrustServer(opts: {
 						if (!res.headersSent) sendJson(res, mapped.status, mapped.body);
 					});
 				});
-				httpServer.on("error", reject);
-				httpServer.listen(config.port, config.host, () => {
-					sweeper = setInterval(() => {
-						void sweepExpired();
-					}, SWEEP_INTERVAL_MS);
-					sweeper.unref();
-					const address = httpServer?.address();
-					const port = typeof address === "object" && address !== null ? address.port : config.port;
-					resolve({ port });
+				httpServer.on("error", (err) => {
+					// A failed listen() takes the same terminal stop as close(): no observer outlives a
+					// server that never listened. An error after listening (a refused accept) is not a
+					// failed listen(): health keeps running.
+					if (httpServer?.listening === true) return;
+					stopHealth();
+					reject(err);
 				});
+				try {
+					httpServer.listen(config.port, config.host, () => {
+						sweeper = setInterval(() => {
+							void sweepExpired();
+						}, SWEEP_INTERVAL_MS);
+						sweeper.unref();
+						const address = httpServer?.address();
+						const port =
+							typeof address === "object" && address !== null ? address.port : config.port;
+						resolve({ port });
+					});
+				} catch (err) {
+					// A synchronous throw (ERR_SOCKET_BAD_PORT) rejects without an "error" event: it is
+					// a failed listen() all the same, so it takes the same terminal stop.
+					stopHealth();
+					reject(err);
+				}
 			});
 		},
 		async close(): Promise<void> {
+			closeStarted = true;
+			// First, and synchronously: no probe, respawn or health child outlives this call.
+			stopHealth();
 			if (sweeper) clearInterval(sweeper);
 			// What this PR leaves to the ledger's pending timeout at shutdown: authorizes still waiting
 			// on the ledger after their request ended, and late holds whose void has not landed.
