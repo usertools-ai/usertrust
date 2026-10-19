@@ -312,10 +312,15 @@ describe("what health and budget report", () => {
 		expect(b.body.ledger).toBe("unreachable");
 	});
 
-	it("a child's first probe counts from its spawn: one that is ready but never replies reads unreachable from spawn + ledgerTimeoutMs", async () => {
-		const spawner = fakeSpawner("silent");
+	// A child that says ready after READY_MS (its start-up, a slow native load) and then takes
+	// REPLY_MS to answer: its first probe's deadline counts from the SEND, not from the spawn.
+	const READY_MS = 750;
+	const SLOW_TIMEOUT_MS = 1_000;
+
+	it("a slow-starting child, ready late and answering within ledgerTimeoutMs of its probe, never reads unreachable", async () => {
+		const spawner = fakeSpawner("delayed:750:350");
 		const health = new LedgerHealth([TARGET], {
-			ledgerTimeoutMs: DEADLINE_MS,
+			ledgerTimeoutMs: SLOW_TIMEOUT_MS,
 			spawnChild: spawner.spawnChild,
 			log: () => {},
 		});
@@ -323,20 +328,52 @@ describe("what health and budget report", () => {
 		try {
 			health.start();
 			const spawnedAt = spawner.times[0] ?? 0;
-			await sleep(DEADLINE_MS / 3);
-			expect(health.state(key)).toBe("unknown");
-			const at = await until(
-				() => (health.state(key) === "unreachable" ? performance.now() : 0),
-				(v) => v > 0,
-			);
-			// The deadline counts from the spawn, not from the moment the probe was sent.
-			expect(at - spawnedAt).toBeGreaterThanOrEqual(DEADLINE_MS - 5);
-			expect(at - spawnedAt).toBeLessThan(DEADLINE_MS + 300);
+			const readings = new Set<string>();
+			let repliedAt = 0;
+			while (health.state(key) !== "reachable" && performance.now() - spawnedAt < 4_000) {
+				readings.add(health.state(key));
+				await sleep(50);
+			}
+			repliedAt = performance.now() - spawnedAt;
+			// The reply came after spawn + ledgerTimeoutMs: counted from the spawn it was an outage.
+			expect(repliedAt).toBeGreaterThan(SLOW_TIMEOUT_MS);
+			expect([...readings]).toEqual(["unknown"]);
+			expect(health.state(key)).toBe("reachable");
 			expect(health.observer(key)).toEqual({ failures: 0, lastFailure: null });
 		} finally {
 			health.stop();
 		}
-	});
+	}, 15_000);
+
+	it("a slow-starting child that is ready and then never replies reads unknown until ledgerTimeoutMs after its probe was sent, then unreachable", async () => {
+		const spawner = fakeSpawner("delayed:750:never");
+		const health = new LedgerHealth([TARGET], {
+			ledgerTimeoutMs: SLOW_TIMEOUT_MS,
+			spawnChild: spawner.spawnChild,
+			log: () => {},
+		});
+		const key = targetKey(TARGET);
+		try {
+			health.start();
+			const spawnedAt = spawner.times[0] ?? 0;
+			const readings = new Set<string>();
+			let at = 0;
+			while (at === 0 && performance.now() - spawnedAt < 6_000) {
+				const st = health.state(key);
+				if (st === "unreachable") at = performance.now() - spawnedAt;
+				else readings.add(st);
+				await sleep(25);
+			}
+			// Not before the child was ready (>= 750 ms) plus the deadline from the send.
+			expect(at).toBeGreaterThanOrEqual(READY_MS + SLOW_TIMEOUT_MS - 5);
+			expect(at).toBeLessThan(READY_MS + SLOW_TIMEOUT_MS + 600);
+			// In particular `unknown` past spawn + ledgerTimeoutMs, where the old reading flipped.
+			expect([...readings]).toEqual(["unknown"]);
+			expect(health.observer(key)).toEqual({ failures: 0, lastFailure: null });
+		} finally {
+			health.stop();
+		}
+	}, 15_000);
 
 	it("healthKeepAliveMs sets the keep-alive probe interval: several probes in a second with 200 ms, only the first by default; no /v1/health call needed", async () => {
 		const fast = fakeSpawner("reply");

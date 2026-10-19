@@ -60,9 +60,10 @@ export function secureTenantVaults(config: ServerConfig): void {
  * vaultBase directories (separate audit chains + spend ledgers) and per-tenant
  * budget/tier overrides. The factory is injectable for tests.
  *
- * `onCreate`, when given, is called exactly once each time `get()` CREATES a governor promise
- * (never when it returns a cached one), with the tenant and that promise, so a caller can track
- * every creation however it was reached. It must not throw.
+ * `onCreate`, when given, is called exactly once each time `get()` CREATES a governor (never when
+ * it returns a cached one), with the tenant and the governor's PROMISE, not a resolved governor:
+ * it is called before the governor exists, so a caller that needs the governor `then`s the promise.
+ * That lets a caller track every creation however it was reached. It must not throw.
  */
 export class GovernorPool {
 	private readonly governors = new Map<string, Promise<Governor>>();
