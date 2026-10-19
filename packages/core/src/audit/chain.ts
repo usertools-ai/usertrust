@@ -1155,10 +1155,11 @@ function renewLeases(): void {
 				continue;
 			}
 			const outcome = lapseLease(writerId, identity, lock);
-			// A LOST acquisition (its file is no longer this lock: another writer took the vault, or this
-			// writer took it again under a new acquisition) is retired silently. Its loss is reported where
-			// it matters, by the next append's ownership check, and a report here would refuse an append
-			// under a healthy newer acquisition.
+			// A LOST acquisition (its file is not at the path last seen: another writer took the vault,
+			// this writer took it again under a new acquisition, or the vault was renamed) is retired
+			// silently, its entry kept only for release. Its loss is reported where it matters, by the next
+			// append's ownership check, and a report here would refuse an append under a healthy newer
+			// acquisition.
 			if (outcome !== "lost") lapsedLeases.set(writerId, lapseMessage(lock, outcome));
 		}
 	}
@@ -1183,8 +1184,10 @@ function describeCode(code: string | undefined): string {
 /**
  * What giving up a lapsed lease did:
  *  - `removed`: its file was this lock, and is gone; the entry left the registry.
- *  - `lost`: its file is no longer this lock (absent, or another acquisition's): there is nothing of
- *    this acquisition's to remove, and the entry left the registry.
+ *  - `lost`: its file is not at the path last seen (absent, or another acquisition's there). Nothing
+ *    is removed, and nothing is reported. The entry STAYS, marked lapsed, as a non-owning cleanup
+ *    record: "absent" can also mean the vault was RENAMED with the lock in it, and `release()` then
+ *    still finds the lock through the caller's current spelling (see releaseLocks).
  *  - `stranded`: its file could not be read or removed (`code`). The entry STAYS, marked lapsed, as the
  *    cleanup record: the next append and `release()` retry the removal, and a release that still
  *    cannot remove it reports it (`AuditLockReleaseError`, the teardown warning).
@@ -1214,9 +1217,12 @@ function lapseLease(writerId: string, identity: string, lock: HeldLock): LapseOu
 	} catch (err) {
 		return { stranded: describeCode(errorCode(err)) };
 	}
-	const mine = heldLocks.get(writerId);
-	mine?.delete(identity);
-	if (mine?.size === 0) heldLocks.delete(writerId);
+	// Only a file this writer just removed ends the record; a `lost` one keeps it (above).
+	if (outcome === "removed") {
+		const mine = heldLocks.get(writerId);
+		mine?.delete(identity);
+		if (mine?.size === 0) heldLocks.delete(writerId);
+	}
 	return outcome;
 }
 

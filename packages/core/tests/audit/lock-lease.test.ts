@@ -4,8 +4,11 @@ import {
 	mkdtempSync,
 	readFileSync,
 	realpathSync,
+	renameSync,
 	rmSync,
 	statSync,
+	symlinkSync,
+	unlinkSync,
 	utimesSync,
 	writeFileSync,
 } from "node:fs";
@@ -782,5 +785,30 @@ describe("a holder whose renewals fail stops writing BEFORE any observer could r
 		expect(held?.isDegraded(), "no append was refused").toBe(false);
 		expect(linesOf(v)).toBe(3);
 		chainIntact(v, 3);
+	});
+
+	it("P2: a lock that moved with its RENAMED vault, whose old lease ran out, is still released through the caller's current spelling — its record is kept, not retired", async () => {
+		vi.useFakeTimers({ toFake: ["performance", "setInterval", "clearInterval"] });
+		const chain = await processIn(THIS_NS);
+		const root = mkdtempSync(join(tmpdir(), "trust-audit-lease-moved-"));
+		cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+		const first = join(root, "vault-a");
+		const second = join(root, "vault-b");
+		const link = join(root, "vault");
+		mkdirSync(join(first, ".usertrust", "audit"), { recursive: true });
+		symlinkSync(first, link);
+		const writer = chain.createAuditWriter(link);
+		await append(writer, 1);
+		expect(existsSync(lockOf(first)), "control: the lock is in the first vault").toBe(true);
+		// The vault is renamed with its lock in it, and the caller's spelling repointed.
+		renameSync(first, second);
+		unlinkSync(link);
+		symlinkSync(second, link);
+		quiet();
+		// The renewals now fail (the path last seen is gone) and the old lease runs out.
+		vi.advanceTimersByTime(HOLDER_BOUND_MS + RENEW_MS);
+		expect(existsSync(lockOf(second)), "control: the moved lock is still there").toBe(true);
+		writer.release();
+		expect(existsSync(lockOf(second)), "release found it through the current spelling").toBe(false);
 	});
 });
