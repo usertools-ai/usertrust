@@ -245,6 +245,8 @@ interface Redaction {
 	replacement: string;
 	/** For a token (a `Bearer` token, an unquoted api-key value): what it can still hold after `end`. */
 	rest?: RegExp;
+	/** For a quoted api-key value: the quote that closes it. */
+	quote?: string;
 }
 
 const REDACTED = "[redacted]";
@@ -254,6 +256,16 @@ const REDACTED = "[redacted]";
  * `start`. Parts that overlap, from any sources, are replaced as one, from the first one's start to
  * the furthest end, by the replacement of the part that starts first (on a tie, of the earlier
  * source). Text outside every part is kept as it is.
+ *
+ * A credential that such a part ends past runs on from that part's end, and what starts inside
+ * that joins too, until the end stops growing: a token through what it can still hold there, a
+ * quoted value through its next closing quote. With the caller's key `tenant key`,
+ * `Bearer tenant keyUPSTREAM` has the token `tenant`, which ends at the key's space, and the key's
+ * match, which ends before `UPSTREAM`: replaced as one, they would print `Bearer [redacted]UPSTREAM`.
+ * And with the key `k"z`, `api_key="xk"zUPSTREAM"` has the value `xk"`, closed by the key's
+ * quote. (5.1.0 replaced the key first, and its patterns then read `[redacted]` and what followed
+ * as the credential.) Linear: each run on starts where the part ends and reads only what the part
+ * has not covered, and a run on that reads nothing ends the loop.
  */
 function applyRedactions(text: string, sources: readonly Iterator<Redaction>[]): string {
 	const heads = sources.map((source) => source.next());
@@ -271,18 +283,48 @@ function applyRedactions(text: string, sources: readonly Iterator<Redaction>[]):
 		if (first === undefined) return out + text.slice(kept);
 		const start = first.start;
 		let end = first.end;
+		// The shortest credential end of each kind, to run on from the part's end.
+		const runs: { through: RegExp | string; end: number }[] = [];
+		const take = (part: Redaction): void => {
+			end = Math.max(end, part.end);
+			const through = part.rest ?? part.quote;
+			if (through === undefined) return;
+			const run = runs.find((r) => r.through === through);
+			if (run === undefined) runs.push({ through, end: part.end });
+			else run.end = Math.min(run.end, part.end);
+		};
+		take(first);
 		heads[from] = sources[from]?.next() ?? { done: true, value: undefined };
-		// Every part that starts inside this one, or where it starts, joins it, which can take it
-		// further. (So an empty part found twice, in two views of a text, is replaced once.)
-		for (let joined = true; joined; ) {
-			joined = false;
-			heads.forEach((head, s) => {
-				if (!head.done && (head.value.start < end || head.value.start === start)) {
-					end = Math.max(end, head.value.end);
-					heads[s] = sources[s]?.next() ?? { done: true, value: undefined };
-					joined = true;
+		for (let grown = true; grown; ) {
+			// Every part that starts inside this one, or where it starts, joins it, which can take it
+			// further. (So an empty part found twice, in two views of a text, is replaced once.)
+			for (let joined = true; joined; ) {
+				joined = false;
+				heads.forEach((head, s) => {
+					if (!head.done && (head.value.start < end || head.value.start === start)) {
+						take(head.value);
+						heads[s] = sources[s]?.next() ?? { done: true, value: undefined };
+						joined = true;
+					}
+				});
+			}
+			grown = false;
+			for (const run of runs) {
+				if (run.end >= end) continue;
+				let reach: number;
+				if (typeof run.through === "string") reach = quotedEnd(text, end, run.through);
+				else {
+					run.through.lastIndex = end;
+					run.through.test(text);
+					reach = run.through.lastIndex;
 				}
-			});
+				// The credential now ends there: it runs on again only if a part takes the end further.
+				run.end = reach;
+				if (reach > end) {
+					end = reach;
+					grown = true;
+				}
+			}
 		}
 		out += text.slice(kept, first.start) + first.replacement;
 		kept = end;
@@ -364,7 +406,8 @@ function apiKeyValue(
 	unquoted: RegExp,
 ): Redaction | undefined {
 	if (quote !== "") {
-		return { start: from, end: quotedEnd(text, from, quote), replacement: `${REDACTED}${quote}` };
+		const end = quotedEnd(text, from, quote);
+		return { start: from, end, replacement: `${REDACTED}${quote}`, quote };
 	}
 	unquoted.lastIndex = from;
 	if (!unquoted.test(text)) return undefined;

@@ -10,10 +10,15 @@
  * sequence sanitizing removes; separators real, doubled, made only of removed characters, or with
  * removed characters beside them; quoted, unquoted and unclosed values; a marker inside a token;
  * markers glued to the word before them or to the caller's key; removed characters and line
- * breaks between and after; seven shapes of caller's key. And 10,000 seeded messages of one class
- * the first generator rarely makes: a chain of credentials, each ended by a character or sequence
- * sanitizing removes, and the next one's marker right after it, split or whole. The comparator's
- * own positive control: a "redaction" that only sanitizes is reported as regressing.
+ * breaks between and after. And 10,000 seeded messages of one class the first generator rarely
+ * makes: a chain of credentials, each ended by a character or sequence sanitizing removes, and the
+ * next one's marker right after it, split or whole. And 10,000 seeded messages that hold the
+ * caller's key around their credentials: before a token, glued to the token after it, inside it,
+ * or right before a marker, its whitespace as it is or another gap. In all three the caller's keys
+ * are seeded too, of words, marker fragments, whole markers and punctuation, joined by spaces, tabs
+ * or punctuation (once seven fixed keys, the one axis the corpus held still, and a token that ran
+ * into a key holding a space hid there for two rounds). The comparator's own positive control: a
+ * "redaction" that only sanitizes is reported as regressing.
  */
 import { describe, expect, it } from "vitest";
 import { scrubForStderr } from "../src/cli/scrub.js";
@@ -132,6 +137,12 @@ const REPROS: Case[] = [
 		secrets: ["Bearer"],
 		credentials: ["TK1"],
 	},
+	// A credential that ends inside the caller's key, where the key holds whitespace or the quote.
+	{ message: "Bearer tenant keyTK1", secrets: ["tenant key"], credentials: ["TK1"] },
+	{ message: "Bearer xtenant keyTK1 end", secrets: ["tenant key"], credentials: ["TK1"] },
+	{ message: `api_key=tenant${LF}keyTK1`, secrets: ["tenant key"], credentials: ["TK1"] },
+	{ message: 'api_key="xk"zTK1" end', secrets: ['k"z'], credentials: ["TK1"] },
+	{ message: "Bearer t kxt kyTK1", secrets: ["t k"], credentials: ["TK1"] },
 ];
 
 /** A seeded generator in [0, 1) (mulberry32). */
@@ -175,6 +186,42 @@ const KEYS: ReadonlyArray<readonly string[]> = [
 	["api- key"],
 ];
 
+/** What a seeded caller's key is made of: words, marker fragments, whole markers, punctuation. */
+const KEY_WORDS = [
+	"tenant",
+	"k3y",
+	"sk-live",
+	"acme.co",
+	"Bea",
+	"earer",
+	"rer",
+	"Bearer",
+	"bearer x",
+	"api",
+	"key",
+	"_key",
+	"x-api",
+	"api_key=",
+	"api-key:",
+	"x-api-key",
+];
+const KEY_JOINS = ["", " ", " ", "  ", TAB, "-", ".", ":", "=", "/", "+", "'", '"', ","];
+
+/** A seeded caller's key: one to three of `KEY_WORDS`, each joined to the last by one of `KEY_JOINS`. */
+function randomKey(r: () => number): string {
+	const pick = <T>(items: readonly T[]): T => items[Math.floor(r() * items.length)] as T;
+	let key = pick(KEY_WORDS);
+	for (let k = 1 + Math.floor(r() * 3); k > 1; k--) key += `${pick(KEY_JOINS)}${pick(KEY_WORDS)}`;
+	return key;
+}
+
+/** The caller's keys for a message: one of the fixed shapes, or one or two seeded ones. */
+function keysFor(r: () => number): readonly string[] {
+	const roll = r();
+	if (roll < 0.3) return KEYS[Math.floor(r() * KEYS.length)] as readonly string[];
+	return roll < 0.9 ? [randomKey(r)] : [randomKey(r), randomKey(r)];
+}
+
 function fuzzCase(r: () => number, n: number): Case {
 	const pick = <T>(items: readonly T[]): T => items[Math.floor(r() * items.length)] as T;
 	const credentials: string[] = [];
@@ -209,7 +256,7 @@ function fuzzCase(r: () => number, n: number): Case {
 	for (const [k, segment] of segments.entries()) {
 		message += k === 0 ? segment : `${r() < 0.2 ? pick(REMOVED) : pick(BETWEEN)}${segment}`;
 	}
-	const secrets = r() < 0.15 && credentials.length > 0 ? [credentials[0] as string] : pick(KEYS);
+	const secrets = r() < 0.15 && credentials.length > 0 ? [credentials[0] as string] : keysFor(r);
 	return { message, secrets, credentials };
 }
 
@@ -247,13 +294,63 @@ function chainCase(r: () => number, n: number): Case {
 		if (k < count - 1) message += pick(ENDERS);
 	}
 	message += pick(["", " end", LF, ";x"]);
-	return { message, secrets: pick(KEYS), credentials };
+	return { message, secrets: keysFor(r), credentials };
 }
 
 const CHAINS: Case[] = [];
 {
 	const r = seeded(20261021);
 	for (let n = 0; n < 10_000; n++) CHAINS.push(chainCase(r, n));
+}
+
+/**
+ * Credentials around the caller's key: the key before a token, glued to the token after it, inside
+ * it, or right before a marker. The key is written as it is, or with each space another gap: two
+ * spaces, a line break, a tab, or a character or sequence sanitizing removes.
+ */
+function keyedCase(r: () => number, n: number): Case {
+	const pick = <T>(items: readonly T[]): T => items[Math.floor(r() * items.length)] as T;
+	const key = randomKey(r);
+	const secrets = r() < 0.8 ? [key] : [key, randomKey(r)];
+	const write = (): string =>
+		r() < 0.5 ? key : key.split(" ").join(pick(["  ", LF, TAB, `${C(0x2028)}`, ...REMOVED]));
+	const credentials: string[] = [];
+	let message = pick(["", " ", "x ", "tenant"]);
+	const count = 1 + Math.floor(r() * 3);
+	for (let k = 0; k < count; k++) {
+		const token = `TOK${k}q${n}Z`;
+		const bearer = r() < 0.5;
+		let marker = pick(bearer ? BEARERS : API_KEYS);
+		if (r() < 0.2) {
+			const at = 1 + Math.floor(r() * (marker.length - 1));
+			marker = `${marker.slice(0, at)}${pick(REMOVED)}${marker.slice(at)}`;
+		}
+		const separator = bearer ? pick([" ", TAB, "  "]) : pick(API_KEY_SEPARATORS);
+		const quote = separator.endsWith('"') ? '"' : separator.endsWith("'") ? "'" : "";
+		const close = quote !== "" && r() < 0.7 ? quote : "";
+		const roll = r();
+		const value =
+			roll < 0.4
+				? `${pick(["", "x", "ab."])}${write()}${token}`
+				: roll < 0.6
+					? `${write()}${pick([" ", TAB, ""])}${token}`
+					: roll < 0.8
+						? `${token.slice(0, 4)}${write()}${token}`
+						: token;
+		message +=
+			roll >= 0.8
+				? `${write()}${marker}${separator}${value}${close}`
+				: `${marker}${separator}${value}${close}`;
+		credentials.push(token);
+		message += pick(["", " ", ";", LF, TAB, " end", "&x"]);
+	}
+	return { message, secrets, credentials };
+}
+
+const KEYED: Case[] = [];
+{
+	const r = seeded(20261023);
+	for (let n = 0; n < 10_000; n++) KEYED.push(keyedCase(r, n));
 }
 
 describe("no regression from 5.1.0: what 5.1.0 redacted is never printed", () => {
@@ -308,11 +405,42 @@ describe("no regression from 5.1.0: what 5.1.0 redacted is never printed", () =>
 		expect(redactedBefore).toBeGreaterThan(10_000);
 	}, 60_000);
 
+	it("10,000 seeded messages with the caller's key around their credentials", () => {
+		const found: string[] = [];
+		let redactedBefore = 0;
+		for (const c of KEYED) {
+			for (const token of regressions(head, c))
+				found.push(`${JSON.stringify(c.message)} ${JSON.stringify(c.secrets)}: ${token}`);
+			const before = released(c.message, c.secrets);
+			redactedBefore += c.credentials.filter((token) => !before.includes(token)).length;
+		}
+		// Declared, not fixed here: a marker that sanitizing glues to the end of a credential that runs
+		// on past the caller's key (the shape is `api_key=Ak xB`, a tab, `Bea`, a NUL, `rer T1`, with the
+		// key `k x`). Pinned, so the change that fixes it must remove it from this list.
+		const DECLARED = ["TOK1q2471Z"];
+		const undeclared = found.filter((f) => !DECLARED.some((token) => f.endsWith(`: ${token}`)));
+		expect(undeclared.slice(0, 10)).toEqual([]);
+		expect(found).toHaveLength(DECLARED.length);
+		const shape = `api_key=Ak xB${TAB}Bea${C(0)}rer T1 end`;
+		expect(released(shape, ["k x"])).not.toContain("T1");
+		expect(head(shape, ["k x"])).toContain("T1");
+		expect(redactedBefore).toBeGreaterThan(10_000);
+		// And the class that hid: a key holding a space, glued to the token after it.
+		expect(
+			KEYED.filter((c) =>
+				c.secrets.some((key) => key.includes(" ") && c.message.includes(`${key}TOK`)),
+			).length,
+		).toBeGreaterThan(500);
+	}, 60_000);
+
 	it("positive control: a line that only sanitizes is reported as regressing", () => {
 		const unredacted: Line = (message) => scrubForStderr(message);
 		expect(REPROS.some((c) => regressions(unredacted, c).length > 0)).toBe(true);
 		expect(FUZZ.filter((c) => regressions(unredacted, c).length > 0).length).toBeGreaterThan(5_000);
 		expect(CHAINS.filter((c) => regressions(unredacted, c).length > 0).length).toBeGreaterThan(
+			5_000,
+		);
+		expect(KEYED.filter((c) => regressions(unredacted, c).length > 0).length).toBeGreaterThan(
 			5_000,
 		);
 	}, 60_000);

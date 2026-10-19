@@ -765,6 +765,50 @@ describe("internalErrorLine reads the original and the sanitized text, and redac
 		}
 	}, 60_000);
 
+	it("a token runs on past the caller's key it ends inside, as long as the part grows", () => {
+		// The token ends at the key's whitespace, the key's match ends before what is glued to it, and
+		// replaced as one they printed that. 5.1.0 replaced the key first, and its `Bearer` (or
+		// api-key) pattern read `[redacted]` and what was glued to it as the token.
+		const rows: Array<[string, string[], string]> = [
+			["Bearer tenant keyUPSTREAM", ["tenant key"], "Bearer [redacted]"],
+			["Bearer xtenant keyUPSTREAM", ["tenant key"], "Bearer [redacted]"],
+			["api_key=tenant keyUPSTREAM", ["tenant key"], "api_key=[redacted]"],
+			["x-api-key: xtenant keyUPSTREAM end", ["tenant key"], "x-api-key: [redacted] end"],
+			// Other whitespace in the key's place, which sanitizing keeps.
+			["Bearer tenant  keyUPSTREAM", ["tenant key"], "Bearer [redacted]"],
+			[`Bearer tenant${C(10)}keyUPSTREAM`, ["tenant key"], "Bearer [redacted]"],
+			[`api_key=tenant${C(0x2028)}keyUPSTREAM`, ["tenant key"], "api_key=[redacted]"],
+			// The key's match reaches into the next one, and the token runs on through both.
+			["Bearer t kxt kyUPSTREAM", ["t k"], "Bearer [redacted]"],
+			["api_key=t kxt kyUPSTREAM;x", ["t k"], "api_key=[redacted];x"],
+			// A quoted value closed by the quote the key holds runs on to its next closing quote, and
+			// no further.
+			['api_key="xk"zUPSTREAM" end', ['k"z'], 'api_key="[redacted]" end'],
+			["x-api-key: 'ak'zUPSTREAM' end", ["k'z"], "x-api-key: '[redacted]' end"],
+			['api_key="xk"zUPSTREAM', ['k"z'], 'api_key="[redacted]"'],
+			// A gap after the key: what follows is not the token's, and is kept, as 5.1.0 kept it.
+			["Bearer tenant key UPSTREAM", ["tenant key"], "Bearer [redacted] UPSTREAM"],
+			["api_key=tenant key&UPSTREAM", ["tenant key"], "api_key=[redacted]&UPSTREAM"],
+		];
+		for (const [message, secrets, printed] of rows) {
+			expect(line(message, secrets), JSON.stringify(message)).toBe(`${LINE}Error: ${printed}`);
+		}
+		// Linear: a part that grows 100,000 times, the token running on through each key's match into
+		// the next, in under 3 seconds.
+		const timed: [string, string, string, string, string][] = [
+			["Bearer ", "t kx", "t k", "", "Bearer [redacted]"],
+			["api_key=", "t kx", "t k", "", "api_key=[redacted]"],
+			['api_key="', 'xk"z', 'k"z', '" end', 'api_key="[redacted]" end'],
+		];
+		for (const [head, unit, key, tail, printed] of timed) {
+			const message = `${head}${unit.repeat(100_000)}UPSTREAM${tail}`;
+			const t = performance.now();
+			const out = line(message, [key]);
+			expect(performance.now() - t, head).toBeLessThan(3_000);
+			expect(out, head).toBe(`${LINE}Error: ${printed}`);
+		}
+	}, 60_000);
+
 	it("a marker right after the caller's key: the boundary the replacement makes is read in the text", () => {
 		expect(line(`tenantBearer ${VALUE}`, ["tenant"])).toBe(
 			`${LINE}Error: [redacted]Bearer [redacted]`,
