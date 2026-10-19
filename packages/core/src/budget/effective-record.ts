@@ -238,11 +238,12 @@ function readRegular(path: string): string | null | undefined {
 
 /**
  * Publish WITHOUT the vault's writer lock, never over another writer's record: only where there is no record, or where
- * the record is still, byte for byte, `mine` (this process's last unheld record). The new record is staged whole and
- * then LINKED into place, which fails if a record appeared meanwhile; the own record it replaces is first moved aside,
- * and put back if, by then, it turned out to be another writer's. Returns the text of this process's unheld record now
- * on disk, or undefined if there is none. Never throws, never warns, and never removes another writer's record: a
- * failure leaves readers where they were (an absent record reads as not yet published).
+ * the record is still, byte for byte, `mine` (this process's last unheld record). An own record is first moved aside,
+ * so that whatever happens next it no longer stands: it describes a live set that has changed. If, once moved, it turns
+ * out to be another writer's (replaced since it was read), it is linked back, never renamed over whatever stands now.
+ * The new record is staged whole and then LINKED into place, which fails if a record appeared meanwhile. Returns the
+ * text of this process's unheld record now on disk, or undefined if there is none. Never throws and never warns: a
+ * failure leaves no record (readers say not yet published), or this process's own if it could not even be moved.
  */
 function publishUnheld(
 	vaultDir: string,
@@ -255,49 +256,44 @@ function publishUnheld(
 	const current = readRegular(target);
 	// Another writer's record, or something that is not a record this process can judge: it stands.
 	if (current === undefined || (current !== null && current !== mine)) return undefined;
+	if (current !== null) {
+		const aside = stagingPath(vaultDir);
+		try {
+			io.rename(target, aside);
+		} catch (err) {
+			// Gone already: publish as on a vault with none. Otherwise it cannot be moved, so it cannot be replaced either.
+			if ((err as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") return mine;
+		}
+		const moved = readRegular(aside);
+		if (moved !== null && moved !== mine) {
+			putBack(io, aside, target);
+			return undefined;
+		}
+		removeQuietly(io, aside);
+	}
 	const tmp = stagingPath(vaultDir);
-	let ownMovedAside = false;
 	try {
 		const text = recordText(body);
 		io.write(tmp, text);
-		if (current !== null) {
-			const aside = stagingPath(vaultDir);
-			io.rename(target, aside);
-			ownMovedAside = true;
-			if (readRegular(aside) !== mine) {
-				putBack(io, aside, target);
-				return undefined;
-			}
-			removeQuietly(io, aside);
-		}
 		io.link(tmp, target);
 		return text;
 	} catch {
-		// Nothing was published. This process's own earlier record, if one was moved aside, is gone: it described
-		// governors that are no longer the live set, so none is better than it.
-		return ownMovedAside ? undefined : mine;
+		return undefined;
 	} finally {
 		removeQuietly(io, tmp);
 	}
 }
 
 /**
- * A record replaced since it was read was another writer's, moved aside by mistake: link it back unless a newer one has
- * taken its place (then the newer one stands). If it cannot be linked for any other reason it is renamed back, and if
- * that fails too it is left where it is rather than removed.
+ * A record replaced since it was read was another writer's, moved aside by mistake: link it back. If that fails because
+ * a newer record has taken its place, the newer one stands; if it fails for any other reason the moved record is left
+ * where it is, never removed and never renamed back, since a rename would replace whatever was published meanwhile.
  */
 function putBack(io: EffectiveRecordIo, aside: string, target: string): void {
 	try {
 		io.link(aside, target);
 	} catch (err) {
-		if ((err as NodeJS.ErrnoException | undefined)?.code !== "EEXIST") {
-			try {
-				io.rename(aside, target);
-			} catch {
-				// left aside, never removed
-			}
-			return;
-		}
+		if ((err as NodeJS.ErrnoException | undefined)?.code !== "EEXIST") return;
 	}
 	removeQuietly(io, aside);
 }

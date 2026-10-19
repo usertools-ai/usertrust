@@ -585,43 +585,69 @@ describe("a publish without the lock", () => {
 		a.release();
 	});
 
-	it.each([
-		["linked back", {}],
-		[
-			"renamed back where it cannot be linked",
-			{
-				link: (): void => {
-					throw Object.assign(new Error("EPERM: operation not permitted, link"), {
-						code: "EPERM",
-					});
-				},
+	/** A rename seam: the holder publishes in the instant between this process reading its own record and moving it. */
+	function racingRename(target: string, seen: { holders?: Buffer }) {
+		return (from: string, to: string): void => {
+			if (from === target && seen.holders === undefined) {
+				recordEffectiveBudget(vaultDir, 9_999);
+				seen.holders = readFileSync(target);
+			}
+			renameSync(from, to);
+		};
+	}
+
+	it("red-first (lost the holder's): a record that replaced this process's own between the check and the move is linked back", () => {
+		const a = registerEnforcedBudget(vaultDir, 2_000, none);
+		const target = join(vaultDir, EFFECTIVE_BUDGET_FILE);
+		const seen: { holders?: Buffer } = {};
+		const b = registerEnforcedBudget(vaultDir, 5_000, none, { rename: racingRename(target, seen) });
+		expect(seen.holders).toBeDefined();
+		expect(readFileSync(target).equals(seen.holders as Buffer)).toBe(true);
+		expect(stagingFiles()).toEqual([]);
+		b.release();
+		a.release();
+	});
+
+	it("red-first (renamed over a newer one): where it cannot be linked back, it is left aside, never renamed over a record published meanwhile", () => {
+		const a = registerEnforcedBudget(vaultDir, 2_000, none);
+		const target = join(vaultDir, EFFECTIVE_BUDGET_FILE);
+		const seen: { holders?: Buffer } = {};
+		let newer: Buffer | undefined;
+		// The link back fails, and by then the holder has published again.
+		const link = (): void => {
+			recordEffectiveBudget(vaultDir, 7_777);
+			newer = readFileSync(target);
+			throw Object.assign(new Error("EPERM: operation not permitted, link"), { code: "EPERM" });
+		};
+		const b = registerEnforcedBudget(vaultDir, 5_000, none, {
+			link,
+			rename: racingRename(target, seen),
+		});
+		expect(readFileSync(target).equals(newer as Buffer)).toBe(true);
+		// The moved record is kept, not removed.
+		const left = stagingFiles();
+		expect(left).toHaveLength(1);
+		expect(readFileSync(join(vaultDir, left[0] as string)).equals(seen.holders as Buffer)).toBe(
+			true,
+		);
+		b.release();
+		a.release();
+	});
+
+	it("red-first (kept a stale figure): a staging failure after this process's own record was moved leaves none", () => {
+		const a = registerEnforcedBudget(vaultDir, 2_000, none);
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 2_000, source: "governor" });
+		const b = registerEnforcedBudget(vaultDir, 5_000, none, {
+			write: () => {
+				throw Object.assign(new Error("ENOSPC: no space left on device, open"), { code: "ENOSPC" });
 			},
-		],
-	] as const)(
-		"red-first (lost the holder's): a record that replaced this process's own between the check and the move is %s",
-		(_how, linkSeam) => {
-			const a = registerEnforcedBudget(vaultDir, 2_000, none);
-			const target = join(vaultDir, EFFECTIVE_BUDGET_FILE);
-			let holders: Buffer | undefined;
-			// The holder publishes in the instant between this process reading its own record and moving it aside.
-			const racingRename = (from: string, to: string): void => {
-				if (from === target && holders === undefined) {
-					recordEffectiveBudget(vaultDir, 9_999);
-					holders = readFileSync(target);
-				}
-				renameSync(from, to);
-			};
-			const b = registerEnforcedBudget(vaultDir, 5_000, none, {
-				...linkSeam,
-				rename: racingRename,
-			});
-			expect(holders).toBeDefined();
-			expect(readFileSync(target).equals(holders as Buffer)).toBe(true);
-			expect(stagingFiles()).toEqual([]);
-			b.release();
-			a.release();
-		},
-	);
+		});
+		// 2,000 alone no longer describes the live set (it disagrees now): unknown, never that figure.
+		expect(readEffectiveBudget(vaultDir)).toEqual({ state: "absent" });
+		expect(stagingFiles()).toEqual([]);
+		b.release();
+		a.release();
+	});
 
 	it("a failed publish without the lock says nothing and leaves no figure that is not the live set's", () => {
 		const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
