@@ -263,9 +263,13 @@ const REDACTED = "[redacted]";
  * `Bearer tenant keyUPSTREAM` has the token `tenant`, which ends at the key's space, and the key's
  * match, which ends before `UPSTREAM`: replaced as one, they would print `Bearer [redacted]UPSTREAM`.
  * And with the key `k"z`, `api_key="xk"zUPSTREAM"` has the value `xk"`, closed by the key's
- * quote. (5.1.0 replaced the key first, and its patterns then read `[redacted]` and what followed
- * as the credential.) Linear: each run on starts where the part ends and reads only what the part
- * has not covered, and a run on that reads nothing ends the loop.
+ * quote. A quoted value runs on too where a key's match ends exactly where it does, since that match
+ * took its closing quote: with the key `TENANT"`, `api_key="xTENANT"UPSTREAM`. And a key's match
+ * that starts exactly where a token ends joins it, since that match took what ended the token: with
+ * the key `'tenant`, `Bearer x'tenantUPSTREAM`. (5.1.0 replaced the key first, and its patterns then
+ * read `[redacted]` and what followed as the credential: a token holds `[` and `]`.) Linear: each
+ * run on starts where the part ends and reads only what the part has not covered, a credential runs
+ * on again only once a part has taken the end past it, and each part is taken once.
  */
 function applyRedactions(text: string, sources: readonly Iterator<Redaction>[]): string {
 	const heads = sources.map((source) => source.next());
@@ -285,10 +289,16 @@ function applyRedactions(text: string, sources: readonly Iterator<Redaction>[]):
 		let end = first.end;
 		// The shortest credential end of each kind, to run on from the part's end.
 		const runs: { through: RegExp | string; end: number }[] = [];
+		// Where a match of the caller's key (a part with neither) ends: one that ends where a quoted
+		// value does took its closing quote.
+		const keyEnds = new Set<number>();
 		const take = (part: Redaction): void => {
 			end = Math.max(end, part.end);
 			const through = part.rest ?? part.quote;
-			if (through === undefined) return;
+			if (through === undefined) {
+				keyEnds.add(part.end);
+				return;
+			}
 			const run = runs.find((r) => r.through === through);
 			if (run === undefined) runs.push({ through, end: part.end });
 			else run.end = Math.min(run.end, part.end);
@@ -297,11 +307,21 @@ function applyRedactions(text: string, sources: readonly Iterator<Redaction>[]):
 		heads[from] = sources[from]?.next() ?? { done: true, value: undefined };
 		for (let grown = true; grown; ) {
 			// Every part that starts inside this one, or where it starts, joins it, which can take it
-			// further. (So an empty part found twice, in two views of a text, is replaced once.)
+			// further. (So an empty part found twice, in two views of a text, is replaced once.) So does
+			// a key's match that starts where a token ends.
 			for (let joined = true; joined; ) {
 				joined = false;
+				const tokenEnds = runs.some((r) => typeof r.through !== "string" && r.end === end);
 				heads.forEach((head, s) => {
-					if (!head.done && (head.value.start < end || head.value.start === start)) {
+					if (
+						!head.done &&
+						(head.value.start < end ||
+							head.value.start === start ||
+							(tokenEnds &&
+								head.value.start === end &&
+								head.value.rest === undefined &&
+								head.value.quote === undefined))
+					) {
 						take(head.value);
 						heads[s] = sources[s]?.next() ?? { done: true, value: undefined };
 						joined = true;
@@ -310,7 +330,8 @@ function applyRedactions(text: string, sources: readonly Iterator<Redaction>[]):
 			}
 			grown = false;
 			for (const run of runs) {
-				if (run.end >= end) continue;
+				const unclosed = typeof run.through === "string" && keyEnds.delete(run.end);
+				if (run.end >= end && !unclosed) continue;
 				let reach: number;
 				if (typeof run.through === "string") reach = quotedEnd(text, end, run.through);
 				else {
@@ -318,12 +339,11 @@ function applyRedactions(text: string, sources: readonly Iterator<Redaction>[]):
 					run.through.test(text);
 					reach = run.through.lastIndex;
 				}
-				// The credential now ends there: it runs on again only if a part takes the end further.
+				// The credential now ends there: it runs on again only if a part takes the end further. And
+				// another pass looks for a key's match that starts there.
 				run.end = reach;
-				if (reach > end) {
-					end = reach;
-					grown = true;
-				}
+				end = Math.max(end, reach);
+				grown = true;
 			}
 		}
 		out += text.slice(kept, first.start) + first.replacement;

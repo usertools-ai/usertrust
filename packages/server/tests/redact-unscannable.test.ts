@@ -809,6 +809,42 @@ describe("internalErrorLine reads the original and the sanitized text, and redac
 		}
 	}, 60_000);
 
+	it("a key's match that takes what ends a credential: the credential runs on past it", () => {
+		const rows: [string, string[], string][] = [
+			// The key's match ends with a quoted value's closing quote.
+			['api_key="prefixTENANT"UPSTREAM', ['TENANT"'], 'api_key="[redacted]"'],
+			['api_key="prefixTENANT"UPSTREAM" end', ['TENANT"'], 'api_key="[redacted]" end'],
+			["x-api-key: 'pTEN'UPSTREAM' end", ["TEN'"], "x-api-key: '[redacted]' end"],
+			['api_key="x"tenantUPSTREAM end', ['"tenant'], 'api_key="[redacted]"'],
+			['api_key="xk"k"k"UPSTREAM end', ['k"'], 'api_key="[redacted]"'],
+			// The key's match starts where a token ends, with what ended it.
+			["Bearer x'tenantUPSTREAM", ["'tenant"], "Bearer [redacted]"],
+			["Bearer x'tenantUPSTREAM end", ["'tenant"], "Bearer [redacted] end"],
+			["api_key=x;tenantUPSTREAM&x", [";tenant"], "api_key=[redacted]&x"],
+			["Bearer x'tenant'tenantUPSTREAM end", ["'tenant"], "Bearer [redacted] end"],
+			["api_key=x'tenant'tenantUPSTREAM;x", ["'tenant"], "api_key=[redacted];x"],
+			// A gap after the key: what follows is kept, as 5.1.0 kept it.
+			["Bearer x'tenant UPSTREAM", ["'tenant"], "Bearer [redacted] UPSTREAM"],
+		];
+		for (const [message, secrets, printed] of rows) {
+			expect(line(message, secrets), JSON.stringify(message)).toBe(`${LINE}Error: ${printed}`);
+		}
+		// Linear: 100,000 of the key's matches, each taking the delimiter after the last, in under 3
+		// seconds.
+		const timed: [string, string, string, string][] = [
+			["Bearer x", "'t", "UPSTREAM end", "Bearer [redacted] end"],
+			["api_key=x", "'t", "UPSTREAM;x", "api_key=[redacted];x"],
+			['api_key="x', 'k"', "UPSTREAM end", 'api_key="[redacted]"'],
+		];
+		for (const [head, key, tail, printed] of timed) {
+			const message = `${head}${key.repeat(100_000)}${tail}`;
+			const t = performance.now();
+			const out = line(message, [key]);
+			expect(performance.now() - t, head).toBeLessThan(3_000);
+			expect(out, head).toBe(`${LINE}Error: ${printed}`);
+		}
+	}, 60_000);
+
 	it("a marker right after the caller's key: the boundary the replacement makes is read in the text", () => {
 		expect(line(`tenantBearer ${VALUE}`, ["tenant"])).toBe(
 			`${LINE}Error: [redacted]Bearer [redacted]`,

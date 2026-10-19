@@ -143,6 +143,11 @@ const REPROS: Case[] = [
 	{ message: `api_key=tenant${LF}keyTK1`, secrets: ["tenant key"], credentials: ["TK1"] },
 	{ message: 'api_key="xk"zTK1" end', secrets: ['k"z'], credentials: ["TK1"] },
 	{ message: "Bearer t kxt kyTK1", secrets: ["t k"], credentials: ["TK1"] },
+	// A key's match that takes what ends a credential: a quoted value's closing quote, or the
+	// delimiter that ended a token.
+	{ message: 'api_key="prefixTENANT"TK1', secrets: ['TENANT"'], credentials: ["TK1"] },
+	{ message: "Bearer x'tenantTK1 end", secrets: ["'tenant"], credentials: ["TK1"] },
+	{ message: "Bearer x'tenant'tenantTK1 end", secrets: ["'tenant"], credentials: ["TK1"] },
 ];
 
 /** A seeded generator in [0, 1) (mulberry32). */
@@ -207,11 +212,22 @@ const KEY_WORDS = [
 ];
 const KEY_JOINS = ["", " ", " ", "  ", TAB, "-", ".", ":", "=", "/", "+", "'", '"', ","];
 
-/** A seeded caller's key: one to three of `KEY_WORDS`, each joined to the last by one of `KEY_JOINS`. */
+/**
+ * What a key may start or end with: a quote or a delimiter, which it then takes from the credential
+ * it ends. Not whitespace: the key's own whitespace is dropped (see Known limits in the change).
+ */
+const KEY_EDGES = ["'", '"', "-", ".", ":", "=", "/", "+", ",", ";", "&"];
+
+/**
+ * A seeded caller's key: one to three of `KEY_WORDS`, each joined to the last by one of `KEY_JOINS`,
+ * sometimes with one of `KEY_EDGES` before or after.
+ */
 function randomKey(r: () => number): string {
 	const pick = <T>(items: readonly T[]): T => items[Math.floor(r() * items.length)] as T;
 	let key = pick(KEY_WORDS);
 	for (let k = 1 + Math.floor(r() * 3); k > 1; k--) key += `${pick(KEY_JOINS)}${pick(KEY_WORDS)}`;
+	if (r() < 0.2) key = `${pick(KEY_EDGES)}${key}`;
+	if (r() < 0.2) key += pick(KEY_EDGES);
 	return key;
 }
 
@@ -347,6 +363,20 @@ function keyedCase(r: () => number, n: number): Case {
 	return { message, secrets, credentials };
 }
 
+/**
+ * Declared, not fixed here: a caller's key that starts with a quote or a delimiter, or ends with `;`
+ * or `&`, standing where a credential's value or separator starts (`Bearer "key,<token>` with the
+ * key `"key,`). 5.1.0 replaced the key first, so its placeholder became the credential's first
+ * characters. A regression is in this class only if one of the case's keys has such an edge and the
+ * token is no regression with those edges trimmed from the keys (the message unchanged): the edge
+ * is its cause, so no other regression can hide in it.
+ */
+function keyAtValueStart(line: Line, c: Case, token: string): boolean {
+	const trim = (key: string): string => key.replace(/^['"\-.:=/+,;&]+/, "").replace(/[;&]+$/, "");
+	if (c.secrets.every((key) => trim(key) === key)) return false;
+	return !regressions(line, { ...c, secrets: c.secrets.map(trim) }).includes(token);
+}
+
 const KEYED: Case[] = [];
 {
 	const r = seeded(20261023);
@@ -408,23 +438,44 @@ describe("no regression from 5.1.0: what 5.1.0 redacted is never printed", () =>
 	it("10,000 seeded messages with the caller's key around their credentials", () => {
 		const found: string[] = [];
 		let redactedBefore = 0;
+		let atValueStart = 0;
 		for (const c of KEYED) {
-			for (const token of regressions(head, c))
-				found.push(`${JSON.stringify(c.message)} ${JSON.stringify(c.secrets)}: ${token}`);
+			for (const token of regressions(head, c)) {
+				if (keyAtValueStart(head, c, token)) atValueStart++;
+				else found.push(`${JSON.stringify(c.message)} ${JSON.stringify(c.secrets)}: ${token}`);
+			}
 			const before = released(c.message, c.secrets);
 			redactedBefore += c.credentials.filter((token) => !before.includes(token)).length;
 		}
-		// Declared, not fixed here: a marker that sanitizing glues to the end of a credential that runs
-		// on past the caller's key (the shape is `api_key=Ak xB`, a tab, `Bea`, a NUL, `rer T1`, with the
-		// key `k x`). Pinned, so the change that fixes it must remove it from this list.
-		const DECLARED = ["TOK1q2471Z"];
-		const undeclared = found.filter((f) => !DECLARED.some((token) => f.endsWith(`: ${token}`)));
-		expect(undeclared.slice(0, 10)).toEqual([]);
-		expect(found).toHaveLength(DECLARED.length);
+		expect(found.slice(0, 10)).toEqual([]);
+		expect(found).toHaveLength(0);
+		// Declared too, not fixed here: a marker that sanitizing glues to the end of a credential that
+		// runs on past the caller's key. The corpus held one; this pins its shape, so the change that
+		// fixes it must turn this around.
 		const shape = `api_key=Ak xB${TAB}Bea${C(0)}rer T1 end`;
 		expect(released(shape, ["k x"])).not.toContain("T1");
 		expect(head(shape, ["k x"])).toContain("T1");
 		expect(redactedBefore).toBeGreaterThan(10_000);
+		// The declared class is there, and its predicate is narrow: a key-at-value-start row is in it,
+		// and a regression the key's edge does not cause (a line that only sanitizes, with the key
+		// `'tenant` after the credential) is not.
+		// Pinned at its size in this corpus, so a change to the class is seen.
+		expect(atValueStart).toBe(95);
+		const atStart: Case = {
+			message: 'Bearer "key,TOKAq1Z end',
+			secrets: ['"key,'],
+			credentials: ["TOKAq1Z"],
+		};
+		expect(regressions(head, atStart)).toEqual(["TOKAq1Z"]);
+		expect(keyAtValueStart(head, atStart, "TOKAq1Z")).toBe(true);
+		const elsewhere: Case = {
+			message: "Bearer TOKBq1Z 'tenant end",
+			secrets: ["'tenant"],
+			credentials: ["TOKBq1Z"],
+		};
+		const unredacted: Line = (message) => scrubForStderr(message);
+		expect(regressions(unredacted, elsewhere)).toEqual(["TOKBq1Z"]);
+		expect(keyAtValueStart(unredacted, elsewhere, "TOKBq1Z")).toBe(false);
 		// And the class that hid: a key holding a space, glued to the token after it.
 		expect(
 			KEYED.filter((c) =>
