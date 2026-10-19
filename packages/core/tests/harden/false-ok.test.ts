@@ -692,7 +692,7 @@ describe("false OK — a documented count that stops matching reality", () => {
 				// total read low. That holds only for one already counted: a NEW one
 				// in this form (`sanitizeMapped`, which strips the character by
 				// copying the text before it and moving past it) went uncounted with
-				// the inventory still green. Counted when its taken branch does not
+				// the inventory still passing. Counted when its taken branch does not
 				// write the character back.
 				if (ts.isIfStatement(n)) {
 					const id = testedRange(n.expression, consts);
