@@ -578,6 +578,54 @@ describe("internalErrorLine reads the original and the sanitized text, and redac
 		expect(failed.slice(0, 10)).toEqual([]);
 	});
 
+	it("a marker right after the caller's key: the boundary the replacement makes is read in the text", () => {
+		expect(line(`tenantBearer ${VALUE}`, ["tenant"])).toBe(
+			`${LINE}Error: [redacted]Bearer [redacted]`,
+		);
+		expect(line(`tenantapi_key=${VALUE}`, ["tenant"])).toBe(
+			`${LINE}Error: [redacted]api_key=[redacted]`,
+		);
+		// Positive control: no pattern finds either marker in the text as it is (no word boundary).
+		expect(redactSecrets(`tenantBearer ${VALUE} tenantapi_key=${VALUE}`)).toBe(
+			`tenantBearer ${VALUE} tenantapi_key=${VALUE}`,
+		);
+		const failed: string[] = [];
+		let cases = 0;
+		for (const [marker, sep] of [
+			...MARKERS,
+			["BEARER", " "] as [string, string],
+			["X-Api-Key", ": "] as [string, string],
+		]) {
+			for (const p of [0, 1, 2]) {
+				for (const inside of ["", ...INSIDE]) {
+					const split = p === 0 ? marker : `${marker.slice(0, p)}${inside}${marker.slice(p)}`;
+					if (p === 0 && inside !== "") continue;
+					for (const secrets of [["tenant"], ["tenant", "nantB"], ["ten", "tenant"]]) {
+						cases++;
+						const message = `tenant${split}${sep}${VALUE} end`;
+						const printed = line(message, secrets).slice(LINE.length);
+						const whole = joinLines(scrubForStderr(message, Number.POSITIVE_INFINITY)).includes(
+							`${marker}${sep}`,
+						);
+						if (redactSecrets(printed, secrets) !== printed)
+							failed.push(`${JSON.stringify(message)}: not a fixed point`);
+						if (whole && printed.includes(VALUE))
+							failed.push(`${JSON.stringify(message)}: ${JSON.stringify(printed)}`);
+					}
+				}
+			}
+		}
+		expect(failed.slice(0, 10)).toEqual([]);
+		expect(cases).toBeGreaterThan(1_000);
+	});
+
+	it("a key's overlapping matches end in order, and a marker after each is found", () => {
+		expect(redactSecrets(`aaaBearer ${VALUE}`, ["aa"])).toBe("[redacted]Bearer [redacted]");
+		expect(redactSecrets(`xyBearer ${VALUE} xyapi-key: ${VALUE}`, ["xy", "x"])).toBe(
+			"[redacted]Bearer [redacted] [redacted]api-key: [redacted]",
+		);
+	});
+
 	it("an unclosed quote at the end, found in both texts, is replaced once", () => {
 		expect(line(`api_key="`)).toBe(`${LINE}Error: api_key="[redacted]"`);
 		expect(line(`api_key="${BEL}`)).toBe(`${LINE}Error: api_key="[redacted]"`);

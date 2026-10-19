@@ -210,6 +210,9 @@ function routeOf(req: IncomingMessage): RouteName | "unrouted" {
 const BEARER_TOKEN = /\b(Bearer)\s+[^\s"',;]+/gi;
 /** The start of an api-key style value: its name, the separator, and its opening quote, if any. */
 const API_KEY_START = /\b(x-api-key|api[-_]key)(["']?\s*[:=]\s*)(["']?)/gi;
+/** `BEARER_TOKEN` and `API_KEY_START` at one place, with no word boundary asked for there. */
+const BEARER_AT = /(Bearer)\s+[^\s"',;]+/iy;
+const API_KEY_AT = /(x-api-key|api[-_]key)(["']?\s*[:=]\s*)(["']?)/iy;
 /** An unquoted api-key value: it ends at whitespace, a quote, `,`, `;` or `&`. */
 const UNQUOTED_VALUE = /[^\s"',;&]+/y;
 const BACKSLASH = 0x5c;
@@ -310,18 +313,80 @@ function* apiKeySpans(text: string): Generator<Redaction> {
 	const start = new RegExp(API_KEY_START);
 	const unquoted = new RegExp(UNQUOTED_VALUE);
 	for (let m = start.exec(text); m !== null; m = start.exec(text)) {
-		const quote = m[3] ?? "";
-		let end: number;
-		if (quote !== "") end = quotedEnd(text, start.lastIndex, quote);
-		else {
-			unquoted.lastIndex = start.lastIndex;
-			// No value here. The old pattern looked again from the next character, but the only
-			// start inside this one (`api-key` in `x-api-key`) meets the same separator and fails too.
-			if (!unquoted.test(text)) continue;
-			end = unquoted.lastIndex;
+		const value = apiKeyValue(text, m[3] ?? "", start.lastIndex, unquoted);
+		// No value here. The old pattern looked again from the next character, but the only start
+		// inside this one (`api-key` in `x-api-key`) meets the same separator and fails too.
+		if (value === undefined) continue;
+		yield value;
+		start.lastIndex = value.end;
+	}
+}
+
+/** The api-key value that starts at `from` after its opening `quote` (or none), if there is one. */
+function apiKeyValue(
+	text: string,
+	quote: string,
+	from: number,
+	unquoted: RegExp,
+): Redaction | undefined {
+	let end: number;
+	if (quote !== "") end = quotedEnd(text, from, quote);
+	else {
+		unquoted.lastIndex = from;
+		if (!unquoted.test(text)) return undefined;
+		end = unquoted.lastIndex;
+	}
+	return { start: from, end, replacement: `${REDACTED}${quote}` };
+}
+
+/** The UTF-16 code units a marker can start with: `B`, `b`, `X`, `x`, `A`, `a`. */
+function startsMarker(code: number): boolean {
+	const lower = code | 0x20;
+	return lower === 0x62 || lower === 0x78 || lower === 0x61;
+}
+
+/**
+ * Each `Bearer <token>` and api-key value whose marker starts exactly where a match of one of
+ * `secrets` ends, with no word boundary asked for there. Replacing the key puts `]` before the
+ * marker, a boundary the text did not have: with the key `tenant`, `tenantBearer <token>` would
+ * print `[redacted]Bearer <token>`. So the marker is looked for there in the text itself, never in
+ * redacted text. The keys' matches end in order (each is found at its end, left to right), so they
+ * are merged as they come, and only where a marker could start is a pattern tried.
+ */
+function* markersAfterKeys(text: string, secrets: readonly string[]): Generator<Redaction> {
+	const keys = secrets.map((secret) => secretSpans(text, secret));
+	const heads = keys.map((key) => key.next());
+	const bearer = new RegExp(BEARER_AT);
+	const apiKey = new RegExp(API_KEY_AT);
+	const unquoted = new RegExp(UNQUOTED_VALUE);
+	for (let last = -1; ; ) {
+		let at = -1;
+		let from = -1;
+		heads.forEach((head, k) => {
+			if (!head.done && (from === -1 || head.value.end < at)) {
+				at = head.value.end;
+				from = k;
+			}
+		});
+		if (from === -1) return;
+		heads[from] = keys[from]?.next() ?? { done: true, value: undefined };
+		if (at === last || !startsMarker(text.charCodeAt(at))) continue;
+		last = at;
+		bearer.lastIndex = at;
+		const token = bearer.exec(text);
+		if (token !== null) {
+			yield {
+				start: at + (token[1] ?? "").length,
+				end: at + token[0].length,
+				replacement: ` ${REDACTED}`,
+			};
+			continue;
 		}
-		yield { start: start.lastIndex, end, replacement: `${REDACTED}${quote}` };
-		start.lastIndex = end;
+		apiKey.lastIndex = at;
+		const name = apiKey.exec(text);
+		const value =
+			name === null ? undefined : apiKeyValue(text, name[3] ?? "", apiKey.lastIndex, unquoted);
+		if (value !== undefined) yield value;
 	}
 }
 
@@ -423,11 +488,15 @@ export function redactSecrets(text: string, secrets: readonly string[] = []): st
 	}
 }
 
-/** Every kind of match in `text`: each `Bearer <token>`, each api-key value and each of `secrets`. */
+/**
+ * Every kind of match in `text`: each `Bearer <token>`, each api-key value (also where a match of
+ * one of `secrets` ends, see `markersAfterKeys`) and each of `secrets`.
+ */
 function spansIn(text: string, secrets: readonly string[]): Generator<Redaction>[] {
 	return [
 		bearerSpans(text),
 		apiKeySpans(text),
+		markersAfterKeys(text, secrets),
 		...secrets.map((secret) => secretSpans(text, secret)),
 	];
 }
