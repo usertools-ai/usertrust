@@ -30,7 +30,8 @@
  *   credential. `sanitizeMapped` gives scrubForStderr's text and where each of its units was.
  * - Linear, as a ratio: reading twice an input takes at most three times as long (a quadratic
  *   reader takes about four), at a size where one read takes 25 ms, each time the least of five
- *   samples of at least 50 ms, taken in turn at both sizes with both inputs built first. What
+ *   samples of at least 50 ms, taken in turn at both sizes with both inputs built first (one flat
+ *   string, as a caller's text arrives, where an input is built only once). What
  *   doubles is what a quadratic reader would read again: the units of a run of
  *   markers, a whitespace run's length, or a key's length with the text's. A time limit would fail
  *   a slow runner, or one under coverage, and pass a quadratic reader on a fast one.
@@ -115,6 +116,17 @@ function expectLinear(name: string, make: (n: number) => () => unknown, n: numbe
 	const times = `${once.toFixed(1)} ms at ${size}, ${twice.toFixed(1)} ms at ${2 * size}, ${reads} reads a sample`;
 	expect(twice / once, `${name}: ${times}`).toBeLessThanOrEqual(3);
 }
+
+/**
+ * `text` as one flat string, as a caller's text arrives (JSON.parse gives one). A string built with
+ * `+` or `repeat` is a tree of parts. V8 flattens it on the first read, but keeps the tree as a
+ * pointer to the flat copy until a garbage collection the string survives replaces it with that
+ * copy. An input built once and kept for the whole measurement can then be flat at `n` and still
+ * the pointer at twice `n`, which reads slower in every sample: a linear reader measured up to 3.7
+ * times as long. Inputs a read builds again each time are not kept, so only those built once pass
+ * through here.
+ */
+const flat = (text: string): string => JSON.parse(JSON.stringify(text));
 
 describe("redactApiKeys", () => {
 	it("matches exactly what the old pattern matched, over a seeded corpus", () => {
@@ -212,7 +224,10 @@ describe("redactSecrets", () => {
 			expectSame(redactSecrets(long, [key]), long);
 			expectSame(redactSecrets(`tenant${" ".repeat(N)}key-0123456789`, [key]), "[redacted]");
 			// Twice the runs' length: a search that read a run once from each place in it takes four times.
-			const reads = (text: string) => () => redactSecrets(text, [key]);
+			const reads = (text: string) => {
+				const input = flat(text);
+				return () => redactSecrets(input, [key]);
+			};
 			expectLinear("runs", (n) => reads(`tenant${" ".repeat(n)}`.repeat(100)), 2_000);
 			expectLinear("words", (n) => reads("tenant ".repeat(n)), 50_000);
 			expectLinear("one run", (n) => reads(`tenant${" ".repeat(n)}x`), 500_000);
@@ -358,7 +373,10 @@ describe("redactSecrets", () => {
 			expectSame(redactSecrets(pairs, [`${"a".repeat(40)}b`]), pairs);
 			// The key grows with the text: a search that began again after each false start reads the key's
 			// length from each place, and takes four times as long.
-			const reads = (text: string, key: string) => () => redactSecrets(text, [key]);
+			const reads = (text: string, key: string) => {
+				const input = flat(text);
+				return () => redactSecrets(input, [key]);
+			};
 			expectLinear("one run", (n) => reads("a".repeat(n), `${"a".repeat(n / 100)}b`), 100_000);
 			expectLinear("pairs", (n) => reads("a ".repeat(n), `${"a".repeat(n / 5_000)}b`), 200_000);
 		}, 60_000);
