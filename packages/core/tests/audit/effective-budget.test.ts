@@ -12,8 +12,10 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
+	chmodSync,
 	existsSync,
 	linkSync,
+	lstatSync,
 	mkdirSync,
 	readdirSync,
 	readFileSync,
@@ -712,6 +714,41 @@ describe("a publish without the lock, beside another writer's lock", () => {
 		expect(readEffectiveBudget(vaultDir)).toEqual({ state: "absent" });
 		a.release();
 	});
+
+	// A lock this process cannot see is not an absent one: only ENOENT reads as "no lock". The record and its staging
+	// file sit in the vault directory itself, never under `audit/`, so in both rows below ONLY the lock's lstat fails;
+	// with `audit/` an ordinary empty directory the same publish succeeds (the "fills an empty slot" row above).
+	it("red-first (fail-open): a lock path that cannot be read (ENOTDIR: `audit` is a file) publishes nothing", () => {
+		rmSync(join(vaultDir, "audit"), { recursive: true });
+		writeFileSync(join(vaultDir, "audit"), "not a directory", { mode: 0o600 });
+		expect(() => lstatSync(lockPath())).toThrow(expect.objectContaining({ code: "ENOTDIR" }));
+		const a = registerEnforcedBudget(vaultDir, 2_000, none);
+		expect(readEffectiveBudget(vaultDir)).toEqual({ state: "absent" });
+		expect(loadBudgetConfig(vaultDir).source).toBe("unpublished");
+		expect(stagingFiles()).toEqual([]);
+		a.release();
+		expect(readEffectiveBudget(vaultDir)).toEqual({ state: "absent" });
+	});
+
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"red-first (fail-open): a lock behind a directory this process cannot search (EACCES: another user's writer) publishes nothing",
+		() => {
+			// A mixed-UID vault: a writer running as another user owns `audit/` at 0700, so this process cannot see
+			// whether its lock is there. Here: `audit/` at 0o000, which only the lock's lstat touches.
+			const audit = join(vaultDir, "audit");
+			chmodSync(audit, 0o000);
+			try {
+				expect(() => lstatSync(lockPath())).toThrow(expect.objectContaining({ code: "EACCES" }));
+				const a = registerEnforcedBudget(vaultDir, 2_000, none);
+				expect(readEffectiveBudget(vaultDir)).toEqual({ state: "absent" });
+				expect(loadBudgetConfig(vaultDir).source).toBe("unpublished");
+				expect(stagingFiles()).toEqual([]);
+				a.release();
+			} finally {
+				chmodSync(audit, 0o700);
+			}
+		},
+	);
 
 	it("red-first (checked too early): a lock that lands after the staging stops the link", () => {
 		const write = (path: string, data: string): void => {
