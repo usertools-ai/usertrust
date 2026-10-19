@@ -16,6 +16,76 @@ required reviewer** (see "Owner setup" below). This is intended: without it, any
 dispatch the workflow could publish with no approval. The refusal comes from the `ci-gate`
 job and names the step to take.
 
+## Choosing the version
+
+The version is decided by what the release changes, never by the person dispatching it. Every
+entry in the CHANGELOG sits under a heading that names its class, and the release's bump is the
+highest class among its entries:
+
+| Bump | When | CHANGELOG headings |
+|---|---|---|
+| **major** | an export removed or renamed, a default changed, or an output's shape changed. At most one a quarter (below) | `### Removed`, `### Breaking` |
+| **minor** | a new detection, option or export, or another change a caller can see that breaks nothing | `### Added`, `### Changed`, `### Deprecated` |
+| **patch** | a fix to a bug, a crash or a false positive, with no change to the public API or a default | `### Fixed`, `### Security`, `### Dependencies` |
+
+Two more headings are notes, which carry no class: `### Read before upgrading` (what an
+existing caller may notice, and what to do about it) and `### Known issues`. Any other `###`
+heading is refused, so an entry cannot sit outside the policy.
+
+**The check.** For a new release, ci-gate runs `scripts/release.sh assert-bump <version input>`
+on the dispatched commit. It reads `CHANGELOG.md` from that commit (the git blob, not a working
+tree) and refuses the release, before anything is built, when:
+
+- `[Unreleased]` still holds an entry, or any line but an empty class or note heading (cut
+  them first: "Cutting the CHANGELOG", below);
+- the section under `[Unreleased]` is not `## [X.Y.Z] - YYYY-MM-DD`, or `X.Y.Z` is not the
+  version this dispatch makes (the committed version bumped by the `version` input);
+- that section has no entry under a class heading, a class heading with no entry, an entry
+  under no heading, or a heading that is neither a class nor a note;
+- a line could hide an entry from the count. The check denies by default, so a line it cannot
+  place is refused, never skipped:
+  - An entry is a list item of any Markdown marker (`-`, `*`, `+`, `1.`, `1)`) at the line's
+    start. An indented line is accepted only under an entry, as its continuation or sub-item.
+  - Under a class heading, every other line is refused: prose, a quote, HTML, or an indented
+    item under no entry.
+  - Anywhere in the section, a line that would render as a heading but is not a `###` class or
+    note heading is refused: `####`, `###Removed`, an indented `#`, a setext underline (`---` or
+    `===` under a line), a line that is only a class or note name in emphasis or HTML
+    (`**Removed**`), and a `##` line that is not the next version's header.
+  - A note's text, and a paragraph that opens the section before its first heading, are free
+    but for those lines. Link reference definitions (`[1.0.0]: <url>`) are accepted anywhere;
+- the `version` input is not exactly the highest class among its entries. Both directions are
+  refused: a patch release of a section with an `Added` entry, and a major release of a section
+  with nothing under `Removed` or `Breaking`.
+
+**At most one major a quarter.** A major is refused while the last one is less than 90 days
+old: the highest `v<N>.0.0` tag on `master`, aged by its tag date (a tag whose commit is not on
+`master` was never released and does not count). To release one anyway, give the reason in the
+`allow_early_major` input. It is written into the release tag, as one code span (so no mention,
+link or HTML in it renders), and leads the GitHub Release's notes, so a republish, which refuses the input, still has it. The input is refused on any
+release that does not need it (a patch, a minor, or a major more than 90 days after the last
+one) and on a republish, so a reason is never given and then silently unused.
+
+A republish skips the check: it publishes a version already tagged, whose bump was checked when
+it was released.
+
+## Cutting the CHANGELOG
+
+Entries collect under `## [Unreleased]`, each under its class heading, as pull requests merge.
+Before dispatching a release, a pull request cuts them:
+
+1. Work out the bump from the highest class under `[Unreleased]` (see "Choosing the version"),
+   and from it the new version: the committed version bumped by that much.
+2. Rename the `[Unreleased]` heading to `## [X.Y.Z] - YYYY-MM-DD` with that version and the
+   day's date, and add a new, empty `## [Unreleased]` above it.
+3. Merge that pull request, and dispatch the release on `master`, at that commit, once CI has
+   passed on it, with the bump from step 1.
+
+The release commit then changes only the six `package.json` files, as it always has: the
+CHANGELOG already says what the release holds, at the commit CI tested. A pull request that
+merges between the cut and the dispatch adds its entries under the new `[Unreleased]`, for the
+next release.
+
 ## What a release does
 
 Three jobs, so that dependency code never runs next to a credential that can push to the
@@ -23,14 +93,23 @@ repository or mint an OIDC token for provenance:
 
 1. **ci-gate** (token: `contents: read`, `actions: read`).
    - The run must be on `master`, or, for a republish only, on a release tag.
+   - For a new release, the `version` input must be exactly the bump the CHANGELOG's release
+     section requires, and a major released less than 90 days after the previous one needs a
+     reason in `allow_early_major` (see "Choosing the version"). A republish skips this check
+     and refuses `allow_early_major`.
    - CI (`ci.yml`) must have passed on the exact commit being released: its latest run for a
      push of that commit must have completed with every job `success`, including each job
      named in `REQUIRED_CI_JOBS`. A missing, pending, skipped, cancelled or failed job stops
      the release and is named in the error.
    - The `npm-publish` environment must require at least one reviewer. A missing environment,
      a permission error, or an answer that cannot be read is a refusal, never a pass. (Reading
-     an environment's protection rules needs `actions: read`.)
-2. **build** (token: `contents: read` only; no OIDC token, no secret).
+     an environment's protection rules needs `actions: read`.) If the environment lets the
+     person who dispatched the release approve it, the gate warns (see "Self-approval").
+2. **build** (token: `contents: read` only; no OIDC token, no secret). It runs as **two legs
+   of one matrix**, `release` and `rebuild`, each on its own fresh runner. Both run the steps
+   below, from one job definition so the two cannot drift apart, and each uploads its output
+   under its own name. The publish job publishes from `release` and uses `rebuild` only to
+   check it (see "The rebuild check").
    1. Installs (`npm ci`, with install scripts, exactly as CI does), typechecks and tests.
    2. Refuses to start if the committed version is not fully on npm (finish it with republish
       first), bumps all six packages by the chosen `version` (patch, minor or major), pins
@@ -40,7 +119,7 @@ repository or mint an OIDC token for provenance:
       creates the tag `v<version>` locally**, and checks that nothing under `packages/`
       differs from that commit.
    4. Packs each package into a tarball (`npm pack --ignore-scripts`), bundles the release
-      commit and tag (`git bundle`), and uploads both as the `release` artifact. These
+      commit and tag (`git bundle`), and uploads both as an artifact named after the leg. These
       tarballs are never published: the publish job reads them as data (below).
 3. **publish**, in the `npm-publish` environment, so it waits for the approval (token:
    `contents: write`, `id-token: write`, `actions: read`; `NPM_TOKEN` in one step). It installs
@@ -48,9 +127,11 @@ repository or mint an OIDC token for provenance:
    with node, and GitHub's own checkout, setup-node and download-artifact actions. **It builds
    nothing**: every byte it publishes was built by the build job, on Node 22 (the runtime CI
    tests on); this job only assembles tarballs from those bytes (python3) and runs npm. It
-   runs Node 24, for the npm Node 24 bundles (npm 11 or later), and its first step after
-   setup-node prints node's and npm's versions and refuses an npm older than 11, before
-   anything reads or writes the registry (see step 3 for why).
+   runs Node 24, for the npm Node 24 bundles, and its first step after setup-node prints
+   node's and npm's versions and refuses an npm older than 11.5.1 or a Node older than
+   22.14.0, before anything reads or writes the registry. Those are the versions npm trusted
+   publishing needs (see "npm authentication and provenance"); below them npm would publish
+   with `NPM_TOKEN` alone, without saying so. npm 11 is also needed for the reason in step 3.
    The publish job pins **Node 24.21.0** exactly, which bundles npm 11.19.0 (per
    nodejs.org/dist/index.json): the version at which the npm sources this page cites
    (`lib/commands/publish.js`, `lib/utils/oidc.js`) were read, so a release never changes
@@ -59,10 +140,12 @@ repository or mint an OIDC token for provenance:
    pull request (the release-workflow test requires the pin and this line to name the same
    version).
    1. Checks the CI gate again, since approval can come long after step 1.
-   2. Downloads the artifact and checks the release commit, as git objects, without checking
-      it out:
-      - its version (validated as `major.minor.patch` before it is used) is tagged, and the tag
-        points at it;
+   2. Downloads both legs' artifacts, and works out the expected version itself: the
+      dispatched commit's committed version, bumped by the `version` input
+      (`release.sh expected-version`). Nothing the build job reports is used as the version.
+      Then it checks the `release` leg's release commit, as git objects, without checking it
+      out:
+      - its version is exactly the expected version, and is tagged, and the tag points at it;
       - it has one parent, which is the commit this run was dispatched on;
       - its message is exactly `release: v<version>` and its committer's `Signed-off-by:`
         trailer, nothing more;
@@ -71,6 +154,11 @@ repository or mint an OIDC token for provenance:
       - each manifest names every lockstep sibling at exactly the new version, is otherwise
         unchanged but for `version` (no dependency added, dropped or changed, no field added,
         dropped or changed), and none has `publishConfig`.
+
+      Then **the rebuild check**, in every mode: for each package it assembles the publish
+      tarball (step 3) twice, once with the `release` leg's `dist/` bytes and once with the
+      `rebuild` leg's, and refuses unless the two are byte-identical (sha256;
+      `release.sh compare-builds`). Both legs' tarballs are read as data.
    3. **Assembles the tarball npm will publish**, for each package, and verifies it (see "The
       publish tarball is assembled, not taken from the build" below). Then runs
       `npm publish <assembled tarball> --access public [--tag backfill] --provenance
@@ -120,7 +208,8 @@ repository or mint an OIDC token for provenance:
       would publish under `backfill`).
    4. **Pushes the release commit and tag** to `master`, atomically, and only while `master`
       is still the dispatched commit (see "Why the commit and tag are pushed before
-      publishing").
+      publishing"). The tag is annotated in this job, on the verified commit, with the version
+      and an early major's reason.
    5. Assembles the six tarballs again (the same commit gives the same bytes) and publishes
       each with the same command, without `--dry-run`. Publishing a tarball runs no lifecycle
       script.
@@ -128,7 +217,8 @@ repository or mint an OIDC token for provenance:
       explicitly: it is Latest only if no `v*` release tag on master is a higher semver and no package
       has a higher version on npm (prereleases never take it), so finishing an older version
       never takes Latest from a newer one. It runs only after every package's publish
-      succeeded.
+      succeeded. For a major released early, the `allow_early_major` reason leads the notes,
+      above the generated ones, as a code span; it is read from the release tag, which step 4 annotated with it.
       This is the same answer that chose the npm dist-tag in steps 3 and 5.
 
    Each step runs only if every step before it succeeded, so a normal release publishes
@@ -177,7 +267,8 @@ imports, and fail to start.
 ### Build output is untrusted data
 
 The publish job treats everything the build job hands it (the git bundle, the commit in it,
-the tarballs, the version it reports) as untrusted DATA, never as code or config:
+both legs' tarballs) as untrusted DATA, never as code or config. It takes no version from the
+build job: it computes the version it expects and checks the release commit against it.
 
 - The working tree stays at the dispatched commit, so every script the job runs comes from
   that commit. The release commit is never checked out.
@@ -226,6 +317,25 @@ v24.21.0):
 So the OIDC token is a credential that can publish once trusted publishing is configured,
 which is one more reason `id-token: write` is granted to the publish job and no other (the
 release-workflow test pins this). Configuring it is an owner step (below).
+
+What trusted publishing needs, per npm's documentation
+(<https://docs.npmjs.com/trusted-publishers>), and how this workflow meets it:
+
+- **npm 11.5.1 or later and Node 22.14.0 or later.** The publish job refuses anything older
+  (see step 3 of "What a release does"), so a release never falls back to `NPM_TOKEN` because
+  of an old npm.
+- **A GitHub-hosted runner.** Every job runs on `ubuntu-latest`.
+- **The workflow file name, exactly.** npm checks the name of the workflow that requested the
+  OIDC token, `publish.yml`, against the one configured (case-sensitive, with the extension).
+  The release is dispatched on this workflow itself, never through another workflow.
+- **`repository.url` matching the repository.** All six manifests say
+  `git+https://github.com/usertools-ai/usertrust.git`.
+- **`id-token: write`**, which only the publish job has. The token is GitHub's OIDC token
+  (<https://docs.github.com/en/actions/reference/security/oidc>).
+
+When a package publishes through trusted publishing from a public repository, npm generates its
+provenance itself; `--provenance` stays on the command for a publish that falls back to the
+token.
 
 ### The publish tarball is assembled, not taken from the build
 
@@ -293,8 +403,10 @@ directory or the checkout's package directories, and a tarball spec runs no life
 
 **What remains.** The `dist/` bytes are built by dependency code, which is inherent to building
 from source; provenance attests the workflow that built them. Within the name rule and the
-caps, the build also still chooses **which** `dist/` paths exist: nothing independent of the
-build fixes that file set. It cannot change the manifest, the root files, any configuration,
+caps, the build also still chooses **which** `dist/` paths exist. The rebuild check (step 2 of
+the publish job) requires a second, independent runner to build the same bytes and the same
+file set, so a build that goes wrong on one runner is refused; it cannot catch a change that
+both builds make alike (see "Approving the `npm-publish` deployment"). It cannot change the manifest, the root files, any configuration,
 the registry, install scripts, or anything outside `dist/`, and it cannot reach the push, the
 OIDC token or `NPM_TOKEN`.
 
@@ -308,48 +420,44 @@ OIDC token or `NPM_TOKEN`.
 - **What remains:** GitHub cannot scope `id-token: write` to one step, so every step of the
   publish job could mint an OIDC token; those steps are the tools above and nothing from the
   repository's dependencies. A compromised build dependency can still change the `dist/`
-  bytes, and which permitted `dist/` paths exist (see above). The split stops it reaching the
+  bytes, and which permitted `dist/` paths exist, as long as it changes them the same way on
+  both build runners (see above). The split stops it reaching the
   push, the OIDC token and `NPM_TOKEN`; the release commit it hands on is checked to be a
   version bump (the versions and the sibling pins) and nothing else, and the tarball it packs
   is used only as a source of
   `dist/` bytes.
 
-## Before approving the `npm-publish` deployment
+## Approving the `npm-publish` deployment
 
-The approval covers what the publish job cannot check by itself. The publish job verifies the
-release commit's shape and assembles the tarballs only from verified sources, but two things
-still come from the build job, which runs dependency code: the `dist/` bytes and the version
-number. A compromised build dependency could choose either, and a tarball with the wrong code at
-the right version, or a consistent release commit at a version nobody asked for, would pass every
-check the publish job makes. So the person approving confirms both independently, before
-approving. The publish job waits for that approval before any of its steps, so nothing has been
-pushed or published yet.
+Two things the publish job uses come from the build job, which runs dependency code: the
+`dist/` bytes and the release commit. The workflow checks both itself, so the approval no longer
+needs a manual rebuild:
 
-Call the expected version `V`: the committed version bumped by the dispatched `version` input
-(for example `4.1.0` with `minor` gives `4.2.0`).
+- **The version.** The publish job computes the version it expects, from the dispatched commit
+  and the `version` input, and refuses a release commit at any other version. ci-gate has
+  already required that input to be the bump the CHANGELOG requires ("Choosing the version").
+- **The `dist/` bytes.** The rebuild check requires a second build, on a second fresh runner,
+  to give byte-identical publish tarballs.
 
-1. **Download the run's `release` artifact** (the run's page, under Artifacts): the build job's
-   tarballs (`*.tgz`) and, for a new release, `release.bundle`.
-2. **Check the release commit in `release.bundle`.** The published `package.json` files and the
-   pushed tag come from this commit, not from the tarballs, so it must be checked on its own. In a
-   clone of the repository that has the dispatched commit (shown on the run's page):
-   - `git bundle verify release.bundle` succeeds;
-   - the bundle holds exactly one tag, and it is `vV` (`git bundle list-heads release.bundle`);
-   - fetch it (`git fetch release.bundle "refs/tags/vV:refs/tags/vV"`), and the tag's commit has
-     exactly one parent, the dispatched commit;
-   - in that commit, all six `packages/<dir>/package.json` files have `"version": "V"`, and
-     every lockstep package one of them depends on is named at exactly `"V"`.
-3. **Build the dispatched commit yourself**, on a machine you trust: check out the dispatched
-   commit, apply the same version bump the build job applies (its "Bump versions" step in
-   `.github/workflows/publish.yml`, with the dispatched `version` input), install with `npm ci`,
-   build, and pack with `bash scripts/release.sh pack <dir>`.
-4. **Compare the tarballs, package by package**, yours with the run's:
-   - the same set of paths, and every file byte-identical (this is the check on the `dist/` code);
-   - `package/package.json` identical as parsed JSON, with `"version": "V"`.
-5. **Approve only if every check in steps 2 and 4 passes.** Otherwise reject the deployment.
+The publish job waits for the approval before any of its steps, so nothing has been pushed or
+published yet. Before approving, read the run's page: ci-gate passed, and its "Require the bump
+the CHANGELOG requires" step names the version and the class that requires it; both build legs
+passed, and each one's summary says `Release v<version>`, the same version. Approve only a run
+you dispatched or expected.
 
-A republish publishes a version that is already tagged on `master`; compare its tarballs the same
-way against a build of that tag.
+**What the checks do not catch.** Both legs install the same lockfile and build the same
+commit, so a compromised dependency at a locked version builds the same bytes on both and passes
+the rebuild check. The rebuild check catches a build that differs between runners (a runner
+that was tampered with, a build that is not reproducible); it does not vet the dependencies.
+Those are vetted where they change: in the pull requests that change `package-lock.json`.
+
+### Self-approval
+
+The environment's "Prevent self-review" setting stops the person who dispatched a run from
+approving it. While the project has a single maintainer who can approve, it is off, and that is
+accepted: the approval is then a second, deliberate step by the same person, not a second
+person's review. ci-gate warns on every release while it is off. Turn it on once a second
+reviewer is added.
 
 ## Modes
 
@@ -361,6 +469,10 @@ way against a build of that tag.
 
 `dry_run` and `republish` can be combined: a republish rehearsal that pushes and publishes
 nothing.
+
+`allow_early_major` is not a mode: it is the reason for a major released less than 90 days
+after the previous one, and is refused on any other release and on a republish (see "Choosing
+the version").
 
 Every mode, dry runs included, is refused until the environment is protected, and then waits
 for its approval. Do a `dry_run` before the first release after any change to the workflow.
@@ -429,12 +541,21 @@ The workflow names these; it cannot create or configure them.
     branch, with an edited copy of this file, away from the token. The gate warns, but does
     not refuse, when no deployment-branch policy is set: it cannot see whether the token is an
     environment secret, and without that the policy protects nothing.
-- **npm trusted publishing (optional, on npmjs.com).** This is the package owner's act on
-  npmjs.com, in each package's settings, not a change to this repository. Configure it for
-  each of the six packages, trusting this repository and this workflow file
-  (`.github/workflows/publish.yml`) only, with the environment name `npm-publish` (npm's
-  trusted publisher settings take an optional GitHub environment name). Once one release has
-  published through OIDC, delete the `NPM_TOKEN` secret.
+- **npm trusted publishing (on npmjs.com).** This is the package owner's act on npmjs.com, in
+  each package's settings (Settings, Trusted Publisher), not a change to this repository.
+  For each of the six packages, add a GitHub Actions trusted publisher:
+  - organization `usertools-ai`, repository `usertrust`, workflow filename `publish.yml` (the
+    file name only, with its extension), environment name `npm-publish`;
+  - under allowed actions, **allow `npm publish`**. A configuration created after
+    2026-09-03 allows only `npm stage publish` until this is chosen, and this workflow runs
+    `npm publish`.
+
+  npm does not check a configuration when it is saved, and **a new configuration expires
+  unless its first successful publish happens within 2 days**; an expired one cannot be used
+  or edited, only deleted and made again. So add it shortly before a release is dispatched.
+  After the first release that publishes through OIDC, set each package's publishing access to "Require two-factor
+  authentication and disallow tokens", which npm recommends once trusted publishing works, and
+  delete the `NPM_TOKEN` secret. Source: <https://docs.npmjs.com/trusted-publishers>.
 - **Branch protection on `master`**: requiring the CI checks on `master` would also apply to
   the workflow's own push of the release commit, which never gets a CI run, so that push
   would be refused (safely: before anything is published). Before requiring checks, give the
