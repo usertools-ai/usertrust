@@ -423,6 +423,32 @@ describe("a lock's owner is the holder of the file NOW, and holders that write o
 		expect(held?.lockOwner?.(), "the holder that lost it does not").toBeUndefined();
 	});
 
+	it("P2: a holder that lost its lock and took it again reads as a NEW owner — a budget record published under its old hold is not taken as current", async () => {
+		vi.useFakeTimers({ toFake: ["performance"] });
+		const holder = await processIn(OTHER_NS);
+		const v = vault();
+		const held = acquire(holder, v).writer;
+		const first = held?.lockOwner?.();
+		expect(first, "control: the holder owns it").toMatch(/^[0-9a-f-]{36}$/);
+		utimesSync(lockOf(v), TEN_MINUTES_AGO(), TEN_MINUTES_AGO());
+		const holderBytes = readFileSync(lockOf(v), "utf-8");
+
+		const taker = await processIn(THIS_NS);
+		expectHeld(taker, v, holderBytes);
+		passMonotonic(CONFIRM_MS);
+		const { writer: took } = acquire(taker, v);
+		expect(took?.lockOwner?.()).toBeDefined();
+		took?.release();
+		expect(existsSync(lockOf(v)), "control: the taker came and went").toBe(false);
+
+		const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+		await held?.appendEvent({ kind: "test", actor: "holder", data: { n: 2 } });
+		quiet.mockRestore();
+		const again = held?.lockOwner?.();
+		expect(again, "the holder holds the lock again").toMatch(/^[0-9a-f-]{36}$/);
+		expect(again, "as a new acquisition").not.toBe(first);
+	});
+
 	it("P1: a snapshot restore's scoped lock (withAuditWriterLock) declares no lease: it renames files outside appendEvent, so another namespace must never reclaim it mid-restore", async () => {
 		vi.useFakeTimers({ toFake: ["performance", "setInterval", "clearInterval"] });
 		const chain = await processIn(THIS_NS);

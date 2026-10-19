@@ -163,9 +163,11 @@ export interface AuditWriter {
 	 */
 	release(): void;
 	/**
-	 * The id of the writer that holds this vault's advisory lock in this process, or undefined while none does (a
-	 * lazy writer takes the lock at its first append). A new writer has a new id, so a lock released and taken again
-	 * reads as a different owner. Optional: a writer that cannot say (a test double) reads as holding none.
+	 * The id of this writer's CURRENT hold on this vault's advisory lock, or undefined while it holds none (a lazy
+	 * writer takes the lock at its first append; a writer whose lock another process reclaimed holds none). Every
+	 * acquisition has a new id — a new writer's, and this writer's own after it lost the lock and took it again — so a
+	 * lock released, or lost, and taken again reads as a different owner. Read from the lock file each time.
+	 * Optional: a writer that cannot say (a test double) reads as holding none.
 	 */
 	lockOwner?(): string | undefined;
 }
@@ -368,6 +370,12 @@ interface HeldLock {
 	path: string;
 	/** The lock declares a lease (`leaseRenewMs`), so {@link renewLeases} must keep renewing it. */
 	leased: boolean;
+	/**
+	 * A random id for THIS acquisition (`AuditWriter.lockOwner`). Not the writerId: a writer that lost its lock
+	 * and took it again keeps its writerId, and a caller that remembered what it published under that id would
+	 * not see that another holder came and went in between.
+	 */
+	acquisitionId: string;
 }
 
 /**
@@ -1035,7 +1043,7 @@ function createLock(lockPath: string, writerId: string, leasable: boolean): bool
 		mine = new Map();
 		heldLocks.set(writerId, mine);
 	}
-	mine.set(identity, { path: lockPath, leased });
+	mine.set(identity, { path: lockPath, leased, acquisitionId: randomUUID() });
 	if (leased) startLeaseRenewal();
 	return true;
 }
@@ -1131,17 +1139,21 @@ function verifyOwnLockFile(file: LockFileView, lockPath: string, writerId: strin
 }
 
 /**
- * Does `writerId` hold the lock of the log at `logPath` RIGHT NOW: registered here AND the file at
- * that path is its own (a fresh read)? Registration alone is not enough: another namespace may have
- * reclaimed an expired lease since, and the registry keeps a lost lock's entry until release. A read
- * that fails answers no (fail toward "not the holder": the caller publishes nothing).
+ * The acquisition id of the lock `writerId` holds on the log at `logPath` RIGHT NOW: registered here
+ * AND the file at that path is its own (a fresh read). Registration alone is not enough: another
+ * namespace may have reclaimed an expired lease since, and the registry keeps a lost lock's entry
+ * until release. A read that fails answers none (fail toward "not the holder": the caller publishes
+ * nothing).
  */
-function ownsLockNow(logPath: string, writerId: string): boolean {
-	if (!heldLocks.has(writerId)) return false;
+function currentAcquisition(logPath: string, writerId: string): string | undefined {
+	if (!heldLocks.has(writerId)) return undefined;
 	try {
-		return verifyOwnLock(join(realpathSync(dirname(logPath)), LOCK_FILE_NAME), writerId);
+		const lockPath = join(realpathSync(dirname(logPath)), LOCK_FILE_NAME);
+		const file = readLockFile(lockPath);
+		if (file === undefined || !verifyOwnLockFile(file, lockPath, writerId)) return undefined;
+		return heldLocks.get(writerId)?.get(file.identity)?.acquisitionId;
 	} catch {
-		return false;
+		return undefined;
 	}
 }
 
@@ -1643,7 +1655,7 @@ function createAuditWriterAt(
 		isDegraded: isDegradedFn,
 		flush,
 		release: releaseWriter,
-		lockOwner: () => (ownsLockNow(logPath, writerId) ? writerId : undefined),
+		lockOwner: () => currentAcquisition(logPath, writerId),
 	};
 }
 

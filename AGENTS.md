@@ -1200,9 +1200,13 @@ Two rules keep that bound true:
   (`createUnleasedAuditWriter`: it cuts the log) never declare a lease. Paused past the threshold,
   either would otherwise resume and overwrite or cut the events a new holder appended meanwhile. Their
   locks are held from another namespace, as before.
-- **`lockOwner()` re-reads the lock file.** The registry keeps a lost lock's entry until release, so
-  "registered" is not "holds it now"; a former holder that still answered `lockOwner()` would publish
-  `effective-budget.json` over the new holder's record. A read that fails answers "not the owner".
+- **`lockOwner()` re-reads the lock file, and names the ACQUISITION, not the writer.** The registry
+  keeps a lost lock's entry until release, so "registered" is not "holds it now"; a former holder that
+  still answered `lockOwner()` would publish `effective-budget.json` over the new holder's record. And
+  a holder that lost its lock and took it back keeps its writerId: had `lockOwner()` returned that,
+  the budget registration would read "already published under this owner" and leave the interim
+  holder's record standing. Every acquisition gets a fresh random id. A read that fails answers "not
+  the owner".
 
 *Prevents:*
 - A previous boot's lock whose PID a live, unrelated process now carries reading as held forever.
