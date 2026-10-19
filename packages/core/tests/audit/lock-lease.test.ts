@@ -47,6 +47,8 @@ const proc = vi.hoisted(() => ({
 	linkedLocks: [] as string[],
 	/** When set, unlinking a lock file (`.audit-writer.lock`) fails with this code. */
 	unlinkLockError: undefined as string | undefined,
+	/** When set, opening a lock file (`.audit-writer.lock`) fails with this code. */
+	openLockError: undefined as string | undefined,
 }));
 vi.mock("node:fs", async (importOriginal) => {
 	const fs = await importOriginal<typeof import("node:fs")>();
@@ -88,7 +90,15 @@ vi.mock("node:fs", async (importOriginal) => {
 		}
 		return fs.unlinkSync(path);
 	}) as typeof fs.unlinkSync;
-	const wrapped = { readFileSync, readlinkSync, futimesSync, linkSync, unlinkSync };
+	const openSync = ((...args: Parameters<typeof fs.openSync>) => {
+		if (proc.openLockError !== undefined && String(args[0]).endsWith(".audit-writer.lock")) {
+			throw Object.assign(new Error(`${proc.openLockError}: injected open`), {
+				code: proc.openLockError,
+			});
+		}
+		return fs.openSync(...args);
+	}) as typeof fs.openSync;
+	const wrapped = { readFileSync, readlinkSync, futimesSync, linkSync, unlinkSync, openSync };
 	return { ...fs, ...wrapped, default: { ...fs, ...wrapped } };
 });
 
@@ -132,6 +142,7 @@ afterEach(() => {
 	proc.futimesCalls = 0;
 	proc.linkedLocks = [];
 	proc.unlinkLockError = undefined;
+	proc.openLockError = undefined;
 });
 proc.bootId = { value: `${THIS_BOOT}\n` };
 proc.pidNs = { value: THIS_NS };
@@ -810,5 +821,32 @@ describe("a holder whose renewals fail stops writing BEFORE any observer could r
 		expect(existsSync(lockOf(second)), "control: the moved lock is still there").toBe(true);
 		writer.release();
 		expect(existsSync(lockOf(second)), "release found it through the current spelling").toBe(false);
+	});
+
+	it("P2: a lapse of a SUPERSEDED acquisition whose cleanup fails (a read error) is not reported against the healthy newer acquisition — its append goes on, and the old record is kept", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		let mono = 1_000_000;
+		vi.spyOn(performance, "now").mockImplementation(() => mono);
+		const holder = await processIn(OTHER_NS);
+		const v = vault();
+		const held = acquire(holder, v).writer;
+		await append(held, 1);
+		utimesSync(lockOf(v), TEN_MINUTES_AGO(), TEN_MINUTES_AGO());
+		const bytes = readFileSync(lockOf(v), "utf-8");
+		const taker = await processIn(THIS_NS);
+		expectHeld(taker, v, bytes);
+		mono += CONFIRM_MS + 1;
+		const { writer: took } = acquire(taker, v);
+		expect(took, "control: the taker reclaimed the lock").toBeDefined();
+		took?.release();
+		await append(held, 2);
+		// The timer runs while the lock file cannot be opened: the OLD acquisition's lapse is stranded.
+		proc.openLockError = "EIO";
+		vi.advanceTimersByTime(RENEW_MS);
+		proc.openLockError = undefined;
+		await append(held, 3);
+		expect(held?.isDegraded(), "no append was refused").toBe(false);
+		expect(linesOf(v)).toBe(3);
+		chainIntact(v, 3);
 	});
 });

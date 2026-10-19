@@ -1209,11 +1209,12 @@ the lock is unlinked if it is still this lock. The next append takes the vault a
 after the bound never revives the lapsed lease. Two edges: a lapsed lock whose file cannot be
 removed STAYS registered, marked lapsed, as the cleanup record (never renewed, never an owner, never
 a write; each append retries the removal and the first that succeeds goes on, and `release()`
-reports it if it still cannot); and an acquisition whose file is not at the path last seen (lost to
-another writer, superseded by this writer's newer acquisition, or moved with a renamed vault) is
-retired silently when its old lease runs out, so a healthy newer acquisition's append is never
-refused for it. Its entry stays, marked lapsed, so `release()` still finds a lock that moved with its
-vault through the caller's current spelling.
+reports it if it still cannot); and a lapse is reported as that ACQUISITION's, not the writer's: an
+acquire that finds a healthy newer acquisition of this writer at the vault (the writer lost the old
+one while stalled and took the vault again) drops the report, so it never refuses an append under
+the newer one. An acquisition whose file is not at the path last seen (lost, superseded, or moved
+with a renamed vault) keeps its entry, marked lapsed, so `release()` still finds a lock that moved
+with its vault through the caller's current spelling.
 *The margin.* An observer reclaims only after its OWN monotonic observation of an unchanged mtime for
 `max(30 s, 3 × leaseRenewMs)`, and it cannot see an mtime before it is set, so no observer reclaims
 earlier than `renewedAt + 30 s`. Its wall-clock condition gives the holder nothing (a clock step makes

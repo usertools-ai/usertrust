@@ -1155,12 +1155,10 @@ function renewLeases(): void {
 				continue;
 			}
 			const outcome = lapseLease(writerId, identity, lock);
-			// A LOST acquisition (its file is not at the path last seen: another writer took the vault,
-			// this writer took it again under a new acquisition, or the vault was renamed) is retired
-			// silently, its entry kept only for release. Its loss is reported where it matters, by the next
-			// append's ownership check, and a report here would refuse an append under a healthy newer
-			// acquisition.
-			if (outcome !== "lost") lapsedLeases.set(writerId, lapseMessage(lock, outcome));
+			// Reported at the writer's next acquire, as THIS acquisition's lapse: an acquire that finds a
+			// healthy newer acquisition of this writer at the vault (it lost this one while stalled and
+			// took the vault again) drops the report, so it never refuses an append under that one.
+			lapsedLeases.set(writerId, { identity, message: lapseMessage(lock, outcome) });
 		}
 	}
 }
@@ -1171,10 +1169,29 @@ function leaseLapsed(lock: HeldLock): boolean {
 }
 
 /**
- * Why each writer's lease lapsed, until the append that reports it (one entry per writer; the next
- * acquire consumes it and refuses with {@link AuditLeaseLapsedError}).
+ * A lapse the renewal timer found, until the writer's next acquire reports it: WHICH acquisition
+ * lapsed (its lock file's `dev:ino`) and why. The report belongs to that acquisition, not the writer:
+ * an acquire that finds a healthy NEWER acquisition of this writer at the vault drops it unreported
+ * (see {@link healthyAcquisitionAt}).
  */
-const lapsedLeases = new Map<string, string>();
+const lapsedLeases = new Map<string, { identity: string; message: string }>();
+
+/**
+ * Is the file at `lockPath` a healthy acquisition of `writerId` other than `lapsedIdentity`:
+ * registered, not lapsed, and within its bound? A read that fails answers no (the report stands).
+ */
+function healthyAcquisitionAt(lockPath: string, writerId: string, lapsedIdentity: string): boolean {
+	try {
+		const file = readLockFile(lockPath);
+		if (file === undefined || file.identity === lapsedIdentity || file.writerId !== writerId) {
+			return false;
+		}
+		const lock = heldLocks.get(writerId)?.get(file.identity);
+		return lock !== undefined && lock.lapsed !== true && !leaseLapsed(lock);
+	} catch {
+		return false;
+	}
+}
 
 /** An errno code fit for a message, else `unknown`. */
 function describeCode(code: string | undefined): string {
@@ -1185,7 +1202,7 @@ function describeCode(code: string | undefined): string {
  * What giving up a lapsed lease did:
  *  - `removed`: its file was this lock, and is gone; the entry left the registry.
  *  - `lost`: its file is not at the path last seen (absent, or another acquisition's there). Nothing
- *    is removed, and nothing is reported. The entry STAYS, marked lapsed, as a non-owning cleanup
+ *    is removed. The entry STAYS, marked lapsed, as a non-owning cleanup
  *    record: "absent" can also mean the vault was RENAMED with the lock in it, and `release()` then
  *    still finds the lock through the caller's current spelling (see releaseLocks).
  *  - `stranded`: its file could not be read or removed (`code`). The entry STAYS, marked lapsed, as the
@@ -1354,11 +1371,15 @@ function acquireProcessLock(logPath: string, writerId: string, leasable: boolean
 	// create's EEXIST would lead to: the file carries this writer's id and inode, so it is this
 	// writer's. Anything else falls through to the create.
 	// A lease that lapsed since this writer's last append (its renewal timer gave the lock up) is
-	// reported here, once: this append is refused, and the next one takes the vault afresh.
+	// reported here, once: this append is refused, and the next one takes the vault afresh. Unless the
+	// lapse was an OLDER acquisition's and a healthy newer one of this writer holds the vault now: then
+	// this append is not refused for it.
 	const lapsed = lapsedLeases.get(writerId);
 	if (lapsed !== undefined) {
 		lapsedLeases.delete(writerId);
-		throw new AuditLeaseLapsedError(lapsed);
+		if (!healthyAcquisitionAt(lockPath, writerId, lapsed.identity)) {
+			throw new AuditLeaseLapsedError(lapsed.message);
+		}
 	}
 	if (heldLocks.has(writerId)) {
 		const file = readLockFile(lockPath);
