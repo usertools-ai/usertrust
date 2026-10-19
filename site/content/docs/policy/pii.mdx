@@ -40,7 +40,7 @@ Other things the scan never reads:
 - **Non-string values.** A phone number stored as a JSON number is not a string and is not checked.
 - **Encoded content.** A string is checked as written. Base64, images, PDFs and other encodings are not decoded.
 
-### Governed actions and the headless governor
+### Governed actions and the headless controller
 
 - **`governAction`** scans the action's `params`. In `"block"` mode a match refuses the action. In `"redact"` mode only the audit copy is redacted; the action itself runs on the original input.
 - **`createGovernor()` and `usertrust-server`** scan the `messages` the caller passes to `authorize`. They support `"block"`. They never redact egress: `"redact"` behaves like `"warn"`, and redacting what goes to the provider is the integrating host's job.

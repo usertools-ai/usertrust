@@ -1,7 +1,7 @@
 # usertrust-server
 
 Self-hostable HTTP control plane for the [usertrust](https://github.com/usertools-ai/usertrust)
-governance kernel. Wraps the headless Governor's two-phase lifecycle
+governance kernel. Wraps the headless controller (created with `createGovernor()`) and its two-phase lifecycle
 (authorize → settle/abort) with per-tenant isolation, bearer-key auth, and SSE telemetry.
 
 ## Quickstart
@@ -30,7 +30,7 @@ unzip tigerbeetle.zip
 ./tigerbeetle start --addresses=3001 --development 0_0.tigerbeetle
 ```
 
-**These commands start ONE replica in `--development` mode: a local full-mode run, not a production deployment.** A single replica has no replication and no high availability: lose its data file and the ledger is gone. For production, deploy a replicated TigerBeetle cluster following TigerBeetle's own guidance ([cluster recommendations](https://docs.tigerbeetle.com/operating/cluster/), [deploying](https://docs.tigerbeetle.com/operating/deploying/)), and give the governor all the replica addresses (`tigerbeetle.addresses`).
+**These commands start ONE replica in `--development` mode: a local full-mode run, not a production deployment.** A single replica has no replication and no high availability: lose its data file and the ledger is gone. For production, deploy a replicated TigerBeetle cluster following TigerBeetle's own guidance ([cluster recommendations](https://docs.tigerbeetle.com/operating/cluster/), [deploying](https://docs.tigerbeetle.com/operating/deploying/)), and give the controller all the replica addresses (`tigerbeetle.addresses`).
 
 Format the data file once; start the replica each time you need it. TigerBeetle and its client need `io_uring` on Linux, and Docker's default seccomp profile blocks it; with it blocked, the client cannot start. In a container, run with `--security-opt seccomp=unconfined` (or a seccomp profile that allows `io_uring`). On a host where `kernel.io_uring_disabled` is set, it must be `0`.
 
@@ -153,7 +153,7 @@ Unauthenticated, and always HTTP `200`. It answers:
 
 - **`ledger`**: whether the server can reach its ledger (see "Ledger reachability" below for how
   it is observed). It covers every ledger the tenants use and reads the worst of them, and
-  `unknown` while a tenant's governor is still being created or reads another ledger than the one
+  `unknown` while a tenant's controller is still being created or reads another ledger than the one
   watched for it.
 
   | `ledger`      | Meaning                                                        | `ok`    |
@@ -178,9 +178,9 @@ Unauthenticated, and always HTTP `200`. It answers:
 ### When the ledger does not answer: `503 ledger_unavailable`
 
 A ledger-backed server waits at most `ledgerTimeoutMs` (config, an integer of at least 100,
-default 5000; not read in dryRun) for the tenant's governor and the ledger on
+default 5000; not read in dryRun) for the tenant's controller and the ledger on
 `POST /v1/authorize`. That wait includes this tenant's earlier authorizes queued ahead of the
-request: the governor serves a tenant's authorizes one at a time. Past it the server answers:
+request: the controller serves a tenant's authorizes one at a time. Past it the server answers:
 
 ```json
 { "error": "ledger_unavailable", "reason": "no answer came within 5000 ms, either from the ledger or from this tenant's earlier authorizes queued ahead of this one; nothing was authorized; retry later", "retryAfterMs": 5000 }
@@ -201,10 +201,10 @@ have reached the client.
   new authorize on that tenant gets the same 503 at once, without queueing another ledger
   request. A client hanging up earlier engages nothing. If that request never completes, they keep failing fast until it does: the fail-closed
   direction. If it ends with a local error while the ledger is still down, the next authorize
-  waits one deadline and is refused again. While the tenant's governor is still being created
+  waits one deadline and is refused again. While the tenant's controller is still being created
   (its acquisition hangs), fast-fail does not engage: each authorize waits one deadline before
   its 503.
-- **Cold start.** A tenant's governor is created on its first authorize, inside the deadline, so
+- **Cold start.** A tenant's controller is created on its first authorize, inside the deadline, so
   the first authorize after boot on a slow ledger can get the 503. It is retryable.
 - **Bursts.** A tenant's authorizes are served one at a time, so a burst counts against the
   deadline too. Measured on an Apple M4 Pro against a local single-node TigerBeetle, each took
@@ -257,7 +257,7 @@ alive, and exits within about 250 ms when the server process dies, SIGKILL inclu
   `ledger: "unknown"` and `ok: true` while the ledger is down.** An embedder who wants health to
   report reachability sets `"ledgerHealth": "child"`. dryRun runs no child and answers `none`.
 - **The session budget.** Each child is one TigerBeetle client session, held for the life of the
-  server: one session per distinct configured target per running server, beside the governors'
+  server: one session per distinct configured target per running server, beside the controllers'
   own. Two address lists for the same cluster are two targets, and cost two sessions on it, so
   **configure every tenant of one cluster with identical `tigerbeetle.addresses`**. The 30 s probe
   makes the health session less likely to be the one a full cluster evicts, never immune: a child
@@ -274,9 +274,9 @@ alive, and exits within about 250 ms when the server process dies, SIGKILL inclu
   and survives to its first probe**. If every replacement fails (it cannot spawn, or crashes at
   load), `unknown` lasts as long as that does, and is never read as `unreachable`: a failing
   observer says nothing about the ledger. Each failure is logged once per kind per cooldown.
-- **A tenant's own `ledger`.** A tenant's ledger is compared with the one its governor actually
-  uses, once the governor exists. Until then (its first request has not finished creating it),
-  the tenant reads `unknown`, and so does health. If the governor reads a ledger other than the
+- **A tenant's own `ledger`.** A tenant's ledger is compared with the one its controller actually
+  uses, once the controller exists. Until then (its first request has not finished creating it),
+  the tenant reads `unknown`, and so does health. If the controller reads a ledger other than the
   one resolved when the server started (its config changed since), the tenant reads `unknown`
   for as long as the server runs, and the server logs that the tenant's config changed after
   start: restart the server to watch the new ledger.
@@ -290,11 +290,11 @@ The authenticated `GET /v1/budget` adds the tenant's own `ledger` and `ledgerObs
 `ledgerObserver` counts the times the child for this tenant's ledger failed, and names the last
 failure's class only (`spawn_failed:EAGAIN`, `child_exited`, `child_error`, `not_ready`, `evicted`, `panic`),
 never a path, address or error message. Like authorize, `/v1/budget` waits at most
-`ledgerTimeoutMs` for the tenant's governor; past it, it answers `503 ledger_unavailable`, with
+`ledgerTimeoutMs` for the tenant's controller; past it, it answers `503 ledger_unavailable`, with
 the tenant's `ledger` and no `remaining`:
 
 ```json
-{ "error": "ledger_unavailable", "reason": "the tenant's governor was not ready within 5000 ms; retry later", "retryAfterMs": 5000, "ledger": "unknown" }
+{ "error": "ledger_unavailable", "reason": "the tenant's controller was not ready within 5000 ms; retry later", "retryAfterMs": 5000, "ledger": "unknown" }
 ```
 
 ### Giving a hold back: `/v1/release`, not `/v1/abort`
@@ -324,7 +324,7 @@ for that hold. The hold may stay reserved until the ledger's 300 s timeout, and 
 recorded on the chain: a known issue in 5.0.0. See the repository's `LIMITATIONS.md`.
 
 `/v1/abort` keeps the same rule: `200 { "aborted": true, "transferId": "…" }` (plus `voidError`) only
-when that request ended the hold, and the `aborted` event only then. A hold the governor no longer held
+when that request ended the hold, and the `aborted` event only then. A hold the controller no longer held
 (its settle in flight, or already settled, aborted or released) is `404 { "error": "not_found", "reason":
 "unknown transferId" }`.
 
@@ -346,15 +346,15 @@ server-layer semantic; other usertrust layers define their own evaluate-only beh
 
 ## Audit authority
 
-Only Governor-produced receipts and audit-chain records are authoritative. The server
+Only Controller-produced receipts and audit-chain records are authoritative. The server
 invents no audit records of its own; every receipt returned by `/v1/settle` comes from
-the tenant's Governor (per-tenant `stateDir/<tenant>` vault: separate audit chain and
+the tenant's Controller (per-tenant `stateDir/<tenant>` vault: separate audit chain and
 spend ledger). Each tenant vault is owner-only (directories `0700`, files `0600`, whatever
 the umask; a vault another user owns is refused), and the server writes nothing outside
 `stateDir`; a `stateDir` the server creates is `0700`, and one you created is left as you
 made it. At start the CLI creates every configured tenant's vault that does not exist yet
-(owner-only) and checks each the way its governor will, and refuses to start, naming the tenant
-and the reason, on one it cannot create or the governor would refuse. An error a client sees only
+(owner-only) and checks each the way its controller will, and refuses to start, naming the tenant
+and the reason, on one it cannot create or the controller would refuse. An error a client sees only
 as the opaque `500 internal` is written to stderr as
 `usertrust-server: internal error: tenant=<id> route=<route>: <reason>`, never with a header or a
 request body; a bearer key or api-key value quoted in the reason is replaced with `[redacted]`.

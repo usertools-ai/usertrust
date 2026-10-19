@@ -277,8 +277,8 @@ export function normalizeCostCenters(cc: unknown): FrozenCostCenters {
 
 function configMismatchError(): Error {
 	return new Error(
-		"usertrust: plugin already initialized with a DIFFERENT config — the governor is a " +
-			"module-wide singleton (one process, one governor), so a second config would either " +
+		"usertrust: plugin already initialized with a DIFFERENT config — the controller is a " +
+			"module-wide singleton (one process, one controller), so a second config would either " +
 			"silently take over the first plugin instance's budget/parentUserId or be silently " +
 			"ignored. Construct every plugin instance with the SAME config, or call shutdown() " +
 			"before switching to a different one.",

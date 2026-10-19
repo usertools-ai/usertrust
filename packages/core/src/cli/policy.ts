@@ -158,7 +158,7 @@ export async function run(
 			);
 		} else {
 			console.error(`${pc.red("[config]")} ${scrubForTerminal(resolved.error)}`);
-			console.error("The governor resolves its policy path from this file; fix it first.");
+			console.error("The controller resolves its policy path from this file; fix it first.");
 		}
 		process.exitCode = 1;
 		return;
@@ -251,7 +251,7 @@ export async function run(
 			console.log(`  ${pc.red("×")} ${scrubForTerminal(`${issue.at}: ${issue.message}`)}`);
 		}
 		console.log("");
-		console.log("A governor started against this file refuses to start rather than");
+		console.log("A controller started against this file refuses to start rather than");
 		console.log("enforcing an empty policy. Fix the above and re-run.");
 		process.exitCode = 1;
 		return;
@@ -289,7 +289,7 @@ export async function run(
 		if (r.scopePatterns !== undefined && r.scopePatterns.length > 0) {
 			console.log(
 				pc.yellow(
-					`      note: scoped to ${scrubForTerminal(r.scopePatterns.join(", "), 120)} — matches only the operator-declared scope on the governor/config; with no host scope this rule never fires`,
+					`      note: scoped to ${scrubForTerminal(r.scopePatterns.join(", "), 120)} — matches only the operator-declared scope on the controller/config; with no host scope this rule never fires`,
 				),
 			);
 		}

@@ -1281,7 +1281,7 @@ export function resolveEnvelope(
 	if (attribution === undefined) return undefined;
 	if (parentUserId === undefined) {
 		throw new Error(
-			`usertrust: withCostCenter("${attribution.costCenter}") is active but this governor has ` +
+			`usertrust: withCostCenter("${attribution.costCenter}") is active but this controller has ` +
 				"no parentUserId. A cost-center envelope account is derived from the " +
 				"(parentUserId, costCenter) tuple, so an attributed call cannot be routed without " +
 				"it — and spending it from the session wallet instead would silently un-enforce the " +

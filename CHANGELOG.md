@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Only `RangeError` is caught. Any other error still throws, so a bug is never reported as an unscannable value.
   - The name is exported as `UNSCANNABLE`.
 
+### Changed
+
+- **Text a person reads now says "controller", not "governor".** The budget-and-money component is called the controller in the dashboard, the CLI and report output, server and plugin messages, and the docs. Nothing a program reads changed: the `Governor` type, `createGovernor()`, `GovernorOpts`, the `budgetSource: "governor"` value, and the text a hold records in the audit chain (for example `governor destroyed`) keep their names, so existing code, wire clients and chains are unaffected. A script that matches one of the old message strings (a `reason` the server returns, a CLI line) needs the new word.
+
 ### Fixed
 
 - **`usertrust-server` logged a very long error message as "(the error could not be read)".** Before writing an internal error to its log, the server redacts api-key values, and the pattern it used could not finish on an unclosed quoted value of about 10 million characters, so the line lost the error's reason. A regular expression now finds only where a value starts, and a loop finds where a quoted one ends: it reads a message of any length, and redacts exactly what the pattern did. If a pattern still cannot finish, the message is replaced by `[redacted: the message could not be scanned]`.

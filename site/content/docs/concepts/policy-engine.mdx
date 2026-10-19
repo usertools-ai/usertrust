@@ -79,7 +79,7 @@ See [Policy Operators](/docs/policy/operators) for detailed usage and examples o
 
 ## Scope Matching
 
-`scopePatterns` match the **operator-declared** `scope` on the governor or config — never request content. Set it the same way you set `budget` or `parentUserId`:
+`scopePatterns` match the **operator-declared** `scope` on the controller or config — never request content. Set it the same way you set `budget` or `parentUserId`:
 
 ```ts
 await trust(client, { scope: ["production/api"] });

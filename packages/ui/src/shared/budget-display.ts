@@ -51,6 +51,6 @@ export function budgetAsOf(
 	s: Pick<SummaryPayload, "budgetSource" | "budgetWrittenAt" | "budgetProvenance">,
 ): string {
 	return s.budgetSource === "governor" && s.budgetWrittenAt !== null
-		? `published by the governor, as of ${formatUtcMinute(s.budgetWrittenAt)}`
+		? `published by the controller, as of ${formatUtcMinute(s.budgetWrittenAt)}`
 		: s.budgetProvenance;
 }

@@ -100,7 +100,7 @@ describe("usertrust policy validate", () => {
         value: opus
 `);
 		await run(tempDir, { json: false }, ["validate"]);
-		expect(out()).toContain("matches only the operator-declared scope on the governor/config");
+		expect(out()).toContain("matches only the operator-declared scope on the controller/config");
 		expect(out()).toContain("with no host scope this rule never fires");
 	});
 

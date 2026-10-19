@@ -317,7 +317,7 @@ describe("loadState", () => {
 			budget: null,
 			budgetSource: "unpublished",
 			budgetProvenance:
-				"unknown: not yet published; no governor has recorded the budget it enforces",
+				"unknown: not yet published; no controller has recorded the budget it enforces",
 			spentUt: 300,
 			remainingUt: null,
 		});
@@ -350,6 +350,8 @@ describe("loadState", () => {
 		);
 		const { summary } = loadState(vaultPath);
 		expect(summary).toMatchObject({ budget: null, budgetSource: "several", remainingUt: null });
-		expect(summary.budgetProvenance).toMatch(/^unknown: several governors with different budgets/);
+		expect(summary.budgetProvenance).toMatch(
+			/^unknown: several controllers with different budgets/,
+		);
 	});
 });

@@ -26,7 +26,7 @@ describe("budgetDisplay", () => {
 
 	it("red-first (no reason): an unknown budget is shown WITH which unknown it is", () => {
 		for (const provenance of [
-			"unknown: not yet published; no governor has recorded the budget it enforces",
+			"unknown: not yet published; no controller has recorded the budget it enforces",
 			"unknown: the enforced-budget record could not be read; not valid JSON",
 		]) {
 			expect(
@@ -68,7 +68,7 @@ describe("budgetAsOf", () => {
 			budgetWrittenAt: "2025-10-12T21:58:00.000Z",
 			budgetProvenance: "P",
 		});
-		expect(line).toBe("published by the governor, as of 2025-10-12 21:58Z");
+		expect(line).toBe("published by the controller, as of 2025-10-12 21:58Z");
 	});
 
 	it("the date is the UTC instant's, even where an offset moves it into another year", () => {
@@ -77,7 +77,7 @@ describe("budgetAsOf", () => {
 			budgetWrittenAt: "2026-01-01T01:30:00+02:00",
 			budgetProvenance: "P",
 		});
-		expect(line).toBe("published by the governor, as of 2025-12-31 23:30Z");
+		expect(line).toBe("published by the controller, as of 2025-12-31 23:30Z");
 	});
 
 	it.each([

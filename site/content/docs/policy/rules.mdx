@@ -8,7 +8,7 @@ description: Define governance rules in YAML with enforcement levels, severity, 
 Rules are defined in YAML (or JSON) and loaded from `.usertrust/policies/default.yml` by default.
 
 ```yaml
-# Requires operator scope on the governor/config, e.g. scope: ["production/api"]
+# Requires operator scope on the controller/config, e.g. scope: ["production/api"]
 - name: block-expensive-models
   effect: deny
   enforcement: hard
@@ -49,7 +49,7 @@ Rules are defined in YAML (or JSON) and loaded from `.usertrust/policies/default
 
 ## Scope Matching
 
-Uses minimatch glob patterns against the **operator-declared** `scope` on the governor or `usertrust.config.json` — not request content, and not `params.params.scope`.
+Uses minimatch glob patterns against the **operator-declared** `scope` on the controller or `usertrust.config.json` — not request content, and not `params.params.scope`.
 
 ```yaml
 scopePatterns:

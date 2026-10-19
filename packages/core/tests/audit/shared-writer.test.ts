@@ -435,7 +435,7 @@ describe("a failed append is loud, and each handle's degraded state is its own",
 		await new Promise((r) => setImmediate(r));
 		expect(degradedWarnings()).toHaveLength(2);
 		expect(degradedWarnings()[1]?.message).toMatch(
-			/3 audit writes failed while this governor was open/,
+			/3 audit writes failed while this controller was open/,
 		);
 		// Every lost event is in the dead-letter queue, and the reader counts each as missing.
 		const dl = readChainDeadLetters(join(tempDir, VAULT_DIR), () => undefined);
@@ -465,7 +465,7 @@ describe("a failed append is loud, and each handle's degraded state is its own",
 		const atRelease = degradedWarnings().map((w) => w.message);
 		expect(atRelease).toHaveLength(2);
 		expect(atRelease[0]).toMatch(/are degraded — failing: AuditWriterLockHeldError/);
-		expect(atRelease[1]).toMatch(/3 audit writes failed while this governor was open/);
+		expect(atRelease[1]).toMatch(/3 audit writes failed while this controller was open/);
 		// Late calls after the release: the first failure warns, and the batch's count follows it.
 		const late = await Promise.all(
 			[0, 1].map((i) =>
@@ -481,7 +481,7 @@ describe("a failed append is loud, and each handle's degraded state is its own",
 			.slice(2);
 		expect(after).toHaveLength(2);
 		expect(after[0]).toMatch(/are degraded — failing:/);
-		expect(after[1]).toMatch(/2 audit writes failed after this governor was destroyed/);
+		expect(after[1]).toMatch(/2 audit writes failed after this controller was destroyed/);
 	});
 
 	it("a report never clears what the governor reads: a late failure stays counted and degraded, through a later late success", async () => {
@@ -513,7 +513,7 @@ describe("a failed append is loud, and each handle's degraded state is its own",
 		await new Promise((r) => setImmediate(r));
 		expect(degradedWarnings().map((w) => w.message)).toEqual([
 			expect.stringMatching(/are degraded — failing:/),
-			expect.stringMatching(/1 audit write failed after this governor was destroyed/),
+			expect.stringMatching(/1 audit write failed after this controller was destroyed/),
 		]);
 	});
 

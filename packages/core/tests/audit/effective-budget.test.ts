@@ -217,7 +217,7 @@ describe("a STALE record never passes as current", () => {
 			"from usertrust.config.json; not confirmed as enforced",
 		);
 		expect(describeBudgetSource({ source: "unpublished", writtenAt: null })).toBe(
-			"unknown: not yet published; no governor has recorded the budget it enforces",
+			"unknown: not yet published; no controller has recorded the budget it enforces",
 		);
 		expect(
 			describeBudgetSource({ source: "unreadable", writtenAt: null, reason: "not valid JSON" }),
@@ -395,7 +395,7 @@ describe("several live governors on one vault", () => {
 		expect(got).toMatchObject({ budget: 0, source: "several" });
 		expect(isKnownBudget(got.source)).toBe(false);
 		expect(describeBudgetSource(got)).toMatch(
-			/^unknown: several governors with different budgets, as of \d{4}-/,
+			/^unknown: several controllers with different budgets, as of \d{4}-/,
 		);
 		expect(readEffectiveBudget(vaultDir)).toMatchObject({ state: "several", governors: 2 });
 		await a.destroy();

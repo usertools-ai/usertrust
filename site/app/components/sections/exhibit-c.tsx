@@ -102,8 +102,8 @@ export default function ExhibitC() {
 						    debits_must_not_exceed_credits, which rejects an overshoot
 						    atomically — the same limitation govern.ts states about itself. */}
 						<p className="mt-4 max-w-2xl text-base leading-relaxed text-white/70">
-							the gate is per-governor: one process serialises its own budget read and hold behind a
-							mutex. across processes the guarantee is the ledger&rsquo;s — TigerBeetle atomically
+							the gate is per-controller: one process serialises its own budget read and hold behind
+							a mutex. across processes the guarantee is the ledger&rsquo;s — TigerBeetle atomically
 							rejects a hold that would overshoot, whoever asked for it.
 						</p>
 					</div>

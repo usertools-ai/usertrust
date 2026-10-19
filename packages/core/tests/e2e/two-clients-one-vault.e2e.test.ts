@@ -286,7 +286,7 @@ describe("the README's two-client pattern: two trust() clients, one process, one
 		await new Promise((r) => setImmediate(r));
 		// and once more, with the count, when the client was destroyed.
 		expect(degradedWarnings).toHaveLength(2);
-		expect(degradedWarnings[1]).toMatch(/4 audit writes failed while this governor was open/);
+		expect(degradedWarnings[1]).toMatch(/4 audit writes failed while this controller was open/);
 		// The cross-check: every degraded receipt's transfer is a dead-lettered event missing from the
 		// chain — no more, no fewer.
 		// Read straight from the file (this test imports nothing this fix added, so it runs, red, on

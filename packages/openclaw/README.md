@@ -90,7 +90,7 @@ own doors — `parentUserId`, every envelope's charset + metadata, and the `tool
 membership checks — never lazily on the first call. The validated config is normalized into a
 deep-frozen copy that every wrapper reads; nothing downstream can mutate routing after
 construction. A second plugin instance constructed with a **different** config is rejected
-loudly (the governor is a module-wide singleton), never silently handed the first instance's
+loudly (the controller is a module-wide singleton), never silently handed the first instance's
 `parentUserId`.
 
 ### Attribution rule (stateless, per call)
@@ -148,7 +148,7 @@ Reproduced verbatim from the design spec (`docs/superpowers/specs/2026-08-07-shi
 >    OpenClaw host, so message STRUCTURE (roles, result blocks) is host-written code structure.
 >    In programmatic mode (`createGovernedStreamFn`) the caller supplies `messages` directly —
 >    attribution there is **caller-trusted labeling** on the same trust boundary as the operator
->    config (the caller already holds the governor). Documented, not hidden.
+>    config (the caller already holds the controller). Documented, not hidden.
 > 4. **Documented residual:** a prompt-injected agent can still *choose* activity that lands on
 >    a mapped envelope — cc labels on openclaw-attributed traffic are model-activity-influenced
 >    categorization, bounded per (1). The audit chain records the selected `costCenter` only;
