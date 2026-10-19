@@ -13,7 +13,7 @@ import type {
 	ReleaseOutcome,
 } from "usertrust";
 import { sanitizeReleaseReason } from "usertrust";
-import { scrubForStderr } from "./cli/scrub.js";
+import { sanitizeMapped, scrubForStderr } from "./cli/scrub.js";
 import type { ServerConfig, TenantConfig } from "./config.js";
 import { DEFAULT_LEDGER_TIMEOUT_MS, resolveTenant } from "./config.js";
 import { EventBus } from "./events.js";
@@ -208,33 +208,617 @@ function routeOf(req: IncomingMessage): RouteName | "unrouted" {
 
 /** A bearer token wherever a message quotes one: `Bearer <token>`. */
 const BEARER_TOKEN = /\b(Bearer)\s+[^\s"',;]+/gi;
+/** The start of an api-key style value: its name, the separator, and its opening quote, if any. */
+const API_KEY_START = /\b(x-api-key|api[-_]key)(["']?\s*[:=]\s*)(["']?)/gi;
+/** `BEARER_TOKEN` and `API_KEY_START` at one place, with no word boundary asked for there. */
+const BEARER_AT = /(Bearer)\s+[^\s"',;]+/iy;
+const API_KEY_AT = /(x-api-key|api[-_]key)(["']?\s*[:=]\s*)(["']?)/iy;
+/** An unquoted api-key value: it ends at whitespace, a quote, `,`, `;` or `&`. */
+const UNQUOTED_VALUE = /[^\s"',;&]+/y;
+/** What a `Bearer` token, or an unquoted api-key value, can still hold from a given point on. */
+const BEARER_REST = /[^\s"',;]*/y;
+const UNQUOTED_REST = /[^\s"',;&]*/y;
+const BACKSLASH = 0x5c;
+
 /**
- * An api-key style value: `x-api-key: <v>`, `api_key=<v>`, `"api-key": "<v>"`. A QUOTED value is
- * consumed through its closing quote (or to the end, unclosed), whatever it holds: `"abc;def"` is
- * one value, never `abc` followed by text. An escape inside it is a backslash and ANY character,
- * a line terminator included (`\\[\s\S]`): with `\\.` an escaped CR or LF ended the match there,
- * and the rest of the value was logged. An unquoted value ends at whitespace, a quote, `,`, `;` or
- * `&`. Two leaks have now been found in this pattern; a third replaces it with a structured
- * redactor rather than another case.
+ * Where the quoted value that starts at `from` ends: just past its closing `quote`, or at the end
+ * of the text when it has none. An escape is a backslash and ANY character, a line terminator
+ * included: with `\\.` in the old pattern, an escaped CR or LF ended the value there, and the rest
+ * of it was logged. A backslash with nothing after it is not part of the value.
  */
-/** Exported for the redaction sweep's positive control only; not part of the package entry. */
-export const API_KEY_VALUE =
-	/\b(x-api-key|api[-_]key)(["']?\s*[:=]\s*)(?:"((?:[^"\\]|\\[\s\S])*)"?|'((?:[^'\\]|\\[\s\S])*)'?|[^\s"',;&]+)/gi;
+function quotedEnd(text: string, from: number, quote: string): number {
+	const close = quote.charCodeAt(0);
+	for (let i = from; i < text.length; i++) {
+		const code = text.charCodeAt(i);
+		if (code === BACKSLASH) {
+			if (i + 1 === text.length) return i;
+			i++;
+		} else if (code === close) return i + 1;
+	}
+	return text.length;
+}
+
+/** A part of a text to replace, `[start, end)`, and what stands in its place. */
+interface Redaction {
+	start: number;
+	end: number;
+	replacement: string;
+	/** For a token (a `Bearer` token, an unquoted api-key value): what it can still hold after `end`. */
+	rest?: RegExp;
+	/** For a quoted api-key value: the quote that closes it. */
+	quote?: string;
+}
+
+const REDACTED = "[redacted]";
+
+/**
+ * `text` with each part that `sources` name replaced. Each source yields its parts in order of
+ * `start`. Parts that overlap, from any sources, are replaced as one, from the first one's start to
+ * the furthest end, by the replacement of the part that starts first (on a tie, of the earlier
+ * source). Text outside every part is kept as it is.
+ *
+ * A credential that such a part ends past runs on from that part's end, and what starts inside
+ * that joins too, until the end stops growing: a token through what it can still hold there, a
+ * quoted value through its next closing quote. With the caller's key `tenant key`,
+ * `Bearer tenant keyUPSTREAM` has the token `tenant`, which ends at the key's space, and the key's
+ * match, which ends before `UPSTREAM`: replaced as one, they would print `Bearer [redacted]UPSTREAM`.
+ * And with the key `k"z`, `api_key="xk"zUPSTREAM"` has the value `xk"`, closed by the key's
+ * quote. A quoted value runs on too where a key's match ends exactly where it does, since that match
+ * took its closing quote: with the key `TENANT"`, `api_key="xTENANT"UPSTREAM`. And a key's match
+ * that starts exactly where a token ends joins it, since that match took what ended the token: with
+ * the key `'tenant`, `Bearer x'tenantUPSTREAM`. (5.1.0 replaced the key first, and its patterns then
+ * read `[redacted]` and what followed as the credential: a token holds `[` and `]`.) Linear: each
+ * run on starts where the part ends and reads only what the part has not covered, a credential runs
+ * on again only once a part has taken the end past it, and each part is taken once.
+ */
+function applyRedactions(text: string, sources: readonly Iterator<Redaction>[]): string {
+	const heads = sources.map((source) => source.next());
+	let out = "";
+	let kept = 0;
+	for (;;) {
+		let first: Redaction | undefined;
+		let from = -1;
+		heads.forEach((head, s) => {
+			if (!head.done && (first === undefined || head.value.start < first.start)) {
+				first = head.value;
+				from = s;
+			}
+		});
+		if (first === undefined) return out + text.slice(kept);
+		const start = first.start;
+		let end = first.end;
+		// The shortest credential end of each kind, to run on from the part's end.
+		const runs: { through: RegExp | string; end: number }[] = [];
+		// Where a match of the caller's key (a part with neither) ends: one that ends where a quoted
+		// value does took its closing quote.
+		const keyEnds = new Set<number>();
+		const take = (part: Redaction): void => {
+			end = Math.max(end, part.end);
+			const through = part.rest ?? part.quote;
+			if (through === undefined) {
+				keyEnds.add(part.end);
+				return;
+			}
+			const run = runs.find((r) => r.through === through);
+			if (run === undefined) runs.push({ through, end: part.end });
+			else run.end = Math.min(run.end, part.end);
+		};
+		take(first);
+		heads[from] = sources[from]?.next() ?? { done: true, value: undefined };
+		for (let grown = true; grown; ) {
+			// Every part that starts inside this one, or where it starts, joins it, which can take it
+			// further. (So an empty part found twice, in two views of a text, is replaced once.) So does
+			// a key's match that starts where a token ends.
+			for (let joined = true; joined; ) {
+				joined = false;
+				const tokenEnds = runs.some((r) => typeof r.through !== "string" && r.end === end);
+				heads.forEach((head, s) => {
+					if (
+						!head.done &&
+						(head.value.start < end ||
+							head.value.start === start ||
+							(tokenEnds &&
+								head.value.start === end &&
+								head.value.rest === undefined &&
+								head.value.quote === undefined))
+					) {
+						take(head.value);
+						heads[s] = sources[s]?.next() ?? { done: true, value: undefined };
+						joined = true;
+					}
+				});
+			}
+			grown = false;
+			for (const run of runs) {
+				const unclosed = typeof run.through === "string" && keyEnds.delete(run.end);
+				if (run.end >= end && !unclosed) continue;
+				let reach: number;
+				if (typeof run.through === "string") reach = quotedEnd(text, end, run.through);
+				else {
+					run.through.lastIndex = end;
+					run.through.test(text);
+					reach = run.through.lastIndex;
+				}
+				// The credential now ends there: it runs on again only if a part takes the end further. And
+				// another pass looks for a key's match that starts there.
+				run.end = reach;
+				end = Math.max(end, reach);
+				grown = true;
+			}
+		}
+		out += text.slice(kept, first.start) + first.replacement;
+		kept = end;
+	}
+}
+
+/**
+ * Each `Bearer <token>`: the whitespace and the token, replaced by one space and `[redacted]`. The
+ * search goes on from inside each match, so a token cannot hide a `Bearer` that ends it
+ * (`Bearer a.Bearer <token>`). Linear: a `Bearer` inside a token needs whitespace after it, so it
+ * ends the token, and no character is read more than twice.
+ */
+function* bearerSpans(text: string): Generator<Redaction> {
+	const bearer = new RegExp(BEARER_TOKEN);
+	for (let m = bearer.exec(text); m !== null; m = bearer.exec(text)) {
+		const [whole, word] = m as unknown as [string, string];
+		yield {
+			start: m.index + word.length,
+			end: m.index + whole.length,
+			replacement: ` ${REDACTED}`,
+			rest: BEARER_REST,
+		};
+		bearer.lastIndex = m.index + word.length;
+	}
+}
+
+/**
+ * Each api-key style value: `x-api-key: <v>`, `api_key=<v>`, `"api-key": "<v>"`. A QUOTED value runs
+ * through its closing quote (or to the end, unclosed), whatever it holds: `"abc;def"` is one value,
+ * never `abc` followed by text. Its name, separator and opening quote are kept; the value becomes
+ * `[redacted]` and the closing quote.
+ *
+ * A regular expression finds only where a value starts; a loop finds where a quoted one ends.
+ * The single pattern this replaces held the whole value in a quantified group, and V8 throws
+ * `RangeError` (call stack exhausted) running such a group over millions of characters: on an
+ * unclosed run of letters in that pattern, on a run of escapes in its unrolled form. Nothing here
+ * repeats a group, so it reads text of any length in one linear pass. Its matches are the old
+ * pattern's, exactly (the agreement test pins that).
+ *
+ * `overlapping` (what the redaction uses): the search goes on from where each value starts, not
+ * from where it ends, so a value cannot hide a marker inside it. Otherwise `api_key=` in
+ * `Bearer x.api_key= x-api-key: "<v>"` takes `x-api-key:` for its value, and the value after that
+ * is logged. (The patterns once ran one after the other, `Bearer` first, and the token's
+ * replacement had already removed the inner marker.) Linear: an unquoted value that starts inside
+ * the last one ends where it does, so that end is reused; and a quoted value cannot start inside
+ * one with the same quote (its opening quote would close the outer one), so no character is read
+ * by more than one quoted value of each kind.
+ */
+function* apiKeySpans(text: string, overlapping = false): Generator<Redaction> {
+	const start = new RegExp(API_KEY_START);
+	const unquoted = new RegExp(UNQUOTED_VALUE);
+	let unquotedFrom = -1;
+	let unquotedEnd = -1;
+	for (let m = start.exec(text); m !== null; m = start.exec(text)) {
+		const quote = m[3] ?? "";
+		const valueAt = start.lastIndex;
+		if (overlapping && quote === "" && valueAt >= unquotedFrom && valueAt < unquotedEnd) {
+			yield { start: valueAt, end: unquotedEnd, replacement: REDACTED, rest: UNQUOTED_REST };
+			continue;
+		}
+		const value = apiKeyValue(text, quote, valueAt, unquoted);
+		// No value here. The old pattern looked again from the next character, but the only start
+		// inside this one (`api-key` in `x-api-key`) meets the same separator and fails too.
+		if (value === undefined) continue;
+		if (quote === "") {
+			unquotedFrom = valueAt;
+			unquotedEnd = value.end;
+		}
+		yield value;
+		if (!overlapping) start.lastIndex = value.end;
+	}
+}
+
+/** The api-key value that starts at `from` after its opening `quote` (or none), if there is one. */
+function apiKeyValue(
+	text: string,
+	quote: string,
+	from: number,
+	unquoted: RegExp,
+): Redaction | undefined {
+	if (quote !== "") {
+		const end = quotedEnd(text, from, quote);
+		return { start: from, end, replacement: `${REDACTED}${quote}`, quote };
+	}
+	unquoted.lastIndex = from;
+	if (!unquoted.test(text)) return undefined;
+	return { start: from, end: unquoted.lastIndex, replacement: REDACTED, rest: UNQUOTED_REST };
+}
+
+/** The UTF-16 code units a marker can start with: `B`, `b`, `X`, `x`, `A`, `a`. */
+function startsMarker(code: number): boolean {
+	const lower = code | 0x20;
+	return lower === 0x62 || lower === 0x78 || lower === 0x61;
+}
+
+/**
+ * Each `Bearer <token>` and api-key value whose marker starts exactly where a match of one of
+ * `secrets` ends, with no word boundary asked for there. Replacing the key puts `]` before the
+ * marker, a boundary the text did not have: with the key `tenant`, `tenantBearer <token>` would
+ * print `[redacted]Bearer <token>`. So the marker is looked for there in the text itself, never in
+ * redacted text. The keys' matches end in order (each is found at its end, left to right), so they
+ * are merged as they come, and only where a marker could start is a pattern tried.
+ *
+ * Linear: no value is read twice. An unquoted value that starts inside the last one ends where it
+ * does (no character in between ends a value), so that end is reused. A quoted value cannot start
+ * inside one with the same quote: its opening quote follows `:`, `=` or whitespace, never a
+ * backslash, so the outer value closes on it. A token after `Bearer` ends at whitespace, and
+ * `Bearer` needs whitespace after it, so no token holds the next one.
+ */
+function* markersAfterKeys(text: string, secrets: readonly string[]): Generator<Redaction> {
+	const keys = secrets.map((secret) => secretSpans(text, secret));
+	const heads = keys.map((key) => key.next());
+	const bearer = new RegExp(BEARER_AT);
+	const apiKey = new RegExp(API_KEY_AT);
+	const unquoted = new RegExp(UNQUOTED_VALUE);
+	let unquotedFrom = -1;
+	let unquotedEnd = -1;
+	for (let last = -1; ; ) {
+		let at = -1;
+		let from = -1;
+		heads.forEach((head, k) => {
+			if (!head.done && (from === -1 || head.value.end < at)) {
+				at = head.value.end;
+				from = k;
+			}
+		});
+		if (from === -1) return;
+		heads[from] = keys[from]?.next() ?? { done: true, value: undefined };
+		if (at === last || !startsMarker(text.charCodeAt(at))) continue;
+		last = at;
+		bearer.lastIndex = at;
+		const token = bearer.exec(text);
+		if (token !== null) {
+			yield {
+				start: at + (token[1] ?? "").length,
+				end: at + token[0].length,
+				replacement: ` ${REDACTED}`,
+				rest: BEARER_REST,
+			};
+			continue;
+		}
+		apiKey.lastIndex = at;
+		const name = apiKey.exec(text);
+		if (name === null) continue;
+		const quote = name[3] ?? "";
+		const valueAt = apiKey.lastIndex;
+		if (quote === "" && valueAt >= unquotedFrom && valueAt < unquotedEnd) {
+			yield { start: valueAt, end: unquotedEnd, replacement: REDACTED, rest: UNQUOTED_REST };
+			continue;
+		}
+		const value = apiKeyValue(text, quote, valueAt, unquoted);
+		if (value === undefined) continue;
+		if (quote === "") {
+			unquotedFrom = valueAt;
+			unquotedEnd = value.end;
+		}
+		yield value;
+	}
+}
+
+/** `text` with every api-key style value replaced by `[redacted]` (see `apiKeySpans`). */
+export function redactApiKeys(text: string): string {
+	return applyRedactions(text, [apiKeySpans(text)]);
+}
+
+/** What `redactSecrets` returns for text its patterns could not finish reading. */
+const UNREADABLE = "[redacted: the message could not be scanned]";
+
+/**
+ * Whether a UTF-16 code unit is whitespace or a control character: what `[\s\x00-\x1f\x7f-\x9f]`
+ * matches (a test compares the two over every code unit).
+ */
+function isGap(code: number): boolean {
+	return (
+		code <= 0x20 ||
+		(code >= 0x7f && code <= 0xa0) ||
+		code === 0x1680 ||
+		(code >= 0x2000 && code <= 0x200a) ||
+		code === 0x2028 ||
+		code === 0x2029 ||
+		code === 0x202f ||
+		code === 0x205f ||
+		code === 0x3000 ||
+		code === 0xfeff
+	);
+}
+
+/**
+ * Each place `secret` (a bearer key, which may hold spaces) stands in `text`, including where a
+ * message has whitespace or a control character anywhere inside it: in place of a space, or within
+ * a word, as a hard-wrapped key in a dump has (sanitizing removes a control character and joins
+ * what was on either side). A plain match misses those, and then the `Bearer` pattern, or an
+ * api-key one, takes the key's first part and leaves the rest in the line.
+ *
+ * Whitespace and control characters are left out of both the key and the text, and the key is
+ * looked for, literally, in what remains (Knuth-Morris-Pratt), each match mapped back to the text
+ * from its first character to its last. Finding a key with a space removed, or added, redacts text
+ * that is not quite the key, which is the safe side. No pattern is built from the key, so no key,
+ * of any length or content, can make one fail to compile; the search reads each character of the
+ * text once, with a fallback bounded by the key's length in all, so it is linear for any key, and
+ * it holds only the key's length in memory. Overlapping places are all yielded. Nothing for a
+ * secret with no other character in it.
+ */
+function* secretSpans(text: string, secret: string): Generator<Redaction> {
+	const key: number[] = [];
+	for (let i = 0; i < secret.length; i++) {
+		const code = secret.charCodeAt(i);
+		if (!isGap(code)) key.push(code);
+	}
+	const k = key.length;
+	if (k === 0) return;
+	// fallback[q]: the length of the longest proper prefix of the key's first q + 1 characters that
+	// is also a suffix of them.
+	const fallback = new Int32Array(k);
+	for (let q = 1, len = 0; q < k; q++) {
+		while (len > 0 && key[q] !== key[len]) len = fallback[len - 1] ?? 0;
+		if (key[q] === key[len]) len++;
+		fallback[q] = len;
+	}
+	// Where the text's last k characters that are not a gap stand: a match's first one is among them.
+	const where = new Int32Array(k);
+	let seen = 0;
+	let matched = 0;
+	for (let i = 0; i < text.length; i++) {
+		const code = text.charCodeAt(i);
+		if (isGap(code)) continue;
+		where[seen % k] = i;
+		seen++;
+		while (matched > 0 && code !== key[matched]) matched = fallback[matched - 1] ?? 0;
+		if (code === key[matched]) matched++;
+		if (matched === k) {
+			yield { start: where[seen % k] ?? 0, end: i + 1, replacement: REDACTED };
+			matched = fallback[k - 1] ?? 0;
+		}
+	}
+}
 
 /**
  * `text` with every `secret` (the caller's own bearer key, when known), every `Bearer <token>` and
  * every api-key style value replaced by `[redacted]`. Scrubbing is not redaction: `scrubForStderr`
  * removes terminal control, never a credential.
+ *
+ * Every kind of match is found on the SAME text, before anything is replaced, and the parts they
+ * cover are replaced once, overlapping ones as one. So no match can hide another: a key that holds
+ * the word `Bearer` or an api-key name does not take that marker from the token after it, and a
+ * heuristic pattern cannot take a key's first part and leave the rest. Each reads the whole text
+ * in one linear pass. Should a pattern still throw `RangeError`, the whole text is replaced: it
+ * fails closed, never returning text it did not scan. Any other error is not caught.
  */
 export function redactSecrets(text: string, secrets: readonly string[] = []): string {
-	let out = text;
-	for (const secret of secrets) if (secret !== "") out = out.split(secret).join("[redacted]");
-	return out
-		.replace(BEARER_TOKEN, "$1 [redacted]")
-		.replace(API_KEY_VALUE, (_match, name: string, sep: string, dq?: string, sq?: string) => {
-			const quote = dq !== undefined ? '"' : sq !== undefined ? "'" : "";
-			return `${name}${sep}${quote}[redacted]${quote}`;
-		});
+	try {
+		return applyRedactions(text, spansIn(text, secrets));
+	} catch (err) {
+		if (err instanceof RangeError) return UNREADABLE;
+		throw err;
+	}
+}
+
+/**
+ * Every kind of match in `text`: each `Bearer <token>`, each api-key value (also where a match of
+ * one of `secrets` ends, see `markersAfterKeys`) and each of `secrets`. No match hides another:
+ * each search goes on from inside its matches.
+ */
+function spansIn(text: string, secrets: readonly string[]): Generator<Redaction>[] {
+	return [
+		bearerSpans(text),
+		apiKeySpans(text, true),
+		markersAfterKeys(text, secrets),
+		...secrets.map((secret) => secretSpans(text, secret)),
+	];
+}
+
+/** The index in the sanitized text of its first unit at or after unit `i` of the original. */
+function sanitizedIndex(at: Int32Array, i: number): number {
+	let lo = 0;
+	let hi = at.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if ((at[mid] ?? 0) < i) lo = mid + 1;
+		else hi = mid;
+	}
+	return lo;
+}
+
+/**
+ * `spans`, found in the original text, at the same characters of the sanitized one: a part keeps
+ * those of its characters sanitizing kept. One whose characters were all removed is dropped (there
+ * is nothing of it to print); an empty one (an unclosed quote at the end) stays, in its place.
+ */
+function* inSanitized(spans: Generator<Redaction>, at: Int32Array): Generator<Redaction> {
+	for (const part of spans) {
+		const start = sanitizedIndex(at, part.start);
+		const end = sanitizedIndex(at, part.end);
+		if (end > start || part.end === part.start) yield { ...part, start, end };
+	}
+}
+
+/**
+ * The sanitized text with one space where sanitizing removed a run between two characters it kept
+ * (`Bearer\t\x1b[31m\t<token>` reads `Bearer <token>`), and, for each unit, the unit of the
+ * sanitized text it stands at: a space, at the character after its run, and marked in `gap`.
+ */
+function withGaps(
+	clean: string,
+	at: Int32Array,
+): { text: string; to: Int32Array; gap: Uint8Array } {
+	let gaps = 0;
+	for (let j = 1; j < clean.length; j++) if ((at[j] ?? 0) !== (at[j - 1] ?? 0) + 1) gaps++;
+	const to = new Int32Array(clean.length + gaps);
+	const gap = new Uint8Array(clean.length + gaps);
+	let text = "";
+	let n = 0;
+	let from = 0;
+	for (let j = 0; j < clean.length; j++) {
+		if (j > 0 && (at[j] ?? 0) !== (at[j - 1] ?? 0) + 1) {
+			text += `${clean.slice(from, j)} `;
+			from = j;
+			gap[n] = 1;
+			to[n++] = j;
+		}
+		to[n++] = j;
+	}
+	return { text: text + clean.slice(from), to, gap };
+}
+
+/**
+ * `spans`, found in the text `withGaps` made, at the same characters of the sanitized text. A
+ * part's spaces stand for nothing there: one that holds only spaces is dropped; an empty one (an
+ * unclosed quote at the end) stays, in its place.
+ */
+function* fromGaps(
+	spans: Generator<Redaction>,
+	{ to, gap }: { to: Int32Array; gap: Uint8Array },
+	length: number,
+): Generator<Redaction> {
+	for (const part of spans) {
+		const start = part.start < to.length ? (to[part.start] ?? length) : length;
+		const last = part.end - 1;
+		const end =
+			part.end === part.start
+				? start
+				: gap[last] === 1
+					? (to[last] ?? length)
+					: (to[last] ?? length) + 1;
+		if (end > start || part.end === part.start) yield { ...part, start, end };
+	}
+}
+
+/**
+ * `spans`, at their characters in the sanitized text `clean`, with each token run on through what it
+ * can still hold there. A token found in the original text or the spaced view ends at a delimiter
+ * that sanitizing may remove, and what stood after it is then joined to the token:
+ * `Bearer\tpart-one\tpart-two` reads `Bearerpart-onepart-two`, and redacting `part-one` alone
+ * would print `Bearer [redacted]part-two`, a line the patterns read differently. Run on, a token's
+ * replacement ends where the token ends in the text it is written in.
+ *
+ * A marker that sanitizing joined to a token's end is read there too, with no word boundary asked
+ * for, and its credential, run on, is replaced with the token: in `api_key: <v>\tBea\0rer <token>`,
+ * the original splits the marker, the spaced view splits it again (`Bea rer`), and the sanitized
+ * text glues it to the value (`<v>Bearer`). (5.1.0 replaced the value first, and its placeholder's
+ * `]` put a boundary there.) Every token's end is looked at, since in a chain each one can be glued
+ * to the next marker (`Bearer <a>\tBearer <b>\tBea\0rer <c>`). Linear: a source's tokens of one
+ * kind end in order, so the reach of the last one is reused for an end inside it; and the markers
+ * are read as `markersAt` reads them.
+ */
+function* throughTokens(spans: Iterable<Redaction>, clean: string): Generator<Redaction> {
+	const reached = new Map<RegExp, { from: number; reach: number }>();
+	const markerEnd = markersAt(clean);
+	for (const part of spans) {
+		const rest = part.rest;
+		if (rest === undefined) {
+			yield part;
+			continue;
+		}
+		let run = reached.get(rest);
+		if (run === undefined || part.end < run.from || part.end > run.reach) {
+			rest.lastIndex = part.end;
+			rest.test(clean);
+			run = { from: part.end, reach: rest.lastIndex };
+			reached.set(rest, run);
+		}
+		run.reach = Math.max(run.reach, markerEnd(part.end));
+		yield { ...part, end: run.reach };
+	}
+}
+
+/**
+ * A reader of `clean` that gives, for a place in it, where the credential ends whose `Bearer` or
+ * api-key marker starts exactly there, with no word boundary asked for; -1 if none does. (A match in
+ * `clean` ends at a delimiter, so there is nothing to run on.) Linear over any places, as
+ * `markersAfterKeys` is: an unquoted value that starts inside the last one ends where it does, so
+ * that end is reused; a quoted value cannot start inside one with the same quote; and a `Bearer`
+ * token ends at whitespace, so the next token starts past it.
+ */
+function markersAt(clean: string): (at: number) => number {
+	const bearer = new RegExp(BEARER_AT);
+	const apiKey = new RegExp(API_KEY_AT);
+	const unquoted = new RegExp(UNQUOTED_VALUE);
+	let last = -1;
+	let lastEnd = -1;
+	let unquotedFrom = -1;
+	let unquotedEnd = -1;
+	const find = (at: number): number => {
+		if (!startsMarker(clean.charCodeAt(at))) return -1;
+		bearer.lastIndex = at;
+		const token = bearer.exec(clean);
+		if (token !== null) return at + token[0].length;
+		apiKey.lastIndex = at;
+		const name = apiKey.exec(clean);
+		if (name === null) return -1;
+		const quote = name[3] ?? "";
+		const valueAt = apiKey.lastIndex;
+		if (quote === "" && valueAt >= unquotedFrom && valueAt < unquotedEnd) return unquotedEnd;
+		const value = apiKeyValue(clean, quote, valueAt, unquoted);
+		if (value === undefined) return -1;
+		if (quote === "") {
+			unquotedFrom = valueAt;
+			unquotedEnd = value.end;
+		}
+		return value.end;
+	};
+	return (at) => {
+		if (at !== last) {
+			last = at;
+			lastEnd = find(at);
+		}
+		return lastEnd;
+	};
+}
+
+/**
+ * `text` sanitized as `scrubForStderr` sanitizes it (never clipped), with every credential in it
+ * redacted: what `redactSecrets` finds in three views of it, together, replaced once in the
+ * sanitized text. Each view can show what the others hide. In the ORIGINAL text, the delimiters
+ * the patterns read are still there, and an escape sequence cannot take a key's first character
+ * with it. In the SANITIZED text, a marker or a key a control character split is whole (`Bea\0rer`,
+ * `x-api\x07-key`), and a key that would take part of the marker in the original cannot hide it
+ * there. In the sanitized text with one space for each run it removed, a separator made of removed
+ * characters still separates: `Bearer\t\x1b[31m\t<token>` is one word once sanitized, and in the
+ * original the pattern takes the escape sequence for the token. A token from any view runs on
+ * through what sanitizing joined to its end (`throughTokens`). The replacement is made in the
+ * sanitized text itself, and nothing removes a character after it: every character the result
+ * holds outside a placeholder stands next to the ones it stood next to in the sanitized text,
+ * which was read. (Redacting the original and sanitizing after could join what was apart: an OSC
+ * sequence whose terminator a redaction took runs further, and the characters on either side of
+ * it meet.) No match is ever looked for in redacted text. On `RangeError`, the whole text is
+ * replaced, as `redactSecrets` does.
+ */
+export function redactSanitized(text: string, secrets: readonly string[] = []): string {
+	try {
+		const { clean, at } = sanitizeMapped(text);
+		const spaced = withGaps(clean, at);
+		return applyRedactions(
+			clean,
+			[
+				...spansIn(text, secrets).map((spans) => inSanitized(spans, at)),
+				...spansIn(clean, secrets),
+				...spansIn(spaced.text, secrets).map((spans) => fromGaps(spans, spaced, clean.length)),
+			].map((spans) => throughTokens(spans, clean)),
+		);
+	} catch (err) {
+		if (err instanceof RangeError) return UNREADABLE;
+		throw err;
+	}
+}
+
+/**
+ * `text` with each whitespace run that holds a line break replaced by one space: what
+ * `/\s*\n\s*\/g` replaced, read in one pass. That pattern is QUADRATIC: it retries its leading
+ * `\s*` from every position of a whitespace run with no line break (500k spaces took 162 s), so it
+ * must not come back. Here each run is matched once, from its start to its end.
+ */
+export function joinLines(text: string): string {
+	return text.replace(/\s+/g, (run) => (run.includes("\n") ? " " : run));
 }
 
 /**
@@ -242,10 +826,12 @@ export function redactSecrets(text: string, secrets: readonly string[] = []): st
  * `500 internal`: which tenant, which route, and the error's own name and message, so a
  * tenant refused at its first request (its vault, say) says why somewhere. It carries no key,
  * header or request body of its own. The message is the server's or governor's text, which can
- * quote what a caller sent, so credentials in it are REDACTED (`redactSecrets`, with the caller's
- * own key in `secrets`) before escape sequences and control characters are removed
- * (`scrubForStderr`) and its lines joined into one; and once more after, so a key a control
- * character had split cannot come back together.
+ * quote what a caller sent, so its escape sequences and control characters are removed and the
+ * credentials in it REDACTED, in one step (`redactSanitized`, with the caller's own key in
+ * `secrets`), on the WHOLE text. Its lines are then joined into one in one pass (`joinLines`; no
+ * pattern reads a line break differently from other whitespace, so joining makes no new match).
+ * Only then is it clipped to `MAX_PRINTED_CHARS`: a cut any earlier could keep a key's first part,
+ * which no search after it can recognize.
  */
 export function internalErrorLine(
 	err: unknown,
@@ -255,8 +841,9 @@ export function internalErrorLine(
 ): string {
 	const name = err instanceof Error ? err.name : typeof err;
 	const message = err instanceof Error ? err.message : String(err);
-	const raw = redactSecrets(`${name}: ${message}`, secrets);
-	const text = redactSecrets(scrubForStderr(raw).replace(/\s*\n\s*/g, " "), secrets);
+	const joined = joinLines(redactSanitized(`${name}: ${message}`, secrets));
+	// The clip is LAST: it only drops the end of text already redacted, so it can expose nothing.
+	const text = scrubForStderr(joined);
 	const tenant = tenantId === undefined ? "-" : scrubForStderr(tenantId);
 	return `usertrust-server: internal error: tenant=${tenant} route=${route}: ${text}`;
 }
