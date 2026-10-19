@@ -136,6 +136,8 @@ describe("resolveSettings: which file a configured session accepts", () => {
 			role: "file-role",
 		});
 		const settings = await resolve(home, path);
+		// `model` is no setting: it is ignored, and only noted (config.mjs `ignoredModelNote`).
+		expect(settings).not.toHaveProperty("model");
 		expect(settings).toMatchObject({
 			configured: true,
 			refused: null,
@@ -145,7 +147,7 @@ describe("resolveSettings: which file a configured session accepts", () => {
 			failOpen: true,
 			stateDir: VALID.stateDir,
 			usage: "estimate",
-			model: "file-model",
+			ignoredModel: true,
 			sendContent: false,
 			unit: "file-unit",
 			role: "file-role",
@@ -156,7 +158,7 @@ describe("resolveSettings: which file a configured session accepts", () => {
 			failOpen: false,
 			sendContent: true,
 			usage: "transcript",
-			model: "claude-sonnet-4-6",
+			ignoredModel: false,
 		});
 		const absent = await resolve(home, path);
 		expect(absent.unit).toBeUndefined();
@@ -333,8 +335,6 @@ describe("resolveSettings: which file a configured session accepts", () => {
 			["failOpen", "1"],
 			["sendContent", "0"],
 			["usage", "both"],
-			["model", ""],
-			["model", "two words"],
 			["unit", 5],
 			["role", { name: "x" }],
 		];
@@ -345,6 +345,10 @@ describe("resolveSettings: which file a configured session accepts", () => {
 		}
 		// Fields it does not know are ignored.
 		expect(await refusal({ ...VALID, comment: "anything" })).toBeNull();
+		// `model` among them: it is no setting any more, so no value of it refuses the file.
+		for (const model of ["", "two words", 7]) {
+			expect(await refusal({ ...VALID, model }), `model=${String(model)}`).toBeNull();
+		}
 	});
 
 	it("never carries a value from the file in a refusal: the marker as JSON, a field, the mode, the url", async () => {
@@ -685,11 +689,21 @@ describe("a configured session reads every setting from its file, and none from 
 		expect(await marker(reading)).toBe("no transcript path");
 	});
 
-	it("UT_CC_MODEL: the authorize names the file's model", async () => {
+	it("a configured model is ignored: the authorize names neither the file's nor UT_CC_MODEL, and SessionStart says so", async () => {
 		const file = await fakeServer();
 		const l = await configured({ url: file.url, model: "file-model" });
+		const start = await runConfigured(SESSION_START, l, { UT_CC_MODEL: "env-model" });
+		const line = (JSON.parse(start.stdout) as { systemMessage: string }).systemMessage;
+		expect(line).toContain(
+			`usertrust: the config file's "model" is ignored: model is no longer configurable, and the session's own model is used.`,
+		);
 		await runConfigured(PRE, l, { UT_CC_MODEL: "env-model" });
-		expect(authorizeBody(file).model).toBe("file-model");
+		// No transcript and no SessionStart model: `unknown`, priced by the server at its dearest rate.
+		expect(authorizeBody(file).model).toBe("unknown");
+		// Control: a file without `model` says nothing of it.
+		const plain = await configured({ url: (await fakeServer()).url });
+		const quiet = await runConfigured(SESSION_START, plain, { UT_CC_MODEL: "env-model" });
+		expect(quiet.stdout).not.toContain("is ignored");
 	});
 
 	it("UT_CC_SEND_CONTENT: the file's sendContent decides, both ways", async () => {

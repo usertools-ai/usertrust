@@ -7,6 +7,31 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ## [Unreleased]
 
+### Fixed
+
+- **A hold names the session's own model, never `claude-sonnet-4-6`.** A hold with no
+  transcript window named `UT_CC_MODEL`, else a built-in `claude-sonnet-4-6`, whatever the
+  session ran. An Opus session's estimate holds, and the holds of a tool call with nothing new
+  before it, read as Sonnet 4.6 on the ledger and were priced at its rate: the budget check
+  before the call was sized too small, and an agent that settles at the estimate (a forked
+  subagent, say) was charged at that rate too. Such a hold now names the newest model its
+  agent's transcript has shown, then the newest response in its transcript, then the model
+  Claude Code reported at SessionStart, and otherwise `unknown`, which usertrust-server prices
+  at the dearest rate it publishes. Estimate mode (`UT_CC_USAGE=estimate`) now reads the
+  transcript tail for the model id only, so a model switched to mid-session is held and settled
+  at its own rate; its usage is still always estimated. Responses written before the session was metered now count
+  toward the model too, though they are still never billed. PostToolUse's fresh hold for an
+  estimate hold that expired is authorized at the expired hold's model. Each authorize says
+  which source it used, in `params.modelSource`.
+
+### Removed
+
+- **`UT_CC_MODEL` and the config file's `model`.** The model is the session's own, so nothing
+  configured can price a hold below it. Either one still set is ignored, never an error, and
+  SessionStart says so: `usertrust: UT_CC_MODEL is ignored: model is no longer configurable,
+  and the session's own model is used.` A config file whose `model` is not a valid id is no
+  longer refused for it.
+
 ## [3.0.3] - 2026-10-17
 
 ### Fixed

@@ -759,9 +759,17 @@ async function agentTypeFor(transcriptPath, agentId, hinted) {
  * makes transcript accounting unavailable for this run.
  */
 async function privateStateDir() {
-	const dir = join(stateRoot(), "transcripts");
+	return privateDir("transcripts");
+}
+
+/**
+ * <state>/<name>, made and checked as `privateStateDir` is. With `create: false` (a read) it is
+ * only checked, and a missing one is unavailable: a read never makes a directory.
+ */
+async function privateDir(name, { create = true } = {}) {
+	const dir = join(stateRoot(), name);
 	try {
-		await mkdir(dir, { recursive: true, mode: 0o700 });
+		if (create) await mkdir(dir, { recursive: true, mode: 0o700 });
 		const info = await lstat(dir);
 		if (!info.isDirectory()) return { ok: false, reason: "state dir is not a directory" };
 		if (typeof process.getuid === "function" && info.uid !== process.getuid()) {
@@ -1377,6 +1385,16 @@ function foldLine(cursor, bytes, since, seen) {
 	} catch {
 		return false;
 	}
+	// Which model the agent runs, from EVERY response read, before anything decides whether its
+	// usage is posted: one from before metering, or one already accounted, is never billed again,
+	// but a hold names its model (`holdModelFor`). Lines are read in file order, so a read that
+	// reaches the end, a reread from zero after a truncation included, ends on the newest. A
+	// response whose model is missing or unusable makes it `unknown`, never an older response's
+	// (which may be cheaper); the `<synthetic>` placeholder names no model, and changes nothing.
+	if (isObject(entry?.message?.usage)) {
+		const responseModel = modelId(entry.message.model);
+		if (responseModel !== SYNTHETIC_MODEL) cursor.lastModel = responseModel ?? UNKNOWN_MODEL;
+	}
 	// Written before this session was first metered: never posted (`sessionFirstRun`), and
 	// counted once per response, to be declared (`recordPreMetering`).
 	if (Date.parse(entry?.timestamp) < since) {
@@ -1467,7 +1485,6 @@ function foldLine(cursor, bytes, since, seen) {
 		m.cacheWriteTokens,
 	);
 	if (message.stop_reason != null) m.complete = true;
-	if (named) cursor.lastModel = model;
 	return true;
 }
 
@@ -1739,6 +1756,131 @@ export async function stampFirstRun(sessionId) {
 	} catch {
 		// The first hook that needs it reports it.
 	}
+}
+
+/** Under the state dir: the model Claude Code reported for each session (`recordSessionModel`). */
+const SESSION_MODEL_DIR = "session-models";
+
+/** How much of a transcript's end `newestTranscriptModel` reads. */
+const MODEL_TAIL_BYTES = 4 * READ_CHUNK_BYTES;
+
+/**
+ * Record the model Claude Code reports for a session: SessionStart's `model`, "the active
+ * model identifier", which it may omit (https://code.claude.com/docs/en/hooks#sessionstart-input).
+ * An omitted or unusable one leaves any earlier record as it is. Local, bounded, and it never
+ * throws: a session with no record has one source fewer (`holdModelFor`).
+ */
+export async function recordSessionModel(sessionId, model) {
+	try {
+		const id = modelId(model);
+		if (typeof sessionId !== "string" || sessionId === "") return;
+		if (id === null || id === SYNTHETIC_MODEL || id === UNKNOWN_MODEL) return;
+		const dir = await privateDir(SESSION_MODEL_DIR);
+		if (!dir.ok) return;
+		await writeAtomic(join(dir.dir, sanitize(sessionId)), id);
+	} catch {
+		// The next hold resolves without it.
+	}
+}
+
+/**
+ * The model recorded for a session (`recordSessionModel`), or null. Read only from a directory
+ * that passes `privateDir`'s checks, as it is written: an id planted where others can write
+ * would price a hold at a model of their choosing.
+ */
+async function sessionModel(sessionId) {
+	if (typeof sessionId !== "string" || sessionId === "") return null;
+	try {
+		const dir = await privateDir(SESSION_MODEL_DIR, { create: false });
+		if (!dir.ok) return null;
+		const text = await readRegular(join(dir.dir, sanitize(sessionId)), READ_BOUND.small);
+		const id = modelId(text);
+		return id === UNKNOWN_MODEL ? null : id;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * The model of the NEWEST response in a transcript, read from its last `MODEL_TAIL_BYTES`
+ * (complete lines only), or null when that part holds none. A response's `message.model`, and
+ * `unknown` when it is missing or unusable: never an older response's, which may be cheaper. The
+ * `<synthetic>` placeholder is not a response of any model, and is passed over. Nothing here is
+ * posted.
+ */
+async function newestTranscriptModel(path) {
+	let handle;
+	try {
+		({ handle } = await openRegular(path));
+	} catch {
+		return null;
+	}
+	try {
+		const { size } = await handle.stat();
+		const start = Math.max(0, size - MODEL_TAIL_BYTES);
+		const buffer = Buffer.alloc(size - start);
+		let read = 0;
+		while (read < buffer.length) {
+			const { bytesRead } = await handle.read(buffer, read, buffer.length - read, start + read);
+			if (bytesRead === 0) break;
+			read += bytesRead;
+		}
+		const lines = buffer.subarray(0, read).toString("utf-8").split("\n");
+		// A tail that starts mid-file starts mid-line: that first piece is not a line.
+		if (start > 0) lines.shift();
+		for (let i = lines.length - 1; i >= 0; i--) {
+			if (!lines[i].includes('"usage"')) continue;
+			let entry;
+			try {
+				entry = JSON.parse(lines[i]);
+			} catch {
+				continue;
+			}
+			if (!isObject(entry?.message?.usage)) continue;
+			const id = modelId(entry.message.model);
+			if (id === SYNTHETIC_MODEL) continue;
+			return id ?? UNKNOWN_MODEL;
+		}
+		return null;
+	} catch {
+		return null;
+	} finally {
+		await handle.close().catch(() => {});
+	}
+}
+
+/**
+ * The model a hold is authorized at when no transcript window names one: every estimate hold,
+ * a transcript hold with no window, and PostToolUse's replacement of an expired hold. Never a
+ * configured or built-in default, which priced an Opus session's holds at a cheaper model's
+ * rate. In order:
+ *  1. `lastModel`, the newest model the agent's cursor has read;
+ *  2. the newest response in the agent's transcript (`newestTranscriptModel`), in estimate mode
+ *     too (`UT_CC_USAGE=estimate`, or an agent that settles at the estimate): only that response's
+ *     model id is read, never its usage, which is still estimated. Without it, a session that
+ *     switched to a dearer model mid-session would go on holding and settling at the cheaper one;
+ *  3. the model Claude Code reported for the session at SessionStart (`recordSessionModel`);
+ *  4. `unknown`: the server prices an id it does not know at the dearest rate it publishes
+ *     (core pricing.ts `FALLBACK_RATE`) and marks the receipt `rateSource: "fallback"`, so an
+ *     unknown model is never priced below the session's.
+ * Returns `{ model, source }`, `source` being `transcript`, `session` or `unknown`: what the
+ * hold's `params.modelSource` says. Never throws.
+ */
+export async function holdModelFor({ sessionId, agentId, input, lastModel }) {
+	const unknown = { model: UNKNOWN_MODEL, source: "unknown" };
+	// The newest response read named no usable model: `unknown`, never an older source's.
+	const known = modelId(lastModel);
+	if (known === UNKNOWN_MODEL) return unknown;
+	if (known !== null && known !== SYNTHETIC_MODEL) return { model: known, source: "transcript" };
+	if (isAgentId(agentId)) {
+		const path = transcriptPathFor(input ?? {}, agentId);
+		const newest = path === undefined ? null : await newestTranscriptModel(path);
+		if (newest === UNKNOWN_MODEL) return unknown;
+		if (newest !== null) return { model: newest, source: "transcript" };
+	}
+	const reported = await sessionModel(sessionId);
+	if (reported !== null) return { model: reported, source: "session" };
+	return unknown;
 }
 
 /**
