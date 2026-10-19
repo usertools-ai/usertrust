@@ -232,10 +232,70 @@ function quotedEnd(text: string, from: number, quote: string): number {
 	return text.length;
 }
 
+/** A part of a text to replace, `[start, end)`, and what stands in its place. */
+interface Redaction {
+	start: number;
+	end: number;
+	replacement: string;
+}
+
+const REDACTED = "[redacted]";
+
 /**
- * `text` with every api-key style value replaced by `[redacted]`: `x-api-key: <v>`, `api_key=<v>`,
- * `"api-key": "<v>"`. A QUOTED value is consumed through its closing quote (or to the end,
- * unclosed), whatever it holds: `"abc;def"` is one value, never `abc` followed by text.
+ * `text` with each part that `sources` name replaced. Each source yields its parts in order of
+ * `start`. Parts that overlap, from any sources, are replaced as one, from the first one's start to
+ * the furthest end, by the replacement of the part that starts first (on a tie, of the earlier
+ * source). Text outside every part is kept as it is.
+ */
+function applyRedactions(text: string, sources: readonly Iterator<Redaction>[]): string {
+	const heads = sources.map((source) => source.next());
+	let out = "";
+	let kept = 0;
+	for (;;) {
+		let first: Redaction | undefined;
+		let from = -1;
+		heads.forEach((head, s) => {
+			if (!head.done && (first === undefined || head.value.start < first.start)) {
+				first = head.value;
+				from = s;
+			}
+		});
+		if (first === undefined) return out + text.slice(kept);
+		let end = first.end;
+		heads[from] = sources[from]?.next() ?? { done: true, value: undefined };
+		// Every part that starts inside this one joins it, which can take it further.
+		for (let joined = true; joined; ) {
+			joined = false;
+			heads.forEach((head, s) => {
+				if (!head.done && head.value.start < end) {
+					end = Math.max(end, head.value.end);
+					heads[s] = sources[s]?.next() ?? { done: true, value: undefined };
+					joined = true;
+				}
+			});
+		}
+		out += text.slice(kept, first.start) + first.replacement;
+		kept = end;
+	}
+}
+
+/** Each `Bearer <token>`: the whitespace and the token, replaced by one space and `[redacted]`. */
+function* bearerSpans(text: string): Generator<Redaction> {
+	for (const m of text.matchAll(BEARER_TOKEN)) {
+		const [whole, word] = m as unknown as [string, string];
+		yield {
+			start: m.index + word.length,
+			end: m.index + whole.length,
+			replacement: ` ${REDACTED}`,
+		};
+	}
+}
+
+/**
+ * Each api-key style value: `x-api-key: <v>`, `api_key=<v>`, `"api-key": "<v>"`. A QUOTED value runs
+ * through its closing quote (or to the end, unclosed), whatever it holds: `"abc;def"` is one value,
+ * never `abc` followed by text. Its name, separator and opening quote are kept; the value becomes
+ * `[redacted]` and the closing quote.
  *
  * A regular expression finds only where a value starts; a loop finds where a quoted one ends.
  * The single pattern this replaces held the whole value in a quantified group, and V8 throws
@@ -244,54 +304,100 @@ function quotedEnd(text: string, from: number, quote: string): number {
  * repeats a group, so it reads text of any length in one linear pass. Its matches are the old
  * pattern's, exactly (the agreement test pins that).
  */
-export function redactApiKeys(text: string): string {
-	let out = "";
-	let kept = 0;
-	API_KEY_START.lastIndex = 0;
-	for (let m = API_KEY_START.exec(text); m !== null; m = API_KEY_START.exec(text)) {
-		const [, name, sep, quote] = m as unknown as [string, string, string, string];
+function* apiKeySpans(text: string): Generator<Redaction> {
+	const start = new RegExp(API_KEY_START);
+	const unquoted = new RegExp(UNQUOTED_VALUE);
+	for (let m = start.exec(text); m !== null; m = start.exec(text)) {
+		const quote = m[3] ?? "";
 		let end: number;
-		if (quote !== "") end = quotedEnd(text, API_KEY_START.lastIndex, quote);
+		if (quote !== "") end = quotedEnd(text, start.lastIndex, quote);
 		else {
-			UNQUOTED_VALUE.lastIndex = API_KEY_START.lastIndex;
+			unquoted.lastIndex = start.lastIndex;
 			// No value here. The old pattern looked again from the next character, but the only
 			// start inside this one (`api-key` in `x-api-key`) meets the same separator and fails too.
-			if (!UNQUOTED_VALUE.test(text)) continue;
-			end = UNQUOTED_VALUE.lastIndex;
+			if (!unquoted.test(text)) continue;
+			end = unquoted.lastIndex;
 		}
-		out += `${text.slice(kept, m.index)}${name}${sep}${quote}[redacted]${quote}`;
-		kept = end;
-		API_KEY_START.lastIndex = end;
+		yield { start: start.lastIndex, end, replacement: `${REDACTED}${quote}` };
+		start.lastIndex = end;
 	}
-	return out + text.slice(kept);
+}
+
+/** `text` with every api-key style value replaced by `[redacted]` (see `apiKeySpans`). */
+export function redactApiKeys(text: string): string {
+	return applyRedactions(text, [apiKeySpans(text)]);
 }
 
 /** What `redactSecrets` returns for text its patterns could not finish reading. */
 const UNREADABLE = "[redacted: the message could not be scanned]";
 
-/** A whitespace or control character. */
-const GAP_CLASS = String.raw`[\s\x00-\x1f\x7f-\x9f]`;
-const GAP_CHAR = new RegExp(GAP_CLASS);
-/** What may stand between a secret's characters: any run of whitespace or control characters, or nothing. */
-const SECRET_GAP = `${GAP_CLASS}*`;
-const REGEXP_SYNTAX = /[.*+?^${}()|[\]\\]/g;
+/**
+ * Whether a UTF-16 code unit is whitespace or a control character: what `[\s\x00-\x1f\x7f-\x9f]`
+ * matches (a test compares the two over every code unit).
+ */
+function isGap(code: number): boolean {
+	return (
+		code <= 0x20 ||
+		(code >= 0x7f && code <= 0xa0) ||
+		code === 0x1680 ||
+		(code >= 0x2000 && code <= 0x200a) ||
+		code === 0x2028 ||
+		code === 0x2029 ||
+		code === 0x202f ||
+		code === 0x205f ||
+		code === 0x3000 ||
+		code === 0xfeff
+	);
+}
 
 /**
- * A pattern for `secret` (a bearer key, which may hold spaces) that also finds it where a message
- * has whitespace or a control character anywhere inside it: in place of a space, or within a word,
- * as a hard-wrapped key in a dump has (sanitizing removes a control character and joins what was
- * on either side). A plain match misses those, and then the `Bearer` pattern, or an api-key one,
- * takes the key's first part and leaves the rest in the line. The secret's own whitespace and
- * control characters are dropped, and any run of them, or none, may stand between any two of its
- * other characters. Finding a key with a space removed, or added, redacts text that is not quite
- * the key, which is the safe side. Each character is literal and only the gap between two of them
- * repeats a class, never a group, so the pattern reads text of any length without a RangeError.
- * `null` for a secret with no other character in it.
+ * Each place `secret` (a bearer key, which may hold spaces) stands in `text`, including where a
+ * message has whitespace or a control character anywhere inside it: in place of a space, or within
+ * a word, as a hard-wrapped key in a dump has (sanitizing removes a control character and joins
+ * what was on either side). A plain match misses those, and then the `Bearer` pattern, or an
+ * api-key one, takes the key's first part and leaves the rest in the line.
+ *
+ * Whitespace and control characters are left out of both the key and the text, and the key is
+ * looked for, literally, in what remains (Knuth-Morris-Pratt), each match mapped back to the text
+ * from its first character to its last. Finding a key with a space removed, or added, redacts text
+ * that is not quite the key, which is the safe side. No pattern is built from the key, so no key,
+ * of any length or content, can make one fail to compile; the search reads each character of the
+ * text once, with a fallback bounded by the key's length in all, so it is linear for any key, and
+ * it holds only the key's length in memory. Overlapping places are all yielded. Nothing for a
+ * secret with no other character in it.
  */
-function secretPattern(secret: string): RegExp | null {
-	const chars = Array.from(secret).filter((char) => !GAP_CHAR.test(char));
-	if (chars.length === 0) return null;
-	return new RegExp(chars.map((char) => char.replace(REGEXP_SYNTAX, "\\$&")).join(SECRET_GAP), "g");
+function* secretSpans(text: string, secret: string): Generator<Redaction> {
+	const key: number[] = [];
+	for (let i = 0; i < secret.length; i++) {
+		const code = secret.charCodeAt(i);
+		if (!isGap(code)) key.push(code);
+	}
+	const k = key.length;
+	if (k === 0) return;
+	// fallback[q]: the length of the longest proper prefix of the key's first q + 1 characters that
+	// is also a suffix of them.
+	const fallback = new Int32Array(k);
+	for (let q = 1, len = 0; q < k; q++) {
+		while (len > 0 && key[q] !== key[len]) len = fallback[len - 1] ?? 0;
+		if (key[q] === key[len]) len++;
+		fallback[q] = len;
+	}
+	// Where the text's last k characters that are not a gap stand: a match's first one is among them.
+	const where = new Int32Array(k);
+	let seen = 0;
+	let matched = 0;
+	for (let i = 0; i < text.length; i++) {
+		const code = text.charCodeAt(i);
+		if (isGap(code)) continue;
+		where[seen % k] = i;
+		seen++;
+		while (matched > 0 && code !== key[matched]) matched = fallback[matched - 1] ?? 0;
+		if (code === key[matched]) matched++;
+		if (matched === k) {
+			yield { start: where[seen % k] ?? 0, end: i + 1, replacement: REDACTED };
+			matched = fallback[k - 1] ?? 0;
+		}
+	}
 }
 
 /**
@@ -299,19 +405,20 @@ function secretPattern(secret: string): RegExp | null {
  * every api-key style value replaced by `[redacted]`. Scrubbing is not redaction: `scrubForStderr`
  * removes terminal control, never a credential.
  *
- * The secrets are replaced FIRST (`secretPattern`), before a heuristic pattern can take part of
- * one. It reads the whole text: no pattern repeats a group, so a message of any length is read to
- * its end. Should a pattern still throw `RangeError`, the whole text is replaced: it fails closed,
- * never returning text it did not scan. Any other error is not caught.
+ * Every kind of match is found on the SAME text, before anything is replaced, and the parts they
+ * cover are replaced once, overlapping ones as one. So no match can hide another: a key that holds
+ * the word `Bearer` or an api-key name does not take that marker from the token after it, and a
+ * heuristic pattern cannot take a key's first part and leave the rest. Each reads the whole text
+ * in one linear pass. Should a pattern still throw `RangeError`, the whole text is replaced: it
+ * fails closed, never returning text it did not scan. Any other error is not caught.
  */
 export function redactSecrets(text: string, secrets: readonly string[] = []): string {
 	try {
-		let out = text;
-		for (const secret of secrets) {
-			const pattern = secretPattern(secret);
-			if (pattern !== null) out = out.replace(pattern, "[redacted]");
-		}
-		return redactApiKeys(out.replace(BEARER_TOKEN, "$1 [redacted]"));
+		return applyRedactions(text, [
+			bearerSpans(text),
+			apiKeySpans(text),
+			...secrets.map((secret) => secretSpans(text, secret)),
+		]);
 	} catch (err) {
 		if (err instanceof RangeError) return UNREADABLE;
 		throw err;
