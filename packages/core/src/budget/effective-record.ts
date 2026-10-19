@@ -7,7 +7,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { linkSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { linkSync, lstatSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { EFFECTIVE_BUDGET_FILE } from "../audit/effective-budget.js";
 import { scrubForTerminal } from "../cli/target.js";
@@ -51,11 +51,12 @@ const REAL_IO: EffectiveRecordIo = {
  * record. A stored "conflict" flag would go stale; the record is instead rewritten on every start and every destroy
  * while the lock is held, and once more when the lock is taken by a writer it was not published under.
  *
- * A governor takes the lock lazily, at its first append. Until then it publishes WITHOUT the lock, but only where no
- * other writer's record stands: where there is no record at all (a new vault, or one only an earlier release wrote,
- * which never published one), or where the record is still this process's own unheld one (`unheldRecords`). So
- * readers see the budget from the start, never "not yet published" until a first call, and never in place of a
- * record another process published. The lock holder's first append replaces an unheld record with its own.
+ * A governor takes the lock lazily, at its first append. Until then it publishes WITHOUT the lock, and only into an
+ * EMPTY slot: where there is no record at all (a new vault, or one only an earlier release wrote, which never
+ * published one). So readers of such a vault see the budget from the start, never "not yet published" until a first
+ * call. A publish without the lock never moves, replaces or removes a record, whoever wrote it, even this process: an
+ * existing record (an earlier run's, a lock holder's, or this process's own) stands, read "as of" its writtenAt, until
+ * the lock holder's first append replaces it, as a lock holder's record has always persisted across restarts.
  *
  * A write that FAILED publishes nothing, so it does not count as published: the next append retries it. Every append,
  * not a backoff: an append already writes to this vault, so one more small write beside it costs little, and a timer
@@ -72,13 +73,6 @@ interface VaultRegistry {
 const registries = new Map<string, VaultRegistry>();
 
 /**
- * Per physical vault: the exact text of the record this process last published WITHOUT the lock, while that record may
- * still stand. Kept after the vault's registry is dropped, so a later governor in this process can replace its own
- * record, and only its own; a publish under the lock ends it.
- */
-const unheldRecords = new Map<string, string>();
-
-/**
  * A governor's registration: `appended` after each of its successful appends, `release` from its destroy(), once the
  * calls it drains and the holds it records have appended and before the audit lock is released: a call that settles
  * while destroy() drains may be the governor's first append, and must still publish.
@@ -90,8 +84,8 @@ export interface EnforcedBudgetRegistration {
 	 */
 	appended(): void;
 	/**
-	 * Drop this governor and republish for the rest, under the lock or, without it, over this process's own unheld
-	 * record only (the last one's leaves the record as it was, read "as of" its writtenAt).
+	 * Drop this governor and republish for the rest: under the lock, or without it only into an empty slot (the last
+	 * one's leaves the record as it was, read "as of" its writtenAt).
 	 */
 	release(): void;
 }
@@ -99,8 +93,8 @@ export interface EnforcedBudgetRegistration {
 /**
  * Register a governor's enforced budget on its vault (`vaultDir` is the `.usertrust` directory) and publish it at once.
  * `lockOwner` reads which writer holds the vault's lock in this process (the governor's audit handle,
- * `AuditWriter.lockOwner`); undefined means none, and the publish then never replaces another writer's record. Never
- * throws.
+ * `AuditWriter.lockOwner`); undefined means none, and the publish then only fills an empty slot, never replacing any
+ * record. Never throws.
  */
 export function registerEnforcedBudget(
 	vaultDir: string,
@@ -119,8 +113,6 @@ export function registerEnforcedBudget(
 	reg.live.set(id, budget);
 	// The record is written through THIS caller's path: any alias of the vault reaches the same physical file.
 	const publishUnder = (owner: string): void => {
-		// Whatever this write does, the record on disk is no longer an unheld one of this process's.
-		unheldRecords.delete(key);
 		if (publish(vaultDir, reg.live, seams, reg.warnedUnder !== owner)) {
 			reg.publishedUnder = owner;
 			reg.warnedUnder = undefined;
@@ -137,9 +129,7 @@ export function registerEnforcedBudget(
 			publishUnder(owner);
 			return;
 		}
-		const mine = publishUnheld(vaultDir, liveBody(reg.live), unheldRecords.get(key), seams);
-		if (mine === undefined) unheldRecords.delete(key);
-		else unheldRecords.set(key, mine);
+		publishIntoEmptySlot(vaultDir, liveBody(reg.live), seams);
 	};
 	publishNow();
 	let released = false;
@@ -224,78 +214,35 @@ function stagingPath(vaultDir: string): string {
 }
 
 /**
- * A file's text if it is a regular file, `null` if nothing is there, undefined if it is anything else or cannot be
- * read. Stat FIRST, as every reader does: opening a FIFO planted at the path would block the governor.
+ * Publish WITHOUT the vault's writer lock, and only where nothing is at the record's path: the record is staged whole
+ * and then LINKED into place, and a link fails if the name exists, so a record that appeared meanwhile stands. Never
+ * moves, replaces or removes anything at the record's path, never throws and never warns: a failure leaves the path as
+ * it was (readers of an empty slot say not yet published, as before this publish existed).
  */
-function readRegular(path: string): string | null | undefined {
-	try {
-		if (!statSync(path).isFile()) return undefined;
-		return readFileSync(path, "utf-8");
-	} catch (err) {
-		return (err as NodeJS.ErrnoException | undefined)?.code === "ENOENT" ? null : undefined;
-	}
-}
-
-/**
- * Publish WITHOUT the vault's writer lock, never over another writer's record: only where there is no record, or where
- * the record is still, byte for byte, `mine` (this process's last unheld record). An own record is first moved aside,
- * so that whatever happens next it no longer stands: it describes a live set that has changed. If, once moved, it turns
- * out to be another writer's (replaced since it was read), it is linked back, never renamed over whatever stands now.
- * The new record is staged whole and then LINKED into place, which fails if a record appeared meanwhile. Returns the
- * text of this process's unheld record now on disk, or undefined if there is none. Never throws and never warns: a
- * failure leaves no record (readers say not yet published), or this process's own if it could not even be moved.
- */
-function publishUnheld(
+function publishIntoEmptySlot(
 	vaultDir: string,
 	body: RecordBody,
-	mine: string | undefined,
 	seams: Partial<EffectiveRecordIo>,
-): string | undefined {
+): void {
 	const io: EffectiveRecordIo = { ...REAL_IO, ...seams };
 	const target = join(vaultDir, EFFECTIVE_BUDGET_FILE);
-	const current = readRegular(target);
-	// Another writer's record, or something that is not a record this process can judge: it stands.
-	if (current === undefined || (current !== null && current !== mine)) return undefined;
-	if (current !== null) {
-		const aside = stagingPath(vaultDir);
-		try {
-			io.rename(target, aside);
-		} catch (err) {
-			// Gone already: publish as on a vault with none. Otherwise it cannot be moved, so it cannot be replaced either.
-			if ((err as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") return mine;
-		}
-		const moved = readRegular(aside);
-		if (moved !== null && moved !== mine) {
-			putBack(io, aside, target);
-			return undefined;
-		}
-		removeQuietly(io, aside);
+	try {
+		// Anything at the path (a record, or anything else) stands: nothing is staged for it. lstat, so a dangling
+		// symbolic link counts as something there too.
+		lstatSync(target);
+		return;
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") return;
 	}
 	const tmp = stagingPath(vaultDir);
 	try {
-		const text = recordText(body);
-		io.write(tmp, text);
+		io.write(tmp, recordText(body));
 		io.link(tmp, target);
-		return text;
 	} catch {
-		return undefined;
+		// not published: the slot is as it was
 	} finally {
 		removeQuietly(io, tmp);
 	}
-}
-
-/**
- * A record replaced since it was read was another writer's, moved aside by mistake: link it back. If that fails because
- * a newer record has taken its place, the newer one stands; if it fails for any other reason the moved record is left
- * where it is, never removed and never renamed back, since a rename would replace whatever was published meanwhile.
- */
-function putBack(io: EffectiveRecordIo, aside: string, target: string): void {
-	try {
-		io.link(aside, target);
-	} catch (err) {
-		if ((err as NodeJS.ErrnoException | undefined)?.code !== "EEXIST") return;
-	}
-	removeQuietly(io, aside);
 }
 
 /** Remove a staging file, best-effort: one left behind is harmless, since readers only open effective-budget.json. */

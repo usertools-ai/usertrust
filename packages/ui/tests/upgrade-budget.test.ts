@@ -48,7 +48,7 @@ afterEach(async () => {
 	rmSync(stateDir, { recursive: true, force: true });
 });
 
-function serverConfig(): ServerConfig {
+function serverConfig(budget = VAULT_5_0_0_BUDGET): ServerConfig {
 	return {
 		host: "127.0.0.1",
 		port: 0,
@@ -56,7 +56,7 @@ function serverConfig(): ServerConfig {
 		enforcement: "enforce",
 		pendingTtlMs: 300_000,
 		dryRun: true,
-		tenants: [{ id: TENANT, keyHash: hashKey(KEY), budget: VAULT_5_0_0_BUDGET }],
+		tenants: [{ id: TENANT, keyHash: hashKey(KEY), budget }],
 	};
 }
 
@@ -64,6 +64,22 @@ async function summary(port: number): Promise<SummaryPayload> {
 	const res = await fetch(`http://127.0.0.1:${port}/api/summary`);
 	expect(res.status).toBe(200);
 	return (await res.json()) as SummaryPayload;
+}
+
+async function status(port: number): Promise<number> {
+	const res = await fetch(`http://127.0.0.1:${port}/v1/budget`, {
+		headers: { authorization: `Bearer ${KEY}` },
+	});
+	expect(res.status).toBe(200);
+	return ((await res.json()) as { remaining: number }).remaining;
+}
+
+function post(port: number, path: string, body: unknown): Promise<Response> {
+	return fetch(`http://127.0.0.1:${port}${path}`, {
+		method: "POST",
+		headers: { "content-type": "application/json", authorization: `Bearer ${KEY}` },
+		body: JSON.stringify(body),
+	});
 }
 
 function eventLog(): string {
@@ -134,5 +150,63 @@ describe("a vault only usertrust 5.0.0 wrote", () => {
 		// No governed event arrived: the chain is the one 5.0.0 wrote, byte for byte.
 		expect(eventLog()).toBe(before);
 		expect(shown?.chain.events).toBe(2);
+	});
+
+	it("a record an earlier process published stands, with its age, when the server restarts with a changed budget; the first append replaces it", {
+		timeout: 20_000,
+	}, async () => {
+		// An earlier run's governor published its budget at its start (no lock) and exited before any call.
+		const OLD = "2026-10-01T00:00:00.000Z";
+		const earlier = JSON.stringify({
+			budget: VAULT_5_0_0_BUDGET,
+			writtenAt: OLD,
+			pid: 1,
+			processStartedAt: OLD,
+		});
+		writeFileSync(join(vaultPath, "effective-budget.json"), earlier, { mode: 0o600 });
+		const changed = VAULT_5_0_0_BUDGET + 10_000;
+		ui = await createUiServer(join(stateDir, TENANT), { port: 0 });
+		api = createUsertrustServer({ config: serverConfig(changed), log: () => {} });
+		const { port } = await api.listen();
+		expect(await status(port)).toBe(changed - VAULT_5_0_0_SPENT);
+		// No append yet: the earlier record stands, shown "as of" its time, never the new budget. This is how a lock
+		// holder's record already persists across a restart; only the lock holder replaces a record. On disk first: the
+		// start neither replaced nor removed it.
+		expect(readFileSync(join(vaultPath, "effective-budget.json"), "utf-8")).toBe(earlier);
+		const stale = {
+			budget: VAULT_5_0_0_BUDGET,
+			budgetSource: "governor",
+			budgetWrittenAt: OLD,
+			budgetProvenance: `the enforced budget, as of ${OLD}`,
+		};
+		expect(loadState(vaultPath).summary).toMatchObject(stale);
+		// The dashboard polls the record every second: after more than two polls it still shows the earlier one.
+		await new Promise((r) => setTimeout(r, 2_500));
+		expect(await summary(ui.port)).toMatchObject(stale);
+		// The first governed call appends, so this process holds the lock and publishes the budget it enforces.
+		const auth = await post(port, "/v1/authorize", {
+			model: "claude-haiku-4-5",
+			estimatedInputTokens: 100,
+			maxOutputTokens: 50,
+		});
+		expect(auth.status).toBe(200);
+		const { transferId } = (await auth.json()) as { transferId: string };
+		const settled = await post(port, "/v1/settle", {
+			transferId,
+			inputTokens: 100,
+			outputTokens: 40,
+		});
+		expect(settled.status).toBe(200);
+		const remaining = await status(port);
+		let shown: SummaryPayload | undefined;
+		await vi.waitFor(
+			async () => {
+				shown = await summary((ui as UiServer).port);
+				expect(shown.budget).toBe(changed);
+				expect(shown.remainingUt).toBe(remaining);
+			},
+			{ timeout: 10_000, interval: 100 },
+		);
+		expect(shown?.budgetWrittenAt).not.toBe(OLD);
 	});
 });

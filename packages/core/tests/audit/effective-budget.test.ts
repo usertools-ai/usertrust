@@ -13,10 +13,10 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
 	existsSync,
+	linkSync,
 	mkdirSync,
 	readdirSync,
 	readFileSync,
-	renameSync,
 	rmSync,
 	statSync,
 	symlinkSync,
@@ -547,133 +547,97 @@ describe("the record is replaced only under the vault's writer lock", () => {
 	});
 });
 
-// Before its first append a governor publishes WITHOUT the lock, so the publish must never take the place of another
-// writer's record: it fills an empty slot, or replaces this process's own unheld record (the live set changed), and
-// nothing else. `lockOwner` reads none throughout, as for every governor that has not appended.
+// Before its first append a governor publishes WITHOUT the lock, so that publish must never take the place of any
+// record: it only fills an empty slot, and never moves, replaces or removes what is at the record's path, whoever wrote
+// it. `lockOwner` reads none throughout, as for every governor that has not appended.
 describe("a publish without the lock", () => {
 	const none = (): undefined => undefined;
 	const stagingFiles = (): string[] => readdirSync(vaultDir).filter((f) => f.endsWith(".tmp"));
+	const recordBytes = (): Buffer => readFileSync(join(vaultDir, EFFECTIVE_BUDGET_FILE));
 
-	it("red-first (one of two): two governors in this process that disagree read as several, and the rest after one leaves", () => {
+	it("fills an empty slot, owner-only, leaving nothing staged", () => {
 		const a = registerEnforcedBudget(vaultDir, 2_000, none);
 		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 2_000, source: "governor" });
-		const b = registerEnforcedBudget(vaultDir, 5_000, none);
-		expect(readEffectiveBudget(vaultDir)).toMatchObject({ state: "several", governors: 2 });
-		b.release();
-		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 2_000, source: "governor" });
-		a.release();
-		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 2_000, source: "governor" });
+		expect(statSync(join(vaultDir, EFFECTIVE_BUDGET_FILE)).mode & 0o777).toBe(0o600);
 		expect(stagingFiles()).toEqual([]);
+		a.release();
 	});
 
-	it("a later governor in this process replaces this process's own unheld record, after the last one left", () => {
-		registerEnforcedBudget(vaultDir, 2_000, none).release();
-		const b = registerEnforcedBudget(vaultDir, 5_000, none);
-		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 5_000, source: "governor" });
-		b.release();
-	});
-
-	it("red-first (published over the holder's): once another writer replaced it, nothing published here without the lock replaces that", () => {
+	it("red-first (published over the holder's): never replaces another writer's record, at a start or a release", () => {
 		const a = registerEnforcedBudget(vaultDir, 2_000, none);
 		// The lock holder, in another process, publishes its own.
 		recordEffectiveBudget(vaultDir, 9_999);
-		const holders = readFileSync(join(vaultDir, EFFECTIVE_BUDGET_FILE));
+		const holders = recordBytes();
 		const b = registerEnforcedBudget(vaultDir, 5_000, none);
-		expect(readFileSync(join(vaultDir, EFFECTIVE_BUDGET_FILE)).equals(holders)).toBe(true);
+		expect(recordBytes().equals(holders)).toBe(true);
 		b.release();
-		expect(readFileSync(join(vaultDir, EFFECTIVE_BUDGET_FILE)).equals(holders)).toBe(true);
+		expect(recordBytes().equals(holders)).toBe(true);
 		a.release();
-	});
-
-	/** A rename seam: the holder publishes in the instant between this process reading its own record and moving it. */
-	function racingRename(target: string, seen: { holders?: Buffer }) {
-		return (from: string, to: string): void => {
-			if (from === target && seen.holders === undefined) {
-				recordEffectiveBudget(vaultDir, 9_999);
-				seen.holders = readFileSync(target);
-			}
-			renameSync(from, to);
-		};
-	}
-
-	it("red-first (lost the holder's): a record that replaced this process's own between the check and the move is linked back", () => {
-		const a = registerEnforcedBudget(vaultDir, 2_000, none);
-		const target = join(vaultDir, EFFECTIVE_BUDGET_FILE);
-		const seen: { holders?: Buffer } = {};
-		const b = registerEnforcedBudget(vaultDir, 5_000, none, { rename: racingRename(target, seen) });
-		expect(seen.holders).toBeDefined();
-		expect(readFileSync(target).equals(seen.holders as Buffer)).toBe(true);
+		expect(recordBytes().equals(holders)).toBe(true);
 		expect(stagingFiles()).toEqual([]);
-		b.release();
-		a.release();
 	});
 
-	it("red-first (renamed over a newer one): where it cannot be linked back, it is left aside, never renamed over a record published meanwhile", () => {
+	it("never replaces this process's own earlier record either: it stands, with its age, until the first append", () => {
 		const a = registerEnforcedBudget(vaultDir, 2_000, none);
-		const target = join(vaultDir, EFFECTIVE_BUDGET_FILE);
-		const seen: { holders?: Buffer } = {};
-		let newer: Buffer | undefined;
-		// The link back fails, and by then the holder has published again.
-		const link = (): void => {
-			recordEffectiveBudget(vaultDir, 7_777);
-			newer = readFileSync(target);
+		const first = recordBytes();
+		// A second governor in this process that disagrees: the record still says the first one's budget, "as of" its
+		// time. The declared cost of never replacing without the lock; the first append below publishes both.
+		const b = registerEnforcedBudget(vaultDir, 5_000, none);
+		expect(recordBytes().equals(first)).toBe(true);
+		b.release();
+		a.release();
+		// A later governor in this process, after the last one left: the same.
+		let owner: string | undefined;
+		const c = registerEnforcedBudget(vaultDir, 7_000, () => owner);
+		expect(recordBytes().equals(first)).toBe(true);
+		owner = "owner-1";
+		c.appended();
+		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 7_000, source: "governor" });
+		c.release();
+	});
+
+	it("a failed publish without the lock says nothing and leaves the slot as it was", () => {
+		const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		const refuse = (): void => {
 			throw Object.assign(new Error("EPERM: operation not permitted, link"), { code: "EPERM" });
 		};
-		const b = registerEnforcedBudget(vaultDir, 5_000, none, {
-			link,
-			rename: racingRename(target, seen),
-		});
-		expect(readFileSync(target).equals(newer as Buffer)).toBe(true);
-		// The moved record is kept, not removed.
-		const left = stagingFiles();
-		expect(left).toHaveLength(1);
-		expect(readFileSync(join(vaultDir, left[0] as string)).equals(seen.holders as Buffer)).toBe(
-			true,
-		);
-		b.release();
-		a.release();
-	});
-
-	it("red-first (kept a stale figure): a staging failure after this process's own record was moved leaves none", () => {
-		const a = registerEnforcedBudget(vaultDir, 2_000, none);
-		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 2_000, source: "governor" });
+		const a = registerEnforcedBudget(vaultDir, 2_000, none, { link: refuse });
+		expect(readEffectiveBudget(vaultDir)).toEqual({ state: "absent" });
 		const b = registerEnforcedBudget(vaultDir, 5_000, none, {
 			write: () => {
 				throw Object.assign(new Error("ENOSPC: no space left on device, open"), { code: "ENOSPC" });
 			},
 		});
-		// 2,000 alone no longer describes the live set (it disagrees now): unknown, never that figure.
 		expect(readEffectiveBudget(vaultDir)).toEqual({ state: "absent" });
 		expect(stagingFiles()).toEqual([]);
+		expect(err).not.toHaveBeenCalled();
 		b.release();
 		a.release();
 	});
 
-	it("a failed publish without the lock says nothing and leaves no figure that is not the live set's", () => {
-		const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-		const refuse = (): void => {
-			throw Object.assign(new Error("EPERM: operation not permitted, link"), { code: "EPERM" });
+	it("a record that appears between the check and the link stands", () => {
+		let holders: Buffer | undefined;
+		const link = (from: string, to: string): void => {
+			recordEffectiveBudget(vaultDir, 9_999);
+			holders = recordBytes();
+			linkSync(from, to);
 		};
-		// No record: still none, so readers stay at "not yet published", as before this publish existed.
-		const a = registerEnforcedBudget(vaultDir, 2_000, none, { link: refuse });
-		expect(readEffectiveBudget(vaultDir)).toEqual({ state: "absent" });
-		a.release();
-		// This process's own record, about to describe the wrong live set: removed, never left as the figure.
-		const c = registerEnforcedBudget(vaultDir, 2_000, none);
-		expect(loadBudgetConfig(vaultDir)).toMatchObject({ budget: 2_000, source: "governor" });
-		const d = registerEnforcedBudget(vaultDir, 5_000, none, { link: refuse });
-		expect(readEffectiveBudget(vaultDir)).toEqual({ state: "absent" });
+		const a = registerEnforcedBudget(vaultDir, 2_000, none, { link });
+		expect(recordBytes().equals(holders as Buffer)).toBe(true);
 		expect(stagingFiles()).toEqual([]);
-		expect(err).not.toHaveBeenCalled();
-		d.release();
-		c.release();
+		a.release();
 	});
 
 	it("something at the record's path that is not a regular file is left alone", () => {
 		mkdirSync(join(vaultDir, EFFECTIVE_BUDGET_FILE));
 		const a = registerEnforcedBudget(vaultDir, 2_000, none);
 		expect(statSync(join(vaultDir, EFFECTIVE_BUDGET_FILE)).isDirectory()).toBe(true);
+		rmSync(join(vaultDir, EFFECTIVE_BUDGET_FILE), { recursive: true });
+		symlinkSync(join(base, "nowhere"), join(vaultDir, EFFECTIVE_BUDGET_FILE));
+		const b = registerEnforcedBudget(vaultDir, 2_000, none);
+		expect(existsSync(join(base, "nowhere"))).toBe(false);
 		expect(stagingFiles()).toEqual([]);
+		b.release();
 		a.release();
 	});
 });
