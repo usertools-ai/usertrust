@@ -1,7 +1,8 @@
 @import "tailwindcss";
 
 /*
- * Violet accent on black, dark only: there is no light theme.
+ * Violet accent on black, dark only: there is no light theme. usertrust gold marks the brand and the budget: the logo,
+ * the rule beside the title and a healthy budget bar. The bar turns orange past 80% used and red past 95%.
  * Green (--approve, aliased --verify) is EARNED by verification only: the integrity pill and row marks, the Verify
  * button and the VERIFIED verdict. The accent marks selection, the active tab, progress fills, chart marks and the live
  * pill; blue (--words) is the focus ring. Fonts are named, never shipped or fetched: a family is used only where it is
@@ -25,6 +26,7 @@
 	--words: #4da3ff;
 	--stakes: #ff5b5b;
 	--alert: #ff7a2f;
+	--gold: #e8b54b; /* the usertrust brand colour */
 	--plan: #4fd1c5;
 	--intel: #9b7bff;
 	--sans: "Usertools Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -32,7 +34,7 @@
 	--fig: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 	--ease-enter: cubic-bezier(0.2, 0.8, 0.2, 1);
 
-	/* The existing names, re-pointed. Names are an API: the budget bar builds var(--chart|amber|danger). */
+	/* The existing names, re-pointed. Names are an API: the budget bar builds var(--gold|warn|danger). */
 	--bg: var(--page);
 	--panel: var(--surface);
 	--panel-2: var(--raised);
@@ -43,8 +45,9 @@
 	--verify: var(--approve);
 	--amber: var(--info);
 	--danger: var(--stakes);
+	--warn: var(--alert); /* a budget more than 80% used: orange */
 	--unrecoverable: var(--alert); /* ran and recorded, NOT charged */
-	--chart: var(--intel); /* chart marks and a healthy budget: never green */
+	--chart: var(--intel); /* chart marks: never green */
 	--shadow: 0 12px 32px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.04);
 	--scrim: rgba(5, 5, 8, 0.7);
 	color-scheme: dark;
@@ -176,10 +179,10 @@ body {
 	.ut-kitmark img[data-st="shown"] {
 		opacity: 1;
 	}
-	.ut-bword {
-		font-size: 15px;
-		font-weight: 500;
-		letter-spacing: 0.025em;
+	.ut-logo {
+		display: block;
+		height: 24px;
+		width: auto;
 		flex: 0 0 auto;
 	}
 	.ut-title {
@@ -196,7 +199,7 @@ body {
 		content: "";
 		width: 26px;
 		height: 2px;
-		background: var(--intel);
+		background: var(--gold);
 		border-radius: 2px;
 	}
 	.ut-asof {

@@ -16,7 +16,9 @@ Then open `http://127.0.0.1:4180` (opens automatically unless `--no-open`).
 - **Trends** — cost over time (UTC), by kind and by model, for the records in view.
 - **Summary** — spend, the budget and where it came from, chain status, and whether an anchor file is present (file presence, not a verification verdict), always visible.
 
-Dark only. No font is shipped or fetched: the page names its font families, and the browser uses one only where it is already installed.
+The header shows the usertrust logo, bundled into the page (it works offline and costs no request). The logo and the name are trademarks of Usertools, Inc. and are not licensed under Apache-2.0: see `brand/LICENSE` and the repository's `TRADEMARKS.md`. A fork or modified version must remove the mark and rename.
+
+Dark only: there is no light theme. No font is shipped or fetched: the page names its font families, and the browser uses one only where it is already installed.
 
 ## Usage
 
