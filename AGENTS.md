@@ -1556,7 +1556,7 @@ first, clip second.
 repaint the terminal of the auditor running the command — forging a passing verdict, which is the
 entire product for a verification tool.
 
-There are **nineteen** sanitizers, in two variants: **thirteen** neutralise C1 and **six** do not. Do
+There are **twenty** sanitizers, in two variants: **fourteen** neutralise C1 and **six** do not. Do
 not consolidate them onto the weaker one — and note that the two counts are pinned SEPARATELY,
 because swapping a stronger sanitizer for a weaker one moves both by one and leaves the total
 untouched. A total is not an inventory.
@@ -1687,6 +1687,13 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   branch does not append the character back. It missed it at first, because an `if` was a
   residual the guard argued was safe (removing one would make the total read low) and that is
   true only of one already counted.
+- The stronger variant in the PII scan: `scrubForWarning` in `core/src/policy/pii-content.ts`
+  (a local function of the same name as the audit writer's), applied to the field path in the
+  `USERTRUST_PII_UNLISTED_FIELD` warning, which goes to `console.warn` and `process.emitWarning`.
+  The path is built from the caller's request, so it substitutes `?` for C0, DEL and C1, and does
+  not clip. A key or type tag in the path is shown only when it is identifier-shaped (at most 64
+  characters) and holds no PII, and is otherwise replaced by `<not shown>`, so the scrub is a
+  second line behind that rule rather than the only one.
 
 **THE INVENTORY'S SCOPE IS DECLARED HERE, and the guard matches this sentence.** It covers
 `packages/*/src` — the TypeScript build inputs, which are what `files: ["dist"]` publishes — plus

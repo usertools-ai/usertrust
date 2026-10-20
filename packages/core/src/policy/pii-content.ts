@@ -933,7 +933,6 @@ export const PII_UNLISTED_FIELD_WARNING = "USERTRUST_PII_UNLISTED_FIELD";
 /** How many distinct fields one governor reports; past it, one last warning says so and no more. */
 export const PII_UNLISTED_FIELD_REPORT_LIMIT = 256;
 
-/** A field name in a terminal warning: C0, DEL and C1 become `?`, as the audit warnings do. */
 /**
  * An unlisted key or an unknown type tag as a warning may name it. A malformed request can put any
  * value where a field name or a tag belongs, so it is shown only when it is shaped like an
@@ -946,6 +945,7 @@ function nameForWarning(text: string): string {
 /** What {@link nameForWarning} reports in place of a name it will not show. */
 const UNSHOWN_NAME = "<not shown>";
 
+/** A field path in a terminal warning: C0, DEL and C1 become `?`, as the audit warnings do. */
 function scrubForWarning(text: string): string {
 	let out = "";
 	for (const ch of text) {
