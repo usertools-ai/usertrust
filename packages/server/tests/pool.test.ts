@@ -122,7 +122,8 @@ describe("a tenant vault carries the tenant's enforced budget (red-first: read a
 			const tenant: TenantConfig = { id: "acme", keyHash: hashKey("k"), budget: 2_000 };
 			const pool = new GovernorPool({ ...config(), stateDir, tenants: [tenant] });
 			const governor = await pool.get(tenant);
-			// Published from its first append: the process then holds the tenant vault's writer lock.
+			// Published at its start (the tenant vault has no record yet), and again from its first append, when the
+			// process holds the tenant vault's writer lock.
 			const auth = await governor.authorize({
 				model: "claude-haiku-5-5",
 				estimatedInputTokens: 10,
