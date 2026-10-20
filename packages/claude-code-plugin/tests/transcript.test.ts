@@ -1616,10 +1616,12 @@ describe("hardening", () => {
 		const pre = await run("pre-tool-use.mjs", preInput("tu_1"));
 		expect(pre.code).toBe(0);
 		expect(pre.stderr).toContain("writable by group or others");
+		// The session's model-switch record cannot be trusted here, nor its absence: a switch to a
+		// dearer model may be hidden, so the newest response's model is not taken (`unknown`).
 		expect(authorizes()[0]?.body.params).toEqual({
 			hook: "PreToolUse",
 			tool_name: "Bash",
-			modelSource: "transcript",
+			modelSource: "unknown",
 		});
 		await run("post-tool-use.mjs", postInput("tu_1"));
 		const stop = await run("stop.mjs", stopInput());
@@ -3036,10 +3038,11 @@ describe("with a server that honours keys, principal and release (usertrust #205
 			await chmod(dir, 0o777);
 			const pre = await run("pre-tool-use.mjs", preInput("tu_1"), attribution);
 			expect(pre.stderr).toContain("writable by group or others");
+			// No trusted model-switch record either: `unknown` (transcript.mjs `holdModelFor`).
 			expect(authorizes()[0]?.body.params).toEqual({
 				hook: "PreToolUse",
 				tool_name: "Bash",
-				modelSource: "transcript",
+				modelSource: "unknown",
 			});
 			expect(authorizes()[0]?.body.principal).toEqual({
 				id: "main",

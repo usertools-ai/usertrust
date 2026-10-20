@@ -325,8 +325,14 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   newest response whose model is missing or not a usable id, a newest response line
   that does not parse (corrupt, or still being written), a transcript that cannot be
   read or inspected (a line over the ingest's limit, or more scanned than it reads),
-  all mean `unknown`. With no response to read, the hold names the model Claude Code
-  reported at SessionStart (its `model`, which Claude Code may omit), but only for
+  all mean `unknown`. The file can lag the conversation (Claude Code writes it
+  asynchronously), so a `PostModelSwitch` hook records each switch of the session's
+  model (`to_model`, whenever it changes: a `/model`, an automatic fallback, a
+  resume), and a newest response from before the latest switch that names another
+  model means `unknown`, for every agent of the session; one dated after it is the
+  transcript's to say. With no response to read, the hold names the model of the
+  session's latest switch, else the one Claude Code reported at SessionStart (its
+  `model`, which Claude Code may omit), but only for
   the main agent (it is the session's model, and a subagent may run a dearer one;
   nothing names a subagent's own model before its first response), and only while
   that is provably current: before the agent has read anything. After that a switch
@@ -336,9 +342,12 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   A fresh hold for an expired one names the model the expired hold was authorized at.
   The authorize says which it used in `params.modelSource` (`transcript`, `session`,
   `hold` or `unknown`). The model is not a setting: `UT_CC_MODEL`, or a config file's
-  `model`, is ignored, and SessionStart says so. A model switch mid-session is named
-  by the next response, which every tool call follows, in either mode; the plugin
-  installs no `PostModelSwitch` hook.
+  `model`, is ignored, and SessionStart says so. `PostModelSwitch` needs Claude Code
+  v2.1.251 or later, and is registered in its own file, `hooks/model-switch.json`: an
+  older Claude Code rejects a whole hooks file that names an event it does not know,
+  so there it loses only this hook (and logs that the file failed to load), and every
+  other hook runs. Without it a switch is named by the next response the transcript
+  holds.
 - **Forked subagents.** A forked subagent's transcript begins with a copy of its
   ancestor's entries — the same response ids — so the plugin posts each response
   id from ONE agent only: the first agent to claim it (a file per id under

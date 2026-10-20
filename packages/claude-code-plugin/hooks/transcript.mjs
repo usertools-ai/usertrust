@@ -1767,14 +1767,22 @@ export async function stampFirstRun(sessionId) {
 
 /**
  * Under the state dir, beside the other per-session transcript state: the model Claude Code
- * reported for each session (`recordSessionModel`), and which agents have read a response
- * (`markSeen`).
+ * reported for each session (`recordSessionModel`), its latest switch (`recordModelSwitch`), and
+ * which agents have read a response (`markSeen`).
  */
 const SESSION_MODEL_DIR = join("transcripts", "session-models");
+
+/** `lastSwitch`'s answer when a switch may be recorded but cannot be read. */
+const SWITCH_UNREADABLE = Symbol("switch unreadable");
+
+/** The record of a session's latest model switch (`recordModelSwitch`). */
+const switchName = (sessionId) => `${sanitize(sessionId)}.switch`;
 
 /** `newestTranscriptModel`'s answers that name no model: the file is missing, or holds no response. */
 const TRANSCRIPT_MISSING = Symbol("transcript missing");
 const NO_RESPONSE = Symbol("no response");
+/** `newestTranscriptModel`'s answer when the file cannot be inspected: no model can be told. */
+const UNINSPECTABLE = Object.freeze({ model: UNKNOWN_MODEL, at: Number.NaN });
 
 /**
  * Record the model Claude Code reports for a session: SessionStart's `model`, "the active
@@ -1814,10 +1822,61 @@ async function sessionModel(sessionId) {
 }
 
 /**
- * A transcript line's response model: its id, `unknown` when unusable, or undefined when it is no
- * response. A line that holds the `"usage"` key but does not parse is `unknown`, never passed over
- * for an older response: that key cannot occur inside escaped JSON text, so such a line is a
- * response that is corrupt, or still being written.
+ * Record a switch of the session's model: PostModelSwitch's `to_model`, "the model ID the switch
+ * changes to", with when this hook saw it (https://code.claude.com/docs/en/hooks#postmodelswitch).
+ * Claude Code runs it after every change of the session's model: one requested, an automatic
+ * fallback, a plan-mode setting, a resume. Only the latest is kept. An unusable `to_model` leaves
+ * any earlier record as it is. Local, bounded, and it never throws.
+ */
+export async function recordModelSwitch(sessionId, model) {
+	try {
+		const id = modelId(model);
+		if (typeof sessionId !== "string" || sessionId === "") return;
+		if (id === null || id === SYNTHETIC_MODEL || id === UNKNOWN_MODEL) return;
+		const dir = await privateDir(SESSION_MODEL_DIR);
+		if (!dir.ok) return;
+		await writeAtomic(
+			join(dir.dir, switchName(sessionId)),
+			JSON.stringify({ model: id, at: Date.now() }),
+		);
+	} catch {
+		// The next hold resolves without it.
+	}
+}
+
+/**
+ * The session's latest switch (`recordModelSwitch`) as `{ model, at }`, null when none is
+ * recorded, or `SWITCH_UNREADABLE` when one may be but cannot be read (fail dearest): from a
+ * directory that fails `privateDir`'s checks for any reason but ENOENT, or a record that cannot be
+ * read or does not parse.
+ */
+async function lastSwitch(sessionId) {
+	if (typeof sessionId !== "string" || sessionId === "") return null;
+	const dir = await privateDir(SESSION_MODEL_DIR, { create: false });
+	if (!dir.ok) return dir.reason.includes("ENOENT") ? null : SWITCH_UNREADABLE;
+	let text;
+	try {
+		text = await readRegular(join(dir.dir, switchName(sessionId)), READ_BOUND.small);
+	} catch (err) {
+		return err?.code === "ENOENT" ? null : SWITCH_UNREADABLE;
+	}
+	try {
+		const record = JSON.parse(text);
+		const id = modelId(record?.model);
+		if (id === null || id === UNKNOWN_MODEL || !Number.isSafeInteger(record.at))
+			return SWITCH_UNREADABLE;
+		return { model: id, at: record.at };
+	} catch {
+		return SWITCH_UNREADABLE;
+	}
+}
+
+/**
+ * A transcript line's response, as `{ model, at }`: its model id, `unknown` when unusable, and its
+ * `timestamp` in epoch ms (NaN when it has none); or undefined when it is no response. A line that
+ * holds the `"usage"` key but does not parse is `unknown`, never passed over for an older response:
+ * that key cannot occur inside escaped JSON text, so such a line is a response that is corrupt, or
+ * still being written.
  */
 function responseModelOf(line) {
 	if (!line.includes(USAGE_FIELD)) return undefined;
@@ -1825,25 +1884,26 @@ function responseModelOf(line) {
 	try {
 		entry = JSON.parse(line.toString("utf-8"));
 	} catch {
-		return UNKNOWN_MODEL;
+		return { model: UNKNOWN_MODEL, at: Number.NaN };
 	}
 	if (!isObject(entry?.message?.usage)) return undefined;
 	const id = modelId(entry.message.model);
 	// The `<synthetic>` placeholder is no response of any model.
 	if (id === SYNTHETIC_MODEL) return undefined;
-	return id ?? UNKNOWN_MODEL;
+	return { model: id ?? UNKNOWN_MODEL, at: Date.parse(entry.timestamp) };
 }
 
 /**
- * The model of the NEWEST response in a transcript, scanned BACKWARD from its end in
- * `READ_CHUNK_BYTES` chunks, so a response line of any size the ingest accepts is read whole:
- * - the newest complete response line's model, and `unknown` when it names no usable one (never an
+ * The NEWEST response in a transcript (`responseModelOf`'s `{ model, at }`), scanned BACKWARD from
+ * its end in `READ_CHUNK_BYTES` chunks, so a response line of any size the ingest accepts is read
+ * whole:
+ * - the newest complete response line, its model `unknown` when it names no usable one (never an
  *   older response's, which may be cheaper);
- * - `unknown` too when the transcript cannot be inspected: unreadable for any reason but ENOENT, a
- *   line over `MAX_LINE_BYTES`, or `MAX_READ_BYTES` scanned without reaching its start;
+ * - `UNINSPECTABLE`, an `unknown` model, when the transcript cannot be inspected: unreadable for any
+ *   reason but ENOENT, a line over `MAX_LINE_BYTES`, or `MAX_READ_BYTES` scanned without reaching
+ *   its start;
  * - `NO_RESPONSE` only after a read back to its first byte found no response;
  * - `TRANSCRIPT_MISSING` when it does not exist (ENOENT).
- * A line still being written (the last, with no newline yet) does not parse, and is passed over.
  * Nothing here is posted.
  */
 async function newestTranscriptModel(path) {
@@ -1851,7 +1911,7 @@ async function newestTranscriptModel(path) {
 	try {
 		({ handle } = await openRegular(path));
 	} catch (err) {
-		return err?.code === "ENOENT" ? TRANSCRIPT_MISSING : UNKNOWN_MODEL;
+		return err?.code === "ENOENT" ? TRANSCRIPT_MISSING : UNINSPECTABLE;
 	}
 	try {
 		const { size } = await handle.stat();
@@ -1859,13 +1919,13 @@ async function newestTranscriptModel(path) {
 		// The bytes before the first newline seen so far: a line whose start lies further back.
 		let carry = Buffer.alloc(0);
 		while (end > 0) {
-			if (size - end >= MAX_READ_BYTES) return UNKNOWN_MODEL;
+			if (size - end >= MAX_READ_BYTES) return UNINSPECTABLE;
 			const start = Math.max(0, end - READ_CHUNK_BYTES);
 			const chunk = Buffer.alloc(end - start);
 			let read = 0;
 			while (read < chunk.length) {
 				const { bytesRead } = await handle.read(chunk, read, chunk.length - read, start + read);
-				if (bytesRead === 0) return UNKNOWN_MODEL;
+				if (bytesRead === 0) return UNINSPECTABLE;
 				read += bytesRead;
 			}
 			const buffer = carry.length === 0 ? chunk : Buffer.concat([chunk, carry]);
@@ -1879,13 +1939,13 @@ async function newestTranscriptModel(path) {
 				newline = stop > 0 ? buffer.lastIndexOf(0x0a, stop - 1) : -1;
 			}
 			carry = buffer.subarray(0, stop);
-			if (carry.length > MAX_LINE_BYTES) return UNKNOWN_MODEL;
+			if (carry.length > MAX_LINE_BYTES) return UNINSPECTABLE;
 			end = start;
 		}
 		// At its first byte: the carry is the transcript's first line.
 		return responseModelOf(carry) ?? NO_RESPONSE;
 	} catch {
-		return UNKNOWN_MODEL;
+		return UNINSPECTABLE;
 	} finally {
 		await handle.close().catch(() => {});
 	}
@@ -1927,10 +1987,19 @@ async function seenBefore(sessionId, agentId) {
  *     stopped before the end). In estimate mode too (`UT_CC_USAGE=estimate`, or an agent that
  *     settles at the estimate): only that response's model id is read, never its usage, which is
  *     still estimated. A newest response with no usable model, or a transcript that cannot be
- *     inspected, is `unknown`;
+ *     inspected, is `unknown`. The file may LAG: Claude Code writes it asynchronously, so it "may
+ *     not yet include the current turn's most recent messages when a hook fires"
+ *     (https://code.claude.com/docs/en/hooks#common-input-fields). So when the session's latest
+ *     model switch (`recordModelSwitch`) names another model than that response, and the response
+ *     is not dated after the switch (or bears no date), the response may predate it: `unknown`,
+ *     never the cheaper of the two, and never the switch's model either, since a one-turn
+ *     fallback model can serve a turn without a switch. A switch record that cannot be read is
+ *     `unknown` too. It counts for every agent of the session: an automatic fallback changes the
+ *     session's model;
  *  2. with no response to read (the transcript is missing, holds none, or no path names it), the
- *     model Claude Code reported for the session at SessionStart (`recordSessionModel`), for the
- *     MAIN agent only: it is the session's model, and a subagent may run a dearer one (Claude Code's
+ *     model of the session's latest switch, else the one Claude Code reported for the session at
+ *     SessionStart (`recordSessionModel`), for the MAIN agent only: it is the session's model,
+ *     and a subagent may run a dearer one (Claude Code's
  *     SubagentStart input names no model, https://code.claude.com/docs/en/hooks#subagentstart-input,
  *     and the Agent tool's `resolvedModel` arrives only once the subagent has finished). And ONLY
  *     while it is provably current: before this agent has read anything (its cursor has read no
@@ -1946,16 +2015,23 @@ export async function holdModelFor({ sessionId, agentId, input, lastModel, readB
 	const unknown = { model: UNKNOWN_MODEL, source: "unknown" };
 	if (!isAgentId(agentId)) return unknown;
 	const path = transcriptPathFor(input ?? {}, agentId);
+	const switched = await lastSwitch(sessionId);
 	if (path !== undefined) {
 		const newest = await newestTranscriptModel(path);
-		if (typeof newest === "string") {
+		if (typeof newest === "object") {
 			await markSeen(sessionId, agentId);
-			return newest === UNKNOWN_MODEL ? unknown : { model: newest, source: "transcript" };
+			if (newest.model === UNKNOWN_MODEL || switched === SWITCH_UNREADABLE) return unknown;
+			// NaN (no date) is never after the switch.
+			if (switched !== null && switched.model !== newest.model && !(newest.at > switched.at)) {
+				return unknown;
+			}
+			return { model: newest.model, source: "transcript" };
 		}
 	}
 	const read =
 		readBefore === true || modelId(lastModel) !== null || (await seenBefore(sessionId, agentId));
-	if (read || agentId !== "main") return unknown;
+	if (read || agentId !== "main" || switched === SWITCH_UNREADABLE) return unknown;
+	if (switched !== null) return { model: switched.model, source: "session" };
 	const reported = await sessionModel(sessionId);
 	if (reported !== null) return { model: reported, source: "session" };
 	return unknown;

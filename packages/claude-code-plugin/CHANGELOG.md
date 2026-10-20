@@ -14,10 +14,15 @@ npm, and its version is its own: the `usertrust` packages and their
   session ran. An Opus session's estimate holds, and the holds of a tool call with nothing new
   before it, read as Sonnet 4.6 on the ledger and were priced at its rate: the budget check
   before the call was sized too small, and an agent that settles at the estimate (a forked
-  subagent, say) was charged at that rate too. Such a hold now names the newest model its
-  agent's transcript has shown, then the newest response in its transcript, then the model
-  Claude Code reported at SessionStart, and otherwise `unknown`, which usertrust-server prices
-  at the dearest rate it publishes. Estimate mode (`UT_CC_USAGE=estimate`) now reads the
+  subagent, say) was charged at that rate too. Such a hold now names the model of the newest
+  response in its agent's transcript; with none to read, and only for the main agent before it
+  has read anything, the model of the session's latest switch, else the one Claude Code reported
+  at SessionStart; and otherwise `unknown`, which usertrust-server prices at the dearest rate it
+  publishes. The transcript can lag the conversation, so a new `PostModelSwitch` hook records
+  each switch of the session's model, and a newest response from before it that names another
+  model is `unknown`. That hook is registered in its own file, `hooks/model-switch.json`: a Claude
+  Code before v2.1.251 does not know the event and rejects a whole hooks file that names it, so
+  it loses only this hook. Estimate mode (`UT_CC_USAGE=estimate`) now reads the
   transcript tail for the model id only, so a model switched to mid-session is held and settled
   at its own rate; its usage is still always estimated. Responses written before the session was metered now count
   toward the model too, though they are still never billed. PostToolUse's fresh hold for an

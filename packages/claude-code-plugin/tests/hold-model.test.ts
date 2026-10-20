@@ -15,6 +15,7 @@ const HOOKS = join(import.meta.dirname, "..", "hooks");
 const SESSION_START = join(HOOKS, "session-start.mjs");
 const PRE = join(HOOKS, "pre-tool-use.mjs");
 const POST = join(HOOKS, "post-tool-use.mjs");
+const SWITCH = join(HOOKS, "post-model-switch.mjs");
 /** Imported in-process by a computed path, as the other tests import hook modules (no declarations). */
 const TRANSCRIPT = join(HOOKS, "transcript.mjs");
 
@@ -324,6 +325,123 @@ describe("the model a hold names is the session's own", () => {
 		expect(await at(s.sessionId, { transcript_path: s.path })).toEqual(unknown);
 	}, 30_000);
 
+	it("the session's latest model switch, directly: a newest response from before it that names another model is `unknown`", async () => {
+		for (const name of ["UT_CC_CONFIG", "UT_SERVER_URL", "UT_SERVER_KEY"]) delete process.env[name];
+		process.env.UT_CC_STATE_DIR = stateDir;
+		const { holdModelFor, recordSessionModel, recordModelSwitch } = (await import(TRANSCRIPT)) as {
+			holdModelFor: (a: Record<string, unknown>) => Promise<{ model: string; source: string }>;
+			recordSessionModel: (session: string, model: unknown) => Promise<void>;
+			recordModelSwitch: (session: string, model: unknown) => Promise<void>;
+		};
+		let n = 0;
+		/** A fresh session that switched to Opus NOW, and a transcript path under it. */
+		const switched = async () => {
+			n += 1;
+			const sessionId = `switch-${n}`;
+			await recordModelSwitch(sessionId, OPUS);
+			return { sessionId, path: join(projectDir, `${sessionId}.jsonl`) };
+		};
+		const at = (sessionId: string, input: Record<string, unknown>, agentId = "main") =>
+			holdModelFor({ sessionId, agentId, input, lastModel: null });
+		const unknown = { model: "unknown", source: "unknown" };
+		const transcript = (model: string) => ({ model, source: "transcript" });
+
+		// The tail lags: its newest response, Haiku's, is from before the switch to Opus.
+		let s = await switched();
+		await writeFile(s.path, response("msg_h", HAIKU, 10_000));
+		expect(await at(s.sessionId, { transcript_path: s.path })).toEqual(unknown);
+		// From before the switch, but naming the model switched to: that model.
+		s = await switched();
+		await writeFile(s.path, response("msg_o", OPUS, 10_000));
+		expect(await at(s.sessionId, { transcript_path: s.path })).toEqual(transcript(OPUS));
+		// A response dated after the switch is the transcript's to say, whichever model it names.
+		s = await switched();
+		await writeFile(s.path, response("msg_h", HAIKU, -10_000));
+		expect(await at(s.sessionId, { transcript_path: s.path })).toEqual(transcript(HAIKU));
+		// A response with no date cannot be placed after the switch: `unknown`.
+		s = await switched();
+		const undated = JSON.parse(response("msg_h", HAIKU)) as Record<string, unknown>;
+		delete undated.timestamp;
+		await writeFile(s.path, `${JSON.stringify(undated)}\n`);
+		expect(await at(s.sessionId, { transcript_path: s.path })).toEqual(unknown);
+		// A subagent of the session too: an automatic fallback changes the session's model.
+		s = await switched();
+		const sub = join(projectDir, s.sessionId, "subagents", "agent-a1.jsonl");
+		await writeTranscript(sub, response("msg_h", HAIKU, 10_000));
+		expect(await at(s.sessionId, { transcript_path: s.path }, "a1")).toEqual(unknown);
+		// A switch record that cannot be read may name a dearer model: `unknown`, even for a
+		// response that a readable record would leave as it is.
+		s = await switched();
+		await writeFile(s.path, response("msg_h", HAIKU, -10_000));
+		await writeFile(join(stateDir, "transcripts", "session-models", `${s.sessionId}.switch`), "{");
+		expect(await at(s.sessionId, { transcript_path: s.path })).toEqual(unknown);
+		// No response yet, never read: the switch's model, over the SessionStart one it is newer than.
+		await recordSessionModel("switch-start", OPUS);
+		await recordModelSwitch("switch-start", HAIKU);
+		expect(await at("switch-start", {})).toEqual({ model: HAIKU, source: "session" });
+		// An unusable `to_model` leaves the earlier record as it is.
+		await recordModelSwitch("switch-start", "two words");
+		expect(await at("switch-start", {})).toEqual({ model: HAIKU, source: "session" });
+	});
+
+	it("the PostModelSwitch hook records the switch, prints nothing for Claude's context, and a hold reads it", async () => {
+		await writeTranscript(mainTranscript(), response("msg_h", HAIKU, 10_000));
+		await pre("tu_1", { transcript_path: mainTranscript() });
+		const recorded = await runHook(
+			SWITCH,
+			{
+				session_id: SESSION,
+				hook_event_name: "PostModelSwitch",
+				from_model: HAIKU,
+				to_model: OPUS,
+				source: "command",
+			},
+			env,
+		);
+		expect(recorded.code).toBe(0);
+		// Claude Code adds a PostModelSwitch hook's plain stdout to Claude's context.
+		expect(recorded.stdout).toBe("");
+		// The tail still ends on Haiku's response, from before the switch.
+		await pre("tu_2", { transcript_path: mainTranscript() });
+		// Opus's first response reaches the file: it is the transcript's again.
+		await writeFile(mainTranscript(), response("msg_h", HAIKU, 10_000) + response("msg_o", OPUS));
+		await pre("tu_3", { transcript_path: mainTranscript() });
+		expect(authorizes()).toMatchObject([
+			{ model: HAIKU, params: { modelSource: "transcript" } },
+			{ model: "unknown", params: { modelSource: "unknown" } },
+			{ model: OPUS, params: { modelSource: "transcript" } },
+		]);
+	});
+
+	it("PostModelSwitch is registered in its own hooks file: a Claude Code before v2.1.251 rejects a whole file that names it", async () => {
+		// The events Claude Code v2.1.250 accepts, from its own error for a file naming PostModelSwitch
+		// ("Failed to load hooks ... Invalid option: expected one of ..."). With any other name in
+		// hooks.json it loads none of the file's hooks: no governance on that client at all.
+		const known = new Set(
+			"PreToolUse PostToolUse PostToolUseFailure PostToolBatch Notification UserPromptSubmit UserPromptExpansion SessionStart SessionEnd Stop StopFailure SubagentStart SubagentStop PreCompact PostCompact PermissionRequest PermissionDenied Setup TeammateIdle TaskCreated TaskCompleted Elicitation ElicitationResult ConfigChange WorktreeCreate WorktreeRemove InstructionsLoaded CwdChanged FileChanged DirectoryAdded MessageDisplay".split(
+				" ",
+			),
+		);
+		type Manifest = { hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>> };
+		const read = async (file: string) =>
+			JSON.parse(await readFile(join(HOOKS, file), "utf-8")) as Manifest;
+		const main = await read("hooks.json");
+		expect(Object.keys(main.hooks).filter((event) => !known.has(event))).toEqual([]);
+		const switches = await read("model-switch.json");
+		expect(Object.keys(switches.hooks)).toEqual(["PostModelSwitch"]);
+		expect(
+			switches.hooks.PostModelSwitch?.flatMap((entry) => entry.hooks.map((h) => h.command)),
+		).toEqual(
+			// biome-ignore lint/suspicious/noTemplateCurlyInString: Claude Code expands ${CLAUDE_PLUGIN_ROOT} itself
+			['node "${CLAUDE_PLUGIN_ROOT}/hooks/launch.mjs" post-model-switch'],
+		);
+		// The plugin declares it, beside hooks/hooks.json, which Claude Code loads by default.
+		const plugin = JSON.parse(
+			await readFile(join(HOOKS, "..", ".claude-plugin", "plugin.json"), "utf-8"),
+		) as { hooks?: unknown };
+		expect(plugin.hooks).toBe("./hooks/model-switch.json");
+	});
+
 	it("before any response of its agent, the main agent's hold names the SessionStart model, and a subagent's is `unknown`", async () => {
 		expect((await sessionStart(HAIKU)).code).toBe(0);
 		// The main agent, no transcript path: an estimate hold at the session's model.
@@ -345,8 +463,13 @@ describe("the model a hold names is the session's own", () => {
 		// Writable by the group: whatever it holds could have been planted, so it is not read.
 		await chmod(join(stateDir, "transcripts", "session-models"), 0o770);
 		await pre("tu_2");
+		// A newest response on disk too: a switch recorded there cannot be trusted, nor its absence
+		// (it may hide a switch to a dearer model), so `unknown` again.
+		await writeTranscript(mainTranscript(), response("msg_h", HAIKU));
+		await pre("tu_3", { transcript_path: mainTranscript() });
 		expect(authorizes()).toMatchObject([
 			{ model: OPUS, params: { modelSource: "session" } },
+			{ model: "unknown", params: { modelSource: "unknown" } },
 			{ model: "unknown", params: { modelSource: "unknown" } },
 		]);
 	});
