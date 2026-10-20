@@ -76,7 +76,7 @@ the kit first, never committed here.
 | Ledger | `ledger/{client,engine,pricing}.ts` |
 | Audit | `audit/{chain,canonical,merkle,verify,read,dead-letters,rotation,entropy,quarantine}.ts` |
 | Anchoring | `audit/{anchor,anchor-verify,anchor-doctor,rekor,rekor-verify,sigv4}.ts` |
-| Policy | `policy/{gate,default-rules,pii,injection,canary,decay}.ts` |
+| Policy | `policy/{gate,default-rules,pii,pii-content,injection,canary,decay}.ts` |
 | Board | `board/{board,director,concerns}.ts` |
 | Budget | `budget/{allocation,attribution,context,runway}.ts` |
 | Runtime | `resilience/{circuit,scope}.ts`, `memory/patterns.ts`, `snapshot/checkpoint.ts` |
@@ -1533,10 +1533,20 @@ audit payload, because the proof must not become a channel for credentials or pr
 invariant is only as strong as the event shapes themselves: the DLQ persists whatever an event
 carried, verbatim (see the DLQ note above).
 
-**`redactPII` is pure.** It deep-clones and never mutates the caller's object. That is what makes
-`pii: "redact"` safe: PII the prompt scan finds never egresses: the outbound request is a redacted
-clone (fields the scan does not read are not redacted unless the prompt scan fired; see LIMITATIONS §11). `"block"`
-throws before any egress; `"warn"` forwards verbatim and redacts only the audit copy.
+**Redaction never mutates the caller's object, and it rewrites content only.** `redactPII` deep-clones;
+`redactContent` (`policy/pii-content.ts`) copies only the containers on the way to a replaced value and
+passes everything else by reference. `"block"` decides on BOTH scans: `detectPII` over every string in the
+prompt fields, control values included (`extractPromptParts`), and the content scan, which reads
+what the SDK sends (decoded JSON `arguments`, hidden Google text parts); never drop either, or
+`"block"` lets out what one of them refuses. A closed per-provider schema in
+`policy/pii-content.ts` names the content fields `"redact"` rewrites; every control field
+(credentials, headers, ids, `metadata`, tool declarations, replayed reasoning) is sent as written,
+and a field the schema does not name is not rewritten and is reported once per governor under
+`USERTRUST_PII_UNLISTED_FIELD`. That is what makes `pii: "redact"` safe: the copy is scanned again,
+and PII the scan still finds in it (a value redaction leaves as written) refuses the call as
+`"block"` does, so PII the scan finds never egresses (see LIMITATIONS.md, section 11). A field added to a provider's request type
+belongs in that schema, and `tests/policy/pii-content-sdk-types.test-d.ts` fails until it is there.
+`"block"` throws before any egress; `"warn"` forwards verbatim and redacts only the audit copy.
 
 **Signature trust is anchored by the operator's publisher→key registry, never by the embedded key.**
 A key embedded in a skill manifest is accepted only if it is in `config.supplyChain.publisherKeys`
@@ -1553,7 +1563,7 @@ first, clip second.
 repaint the terminal of the auditor running the command — forging a passing verdict, which is the
 entire product for a verification tool.
 
-There are **nineteen** sanitizers, in two variants: **thirteen** neutralise C1 and **six** do not. Do
+There are **twenty** sanitizers, in two variants: **fourteen** neutralise C1 and **six** do not. Do
 not consolidate them onto the weaker one — and note that the two counts are pinned SEPARATELY,
 because swapping a stronger sanitizer for a weaker one moves both by one and leaves the total
 untouched. A total is not an inventory.
@@ -1684,6 +1694,13 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   branch does not append the character back. It missed it at first, because an `if` was a
   residual the guard argued was safe (removing one would make the total read low) and that is
   true only of one already counted.
+- The stronger variant in the PII scan: `scrubForWarning` in `core/src/policy/pii-content.ts`
+  (a local function of the same name as the audit writer's), applied to the field path in the
+  `USERTRUST_PII_UNLISTED_FIELD` warning, which goes to `console.warn` and `process.emitWarning`.
+  The path is built from the caller's request, so it substitutes `?` for C0, DEL and C1, and does
+  not clip. A key or type tag in the path is shown only when it is identifier-shaped (at most 64
+  characters) and holds no PII, and is otherwise replaced by `<not shown>`, so the scrub is a
+  second line behind that rule rather than the only one.
 
 **THE INVENTORY'S SCOPE IS DECLARED HERE, and the guard matches this sentence.** It covers
 `packages/*/src` — the TypeScript build inputs, which are what `files: ["dist"]` publishes — plus
