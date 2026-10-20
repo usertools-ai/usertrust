@@ -407,12 +407,20 @@ describe("resolveSettings: which file a configured session accepts", () => {
 
 	it("a configured session's child gets nothing of the environment but the host variables a hook reads", async () => {
 		const { CHILD_ENV, childEnv, isChildEnv } = await configModule();
-		expect(CHILD_ENV).toEqual(["CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS"]);
-		const given = childEnv({ ...HOSTILE_ENV, CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: "3000" });
+		expect(CHILD_ENV).toEqual([
+			"CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS",
+			"BASH_DEFAULT_TIMEOUT_MS",
+		]);
+		const given = childEnv({
+			...HOSTILE_ENV,
+			CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: "3000",
+			BASH_DEFAULT_TIMEOUT_MS: "300000",
+		});
 		// NODE_V8_COVERAGE is set, empty: node's spawn copies the parent's into any
 		// environment it is given that lacks one.
 		expect(given).toEqual({
 			CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: "3000",
+			BASH_DEFAULT_TIMEOUT_MS: "300000",
 			NODE_V8_COVERAGE: "",
 		});
 		expect(isChildEnv(given)).toBe(true);
