@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The documentation no longer says more than audit verification checks.** Verification reads events in `sequence` order, so moving lines in `events.jsonl` without changing an event is not reported. On a vault with no external anchor, a log cut short or extended, with its `.meta` sidecar rewritten to match, verifies. A consistency proof shows something only against a root you obtained independently. The sample output now shows the `UNANCHORED` qualifier that `usertrust-verify` prints, and the sentences that said each call is audited now say what a call whose audit write failed reports (`auditDegraded`). Each of these statements is now listed in `docs/claims.json` with the test that proves it, and a test fails when the documentation states an integrity claim the list does not hold (see `docs/CLAIMS.md`).
+
 ## [5.2.0] - 2026-10-19
 
 ### Read before upgrading
