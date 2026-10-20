@@ -25,7 +25,8 @@ npm, and its version is its own: the `usertrust` packages and their
   still shown once): run `usertrust-job.mjs start --type <type> --source agent <short-id>` at the start
   of each distinct task and again when the task changes, without asking. It is added on every start,
   resume, clear, compact and fork, after one health request of at most 1.5 s; if that fails or times out,
-  only the banner is shown. Claude Code saves injected context in the session transcript.
+  only the banner is shown. The request never counts toward the circuit breaker and is not made while it
+  is open. Claude Code saves injected context in the session transcript.
 
 ## [3.0.3] - 2026-10-17
 

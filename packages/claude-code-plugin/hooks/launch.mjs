@@ -4,7 +4,7 @@
 // session's settings from the session's pin (session.mjs, which makes the pin when
 // the session has none). Then:
 // - An `environment` session and a refused one run the hook here, in this process. So does
-//   SessionStart, which sends nothing itself: its one request (does the server list
+//   SessionStart, which makes no governed request itself: its one probe (does the server list
 //   `job-type`?) is made, for a configured session, by a child of the kind below
 //   (`probeInChild`, session-probe.mjs), and the answer is a token the child writes to a pipe.
 // - A `configured` session's other hooks, all of which can send, run as a CHILD that

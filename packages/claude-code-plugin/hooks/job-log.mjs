@@ -40,6 +40,7 @@ import { mkdir, open, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
 	appendRegular,
+	breakerOpen,
 	capabilityListMalformed,
 	eachLine,
 	guardMode,
@@ -423,13 +424,21 @@ export const TYPE_PROBE_MS = 1_500;
 /**
  * Whether the server lists `job-type` in `/v1/health` `capabilities`, asked in THIS process:
  * one health request of at most `TYPE_PROBE_MS`. False for everything else, never a thrown
- * error: a probe that times out or fails, a refused configuration, and health output whose
+ * error: the breaker open, a probe that times out or fails (neither counts toward the breaker:
+ * `serverCapabilities` `count: false`), a refused configuration, and health output whose
  * capability list is not a list of strings (a half-readable list is not trusted for this one
  * decision, even when the literal is in it).
  */
 export async function probeJobType() {
 	try {
-		const capabilities = await serverCapabilities({ maxMs: TYPE_PROBE_MS });
+		// The breaker's own open-check, as every hook makes it: while the host's breaker for this
+		// server is open nothing is sent, and the session just gets its banner. (A hook past the
+		// breaker's minute is its half-open prober, as any other hook would be.) Made HERE, in the
+		// process that sends: a configured session's child, so a parent that inherits the
+		// environment never asks the server anything.
+		if (await breakerOpen()) return false;
+		// `count: false`: this probe's timeout or failure never strikes the breaker.
+		const capabilities = await serverCapabilities({ maxMs: TYPE_PROBE_MS, count: false });
 		return (
 			capabilities !== null &&
 			!capabilityListMalformed(capabilities) &&

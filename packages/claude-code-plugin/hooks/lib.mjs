@@ -1765,7 +1765,7 @@ export function jobTypeCapable(capabilities) {
  * they do not know. It would accept an `idempotencyKey` and drop it in silence —
  * and a settle retried "safely" under that key would then post twice.
  */
-export function serverCapabilities({ maxMs = 2_000 } = {}) {
+export function serverCapabilities({ maxMs = 2_000, count = true } = {}) {
 	capabilitiesRead ??= (async () => {
 		const timeoutMs = Math.min(maxMs, budgetShare(0.2), timeLeft());
 		const unknown = async (why, { cache = true } = {}) => {
@@ -1803,7 +1803,10 @@ export function serverCapabilities({ maxMs = 2_000 } = {}) {
 			await rememberCapabilities(capabilities);
 			return capabilities;
 		} catch (err) {
-			if (controller.signal.aborted) timedOut(timeoutMs);
+			// `count: false` is SessionStart's optional probe: a slow health answer there is not the
+			// server's silence toward a governed call, and three session starts must never open the
+			// breaker that every watch-mode hook then obeys. Every other probe counts, as before.
+			if (controller.signal.aborted && count) timedOut(timeoutMs);
 			return unknown(err instanceof Error ? err.message : String(err));
 		} finally {
 			clearTimeout(timeout);

@@ -553,7 +553,9 @@ are opaque: 1-128 characters of `[A-Za-z0-9._:-]`.
     run it again when the task changes, do not ask you, and after a resume or compact keep a job already
     open for the same work. It is added on every start, resume, `/clear`, compact and fork. Claude Code
     saves what a hook injects in the session transcript, so it is not hidden: it is simply not shown as a
-    chat message. The check for `"job-type"` is one health request of up to 1.5 s at session start; if it
+    chat message. The check for `"job-type"` is one health request of up to 1.5 s at session start. It never
+    counts toward the circuit breaker (a slow or failing answer there is not a strike, so session starts
+    cannot open the breaker the governed calls obey), and it is not made while the breaker is open. If it
     fails, times out, answers something that is not a capability list, or the configuration is refused, no
     instruction is added and the banner is shown exactly as before.
   - **Allow the command** so the agent is not prompted for it each time: `Bash(usertrust-job.mjs:*)`

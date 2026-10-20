@@ -31,6 +31,10 @@ const saved = { ...process.env };
 
 beforeEach(async () => {
 	state = await mkdtemp(join(tmpdir(), "utcc-jt-"));
+	// Hermetic: a developer's own session settings (a config file, a server, a key) must never
+	// reach the in-process libraries or a spawned process of these tests. `UT_CC_CONFIG` present
+	// would make this process a CONFIGURED session whose state dir is not `state`.
+	for (const name of ["UT_CC_CONFIG", "UT_SERVER_URL", "UT_SERVER_KEY"]) delete process.env[name];
 	process.env.UT_CC_STATE_DIR = state;
 });
 afterEach(() => {

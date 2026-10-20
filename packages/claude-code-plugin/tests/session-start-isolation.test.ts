@@ -11,7 +11,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { LAUNCH, PASSWD_HOME_PRELOAD, pinsDir, runHook } from "./helpers/run-hook.js";
+import {
+	LAUNCH,
+	PASSWD_HOME_PRELOAD,
+	passwdHomeFor,
+	pinsDir,
+	runHook,
+} from "./helpers/run-hook.js";
 
 vi.setConfig({ testTimeout: 30_000 });
 
@@ -23,7 +29,7 @@ const CAPS = JSON.stringify({ status: "ok", capabilities: ["job", "job-type", "p
 const servers: Server[] = [];
 afterEach(() => {
 	for (const s of servers.splice(0)) {
-		s.closeAllConnections();
+		s.closeAllConnections?.();
 		s.close();
 	}
 });
@@ -432,4 +438,131 @@ describe("a configured session's SessionStart request is made from its isolated 
 			expect(gone, "the probe child did not end by itself").toBe(true);
 		});
 	});
+});
+
+// ── The probe and the circuit breaker (breaker.mjs) ──
+
+interface BreakerLib {
+	useBreakerHome(home: string | null): void;
+	noteTimeout(url: string, deadlineMs: number): boolean;
+	consultBreaker(
+		url: string,
+		probe: () => Promise<boolean | null>,
+	): Promise<{ state: "open" | "closed" }>;
+}
+const breakerLib = async () =>
+	(await import(pathToFileURL(join(HOOKS, "breaker.mjs")).href)) as BreakerLib;
+
+describe("SessionStart's probe and the host's circuit breaker", () => {
+	const PRE = join(HOOKS, "pre-tool-use.mjs");
+	const SESSION = "s-brk";
+	const stateOf = async () => mkdtemp(join(tmpdir(), "utcc-brk-state-"));
+
+	/** A session's env and the passwd home its breaker lives under, for each way a session is set up. */
+	async function sessionFor(mode: "env" | "configured", url: string) {
+		if (mode === "configured") {
+			const env = await configured(url);
+			return { env, home: env.TEST_PASSWD_HOME };
+		}
+		const env = { UT_SERVER_URL: url, UT_SERVER_KEY: "k", UT_CC_STATE_DIR: await stateOf() };
+		return { env, home: passwdHomeFor(env) };
+	}
+	const breakerState = async (home: string, url: string) => {
+		const lib = await breakerLib();
+		lib.useBreakerHome(home);
+		return (await lib.consultBreaker(url, async () => true)).state;
+	};
+
+	/** A server on one port, then another on the SAME port (the breaker is keyed by the URL). */
+	async function portHolder(make: () => Server, sockets: Socket[] = []) {
+		const server = make();
+		servers.push(server);
+		await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+		const port = (server.address() as { port: number }).port;
+		return {
+			port,
+			async replaceWith(next: Server) {
+				for (const sock of sockets) sock.destroy();
+				server.closeAllConnections?.();
+				await new Promise((r) => server.close(r));
+				servers.push(next);
+				await new Promise<void>((r) => next.listen(port, "127.0.0.1", () => r()));
+			},
+		};
+	}
+	const live = (seen: string[]) =>
+		createHttp((req, res) => {
+			seen.push(`${req.method} ${req.url}`);
+			res.writeHead(200, { "content-type": "application/json" });
+			res.end(
+				req.url === "/v1/health" ? CAPS : JSON.stringify({ transferId: "tx_1", estimatedCost: 1 }),
+			);
+		});
+
+	for (const mode of ["env", "configured"] as const) {
+		for (const [what, make] of [
+			[
+				"a server that accepts the connection and never answers",
+				(sockets: Socket[]) => createTcp((sock) => sockets.push(sock)) as unknown as Server,
+			],
+			[
+				"a /v1/health that answers in 1.7 s",
+				() =>
+					createHttp((_req, res) => {
+						setTimeout(() => {
+							res.writeHead(200, { "content-type": "application/json" });
+							res.end(CAPS);
+						}, 1_700);
+					}),
+			],
+		] as const) {
+			it(`${mode}: three session starts against ${what} leave the breaker closed, and a watch-mode call still sends`, async () => {
+				const sockets: Socket[] = [];
+				const holder = await portHolder(() => make(sockets), sockets);
+				const url = `http://127.0.0.1:${holder.port}`;
+				const { env, home } = await sessionFor(mode, url);
+				for (let i = 0; i < 3; i++) {
+					const r = await start(env, {}, SESSION);
+					expect(r.code).toBe(0);
+					expect(Object.keys(JSON.parse(r.stdout))).toEqual(["systemMessage"]);
+					expect(count(r.stdout, BANNER)).toBe(1);
+				}
+				// mutant: the probe's timeout is counted → the third opens the breaker
+				expect(await breakerState(home, url)).toBe("closed");
+				// ...and the server, answering again, is metered: the call is authorized, not skipped
+				const seen: string[] = [];
+				await holder.replaceWith(live(seen));
+				const call = await runHook(
+					PRE,
+					{
+						session_id: SESSION,
+						tool_name: "Bash",
+						tool_use_id: "tu_1",
+						tool_input: { command: "ls" },
+					},
+					{ ...env, UT_CC_USAGE: "estimate" },
+				);
+				expect(call.code).toBe(0);
+				expect(seen).toContain("POST /v1/authorize");
+			});
+		}
+
+		it(`${mode}: with the breaker OPEN, SessionStart sends nothing, adds no instruction, and still shows the banner once`, async () => {
+			const fake = await httpFake();
+			const url = `http://127.0.0.1:${fake.port}`;
+			const { env, home } = await sessionFor(mode, url);
+			const lib = await breakerLib();
+			lib.useBreakerHome(home);
+			// Three counted timeouts, by the breaker's own writer: it is open for a minute.
+			for (let i = 0; i < 3; i++) lib.noteTimeout(url, 5_000);
+			expect(await breakerState(home, url)).toBe("open");
+			const r = await start(env, {}, SESSION);
+			expect(r.code).toBe(0);
+			// mutant: the open-check removed → the probe asks the server, and the instruction arrives
+			expect(fake.requests).toEqual([]);
+			expect(Object.keys(JSON.parse(r.stdout))).toEqual(["systemMessage"]);
+			expect(count(r.stdout, BANNER)).toBe(1);
+			expect(await breakerState(home, url)).toBe("open");
+		});
+	}
 });
