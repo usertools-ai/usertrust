@@ -600,9 +600,10 @@ written.
 `"redact"` rewrites exactly what the scan reads, and nothing else: each content
 string that matches is replaced in full, not only the matched characters, in a
 copy of the request, and every other value is sent as the caller wrote it. A tool
-call's JSON `arguments` string is parsed, its matching strings replaced and the
-JSON written out again, so it stays valid JSON; one that is not JSON is replaced
-in full. The content fields are a closed list per provider, written from the
+call's JSON `arguments` string keeps its text: only the string values in it that
+match are replaced, in place, so it stays valid JSON and every other character
+(keys, numbers of any size, whitespace) is sent as written; one that is not JSON
+is replaced in full. The content fields are a closed list per provider, written from the
 provider SDKs' request types. A field the list does not name (one a newer SDK
 adds, or a content block type it does not know) is neither scanned nor redacted:
 it is sent as written, and each governor reports it once, by its path and never its

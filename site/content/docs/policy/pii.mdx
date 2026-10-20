@@ -74,7 +74,7 @@ Each string is tested against these patterns. A match anywhere inside the string
 `"redact"` rewrites exactly the content the scan reads. When the scan finds PII, usertrust forwards a copy of the request in which every content string that matches a pattern is replaced by `[REDACTED:<types>]`, for example `[REDACTED:email,phone]`.
 
 - The replacement is for the **whole string value**, not just the matched characters: a message that contains one email address is replaced in full.
-- A tool call's JSON `arguments` string is parsed, the matching values inside it are replaced, and it is written out again, so it is still valid JSON. A string that is not JSON is replaced in full. Keys are never replaced.
+- A tool call's JSON `arguments` string keeps its text: only the string values inside it that match are replaced, in place, so it is still valid JSON and every other character (keys, numbers of any size, whitespace) is sent as written. A string that is not JSON is replaced in full. Keys are never replaced.
 - **Every control field is sent as you wrote it**: MCP server credentials and headers, `httpOptions` headers, cache keys, safety identifiers, `metadata`, ids, and replayed reasoning, which the provider refuses if it is changed. They are not redacted even when the prompt beside them is.
 - PII in a field the scan does not read (a `tools` description, a `system` block array, a Google `config.systemInstruction`) goes to the provider as written.
 - Your own object is never changed; usertrust redacts a copy.

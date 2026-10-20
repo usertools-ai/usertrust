@@ -1104,7 +1104,7 @@ describe("fields the schema does not name", () => {
 });
 
 describe("JSON-string arguments", () => {
-	it("are parsed, their strings redacted, and sent as valid JSON with keys, numbers and clean strings kept", () => {
+	it("have their string values redacted and are sent as valid JSON, with keys, numbers and clean strings kept", () => {
 		const request = chat("hi", {
 			role: "assistant",
 			content: null,
@@ -1136,6 +1136,40 @@ describe("JSON-string arguments", () => {
 		expect(
 			((sent["messages"] as Loose[])[1] as { function_call: Loose }).function_call["arguments"],
 		).toBe(text);
+	});
+
+	it("keep every byte but the replaced string values: big numbers, escapes, whitespace and keys", () => {
+		const text =
+			'{"id":9007199254740993, "big":1e400,\n "to" : "alice\\u0040example.com",' +
+			` "${EMAIL}": ["say \\"hi\\"", 1.50, "${EMAIL}"]}`;
+		const expected =
+			'{"id":9007199254740993, "big":1e400,\n "to" : "[REDACTED:email]",' +
+			` "${EMAIL}": ["say \\"hi\\"", 1.50, "[REDACTED:email]"]}`;
+		const request = chat("hi", {
+			role: "assistant",
+			content: null,
+			function_call: { name: "send", arguments: text },
+		});
+		const s = scan("openai", request);
+		expect(detectContentPII(s).found).toBe(true);
+		const sent = redactContent(request, s) as Loose;
+		expect(
+			((sent["messages"] as Loose[])[1] as { function_call: Loose }).function_call["arguments"],
+		).toBe(expected);
+	});
+
+	it("nested deeper than a recursive serializer reaches are redacted, not thrown on", () => {
+		const depth = 10_000;
+		const text = `${"[".repeat(depth)}"${EMAIL}"${"]".repeat(depth)}`;
+		const request = chat("hi", {
+			role: "assistant",
+			content: null,
+			function_call: { name: "send", arguments: text },
+		});
+		const sent = redactContent(request, scan("openai", request)) as Loose;
+		expect(
+			((sent["messages"] as Loose[])[1] as { function_call: Loose }).function_call["arguments"],
+		).toBe(`${"[".repeat(depth)}"${R}"${"]".repeat(depth)}`);
 	});
 
 	it("that are not JSON are redacted as text, whole", () => {

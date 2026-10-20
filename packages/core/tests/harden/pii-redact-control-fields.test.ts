@@ -339,6 +339,30 @@ describe("under pii redact, through the real SDKs", () => {
 		expect(JSON.parse(call?.function?.arguments)).toEqual({ to: "[REDACTED:email]", copies: 2 });
 	});
 
+	it("OpenAI chat: deeply nested JSON arguments with a big number keep every other byte", async () => {
+		const depth = 10_000;
+		const args = (v: string) =>
+			`{"id":9007199254740993,"to":${"[".repeat(depth)}"${v}"${"]".repeat(depth)}}`;
+		const c = await openai();
+		await c.chat.completions.create({
+			model: "gpt-4o",
+			messages: [
+				{ role: "user", content: "send it" },
+				{
+					role: "assistant",
+					content: null,
+					tool_calls: [
+						{ id: "call_1", type: "function", function: { name: "send", arguments: args(EMAIL) } },
+					],
+				},
+				{ role: "tool", tool_call_id: "call_1", content: "sent" },
+			],
+		});
+		expect(bodies[0]?.messages?.[1]?.tool_calls?.[0]?.function?.arguments).toBe(
+			args("[REDACTED:email]"),
+		);
+	});
+
 	it("a field the schema does not name is sent as written and reported once per governor, by path only", async () => {
 		const warnings: Array<{ message: string; code: unknown }> = [];
 		const emit = vi.spyOn(process, "emitWarning").mockImplementation(((

@@ -33,9 +33,10 @@ import { detectPII, type PIIDetection, redactPII } from "./pii.js";
 /**
  * - `text`: a string the model reads.
  * - `json`: a JSON value (a tool call's input); the strings inside it are content, its keys never.
- * - `jsonText`: a string that holds JSON (a tool call's `arguments`): the strings inside the parse
- *   are content, and the string is re-serialized only when one of them changed. A string that is
- *   not JSON is read, and replaced, as text.
+ * - `jsonText`: a string that holds JSON (a tool call's `arguments`): the string values inside it
+ *   are content, its keys never. Redaction replaces only those string literals in the text, so
+ *   every other byte (numbers, keys, whitespace) is sent as written. A string that is not JSON is
+ *   read, and replaced, as text.
  * - `control`: sent as written, never read.
  */
 export type Leaf = "text" | "json" | "jsonText" | "control";
@@ -792,6 +793,45 @@ export function detectContentPII(scan: ContentScan): PIIDetection {
 	return { found: types.size > 0, types: [...types], paths };
 }
 
+/**
+ * `text`, which must be valid JSON, with each string VALUE that holds PII replaced by its
+ * redaction, or undefined when none does. Every other byte is kept as written: keys, whitespace,
+ * and numbers, which a parse and re-serialization would change (one past 2^53 rounds, one past the
+ * double range becomes `null`). One pass over the text with a stack of open containers, so any
+ * nesting the parse accepted is handled without recursion.
+ */
+function redactJsonStrings(text: string): string | undefined {
+	const inObject: boolean[] = [];
+	let keyNext = false;
+	let out = "";
+	let from = 0;
+	for (let i = 0; i < text.length; i++) {
+		const ch = text[i];
+		if (ch === "{" || ch === "[") {
+			inObject.push(ch === "{");
+			keyNext = ch === "{";
+		} else if (ch === "}" || ch === "]") {
+			inObject.pop();
+			keyNext = false;
+		} else if (ch === ",") {
+			keyNext = inObject.at(-1) === true;
+		} else if (ch === '"') {
+			let end = i + 1;
+			while (text[end] !== '"') end += text[end] === "\\" ? 2 : 1;
+			if (keyNext) keyNext = false;
+			else {
+				const redacted = redactPII(JSON.parse(text.slice(i, end + 1)) as string);
+				if (redacted.detection.found) {
+					out += `${text.slice(from, i)}${JSON.stringify(redacted.data)}`;
+					from = end + 1;
+				}
+			}
+			i = end;
+		}
+	}
+	return from === 0 ? undefined : out + text.slice(from);
+}
+
 /** A shallow copy with the same prototype and own property descriptors. */
 function shallowCopy<V extends object>(value: V): V {
 	if (Array.isArray(value)) return value.slice() as V;
@@ -813,7 +853,8 @@ function define(target: object, key: Segment, value: unknown): void {
 /**
  * `root` with each content site that holds PII replaced by its redaction. Only the containers on
  * the way to a changed site are copied; every other value is the caller's own, by reference, and
- * `root` itself is never changed. A `jsonText` site is re-serialized from its redacted parse.
+ * `root` itself is never changed. A `jsonText` site keeps its text, with only the string values
+ * that hold PII replaced (see {@link redactJsonStrings}).
  */
 export function redactContent(root: unknown, scan: ContentScan): unknown {
 	const copies = new Map<object, object>();
@@ -828,17 +869,9 @@ export function redactContent(root: unknown, scan: ContentScan): unknown {
 	let out = root;
 	for (const site of scan.sites) {
 		let replacement: unknown;
-		if (site.leaf === "jsonText") {
-			const read = readJsonText(site.value as string);
-			if (read.parsed) {
-				const redacted = redactPII(read.value);
-				if (!redacted.detection.found) continue;
-				replacement = JSON.stringify(redacted.data);
-			} else {
-				const redacted = redactPII(site.value);
-				if (!redacted.detection.found) continue;
-				replacement = redacted.data;
-			}
+		if (site.leaf === "jsonText" && readJsonText(site.value as string).parsed) {
+			replacement = redactJsonStrings(site.value as string);
+			if (replacement === undefined) continue;
 		} else {
 			const redacted = redactPII(site.value);
 			if (!redacted.detection.found) continue;
