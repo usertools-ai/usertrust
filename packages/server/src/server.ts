@@ -1490,7 +1490,10 @@ export function createUsertrustServer(opts: {
 	/** Today's answer to an authorize the governor refused: the mapped error, or evaluate-only's shadow 200. */
 	function answerDenied(tenant: TenantConfig, err: unknown, res: ServerResponse): void {
 		const mapped = httpError(err, res, "POST /v1/authorize");
-		const shadow = config.enforcement === "evaluate_only" && mapped.status !== 500;
+		// Shadowed: policy and budget decisions (4xx). Never a 5xx: an internal error, and an
+		// audit refusal (503), are the server's inability to govern or record the call, not a
+		// decision `evaluate_only` may observe and wave through.
+		const shadow = config.enforcement === "evaluate_only" && mapped.status < 500;
 		bus.publish(tenant.id, {
 			type: "denied",
 			error: mapped.body.error,

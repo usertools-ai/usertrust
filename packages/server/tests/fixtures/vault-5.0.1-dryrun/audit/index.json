@@ -1,0 +1,100 @@
+[
+	{
+		"receiptId": "rcpt_mv64wxzg_18797880",
+		"kind": "llm_call",
+		"ts": "2026-10-13T03:41:55.084Z",
+		"actor": "compat-fixture",
+		"path": "llm_call/2026-10-13/rcpt_mv64wxzg_18797880.json"
+	},
+	{
+		"receiptId": "rcpt_mv64wxzx_3d055080",
+		"kind": "llm_call",
+		"ts": "2026-10-13T03:41:55.101Z",
+		"actor": "compat-fixture",
+		"path": "llm_call/2026-10-13/rcpt_mv64wxzx_3d055080.json"
+	},
+	{
+		"receiptId": "rcpt_mv64wy0e_4e0d5e63",
+		"kind": "llm_call",
+		"ts": "2026-10-13T03:41:55.118Z",
+		"actor": "compat-fixture",
+		"path": "llm_call/2026-10-13/rcpt_mv64wy0e_4e0d5e63.json"
+	},
+	{
+		"receiptId": "rcpt_mv64wy0s_cf8caf81",
+		"kind": "llm_call",
+		"ts": "2026-10-13T03:41:55.132Z",
+		"actor": "compat-fixture",
+		"path": "llm_call/2026-10-13/rcpt_mv64wy0s_cf8caf81.json"
+	},
+	{
+		"receiptId": "rcpt_mv64wy18_1276ae20",
+		"kind": "llm_call",
+		"ts": "2026-10-13T03:41:55.148Z",
+		"actor": "compat-fixture",
+		"path": "llm_call/2026-10-13/rcpt_mv64wy18_1276ae20.json"
+	},
+	{
+		"receiptId": "rcpt_mv64wy1o_d29483c2",
+		"kind": "llm_call",
+		"ts": "2026-10-13T03:41:55.164Z",
+		"actor": "compat-fixture",
+		"path": "llm_call/2026-10-13/rcpt_mv64wy1o_d29483c2.json"
+	},
+	{
+		"receiptId": "rcpt_mv64wy23_ebab8d61",
+		"kind": "llm_call",
+		"ts": "2026-10-13T03:41:55.179Z",
+		"actor": "compat-fixture",
+		"path": "llm_call/2026-10-13/rcpt_mv64wy23_ebab8d61.json"
+	},
+	{
+		"receiptId": "rcpt_mv64wy2h_80d7b743",
+		"kind": "llm_call",
+		"ts": "2026-10-13T03:41:55.193Z",
+		"actor": "compat-fixture",
+		"path": "llm_call/2026-10-13/rcpt_mv64wy2h_80d7b743.json"
+	},
+	{
+		"receiptId": "rcpt_mv64wy2x_27f5a07b",
+		"kind": "llm_call",
+		"ts": "2026-10-13T03:41:55.209Z",
+		"actor": "compat-fixture",
+		"path": "llm_call/2026-10-13/rcpt_mv64wy2x_27f5a07b.json"
+	},
+	{
+		"receiptId": "rcpt_mv64wy3c_8a2fe1ef",
+		"kind": "llm_call",
+		"ts": "2026-10-13T03:41:55.224Z",
+		"actor": "compat-fixture",
+		"path": "llm_call/2026-10-13/rcpt_mv64wy3c_8a2fe1ef.json"
+	},
+	{
+		"receiptId": "rcpt_mv64wy3p_b50071c2",
+		"kind": "llm_call",
+		"ts": "2026-10-13T03:41:55.237Z",
+		"actor": "compat-fixture",
+		"path": "llm_call/2026-10-13/rcpt_mv64wy3p_b50071c2.json"
+	},
+	{
+		"receiptId": "rcpt_mv64wy42_2666ecc8",
+		"kind": "llm_call",
+		"ts": "2026-10-13T03:41:55.250Z",
+		"actor": "compat-fixture",
+		"path": "llm_call/2026-10-13/rcpt_mv64wy42_2666ecc8.json"
+	},
+	{
+		"receiptId": "rcpt_mv64wy4h_b0318626",
+		"kind": "llm_call",
+		"ts": "2026-10-13T03:41:55.266Z",
+		"actor": "compat-fixture",
+		"path": "llm_call/2026-10-13/rcpt_mv64wy4h_b0318626.json"
+	},
+	{
+		"receiptId": "rcpt_mv64wy4x_8058dd1e",
+		"kind": "llm_call",
+		"ts": "2026-10-13T03:41:55.281Z",
+		"actor": "compat-fixture",
+		"path": "llm_call/2026-10-13/rcpt_mv64wy4x_8058dd1e.json"
+	}
+]

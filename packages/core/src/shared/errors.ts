@@ -222,15 +222,23 @@ export class SpendLedgerUnreadableError extends Error {
 	}
 }
 
+/** The hint on an `AuditDegradedError` from the audit pre-flight: the tail's state says what is wrong. */
+export const AUDIT_PREFLIGHT_HINT =
+	"Run `usertrust verify` to see the audit tail's state, and keep the vault exactly as it is: nothing was written.";
+
 export class AuditDegradedError extends Error {
 	public readonly cause_message: string;
 	public readonly hint: string;
 	public readonly docsUrl: string;
 
-	constructor(reason: string) {
-		const hint = "Check disk space and permissions on the .usertrust/audit/ directory.";
+	constructor(reason: string, options?: { cause?: unknown; hint?: string }) {
+		const hint =
+			options?.hint ?? "Check disk space and permissions on the .usertrust/audit/ directory.";
 		const docsUrl = "https://usertrust.ai/docs/errors/audit-degraded";
-		super(`Audit degraded: ${reason}\n\n  Hint: ${hint}\n  Docs: ${docsUrl}`);
+		super(
+			`Audit degraded: ${reason}\n\n  Hint: ${hint}\n  Docs: ${docsUrl}`,
+			options?.cause === undefined ? undefined : { cause: options.cause },
+		);
 		this.name = "AuditDegradedError";
 		this.cause_message = reason;
 		this.hint = hint;

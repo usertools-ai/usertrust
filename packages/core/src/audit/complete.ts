@@ -39,9 +39,13 @@ export function deadLettersAgainst(
 export interface CompleteVerification {
 	/** The verifier's own reading: its verdict and the events it walked. */
 	reading: VaultReading;
-	/** The dead-letter queue, judged against those events. */
-	deadLetters: ChainDeadLetters | ChainDeadLettersUnreadable;
-	/** No chain event is missing from the chain, and the queue could be read. */
+	/**
+	 * The dead-letter queue, judged against those events. `null` when there was no snapshot (`busy`):
+	 * nothing is judged against a chain nobody read (a chain of no events, which every dead letter
+	 * would call missing).
+	 */
+	deadLetters: ChainDeadLetters | ChainDeadLettersUnreadable | null;
+	/** No chain event is missing from the chain, and the queue could be read (false when `busy`: unknown). */
 	complete: boolean;
 	/** The chain verifies AND it is complete. */
 	valid: boolean;
@@ -62,6 +66,15 @@ export function incompletenessErrors(d: ChainDeadLetters | ChainDeadLettersUnrea
 /** Verify the vault (the `.usertrust` directory) for integrity and completeness. Reads only; writes nothing. */
 export function verifyVaultComplete(vaultDir: string): CompleteVerification {
 	const reading = verifyVaultReading(vaultDir);
+	if (reading.result.busy === true) {
+		return {
+			reading,
+			deadLetters: null,
+			complete: false,
+			valid: false,
+			errors: reading.result.errors,
+		};
+	}
 	const deadLetters = deadLettersAgainst(vaultDir, reading.events);
 	const extra = incompletenessErrors(deadLetters);
 	const complete = extra.length === 0;

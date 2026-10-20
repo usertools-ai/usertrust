@@ -23,6 +23,7 @@ export type {
 export {
 	type AppendEventInput,
 	AUDIT_DEGRADED_WARNING,
+	AuditTailMismatchError,
 	AuditTornTailError,
 	type AuditWriter,
 	AuditWriterLockHeldError,
@@ -68,8 +69,17 @@ export {
 	loadBudgetConfig,
 	readLedgerEvents,
 } from "./audit/read.js";
+export type { TailState, TailStateName, TrailingKind } from "./audit/tail-state.js";
 export type { ChainVerificationResult, VaultVerificationResult } from "./audit/verify.js";
-export { verifyChain, verifyVault } from "./audit/verify.js";
+export {
+	verifyChain,
+	verifyVault,
+	/**
+	 * @internal For usertrust-ui only, which requires usertrust at exactly its own version (its package.json pins
+	 * `"usertrust"` to that version), so this moves with it and is no public API. Not documented, not semver-covered.
+	 */
+	verifyVaultBounded,
+} from "./audit/verify.js";
 export type { BoardReviewResult, BoardStats } from "./board/board.js";
 // Board
 export { createBoard } from "./board/board.js";

@@ -271,6 +271,16 @@ export function SummaryStrip(props: {
 							no events
 						</span>
 					)}
+					{status === "busy" && (
+						<span
+							className="ut-pill"
+							data-tone="alert"
+							title="The vault kept changing while it was read: no verdict, neither verified nor broken"
+						>
+							<i />
+							no verdict
+						</span>
+					)}
 					<span
 						className="ut-why"
 						title="The dashboard is a monitor: usertrust verify is the authoritative check of a vault"

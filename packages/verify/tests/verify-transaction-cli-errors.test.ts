@@ -126,9 +126,31 @@ describe("--tx prints the verdict's errors", () => {
 		dirs.push(root);
 		const audit = join(root, ".usertrust", "audit");
 		mkdirSync(audit, { recursive: true });
-		writeFileSync(join(audit, "events.jsonl"), `${chain(3, () => "tx-ok").join("\n")}\n`);
+		const lines = chain(3, () => "tx-ok");
+		writeFileSync(join(audit, "events.jsonl"), `${lines.join("\n")}\n`);
+		// With its anchor: a chain of several events with no anchor is refused (ANCHOR_MISSING).
+		const head = (JSON.parse(lines[2] as string) as { hash: string }).hash;
+		writeFileSync(
+			join(audit, "events.jsonl.meta"),
+			JSON.stringify({ lastHash: head, sequence: 3 }),
+		);
 		const res = runCli(join(root, ".usertrust"), "--tx", "tx-ok");
 		expect(res.status).toBe(0);
 		expect(res.stdout).not.toMatch(/^ {2}- /m);
+	}, 60_000);
+
+	it("a transfer that may sit in a segment nobody could read is FAILED (exit 1), never 'not found' (exit 2)", () => {
+		const root = mkdtempSync(join(tmpdir(), "verify-tx-cli-"));
+		dirs.push(root);
+		const audit = join(root, ".usertrust", "audit");
+		mkdirSync(audit, { recursive: true });
+		writeFileSync(join(audit, "events.jsonl"), `${chain(1, () => "tx-live").join("\n")}\n`);
+		// A DIRECTORY named like a segment: unreadable whatever user runs the tests.
+		mkdirSync(join(audit, "events-0001.jsonl"));
+		const res = runCli(join(root, ".usertrust"), "--tx", "tx-elsewhere");
+		expect(res.status).toBe(1);
+		expect(res.stdout).toContain("Vault integrity: FAILED");
+		expect(res.stdout).toContain("  - Audit segment could not be read: events-0001.jsonl");
+		expect(res.stdout).not.toContain("not found");
 	}, 60_000);
 });

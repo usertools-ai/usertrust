@@ -20,19 +20,21 @@ const ROTATION_MESSAGE =
  * docs alike), and where. A new name, or a known name in a new place, trips this.
  */
 const KNOWN_JSONL: Record<string, string[]> = {
-	"*.jsonl": ["audit/read.ts", "audit/verify.ts", "cli/audit-segments.ts"],
+	// tail-state.ts names them to REFUSE a rotated vault (the writer's SEGMENTED state): it reads the
+	// audit directory's names, and writes nothing.
+	"*.jsonl": ["audit/read.ts", "audit/stable-read.ts", "audit/tail-state.ts", "audit/verify.ts"],
 	".jsonl": [
 		"audit/anchor-verify.ts",
 		"audit/quarantine.ts",
 		"audit/read.ts",
-		"audit/verify.ts",
-		"cli/audit-segments.ts",
-		"cli/health.ts",
+		"audit/stable-read.ts",
+		"audit/tail-state.ts",
 	],
 	"a.jsonl": ["cli/anchor.ts"],
 	"anchors.jsonl": [
 		"audit/anchor-verify.ts",
 		"audit/anchor.ts",
+		"audit/stable-read.ts",
 		"cli/anchor.ts",
 		"export/markdown.ts",
 	],
@@ -44,12 +46,13 @@ const KNOWN_JSONL: Record<string, string[]> = {
 		"audit/denial-events.ts",
 		"audit/quarantine.ts",
 		"audit/read.ts",
+		"audit/stable-read.ts",
+		"audit/tail-state.ts",
 		"audit/verify.ts",
-		"cli/audit-segments.ts",
 		"cli/health.ts",
 		"snapshot/checkpoint.ts",
 	],
-	"events.jsonl.meta": ["audit/anchor.ts", "cli/anchor.ts", "snapshot/checkpoint.ts"],
+	"events.jsonl.meta": ["audit/anchor.ts", "audit/tail-state.ts", "cli/anchor.ts"],
 	"history.jsonl": ["board/board.ts"],
 };
 

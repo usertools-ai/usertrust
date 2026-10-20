@@ -23,9 +23,11 @@ const io = vi.hoisted(() => ({
 vi.mock("node:fs", async (importOriginal) => {
 	const real = await importOriginal<typeof import("node:fs")>();
 	const isLog = (p: unknown): boolean => String(p).endsWith("events.jsonl");
+	// The stat keeps its methods (`isFile()` and the rest): a filesystem that reports inode 0 still answers them, and a
+	// plain object spread from it would not.
 	const zero = <T>(st: T): T =>
 		io.zeroInode && st !== undefined && typeof (st as { ino: unknown }).ino === "bigint"
-			? ({ ...st, ino: 0n } as T)
+			? (Object.assign(Object.create(Object.getPrototypeOf(st) as object), st, { ino: 0n }) as T)
 			: st;
 	const wrapped = {
 		...real,

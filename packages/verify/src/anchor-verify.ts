@@ -31,6 +31,8 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { canonicalize } from "./canonical.js";
 import { GENESIS_HASH } from "./constants.js";
+import { acquireWholeFile, splitLines } from "./tail-read.js";
+import type { FileObservation } from "./tail-state.js";
 import {
 	buildMerkleTree,
 	generateConsistencyProof,
@@ -773,18 +775,63 @@ export function gatherOrderedEventHashes(vaultPath: string): string[] {
 	return ordered.map((e) => e.hash);
 }
 
-/** Read the vault-local anchor mirror (cache, never a trust root alone). */
+/**
+ * Read the vault-local anchor mirror (cache, never a trust root alone). Acquired as the log is, never
+ * blind: through no symlink, never blocking on a FIFO in its place, and within the bound for one read.
+ * An anchored verdict takes the mirror from its snapshot instead ({@link parseAnchorMirror}).
+ */
 export function readAnchorMirror(vaultPath: string): {
 	records: AnchorRecord[];
 	errors: string[];
 } {
-	const mirrorPath = join(vaultPath, "audit", "anchors", "anchors.jsonl");
-	if (!existsSync(mirrorPath)) return { records: [], errors: [] };
-	try {
-		return parseAnchorsContent(readFileSync(mirrorPath, "utf-8"));
-	} catch {
-		return { records: [], errors: ["malformed-anchor: anchor mirror unreadable"] };
+	return parseAnchorMirror(
+		acquireWholeFile(join(vaultPath, "audit", "anchors", "anchors.jsonl")).file,
+	);
+}
+
+/**
+ * The anchor mirror's records, from what was read of it: line by line, never decoded whole (the
+ * mirror grows with every anchor), each line as {@link parseAnchorsContent} reads it. A mirror that
+ * could not be read is unreadable, never "no anchors"; one over the bound for one read says so.
+ */
+export function parseAnchorMirror(file: FileObservation): {
+	records: AnchorRecord[];
+	errors: string[];
+} {
+	if (file.kind === "absent") return { records: [], errors: [] };
+	if (file.kind !== "read") {
+		return {
+			records: [],
+			errors: [
+				file.kind === "oversize"
+					? `malformed-anchor: anchor mirror over the bound for one read (${file.size} bytes)`
+					: "malformed-anchor: anchor mirror unreadable",
+			],
+		};
 	}
+	const records: AnchorRecord[] = [];
+	const errors: string[] = [];
+	const { lines, trailing } = splitLines(file.bytes);
+	let n = 0;
+	for (const bytes of trailing.length > 0 ? [...lines, trailing] : lines) {
+		let line: string;
+		try {
+			line = bytes.toString("utf-8").trim();
+		} catch {
+			n++;
+			errors.push(`anchor line ${n}: unreadable`);
+			continue;
+		}
+		if (line.length === 0) continue;
+		n++;
+		const { record, error } = parseAnchorRecord(line);
+		if (record) {
+			records.push(record);
+		} else {
+			errors.push(`anchor line ${n}: ${error}`);
+		}
+	}
+	return { records, errors };
 }
 
 // ── State machine ──

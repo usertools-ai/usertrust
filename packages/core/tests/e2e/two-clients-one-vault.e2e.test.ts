@@ -36,6 +36,26 @@ import { createGovernor } from "../../src/headless.js";
 import { VAULT_DIR } from "../../src/shared/constants.js";
 import type { TrustReceipt } from "../../src/shared/types.js";
 
+/**
+ * A one-shot fault: the next anchor write (the create of its temp file) fails EACCES, after the
+ * append's event was synced to the log. What a failed anchor update leaves: the event on the chain,
+ * the OLD anchor in place (the next append rolls it forward), and the event dead-lettered with its hash.
+ */
+const anchorFault = vi.hoisted(() => ({ armed: false }));
+vi.mock("node:fs", async (importOriginal) => {
+	const fs = await importOriginal<typeof import("node:fs")>();
+	const openSync = ((p: unknown, ...rest: unknown[]) => {
+		if (anchorFault.armed && /\.meta\.[0-9a-f-]+\.tmp$/.test(String(p))) {
+			anchorFault.armed = false;
+			throw Object.assign(new Error(`EACCES: permission denied, open '${String(p)}'`), {
+				code: "EACCES",
+			});
+		}
+		return (fs.openSync as (...a: unknown[]) => number)(p, ...rest);
+	}) as typeof fs.openSync;
+	return { ...fs, openSync, default: { ...fs, openSync } };
+});
+
 vi.mock("tigerbeetle-node", () => ({
 	createClient: vi.fn(() => ({
 		createAccounts: vi.fn(async () => []),
@@ -366,13 +386,10 @@ describe("the README's two-client pattern: two trust() clients, one process, one
 				messages: [{ role: "user", content: "hi" }],
 			});
 		const first = await ask();
-		// The anchor cannot be replaced (a directory in its place): the next call's event is synced to
-		// the log, then its `.meta` update fails, and the append rejects for an event that IS on the chain.
-		const meta = join(vault, VAULT_DIR, "audit", "events.jsonl.meta");
-		rmSync(meta);
-		mkdirSync(meta);
+		// The next call's event is synced to the log, then its `.meta` update fails, and the append
+		// rejects for an event that IS on the chain. The call after it rolls the anchor forward.
+		anchorFault.armed = true;
 		const second = await ask();
-		rmSync(meta, { recursive: true });
 		const third = await ask();
 		await openai.destroy();
 		expect(second.receipt.auditDegraded).toBe(true);
@@ -407,11 +424,8 @@ describe("the README's two-client pattern: two trust() clients, one process, one
 			return governor.settle(hold, { inputTokens: 10, outputTokens: 5 });
 		};
 		const first = await settleOne();
-		const meta = join(vault, VAULT_DIR, "audit", "events.jsonl.meta");
-		rmSync(meta);
-		mkdirSync(meta);
+		anchorFault.armed = true;
 		const second = await settleOne();
-		rmSync(meta, { recursive: true });
 		await governor.destroy();
 		// The headless shape: degraded, with a placeholder hash rather than "AUDIT_DEGRADED".
 		expect(second.auditDegraded).toBe(true);

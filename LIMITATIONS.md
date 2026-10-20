@@ -410,9 +410,10 @@ appends fails; it never forks the chain. Its calls still settle, and every event
 misses the chain is reported: the receipt carries `auditDegraded` (a failed warn-mode `injection_detected` append is the exception: it is dead-lettered but leaves the receipt unmarked), the event goes to
 `.usertrust/dlq/dead-letters.jsonl` (when that write succeeds), the process gets a `USERTRUST_AUDIT_DEGRADED`
 warning (at the first failure, and with the count when the client is destroyed), and
-`usertrust verify` reports the vault INCOMPLETE and exits 1 for a dead-lettered event (if the dead-letter write itself fails and leaves no bytes, for instance on a full disk, neither `verify` nor `health` sees the gap; a partial line left by a short write counts as an unreadable entry, so the vault reads INCOMPLETE). A `trust()` client with
-`audit.failClosed: true` refuses such calls instead; `createGovernor()` and
-`usertrust-server` do not enforce `audit.failClosed`. Such a process's budget is
+`usertrust verify` reports the vault INCOMPLETE and exits 1 for a dead-lettered event (if the dead-letter write itself fails and leaves no bytes, for instance on a full disk, neither `verify` nor `health` sees the gap; a partial line left by a short write counts as an unreadable entry, so the vault reads INCOMPLETE). With
+`audit.failClosed: true`, such calls are refused instead, before any hold: every governed
+`trust()` call and action, and headless `authorize()` (whose `settle()` stays fail-open);
+`usertrust-server` answers that tenant's authorize with `503 audit_refused`. Such a process's budget is
 not visible to vault readers either: the enforced-budget record
 (`effective-budget.json`) is replaced only by the process that holds the lock, so
 the ledger UI, `inspect`, `health` and `report` show the lock holder's budget while
@@ -485,13 +486,54 @@ If you need multiple concurrent workers, give each its own vault. Merging or
 centralizing chains is a control-plane concern, not something the core SDK
 pretends to solve today.
 
+**The writer never appends over a tail it cannot explain, and that is all it can see.**
+Before each append the writer classifies the log's last lines against the `.meta` anchor,
+and goes on only from a fresh chain, the anchored head, or one event past it (an
+interrupted write, which it rolls forward). Anything else refuses the append, with nothing
+written: the event is dead-lettered (or, under `audit.failClosed`, the call refused before
+any hold). What this does not cover:
+
+- **The middle of the chain is `usertrust verify`'s.** The writer reads the tail only; an
+  event deleted or edited before it is found by `verify`, which walks every line.
+- **Someone who rewrites both the log and `.meta`, consistently, is invisible to the vault
+  itself.** The anchor lives in the vault too. Only an anchor held outside it (`usertrust
+  anchor`, verified with `--anchor`) catches that deletion.
+- **A vault of more than one event with no `.meta` is refused** (`ANCHOR_MISSING`): with no
+  anchor, a truncated log cannot be told from a whole one. Every release writes `.meta` after
+  each append, so a vault comes to this only when its `.meta` was deleted, or every write of it
+  failed (each of those appends was reported degraded and dead-lettered).
+- **A refused vault has no recovery command yet.** Keep it exactly as it is and save
+  `usertrust verify --json`; the evidence decides what happened.
+- **Where a directory cannot be synced** (the filesystem refuses directory fsync), a power
+  loss can remove a first append that already returned, and leave an empty vault that looks
+  fresh. Only evidence outside the vault (an external anchor, the caller's receipts) shows it.
+- **One event's line is at most 16 MiB.** A larger event is refused before it is written, and
+  dead-lettered, so the writer never writes a tail it cannot read back (it reads the last lines
+  within 64 MiB). A vault an older version left with longer last lines is refused (`TAIL_OVERSIZE`).
+  Beside one such line left last, an event that would not fit within 64 MiB with it is refused
+  too, and dead-lettered; an ordinary event goes on.
+- **A log whose last lines an older version wrote without a `sequence` is appended to only while
+  it is at most 1 GiB.** Such a line's position is its line number, so the writer counts the log's
+  lines on each append until two events of this version follow it, and the count reads at most
+  1 GiB (the bound `usertrust verify` reads a whole log within). A longer one is refused
+  (`TAIL_OVERSIZE`), and verify names it as over its bound too. Beside such a line left last, an
+  event that would take the log past 1 GiB is refused, and dead-lettered; one that fits goes on.
+- **`usertrust verify` reads one log segment, the dead-letter queue and the anchor mirror within
+  1 GiB each, and a vault's log segments within 2 GiB together.** A larger file, or a segment that
+  does not fit in what the segments read before it left of the 2 GiB, is named as over that bound
+  and its contents are not judged: the vault fails (or, for the dead-letter queue, whether events
+  are missing is unknown).
+- **Dead letters are read after the chain's snapshot.** A letter written while verify runs, for an
+  event appended after its snapshot, reads as missing: verify fails, and a run at rest settles it.
+
 **A torn tail halts appends until an operator repairs it.** An append that never
 completed (a crash, a full disk) can leave bytes after the log's last newline. The
 writer then refuses every append (`AuditTornTailError`) rather than bury those bytes
-mid-file — so with `audit.failClosed` (`trust()` only), governed calls stop too. The repair is
+mid-file — so with `audit.failClosed` (`trust()`, and headless `authorize()`), governed calls stop too. The repair is
 `usertrust audit quarantine-tail`, and it repairs exactly ONE state: unparseable bytes
 after the last newline, on a single `events.jsonl` that otherwise verifies from
-genesis, with an agreeing `.meta` anchor. Every other unverifiable state, including an
+genesis, with an anchor the writer itself would go on from (the head, or one event
+behind it). Every other unverifiable state, including an
 unterminated last line that parses, is refused: repairing it would mean choosing which
 evidence is true, which is an operator's decision. A run that died between cutting the
 log and recording the cut is finished by the next run.

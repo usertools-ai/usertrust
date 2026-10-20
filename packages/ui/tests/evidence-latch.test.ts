@@ -905,6 +905,8 @@ describe("the last verified event: what a full load must still hold, and when fu
 		const a2 = eventLine(a1.hash, "tx_a2", 2);
 		const a3 = eventLine(a2.hash, "tx_a3", 3);
 		writeFileSync(log(), a1.line + a2.line + a3.line);
+		// With its anchor, as a writer leaves it: a chain of several events with no anchor is refused (ANCHOR_MISSING).
+		writeFileSync(meta(), JSON.stringify({ lastHash: a3.hash, sequence: 3 }));
 		ui = await createUiServer(root, { port: 0 });
 		const port = ui.port;
 		expect(await chainOf(port)).toMatchObject({ events: 3, valid: true });
@@ -918,8 +920,10 @@ describe("the last verified event: what a full load must still hold, and when fu
 		expect(forked.events).toBe(5);
 		expect(forked.valid).toBe(false);
 		expect(forked.errors.filter((e) => e.includes("deletion detected"))).toEqual([]);
-		// The verified tip removed: only the other chain is left, and on its own it verifies.
+		// The verified tip removed: only the other chain is left, with an anchor that agrees (a consistent rewrite of both),
+		// and on its own it verifies.
 		writeFileSync(log(), a1.line + a2.line + b1.line + b2.line);
+		writeFileSync(meta(), JSON.stringify({ lastHash: b2.hash, sequence: 4 }));
 		expect(loadState(vault()).summary.chain.valid).toBe(true);
 		check();
 		const after = await chainWhen(port, isDeletion);
@@ -1052,6 +1056,8 @@ describe("the last verified event: what a full load must still hold, and when fu
 			expect(first.summary.chain.valid).toBe(false);
 			// With a head held from a verified read of the first three, the fork moves nothing: the caller keeps its head.
 			writeFileSync(log(), a1.line + a2.line + a3.line);
+			// With its anchor, as a writer leaves it: a chain of several events with no anchor is refused.
+			writeFileSync(meta(), JSON.stringify({ lastHash: a3.hash, sequence: 3 }));
 			const before = loadState(vault());
 			expect(before.verified).toBe(true);
 			expect(before.head).toEqual({ verifiedHash: a3.hash, hadEvidence: true });
@@ -1116,6 +1122,8 @@ describe("the last verified event: what a full load must still hold, and when fu
 			mkdirSync(auditDir(), { recursive: true });
 			const { a, b, a3 } = chains();
 			writeFileSync(log(), a);
+			// With its anchor, as a writer leaves it: a chain of several events with no anchor is refused.
+			writeFileSync(meta(), JSON.stringify({ lastHash: a3.hash, sequence: 3 }));
 			const held = loadState(vault());
 			expect(held.head).toEqual({ verifiedHash: a3.hash, hadEvidence: true });
 			ui = await createUiServer(root, { port: 0 });
@@ -1129,8 +1137,10 @@ describe("the last verified event: what a full load must still hold, and when fu
 			const appended = await chainWhen(port, (c) => c.events === 5);
 			expect(appended.valid).toBe(false);
 			expect(appended.errors.filter((e) => e.includes("deletion detected"))).toEqual([]);
-			// Only the independent chain left: on its own it verifies, and it lacks the remembered tip.
+			// Only the independent chain left, with an anchor that agrees (a consistent rewrite of both): on its own it
+			// verifies, and it lacks the remembered tip.
 			writeFileSync(log(), b);
+			writeFileSync(meta(), JSON.stringify({ lastHash: lastHashOf(log()), sequence: 2 }));
 			expect(loadState(vault()).summary.chain.valid).toBe(true);
 			check();
 			const after = await chainWhen(port, isDeletion);

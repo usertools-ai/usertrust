@@ -402,10 +402,27 @@ function verifiedOrFail<T>(verify: () => T): T {
 	}
 }
 
+/** A vault being written has no verdict: said so, never as FAILED (exit 1). */
+const BUSY_LINE =
+	"Vault integrity: BUSY (the vault is being written: its audit files kept changing while they were read; no verdict, run again)";
+
 // ── Single transaction mode ──
 if (txId !== undefined) {
 	const params = anchorMode ? await anchorParamsOrFail() : undefined;
 	const result = verifiedOrFail(() => verifyTransaction(vaultPath, txId, params));
+	// Neither is "not found" (exit 2): a vault read while it kept changing has no verdict, and one whose
+	// chain could not be read has failed. Out through writeAllSync, as below.
+	if (result.busy === true) {
+		writeAllSync(1, `${BUSY_LINE}\n`);
+		process.exit(1);
+	}
+	if (result.failed === true) {
+		writeAllSync(
+			1,
+			`Vault integrity: FAILED\n${result.errors.map((error) => `  - ${forDisplay(error)}\n`).join("")}`,
+		);
+		process.exit(1);
+	}
 	// The receipt carries no errors; the absent range of a missing segment lives only here. Out through
 	// writeAllSync, as the receipt mode does: process.stdout is asynchronous on a pipe and the exit below does not
 	// drain it, so a long error list reached `| tool` truncated, losing the named range appended last.
@@ -431,10 +448,19 @@ if (txId !== undefined) {
 }
 
 // ── Full vault verification ──
+
+/** A valid chain whose tail says more: an event one past its anchor, from an interrupted write. */
+function printTailNote(result: { tailState?: { state: string; note: string } | null }): void {
+	if (result.tailState?.state === "ONE_PAST_ANCHOR") console.log(`Note: ${result.tailState.note}.`);
+}
+
 if (!anchorMode) {
 	const result = verifiedOrFail(() => verifyVault(vaultPath));
-	if (result.valid) {
+	if (result.busy === true) {
+		console.log(BUSY_LINE);
+	} else if (result.valid) {
 		console.log("Vault integrity: VERIFIED (UNANCHORED — internal consistency only)");
+		printTailNote(result);
 	} else {
 		console.log("Vault integrity: FAILED");
 		for (const error of result.errors) {
@@ -454,12 +480,15 @@ if (!anchorMode) {
 
 const anchorParams = await anchorParamsOrFail();
 const result = verifiedOrFail(() => verifyVaultWithAnchors(vaultPath, anchorParams));
-if (result.valid) {
+if (result.busy === true) {
+	console.log(BUSY_LINE);
+} else if (result.valid) {
 	console.log(
 		result.anchorState === "ANCHORED_VERIFIED"
 			? `Vault integrity: VERIFIED (${result.anchoring.anchorSource === "external" ? "externally anchored" : "vault-mirror anchors only"})`
 			: `Vault integrity: VERIFIED (${result.anchorState})`,
 	);
+	printTailNote(result);
 } else {
 	console.log(`Vault integrity: FAILED (${result.anchorState})`);
 	for (const error of result.errors) {

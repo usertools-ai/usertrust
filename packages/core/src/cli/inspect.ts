@@ -11,7 +11,12 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import pc from "picocolors";
-import { describeBudgetSource, isKnownBudget, loadBudgetConfig } from "../audit/read.js";
+import {
+	describeBudgetSource,
+	isKnownBudget,
+	loadBudgetConfig,
+	type PersistedAuditEvent,
+} from "../audit/read.js";
 import { verifyVaultReading } from "../audit/verify.js";
 import { GENESIS_HASH, VAULT_DIR } from "../shared/constants.js";
 import type { AuditEvent } from "../shared/types.js";
@@ -29,6 +34,18 @@ function computeSpent(events: readonly AuditEvent[]): number {
 		}
 	}
 	return spent;
+}
+
+/** The walk's events as this statement reads them: an event without `data` carries none. */
+function statementEvents(events: readonly PersistedAuditEvent[]): AuditEvent[] {
+	return events.map((e) => {
+		const record = e as unknown as Record<string, unknown>;
+		const data =
+			typeof record.data === "object" && record.data !== null
+				? (record.data as Record<string, unknown>)
+				: {};
+		return { ...(e as AuditEvent), data } as AuditEvent;
+	});
 }
 
 function formatTime(timestamp: string): string {
@@ -72,12 +89,27 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	const config = loadBudgetConfig(vaultPath);
 	// ONE READING for the verdict, the count, the latest hash, the Merkle root, the spend and the table:
 	// every audit segment, ordered by `sequence`, walked as one chain, exactly as `usertrust verify`
-	// reads it. Verifying the live log alone failed every rotated vault (its first event links to the
-	// previous segment, not to GENESIS, and the `.meta` anchor counts every event), and listing events
-	// from a second read let the table and the root describe a log the verdict never judged.
+	// reads it, from one snapshot. Verifying the live log alone failed every rotated vault (its first
+	// event links to the previous segment, not to GENESIS, and the `.meta` anchor counts every event),
+	// and listing events from a second read let the table and the root describe a log the verdict never
+	// judged.
 	const reading = verifyVaultReading(vaultPath);
+	// A vault that kept changing while it was read has no snapshot: no statement is made from it.
+	if (reading.result.busy === true) {
+		const message =
+			"the vault is being written: its audit files kept changing while they were read, so there is no statement (run inspect again)";
+		if (json) {
+			console.log(
+				toSafeJson({ command: "inspect", success: false, data: { busy: true, message } }),
+			);
+		} else {
+			console.log(pc.yellow(`Chain: ${message}.`));
+		}
+		process.exitCode = 1;
+		return;
+	}
 	const verification = reading.result;
-	const events = reading.events;
+	const events = statementEvents(reading.events);
 	const spent = computeSpent(events);
 	// An UNKNOWN budget (no governor record, no configured budget) has no remaining figure: subtracting spend from the
 	// placeholder 0 printed a negative balance for a vault whose governor enforces a real budget elsewhere.
@@ -92,12 +124,13 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	const latestHash = reading.orderedHashes.at(-1) ?? GENESIS_HASH;
 	const merkleRoot = verification.merkleRoot;
 	// A `Sequence gap:` says an event follows the wrong one, not which file is gone: name the absent
-	// range and its neighbouring segments beside it. Event ids and segment file names inside these
-	// errors are text from the vault under inspection: the TABLE scrubs every line it prints, while
-	// --json keeps the vault's own bytes (`toSafeJson` escapes C1) so the evidence is not replaced by `?`.
+	// range and its neighbouring segments beside it, from the same snapshot. Event ids and segment file
+	// names inside these errors are text from the vault under inspection: the TABLE scrubs every line it
+	// prints, while --json keeps the vault's own bytes (`toSafeJson` escapes C1) so the evidence is not
+	// replaced by `?`.
 	const chainErrors = [
 		...verification.errors,
-		...describeMissingSegments(join(vaultPath, "audit"), verification.errors),
+		...describeMissingSegments(verification.errors, reading.sequenceSegments),
 	];
 
 	if (json) {

@@ -426,7 +426,7 @@ export async function createUiServer(
 			// usertrust-ui process. The catch stays around this call alone:
 			// `verifyTransaction` reports found/valid through its result object rather
 			// than by throwing for a transaction, so widening this catch would relabel a genuine server
-			// fault (an unreadable vault) as a client 400; the unreadable-segment throw is caught below as a 500.
+			// fault (an unreadable vault) as a client 400; anything it does throw is caught below as a 500.
 			let txId: string;
 			try {
 				txId = decodeURIComponent(url.pathname.slice("/api/verify/".length));
@@ -434,9 +434,10 @@ export async function createUiServer(
 				sendJson(res, 400, { error: "malformed percent-encoding in transaction id" });
 				return;
 			}
-			// An audit segment that cannot be read makes `verifyTransaction` THROW (it will not turn unread records
-			// into "not found"). That is a server fault, not a client error: 500, with a fixed message (the thrown
-			// text carries the vault's file names), and the process keeps serving.
+			// A vault being written has no verdict (503: try again); one whose chain could not be read is
+			// the server's fault (500). Neither is "not found". Anything `verifyTransaction` throws is a server
+			// fault too: 500, with a fixed message (thrown text can carry the vault's file names), and the
+			// process keeps serving.
 			let result: ReturnType<typeof verifyTransaction>;
 			try {
 				result = verifyTransaction(vaultPath, txId);
@@ -444,7 +445,11 @@ export async function createUiServer(
 				sendJson(res, 500, { error: "audit log could not be read" });
 				return;
 			}
-			sendJson(res, result.found ? 200 : 404, result);
+			sendJson(
+				res,
+				result.busy === true ? 503 : result.failed === true ? 500 : result.found ? 200 : 404,
+				result,
+			);
 			return;
 		}
 		if (url.pathname.startsWith("/api/")) {

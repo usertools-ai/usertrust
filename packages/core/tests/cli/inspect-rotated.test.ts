@@ -309,9 +309,9 @@ describe("usertrust inspect: rotated audit segments", () => {
 	});
 
 	it("the vault reading's own errors are scrubbed in the table too: a malformed line in a hostile-named segment", async () => {
-		// `verifyVault` quotes a segment's file name in its malformed-line error without scrubbing it
-		// (that string is byte-mirrored with usertrust-verify and stays as it is), so inspect scrubs
-		// every line it prints, not only the ones it composes.
+		// `verifyVault` scrubs a segment's file name where its own errors quote it (both verifiers do,
+		// in their mirrored walk), and inspect still scrubs every line it prints, not only the ones it
+		// composes.
 		const lines = await writeNine();
 		const hostile = "events-\x1b]0;pwned\x07\x9b0001.jsonl";
 		cut(lines, [
@@ -322,8 +322,8 @@ describe("usertrust inspect: rotated audit segments", () => {
 
 		const data = await inspectJson();
 		expect(data.chain.valid).toBe(false);
-		// --json keeps the vault's bytes (JSON-escaped); only the table substitutes.
-		expect(data.chain.errors).toContain(`malformed JSON (${hostile}:5)`);
+		// --json carries the walk's own error as the walk wrote it, the name already scrubbed.
+		expect(data.chain.errors).toContain("malformed JSON (events-?]0;pwned??0001.jsonl:5)");
 		expect(logOutput.join("\n")).not.toContain("\x1b");
 		const table = await inspectTable();
 		expect(table).toContain("  - malformed JSON (events-?]0;pwned??0001.jsonl:5)");
