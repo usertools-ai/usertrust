@@ -11,7 +11,7 @@
 // It also warns of tool calls the server REJECTED for their key since the last session start
 // (key-rejected.mjs `rejectedSinceLastStart`): read from watch.jsonl, locally and bounded. Any
 // failure to read it is the normal banner, never a thrown error or a wait.
-import { writeSessionStart } from "./job-log.mjs";
+import { jobTypeInstruction, writeSessionStart } from "./job-log.mjs";
 import { rejectedSinceLastStart, warningText } from "./key-rejected.mjs";
 import {
 	announce,
@@ -66,4 +66,10 @@ try {
 // same reason as the rejected-key warning.
 const peerWarning = takePeerWarning();
 if (peerWarning !== null) warning = warning === null ? peerWarning : `${peerWarning} ${warning}`;
-announce(warning === null ? modeAnnouncement() : `${warning} ${modeAnnouncement()}`);
+// The banner and, for a server that lists `job-type`, the agent's instruction to type its jobs
+// (`jobTypeInstruction`: bounded probe, null on any failure): ONE announce, so ONE JSON object.
+const typeInstruction = await jobTypeInstruction();
+announce(
+	warning === null ? modeAnnouncement() : `${warning} ${modeAnnouncement()}`,
+	typeInstruction === null ? undefined : { additionalContext: typeInstruction },
+);

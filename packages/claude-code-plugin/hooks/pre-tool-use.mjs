@@ -87,6 +87,7 @@ import {
 	isUnknownTransfer,
 	jobCapable,
 	jobHoldFields,
+	jobTypeCapable,
 	MAX_CONTENT_CHARS,
 	MAX_OUTPUT_TOKENS,
 	noCallRan,
@@ -555,7 +556,13 @@ async function reserve(input) {
 	// bills job-a. Read only for a server that honours `job` (older servers strip the
 	// keys, and an unlabelled hold must stay byte-identical to today's).
 	const callMs = hookStartedAt();
-	const jobs = (await jobCapable(await serverCapabilities())) ? await resolveJob(sessionId) : null;
+	// The job's TYPE rides only to a server that also lists `job-type` (one that lists `job` alone
+	// is sent the job and no type): `resolveJob`'s `types` is the one gate, so the labels below ARE
+	// the outgoing authorize capture, and what the hold file records is exactly what was sent.
+	const probed = await serverCapabilities();
+	const jobs = (await jobCapable(probed))
+		? await resolveJob(sessionId, { types: await jobTypeCapable(probed) })
+		: null;
 	// A log stamped by a clock far AHEAD of this one (since corrected) makes this call's job unknown.
 	const { labels: holdLabels, key: holdKey } = labelsFor(jobs, callMs);
 	const prepared = await prepareWindow({
@@ -745,6 +752,13 @@ async function reserve(input) {
 					reason: reason.slice(0, MAX_REASON_CHARS),
 					// With the `job` capability, a refused call names its job (or why it has none).
 					...(holdAuthorizeLabels().job === undefined ? {} : { job: holdAuthorizeLabels().job }),
+					// And its type, as the authorize carried it (or none), so watch data agrees with the chain.
+					...(holdAuthorizeLabels().jobType === undefined
+						? {}
+						: { jobType: holdAuthorizeLabels().jobType }),
+					...(holdAuthorizeLabels().typeSource === undefined
+						? {}
+						: { typeSource: holdAuthorizeLabels().typeSource }),
 					...(holdAuthorizeLabels().jobState === undefined
 						? {}
 						: { jobState: holdAuthorizeLabels().jobState }),
