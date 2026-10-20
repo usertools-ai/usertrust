@@ -32,6 +32,7 @@
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..", "..", "..");
@@ -128,26 +129,58 @@ function uncoveredHits(text: string, vocabulary: RegExp, covered: string[]): Hit
 	return out;
 }
 
+/** The `it` / `test` / `describe` call a callee names, with its modifier (`it.skip`, `it.each(...)`). */
+function testCall(callee: ts.Expression): { base: string; modifier?: string } | undefined {
+	if (ts.isIdentifier(callee)) return { base: callee.text };
+	if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression)) {
+		return { base: callee.expression.text, modifier: callee.name.text };
+	}
+	// it.each(table)("title"), it.skipIf(cond)("title")
+	if (ts.isCallExpression(callee)) return testCall(callee.expression);
+	return undefined;
+}
+
+/** Every call in a source file, from its syntax tree: code inside comments and strings is not a call. */
+function calls(source: string): ts.CallExpression[] {
+	const out: ts.CallExpression[] = [];
+	const visit = (node: ts.Node): void => {
+		if (ts.isCallExpression(node)) out.push(node);
+		ts.forEachChild(node, visit);
+	};
+	visit(ts.createSourceFile("cited.test.ts", source, ts.ScriptTarget.Latest, true));
+	return out;
+}
+
 /**
- * The literal titles of the `it(...)` / `test(...)` calls in a test file's source, skipped and
- * todo rows excluded. A template-literal title is returned as written (`${label}: ...`).
+ * The titles of the `it(...)` / `test(...)` rows a test file declares, skipped and todo rows
+ * excluded. A template-literal title is returned as written (`${label}: ...`).
  */
 function literalTitles(source: string): Set<string> {
 	const titles = new Set<string>();
-	const call =
-		/(?<![\w.$])(?:it|test)(?:\.(\w+)(?:\([^)]*\))?)?\(\s*(["'`])((?:\\[\s\S]|(?!\2)[^\\])*)\2/g;
-	for (const m of source.matchAll(call)) {
-		const modifier = m[1];
-		if (modifier === "skip" || modifier === "todo" || modifier === "skipIf") continue;
-		titles.add((m[3] ?? "").replace(/\\([\s\S])/g, "$1"));
+	for (const call of calls(source)) {
+		const named = testCall(call.expression);
+		if (named === undefined || (named.base !== "it" && named.base !== "test")) continue;
+		if (named.modifier === "skip" || named.modifier === "todo" || named.modifier === "skipIf")
+			continue;
+		const title = call.arguments[0];
+		if (title === undefined) continue;
+		if (ts.isStringLiteral(title) || ts.isNoSubstitutionTemplateLiteral(title))
+			titles.add(title.text);
+		else if (ts.isTemplateExpression(title)) titles.add(title.getText().slice(1, -1));
 	}
 	return titles;
 }
 
 /** A cited file that can stop its rows from running wholesale. */
 function disablesRows(source: string): string | undefined {
-	const m = source.match(/\b(?:describe|it|test)\.(?:skip|todo|only)\(/);
-	return m?.[0];
+	for (const call of calls(source)) {
+		const named = testCall(call.expression);
+		if (named === undefined || !["describe", "it", "test"].includes(named.base)) continue;
+		if (named.modifier === "skip" || named.modifier === "todo" || named.modifier === "only") {
+			return `${named.base}.${named.modifier}(`;
+		}
+	}
+	return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -356,6 +389,9 @@ describe("the register's checkers report a failure when there is one (positive c
 			'it.todo("todo");',
 			'it.skipIf(true)("skip-if", () => {});',
 			'audit("not a row", () => {});',
+			'// it("commented out", () => {});',
+			'/* test("block comment", () => {}); */',
+			"const s = 'it(\"inside a string\", () => {})';",
 		].join("\n");
 		const t = literalTitles(src);
 		// An it.each title is the literal format string the source holds.
@@ -365,6 +401,8 @@ describe("the register's checkers report a failure when there is one (positive c
 		expect(disablesRows(src)).toBe("it.skip(");
 		expect(disablesRows('describe.only("x", () => {});')).toBe("describe.only(");
 		expect(disablesRows('it("x", () => {});')).toBeUndefined();
+		// A commented-out skip disables nothing, as a commented-out row proves nothing.
+		expect(disablesRows('// it.skip("x", () => {});\nit("x", () => {});')).toBeUndefined();
 	});
 
 	it("a changelog scan reads only the named section", () => {
