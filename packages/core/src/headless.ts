@@ -1286,9 +1286,15 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	const isTestEnv = process.env.USERTRUST_TEST === "1" || process.env.NODE_ENV === "test";
 	const destroyDrainMs = (isTestEnv ? opts?._destroyDrainMs : undefined) ?? 5_000;
 	const askedMaxHoldTtlMs = opts?.maxHoldTtlMs ?? DEFAULT_MAX_HOLD_TTL_MS;
-	if (!Number.isSafeInteger(askedMaxHoldTtlMs) || askedMaxHoldTtlMs < LEDGER_HOLD_TIMEOUT_MS) {
+	// TigerBeetle's `Transfer.timeout` is a u32 count of seconds: a longer ceiling fails at the ledger.
+	const ledgerMaxMs = 4_294_967_295_000;
+	if (
+		!Number.isSafeInteger(askedMaxHoldTtlMs) ||
+		askedMaxHoldTtlMs < LEDGER_HOLD_TIMEOUT_MS ||
+		askedMaxHoldTtlMs > ledgerMaxMs
+	) {
 		throw new RangeError(
-			`createGovernor(): maxHoldTtlMs must be an integer of at least ${LEDGER_HOLD_TIMEOUT_MS}`,
+			`createGovernor(): maxHoldTtlMs must be an integer from ${LEDGER_HOLD_TIMEOUT_MS} to ${ledgerMaxMs}`,
 		);
 	}
 	// In whole seconds, rounded DOWN: the ledger's timeout is in seconds, and a life rounded up to

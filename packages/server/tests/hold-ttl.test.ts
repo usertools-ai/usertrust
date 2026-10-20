@@ -14,10 +14,18 @@
  *  - `/v1/health` lists `hold-ttl` and states the ceiling, `maxHoldTtlMs`.
  */
 
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { GovernorOpts } from "usertrust";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ServerConfig } from "../src/config.js";
-import { DEFAULT_MAX_PENDING_TTL_MS, hashKey, maxHoldLife } from "../src/config.js";
+import {
+	DEFAULT_MAX_PENDING_TTL_MS,
+	hashKey,
+	loadServerConfig,
+	maxHoldLife,
+} from "../src/config.js";
 import { createUsertrustServer, holdLife, type UsertrustServer } from "../src/server.js";
 import { createFakeGovernor } from "./helpers/fake-governor.js";
 
@@ -155,6 +163,8 @@ describe("an authorize may ask its hold to live longer (`holdTtlMs`)", () => {
 		// A config built without the schema can lack pendingTtlMs: the default ceiling, never NaN.
 		expect(maxHoldLife({})).toBe(DEFAULT_MAX_PENDING_TTL_MS);
 		expect(maxHoldLife({ maxPendingTtlMs: Number.NaN })).toBe(DEFAULT_MAX_PENDING_TTL_MS);
+		// A fractional pendingTtlMs that wins is rounded UP: never a ceiling below the sweep life.
+		expect(maxHoldLife({ pendingTtlMs: 1_200_500, maxPendingTtlMs: 300_000 })).toBe(1_201_000);
 	});
 });
 
@@ -202,6 +212,47 @@ describe("`release-waits`: a release that finds the hold taken by another termin
 		expect(res.status).toBe(409);
 		expect(((await res.json()) as { error: string }).error).toBe("hold_active");
 		await sweeping;
+	});
+
+	it.each([
+		["a void that failed", "ledger_unavailable", 409],
+		["a void the ledger no longer needed (the hold expired)", "pending_transfer_expired", 404],
+	])(
+		"a racing terminal whose release ended in %s (%s): the waiting release's status",
+		async (_name, voidError, status) => {
+			const fake = createFakeGovernor({ releaseDelayMs: 200, release: { voidError } });
+			server = createUsertrustServer({
+				config: config({ pendingTtlMs: 300_000 }),
+				factory: async () => fake.governor,
+			});
+			const { port } = await server.listen();
+			const base = `http://127.0.0.1:${port}`;
+			const { json } = await authorize(base);
+			const sweeping = server.sweepExpired(Date.now() + 10 * MINUTE);
+			const res = await fetch(`${base}/v1/release`, {
+				method: "POST",
+				headers: { "content-type": "application/json", authorization: `Bearer ${KEY}` },
+				body: JSON.stringify({ transferId: String(json.transferId) }),
+			});
+			expect(res.status).toBe(status);
+			const body = (await res.json()) as { error?: string; expiresInMs?: unknown };
+			if (status === 409) {
+				// The reservation stays until the hold's life runs out: the answer says when.
+				expect(body.error).toBe("hold_active");
+				expect(Number.isSafeInteger(body.expiresInMs)).toBe(true);
+			}
+			await sweeping;
+		},
+	);
+
+	it("a maxPendingTtlMs past the ledger's u32 seconds is refused at load", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "utsrv-ttl-cfg-"));
+		const path = join(dir, "server.json");
+		const base = { tenants: [{ id: "acme", keyHash: hashKey(KEY) }] };
+		writeFileSync(path, JSON.stringify({ ...base, maxPendingTtlMs: 4_294_967_296_000 }));
+		await expect(loadServerConfig(path)).rejects.toThrow();
+		writeFileSync(path, JSON.stringify({ ...base, maxPendingTtlMs: 4_294_967_295_000 }));
+		expect((await loadServerConfig(path)).maxPendingTtlMs).toBe(4_294_967_295_000);
 	});
 
 	it("/v1/health lists `release-waits`", async () => {

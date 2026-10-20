@@ -168,7 +168,8 @@ describe("an authorize may ask its hold to live longer (`holdTtlMs`), clamped to
 		},
 	);
 
-	it.each([60_000, 1_000_000.5, Number.POSITIVE_INFINITY])(
+	// The last: one second past TigerBeetle's u32 `Transfer.timeout` (4 294 967 295 s).
+	it.each([60_000, 1_000_000.5, Number.POSITIVE_INFINITY, 4_294_967_296_000])(
 		"maxHoldTtlMs %s is a RangeError at creation",
 		async (bad) => {
 			await expect(createGovernor({ vaultBase: ledgerVault(), maxHoldTtlMs: bad })).rejects.toThrow(

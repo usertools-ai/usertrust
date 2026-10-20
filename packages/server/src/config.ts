@@ -16,6 +16,9 @@ const TenantSchema = z.object({
 	configPath: z.string().optional(),
 });
 
+/** The ledger's longest pending timeout: TigerBeetle's `Transfer.timeout` is a u32 count of seconds. */
+const MAX_LEDGER_TIMEOUT_MS = 4_294_967_295_000;
+
 const ServerConfigSchema = z.object({
 	host: z.string().default("127.0.0.1"),
 	port: z.number().int().min(1).max(65535).default(4519),
@@ -29,7 +32,7 @@ const ServerConfigSchema = z.object({
 	 * least that. A longer one keeps a hold whose client crashed reserved for longer before the
 	 * ledger voids it.
 	 */
-	maxPendingTtlMs: z.number().int().min(300_000).optional(),
+	maxPendingTtlMs: z.number().int().min(300_000).max(MAX_LEDGER_TIMEOUT_MS).optional(),
 	dryRun: z.boolean().default(false),
 	/**
 	 * How long the start-up ledger probe waits for TigerBeetle to answer (ledger-probe.ts).
@@ -78,11 +81,12 @@ export function maxHoldLife(config: {
 	maxPendingTtlMs?: number | undefined;
 }): number {
 	const finite = (v: number | undefined) => (Number.isFinite(v) ? (v as number) : 0);
-	const ceiling = Math.max(
-		finite(config.maxPendingTtlMs) || DEFAULT_MAX_PENDING_TTL_MS,
-		finite(config.pendingTtlMs),
+	// The configured ceiling rounded down to whole seconds, but never below the sweep life, which is
+	// rounded UP: rounding it down would cap a hold below the life every hold already has.
+	return Math.max(
+		Math.floor((finite(config.maxPendingTtlMs) || DEFAULT_MAX_PENDING_TTL_MS) / 1000) * 1000,
+		Math.ceil(finite(config.pendingTtlMs) / 1000) * 1000,
 	);
-	return Math.floor(ceiling / 1000) * 1000;
 }
 
 export type TenantConfig = z.infer<typeof TenantSchema>;
