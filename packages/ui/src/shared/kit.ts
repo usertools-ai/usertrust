@@ -2,8 +2,9 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * The usertrust mark, loaded at runtime from usertrust.ai, OPT-IN. Brand assets are never committed to this repo:
- * public pages load them from usertrust.ai at runtime. This UI is loopback-only by default, so the mark is off
+ * The usertrust mark, loaded at runtime from usertrust.ai, OPT-IN. Brand assets are not committed to this repo
+ * (the one exception is the header logo in `packages/ui/brand/`, which the page bundles): public pages load them from
+ * usertrust.ai at runtime. This UI is loopback-only by default, so the mark is off
  * unless the vault config turns it on, and then it is the BROWSER that fetches it: one plain GET with no query
  * string, no cookies (`crossorigin="anonymous"`) and no referrer.
  */

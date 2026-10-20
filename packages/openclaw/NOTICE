@@ -20,3 +20,7 @@ Copyright (c) Microsoft Corporation, licensed under the MIT License:
 
 No Microsoft source code is included in this repository. "Microsoft" and
 "Agent Governance Toolkit" are used for identification only.
+
+The usertrust name and logo are trademarks of Usertools, Inc. The logo, where a
+package includes it, is not licensed under Apache-2.0; see TRADEMARKS.md in the
+source repository.

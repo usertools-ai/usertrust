@@ -1,19 +1,21 @@
 /**
- * No brand image is tracked in this repository. Brand assets (the mascot, the posters, the
+ * No brand image is tracked in this repository, bar one settled exception (`BRAND_EXCEPTIONS`). Brand assets (the mascot, the posters, the
  * favicon mark, the lattice and the kit's other files) load at runtime from the brand kit,
  * https://usertrust.ai/kit/, which serves them with `access-control-allow-origin: *`; the site keeps
  * their URLs in `app/lib/kit-images.ts`. Anything tracked here would read as Apache-licensed.
  *
  * What this guard catches, over every path `git ls-files` lists from the repository root:
  * - a tracked path with a DIRECTORY named `brand` (any case), and a tracked file whose name
- *   starts with `mascot` (any case);
+ *   starts with `mascot` (any case), except the EXACT paths in `BRAND_EXCEPTIONS`;
  * - an EXACT copy of a kit file, by its bytes: no tracked file may hash (sha256) to any entry
  *   of `KIT_SHA256`, whatever its name or path.
  *
  * What it does NOT catch: a MODIFIED copy. A brand image that is resized, cropped,
  * re-encoded or re-compressed has new bytes and a new hash, and passes this guard. Such a
  * file still breaks the rule, so any image added to the repository needs a person's review.
- * Fonts have their own guard and are not listed here. The marks drawn in code (SVG and CSS in
+ * The exception is settled and narrow: the one logo `usertrust-ui` displays, and the licence that says
+ * it is not Apache-2.0. A third file in that folder, a second mark anywhere, or the same name in another
+ * case fails. Its bytes are pinned by `packages/ui/tests/brand-mark.test.ts`. Fonts have their own guard and are not listed here. The marks drawn in code (SVG and CSS in
  * the site's components and stylesheets) are not files this guard can see; they are pending
  * review.
  */
@@ -128,6 +130,21 @@ export const KIT_SHA256: ReadonlyArray<{ sha256: string; kit: string }> = [
 	},
 ];
 
+/**
+ * The only paths allowed under a `brand/` directory, matched EXACTLY (case-sensitively, whole path). Each
+ * carries its reason. Adding a path here is a decision for the owner of the brand, never a convenience.
+ */
+export const BRAND_EXCEPTIONS: ReadonlyArray<{ path: string; why: string }> = [
+	{
+		path: "packages/ui/brand/usertrust-mark.svg",
+		why: "the one logo usertrust-ui bundles into its header; not Apache-2.0, see packages/ui/brand/LICENSE",
+	},
+	{
+		path: "packages/ui/brand/LICENSE",
+		why: "states that the mark beside it is not licensed under Apache-2.0",
+	},
+];
+
 /** Every path git tracks, repo-relative. Fails, never passes, if git cannot list. */
 function trackedFiles(): string[] {
 	const r = spawnSync("git", ["ls-files", "-z"], { cwd: REPO_ROOT, encoding: "utf8" });
@@ -135,9 +152,14 @@ function trackedFiles(): string[] {
 	return r.stdout.split("\0").filter(Boolean);
 }
 
-/** The paths among `paths` that sit under a directory named `brand`, or are named `mascot*`. */
+/**
+ * The paths among `paths` that sit under a directory named `brand`, or are named `mascot*`, other than the
+ * exact `BRAND_EXCEPTIONS`.
+ */
 export function brandPaths(paths: readonly string[]): string[] {
+	const allowed = new Set(BRAND_EXCEPTIONS.map((row) => row.path));
 	return paths.filter((path) => {
+		if (allowed.has(path)) return false;
 		const segments = path.split("/");
 		const name = segments.pop() ?? "";
 		return segments.some((dir) => dir.toLowerCase() === "brand") || /^mascot/i.test(name);
@@ -209,6 +231,35 @@ test("the path rule: a brand/ directory at any depth and in any case, and a masc
 	);
 });
 
+test("the brand exception is exactly the mark and its licence, and nothing beside them", () => {
+	assert.deepEqual(
+		BRAND_EXCEPTIONS.map((row) => row.path),
+		["packages/ui/brand/usertrust-mark.svg", "packages/ui/brand/LICENSE"],
+	);
+	// The exceptions pass...
+	assert.deepEqual(
+		brandPaths(BRAND_EXCEPTIONS.map((row) => row.path)),
+		[],
+		"the two exception paths are allowed",
+	);
+	// ...and everything else near them fails: a second file in the folder, another mark, the same
+	// name in another case or directory, a nested path, and a mascot file inside the folder.
+	const near = [
+		"packages/ui/brand/second-mark.svg",
+		"packages/ui/brand/usertrust-mark.png",
+		"packages/ui/brand/NOTICE",
+		"packages/ui/brand/usertrust-mark.svg.bak",
+		"packages/ui/brand/sub/usertrust-mark.svg",
+		"packages/ui/Brand/usertrust-mark.svg",
+		"packages/ui/brand/Usertrust-Mark.svg",
+		"packages/ui/brand/license",
+		"packages/server/brand/usertrust-mark.svg",
+		"brand/usertrust-mark.svg",
+		"packages/ui/brand/mascot.png",
+	];
+	assert.deepEqual(brandPaths(near), near);
+});
+
 test("every denylist entry is a sha256 with a kit path, and the list holds the brand images", () => {
 	assert.equal(KIT_SHA256.length, 26, "the kit's 20 non-font files, plus six retired files");
 	assert.equal(new Set(KIT_SHA256.map((row) => row.sha256)).size, 26, "no hash listed twice");
@@ -261,6 +312,47 @@ test("no tracked file is an exact copy of a kit file, by its bytes", () => {
 		kitCopies(files),
 		[],
 		"brand assets load from https://usertrust.ai/kit/ at runtime, never committed",
+	);
+});
+
+/**
+ * The sha256 of the one logo this repository may hold, `packages/ui/brand/usertrust-mark.svg`. It is not in
+ * `KIT_SHA256` (that lists the kit's files), so without this a byte-identical copy of the mark under any other name or
+ * folder (say `site/public/logo.svg`) would pass the byte check. Pinned equal to the hash in
+ * `packages/ui/tests/brand-mark.test.ts`.
+ */
+export const MARK_SHA256 = "e1136ed9518bbc08d6d92259ac9575b536c28c88c6261698ee2e250962f5c2b7";
+
+/** Each of `paths`, other than the allowed mark itself, whose bytes are the mark's. */
+export function markCopies(
+	paths: readonly string[],
+	hashOf: (path: string) => string = sha256Of,
+): string[] {
+	return paths.filter(
+		(path) => path !== "packages/ui/brand/usertrust-mark.svg" && hashOf(path) === MARK_SHA256,
+	);
+}
+
+test("the usertrust mark exists exactly once: no tracked file elsewhere is a byte-for-byte copy of it", () => {
+	const files = trackedFiles();
+	assert.ok(
+		files.includes("packages/ui/brand/usertrust-mark.svg"),
+		"the control: the one allowed mark is tracked and is what the scan compares against",
+	);
+	assert.equal(
+		sha256Of("packages/ui/brand/usertrust-mark.svg"),
+		MARK_SHA256,
+		"the pinned hash is the mark's",
+	);
+	assert.deepEqual(
+		markCopies(files),
+		[],
+		"the mark is bundled from packages/ui/brand/, never copied elsewhere",
+	);
+	// The control: the scan does flag a copy under another name and folder.
+	assert.deepEqual(
+		markCopies(["site/public/logo.svg", "packages/ui/brand/usertrust-mark.svg"], () => MARK_SHA256),
+		["site/public/logo.svg"],
 	);
 });
 
