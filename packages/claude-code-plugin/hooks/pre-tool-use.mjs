@@ -80,6 +80,7 @@ import {
 	giveBackInvalid,
 	guardMode,
 	HoldNameTaken,
+	holdExpiresAt,
 	holdOfCall,
 	holdTtlFor,
 	hookStartedAt,
@@ -631,8 +632,12 @@ async function reserve(input) {
 		// How long this call's hold should live (lib.mjs `holdTtlFor`): a long Bash or a subagent
 		// asks for its hold to outlive it, so its budget stays reserved until it settles.
 		const holdTtlMs = await holdTtlFor(toolName, input.tool_input);
-		const authorizeOnce = () =>
-			serverRequest(
+		// The clock just before the authorize whose answer is used: its hold's life counts from no
+		// earlier (lib.mjs `holdExpiresAt`).
+		let sentAt;
+		const authorizeOnce = () => {
+			sentAt = Date.now();
+			return serverRequest(
 				"/v1/authorize",
 				{
 					model: window?.model ?? fallbackModel,
@@ -667,6 +672,7 @@ async function reserve(input) {
 				// Past the server's own deadline, so its 503 is received (`AUTHORIZE_TIMEOUT_MS`).
 				{ timeoutMs: Math.min(AUTHORIZE_TIMEOUT_MS, timeLeft() - 500) },
 			);
+		};
 		// A 503 `ledger_unavailable` (an outage, or a burst past what the server answers in time) is
 		// tried once more, after a short wait, when the hook's budget leaves room for both
 		// (`authorizeRetryWait`); a second miss is the outage it was, below. A refusal is a decision
@@ -709,6 +715,7 @@ async function reserve(input) {
 					startedAt: new Date(callMs).toISOString(),
 					estimatedInputTokens,
 					...holdLifeField(holdTtlMs, json),
+					expiresAt: holdExpiresAt(sentAt, json),
 					...(settlesAtEstimate
 						? {}
 						: {

@@ -576,6 +576,9 @@ export async function recordPending(sessionId, agentId, entry, { settling = fals
 				// The hold's life as its authorize knew it (pre-tool-use.mjs `holdLifeField`): a
 				// `.settling` record of it is stale only after that (transcript.mjs `staleSettlingAfter`).
 				...(Number.isSafeInteger(entry.holdTtlMs) ? { holdTtlMs: entry.holdTtlMs } : {}),
+				// When the hold's life ends, on this machine's clock (`holdExpiresAt`): past it, no
+				// settle is sent (`holdExpired`).
+				...(Number.isSafeInteger(entry.expiresAt) ? { expiresAt: entry.expiresAt } : {}),
 				// Which server and tenant made the hold: never the key itself.
 				...tenantBinding(),
 				// A transcript-mode hold also records what it will settle: the model it
@@ -1296,6 +1299,7 @@ export async function listPending(sessionId, agentId) {
 					? { estimatedInputTokens: parsed.estimatedInputTokens }
 					: {}),
 				...(Number.isSafeInteger(parsed.holdTtlMs) ? { holdTtlMs: parsed.holdTtlMs } : {}),
+				...(Number.isSafeInteger(parsed.expiresAt) ? { expiresAt: parsed.expiresAt } : {}),
 				// The mark as written, whatever its value: `isGated` judges it.
 				...(Object.hasOwn(parsed, "gate") ? { gate: parsed.gate } : {}),
 				// A quarantined hold whose call ran (`quarantineHold`).
@@ -1870,6 +1874,52 @@ export function isUnknownRoute(response) {
  */
 export function isUnknownTransfer(response) {
 	return response.status === 404 && response.json?.reason === "unknown transferId";
+}
+
+/**
+ * When a hold's life ends, on this machine's clock: the authorize answer's `expiresInMs`
+ * (usertrust-server's `hold-expiry`, a DURATION) added to the clock read just BEFORE that
+ * authorize was sent (`sentAt`). That is never later than the hold's last moment, whatever the
+ * offset between the two machines' clocks. Undefined when the answer states no life: an older
+ * server, or a hold whose life the server does not know.
+ */
+export function holdExpiresAt(sentAt, json) {
+	const life = json?.expiresInMs;
+	if (!Number.isSafeInteger(sentAt) || !Number.isSafeInteger(life) || life < 0) return undefined;
+	return sentAt + life;
+}
+
+/**
+ * Whether a hold is past its recorded life (`holdExpiresAt`) at `now`. A caller about to settle
+ * passes the moment its settle could ARRIVE (now plus that request's timeout), never the moment it
+ * leaves: with less life left than that, the settle can land after the ledger's pending timeout.
+ * Past it, the ledger has voided the hold, or will have: a settle can only fail, as a 410
+ * `settlement_unrecoverable` the server records as spend it never charged, though this plugin
+ * charges that usage itself (a fresh hold, or a later settle point). So no settle is sent
+ * (`endExpiredHold`), and the hold takes the path a gone answer takes.
+ */
+export function holdExpired(entry, now = Date.now()) {
+	return Number.isSafeInteger(entry?.expiresAt) && now > entry.expiresAt;
+}
+
+/**
+ * End a hold past its life (`holdExpired`) before anything replaces it, and say how the server
+ * confirms it ended: `released` (200: this release ended it), `gone` (404 `unknown transferId`:
+ * the server no longer has it), or null when unconfirmed. The server counts a hold against the
+ * budget until its own sweep, which can run well after the hold's last moment, so a replacement
+ * asked for beside it could be refused; and a clock that is wrong may leave it live. `gone` is
+ * usually a hold the sweep ended long since, but can be one whose sweep is still voiding it, its
+ * funds not yet free (PostToolUse's replacement waits for that once). Unconfirmed, the caller sends
+ * the settle as before. No release class: it proves nothing. Never throws.
+ */
+export async function endExpiredHold(transferId, timeoutMs) {
+	try {
+		const response = await releaseHold(transferId, "the hold is past its life", { timeoutMs });
+		if (response.status === 200) return "released";
+		return isUnknownTransfer(response) ? "gone" : null;
+	} catch {
+		return null;
+	}
 }
 
 /**

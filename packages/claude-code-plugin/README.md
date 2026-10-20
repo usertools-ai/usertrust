@@ -731,11 +731,23 @@ In both modes PostToolUse/Stop/SubagentStop never block — the tool already ran
 an estimate hold is marked settle-attempted (`.settling`) before its one settle,
 and one whose settle goes unanswered is given back at Stop — never settled again —
 and the server's pending-TTL sweep voids anything orphaned. A call can wait at Claude
-Code's permission prompt for longer than the server keeps a hold (five minutes; see
-[Long tool calls](#long-tool-calls) for a call that runs longer).
-A transcript hold whose settle then answers 404 gives its window back to a later
-settle point. An estimate hold is charged once, on a fresh hold of its own — but
-only on a clean 404 `unknown transferId` to its one settle. The plugin settles
+Code's permission prompt, or a long Bash command run, for longer than the server
+keeps a hold (five minutes; see [Long tool calls](#long-tool-calls) for a call that
+runs longer). A server that states each hold's life (`hold-expiry`:
+the authorize answer's `expiresInMs`) lets PreToolUse record when it ends, counted
+from the clock read before the authorize, so never later than the hold's last
+moment. Once a settle sent now could arrive after it (the settle's own timeout is counted
+too), the hold is given back first: the server counts a hold against the
+budget until its own sweep, so a replacement asked for beside it could be refused.
+Once the server confirms it ended, no settle is sent: it could only fail, as a 410
+`settlement_unrecoverable` the server records as spend it never charged, though the
+plugin charges that usage itself. The hold takes the path a gone answer takes, below.
+Unconfirmed, the settle is sent as before.
+An older server states no life, and the settle is sent as before.
+A transcript hold whose settle then answers 404, or is past its life, gives its
+window back to a later settle point (or, authorized under a key, is retried under
+it). An estimate hold is charged once, on a fresh hold of its own — but only on a
+clean 404 `unknown transferId` to its one settle, or past its life. The plugin settles
 each transferId at most once, so that 404 means the hold is gone unposted. A
 timeout, no answer, a 5xx or `settled: false` may have posted, and is never
 re-authorized. Neither is a 404 to a hold an earlier release recorded (its file
