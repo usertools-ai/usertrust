@@ -292,6 +292,26 @@ describe("a hold's life, as the server states it", () => {
 			expect((await records()).filter((r) => r.kind === "gap")).toEqual([]);
 		}, 20_000);
 
+		it("a slow give-back, then a FIRST authorize too late to settle: never a fresh hold left unsettled", async () => {
+			life = 0;
+			await pre("tu_1", {}, ESTIMATE);
+			await outlive();
+			// The give-back takes most of the budget, and the first replacement answers only after the
+			// point where its settle could still land. Capped, it is given up and the call-ran gap taken;
+			// uncapped, it would succeed and leave its settle too little time, a hold never charged.
+			slowBy.set("/v1/release", 4_500);
+			slowBy.set("/v1/authorize", 4_000);
+			slowBy.set("/v1/settle", 1_600);
+			await post("tu_1", {}, ESTIMATE);
+			const gaps = (await records()).filter((r) => r.kind === "gap") as Array<{
+				phase?: string;
+				releaseClass?: string;
+			}>;
+			expect(gaps.filter((g) => g.phase === "settle")).toEqual([]);
+			expect(gaps.map((g) => g.releaseClass)).toContain("call-ran");
+			expect(settled().map((s) => s.transferId)).not.toContain("tx_1");
+		}, 20_000);
+
 		it("with no room left in the hook's budget for the wait, no retry: the call-ran gap", async () => {
 			life = 0;
 			await pre("tu_1", {}, ESTIMATE);

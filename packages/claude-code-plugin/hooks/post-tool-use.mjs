@@ -116,7 +116,7 @@ async function estimateUsageTo(sessionId, entry) {
 const RELEASE_WAIT_MAX_MS = 30_000;
 /** What a replacement's retry keeps of the hook's budget past its wait, for its own authorize. */
 const RETRY_AUTHORIZE_RESERVE_MS = 1_500;
-/** ...and for the fresh hold's settle, which the retried authorize can never take. */
+/** ...and for the fresh hold's settle, which no replacement authorize can take (`replacementTimeout`). */
 const RETRY_SETTLE_RESERVE_MS = 1_500;
 /** A wait shorter than this is no wait: the retry is skipped. */
 const RETRY_WAIT_FLOOR_MS = 50;
@@ -264,7 +264,10 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 	const principal = principalCapable(capabilities)
 		? estimatePrincipalFor(sessionId, agentId, input.agent_type)
 		: undefined;
-	const authorizeReplacement = (request = withinBudget()) =>
+	// Every replacement authorize, first or retried, leaves the fresh hold's settle its share of the
+	// hook's budget: a hold granted with no time left to settle it would leave the call uncharged.
+	const replacementTimeout = () => Math.min(5000, timeLeft() - RETRY_SETTLE_RESERVE_MS);
+	const authorizeReplacement = (request = { timeoutMs: replacementTimeout() }) =>
 		serverRequest(
 			"/v1/authorize",
 			{
@@ -286,6 +289,16 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 			},
 			request,
 		);
+	if (replacementTimeout() < RETRY_WAIT_FLOOR_MS) {
+		// No room for an authorize and its settle: the call RAN and nothing will charge it, a gap,
+		// written before its settle-attempted marker goes (evidence first).
+		await recordUnconfirmedCall(sessionId, { ...entry, agentId }, "call-ran");
+		await unlink(claimed).catch(() => {});
+		say(
+			`usertrust: hold ${entry.transferId} expired before its settle, and no time is left to charge this call on a fresh hold; this call's estimate is not recorded`,
+		);
+		return;
+	}
 	let auth;
 	try {
 		auth = await authorizeReplacement();
@@ -307,9 +320,7 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 			wait >= RETRY_WAIT_FLOOR_MS
 		) {
 			await new Promise((resolve) => setTimeout(resolve, wait));
-			auth = await authorizeReplacement({
-				timeoutMs: Math.min(5000, timeLeft() - RETRY_SETTLE_RESERVE_MS),
-			});
+			auth = await authorizeReplacement();
 		}
 	} catch (err) {
 		// No answer. The call RAN and nothing will charge it, as when the fresh hold is refused (below):
