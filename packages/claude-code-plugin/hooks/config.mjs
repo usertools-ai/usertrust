@@ -59,16 +59,34 @@ const VARIABLES = {
 	sendContent: "UT_CC_SEND_CONTENT",
 	unit: "UT_CC_UNIT",
 	role: "UT_CC_ROLE",
+	holdGraceMs: "UT_CC_HOLD_GRACE_MS",
 };
 
 /**
  * Variables Claude Code itself defines, which a hook may read in either kind of
  * session: none of them is a setting of this plugin.
  */
-const HOST_VARIABLES = ["CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS"];
+const HOST_VARIABLES = ["CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS", "BASH_DEFAULT_TIMEOUT_MS"];
 
 const DEFAULT_URL = "http://127.0.0.1:4519";
 const DEFAULT_MODEL = "claude-sonnet-4-6";
+
+/**
+ * How much longer than a Bash call's own timeout its hold is asked to live (`holdGraceMs`): the
+ * call's PreToolUse comes before it starts and its PostToolUse after it ends (lib.mjs `holdTtlFor`).
+ */
+export const DEFAULT_HOLD_GRACE_MS = 60_000;
+/** The longest `holdGraceMs` accepted: an hour. */
+const MAX_HOLD_GRACE_MS = 3_600_000;
+
+/** A `holdGraceMs`: a whole number of ms, from 0 to `MAX_HOLD_GRACE_MS`. */
+export const isHoldGrace = (v) => Number.isSafeInteger(v) && v >= 0 && v <= MAX_HOLD_GRACE_MS;
+
+/** `UT_CC_HOLD_GRACE_MS`, as a `holdGraceMs`: digits only, else the default. */
+function graceFromVariable(raw) {
+	const value = /^[0-9]{1,9}$/.test(raw ?? "") ? Number(raw) : Number.NaN;
+	return isHoldGrace(value) ? value : DEFAULT_HOLD_GRACE_MS;
+}
 
 /** Where a config file must be, under the passwd home. */
 const ANCHOR = [".config", "usertrust"];
@@ -102,6 +120,7 @@ function fromEnvironment(env) {
 		sendContent: env.UT_CC_SEND_CONTENT !== "0",
 		unit: env.UT_CC_UNIT,
 		role: env.UT_CC_ROLE,
+		holdGraceMs: graceFromVariable(env.UT_CC_HOLD_GRACE_MS),
 	};
 }
 
@@ -136,6 +155,7 @@ export function refusedSettings(
 		sendContent: false,
 		unit: undefined,
 		role: undefined,
+		holdGraceMs: DEFAULT_HOLD_GRACE_MS,
 	};
 }
 
@@ -166,7 +186,7 @@ function isHttpUrl(value) {
  * it is refused. Required: `url` (http or https), `key`, `mode` (`watch` or
  * `enforce`) and an absolute `stateDir`. Optional: `failOpen` and `sendContent`
  * (booleans), `usage` (`transcript` or `estimate`), `model`, `unit` and `role`
- * (strings). Fields it does not know are ignored.
+ * (strings), and `holdGraceMs` (ms, 0 to an hour). Fields it does not know are ignored.
  */
 export function parseConfig(text) {
 	let value;
@@ -200,6 +220,7 @@ export function parseConfig(text) {
 		model: [DEFAULT_MODEL, (v) => typeof v === "string" && VISIBLE.test(v)],
 		unit: [undefined, (v) => typeof v === "string"],
 		role: [undefined, (v) => typeof v === "string"],
+		holdGraceMs: [DEFAULT_HOLD_GRACE_MS, isHoldGrace],
 	};
 	const settings = {
 		configured: true,
