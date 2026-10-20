@@ -292,6 +292,28 @@ describe("under pii redact, through the real SDKs", () => {
 		expect(blocks?.[1]).toEqual({ type: "text", text: "[REDACTED:email]" });
 	});
 
+	it("Google: a part whose thoughtSignature key holds undefined or an empty string is content, and is redacted", async () => {
+		const c = await google();
+		await c.models.generateContent({
+			model: "gemini-2.5-flash",
+			contents: [
+				{ role: "user", parts: [{ text: EMAIL, thoughtSignature: undefined }] },
+				{ role: "model", parts: [{ text: EMAIL, thoughtSignature: "" }] },
+			],
+		});
+		// A bare part whose role key holds undefined is a part, as the SDK reads it.
+		await c.models.generateContent({
+			model: "gemini-2.5-flash",
+			contents: { role: undefined, text: EMAIL } as Loose,
+		});
+		expect(bodies).toHaveLength(2);
+		const [both, bare] = bodies.map((b) => JSON.stringify(b));
+		expect(both).not.toContain(EMAIL);
+		expect(both?.split("[REDACTED:email]")).toHaveLength(3);
+		expect(bare).not.toContain(EMAIL);
+		expect(bare).toContain("[REDACTED:email]");
+	});
+
 	it("OpenAI chat: a tool call's JSON arguments are sent as valid JSON, with the address redacted", async () => {
 		const c = await openai();
 		await c.chat.completions.create({

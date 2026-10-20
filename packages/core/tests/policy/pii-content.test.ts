@@ -896,7 +896,20 @@ describe("Google generateContent", () => {
 				}),
 			],
 			["a bare Part in the contents", (p, v) => google(p, { text: v })],
+			[
+				"a bare Part whose role key holds undefined",
+				(p, v) => google(p, { role: undefined, text: v }),
+			],
 			["a text part", part((v) => ({ text: v }))],
+			[
+				"a text part whose thoughtSignature key holds undefined",
+				part((v) => ({ text: v, thoughtSignature: undefined })),
+			],
+			[
+				"a text part with an empty thoughtSignature",
+				part((v) => ({ text: v, thoughtSignature: "" })),
+			],
+			["a text part with thought: false", part((v) => ({ text: v, thought: false }))],
 			[
 				"a function call's args",
 				part((v) => ({ functionCall: { id: "f1", name: "send", args: { to: v, n: 1 } } })),
@@ -1004,6 +1017,33 @@ describe("fields the schema does not name", () => {
 			"messages[][role=user].content[][type=]",
 			"messages[][role=user].future",
 		]);
+	});
+
+	it("an unknown tag or key is named only when it is a plain identifier holding no PII", () => {
+		const s = scan("openai", {
+			model: "gpt-4o",
+			messages: [
+				{ role: EMAIL, content: "x" },
+				{ role: "user", content: "x", [EMAIL]: 1, "a\u001b[2Jb": 2, future_key: 3 },
+				{ role: "user", content: [{ type: "+1 415 555 0100", text: "x" }] },
+			],
+			[EMAIL]: true,
+		});
+		expect([...s.unlisted].sort()).toEqual([
+			"<not shown>",
+			"messages[][role=<not shown>]",
+			"messages[][role=user].<not shown>",
+			"messages[][role=user].content[][type=<not shown>]",
+			"messages[][role=user].future_key",
+		]);
+		expect(JSON.stringify(s.unlisted)).not.toContain(EMAIL);
+	});
+
+	it("an item without a type or a role is an item reference: any key beside its id is reported", () => {
+		const ref = { model: "gpt-4o", input: [{ id: "msg_1" }] };
+		expect(scan("openai", ref).unlisted).toEqual([]);
+		const s = scan("openai", { model: "gpt-4o", input: [{ id: "msg_1", content: EMAIL }] });
+		expect(s.unlisted).toEqual(["input[].content"]);
 	});
 
 	it("a key such as constructor or __proto__ is unlisted, never found on a prototype", () => {

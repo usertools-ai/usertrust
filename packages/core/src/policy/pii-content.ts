@@ -432,6 +432,8 @@ export const OPENAI_RESPONSES_MESSAGE = obj({
  * were (reasoning, compaction, and the calls and results of the provider's own hosted tools) are
  * sent as written.
  */
+/** An item reference given without its `type`. */
+const OPENAI_RESPONSES_ITEM_REFERENCE = obj({ id: C, type: C });
 export const OPENAI_RESPONSES_ITEMS = byType(
 	{
 		message: OPENAI_RESPONSES_MESSAGE,
@@ -515,10 +517,12 @@ export const OPENAI_RESPONSES_ITEMS = byType(
 		tool_search_output: C,
 		additional_tools: C,
 	},
-	// No `type`: a message (EasyInputMessage) when it has a role, else an item reference.
+	// No `type`: a message (EasyInputMessage) when it has a role, else an item reference, whose
+	// only fields are its id and type: any other key is reported, never passed over unscanned.
 	{
 		kind: "choose",
-		choose: (item) => (Object.hasOwn(item, "role") ? OPENAI_RESPONSES_MESSAGE : C),
+		choose: (item) =>
+			Object.hasOwn(item, "role") ? OPENAI_RESPONSES_MESSAGE : OPENAI_RESPONSES_ITEM_REFERENCE,
 	},
 );
 
@@ -582,12 +586,16 @@ export const GOOGLE_PART = obj({
 	toolCall: obj({ id: C, toolType: C, args: J }),
 	toolResponse: obj({ id: C, toolType: C, response: J }),
 });
-/** A part the model produced with a thought signature is its own earlier output: sent as written. */
+/**
+ * A part the model produced (a thought, or a part carrying its thought signature) is its own earlier
+ * output: sent as written. The signature must be a non-empty string: the SDK drops an `undefined`
+ * one from the wire, so a key that is merely present would exempt ordinary content.
+ */
 const googlePart: ChooseNode = {
 	kind: "choose",
 	choose: (part) =>
-		Object.hasOwn(part, "thoughtSignature") ||
-		(Object.hasOwn(part, "thought") && part.thought === true)
+		(typeof part.thoughtSignature === "string" && part.thoughtSignature !== "") ||
+		part.thought === true
 			? C
 			: GOOGLE_PART,
 };
@@ -598,7 +606,7 @@ const googleContentsElement = either({
 	object: {
 		kind: "choose",
 		choose: (value) =>
-			Object.hasOwn(value, "parts") || Object.hasOwn(value, "role") ? GOOGLE_CONTENT : googlePart,
+			value.parts !== undefined || value.role !== undefined ? GOOGLE_CONTENT : googlePart,
 	},
 });
 export const GOOGLE_REQUEST = obj({
@@ -701,9 +709,14 @@ export function scanContent(root: unknown, schema: Node): ContentScan {
 					return;
 				}
 				for (const key of Object.keys(value)) {
+					// A key holding undefined is not serialized: nothing of it reaches the provider.
+					if (value[key] === undefined) continue;
 					const at = pattern === "" ? key : `${pattern}.${key}`;
 					const child = Object.hasOwn(node.fields, key) ? node.fields[key] : undefined;
-					if (child === undefined) unlisted.add(at);
+					if (child === undefined)
+						unlisted.add(
+							pattern === "" ? nameForWarning(key) : `${pattern}.${nameForWarning(key)}`,
+						);
 					else visit(value[key], child, [...path, key], at);
 				}
 				return;
@@ -721,9 +734,10 @@ export function scanContent(root: unknown, schema: Node): ContentScan {
 				}
 				const known =
 					typeof tag === "string" && Object.hasOwn(node.values, tag) ? node.values[tag] : undefined;
-				const at = `${pattern}[${node.key}=${typeof tag === "string" ? tag : describe(tag)}]`;
-				if (known === undefined) unlisted.add(at);
-				else visit(value, known, path, at);
+				if (known === undefined) {
+					const shown = typeof tag === "string" ? nameForWarning(tag) : describe(tag);
+					unlisted.add(`${pattern}[${node.key}=${shown}]`);
+				} else visit(value, known, path, `${pattern}[${node.key}=${tag as string}]`);
 				return;
 			}
 			case "choose": {
@@ -861,6 +875,18 @@ export const PII_UNLISTED_FIELD_WARNING = "USERTRUST_PII_UNLISTED_FIELD";
 export const PII_UNLISTED_FIELD_REPORT_LIMIT = 256;
 
 /** A field name in a terminal warning: C0, DEL and C1 become `?`, as the audit warnings do. */
+/**
+ * An unlisted key or an unknown type tag as a warning may name it. A malformed request can put any
+ * value where a field name or a tag belongs, so it is shown only when it is shaped like an
+ * identifier and holds no PII; anything else is reported under a fixed marker.
+ */
+function nameForWarning(text: string): string {
+	return /^[A-Za-z_$][\w$-]{0,63}$/.test(text) && !detectPII(text).found ? text : UNSHOWN_NAME;
+}
+
+/** What {@link nameForWarning} reports in place of a name it will not show. */
+const UNSHOWN_NAME = "<not shown>";
+
 function scrubForWarning(text: string): string {
 	let out = "";
 	for (const ch of text) {
