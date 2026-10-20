@@ -512,6 +512,11 @@ any hold). What this does not cover:
   within 64 MiB). A vault an older version left with longer last lines is refused (`TAIL_OVERSIZE`).
   Beside one such line left last, an event that would not fit within 64 MiB with it is refused
   too, and dead-lettered; an ordinary event goes on.
+- **A log whose last lines an older version wrote without a `sequence` is appended to only while
+  it is at most 1 GiB.** Such a line's position is its line number, so the writer counts the log's
+  lines on each append until two events of this version follow it, and the count reads at most
+  1 GiB (the bound `usertrust verify` reads a whole log within). A longer one is refused
+  (`TAIL_OVERSIZE`), and verify names it as over its bound too.
 - **`usertrust verify` reads one log segment, the dead-letter queue and the anchor mirror within
   1 GiB each, and a vault's log segments within 2 GiB together.** A larger file, or a segment that
   does not fit in what the segments read before it left of the 2 GiB, is named as over that bound
