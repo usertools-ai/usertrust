@@ -1148,14 +1148,17 @@ describe("failure handling — at most once", () => {
 describe("estimate mode and the cursor", () => {
 	it("STICKY: unreadable at PreToolUse → estimate; readable later → still estimate, never real", async () => {
 		await startServer(okResponder);
-		// No transcript file yet.
+		// The transcript cannot be read: a directory stands at its path (not a regular file). A
+		// file that is merely not written YET defers instead (the "not written yet" rows below).
+		await mkdir(mainTranscript);
 		const pre1 = await run("pre-tool-use.mjs", preInput("tu_1"));
 		expect(pre1.code).toBe(0);
 		expect(pre1.stderr).toContain("ESTIMATE");
 		const post1 = await run("post-tool-use.mjs", postInput("tu_1"));
-		expect(post1.stderr).toContain("settling at the ESTIMATE — transcript unreadable (ENOENT)");
+		expect(post1.stderr).toContain("settling at the ESTIMATE — transcript unreadable (ENOTREG)");
 		expect((await readCursor()).estimateMode).toBe(true);
 		// The transcript appears, with usage that the estimate already stood for.
+		await rm(mainTranscript, { recursive: true });
 		await writeMain(responseEntries("msg_a", SONNET, u(9, 9, 9, 9)));
 		await run("pre-tool-use.mjs", preInput("tu_2"));
 		await run("post-tool-use.mjs", postInput("tu_2"));
@@ -1172,6 +1175,86 @@ describe("estimate mode and the cursor", () => {
 		for (const a of authorizes())
 			expect(a.body.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });
 		expect((await readCursor()).accounted).toEqual([]);
+	});
+
+	it("NOT WRITTEN YET: a hook before the transcript exists defers, and its usage is posted for real once it does", async () => {
+		await startServer(okResponder);
+		// Claude Code named the transcript, but has not written it yet (it writes asynchronously).
+		const pre1 = await run("pre-tool-use.mjs", preInput("tu_1"));
+		expect(pre1.code).toBe(0);
+		expect(pre1.stderr).toContain("transcript not written yet (ENOENT)");
+		expect(pre1.stderr).not.toContain("ESTIMATE");
+		await run("post-tool-use.mjs", postInput("tu_1"));
+		// Nothing settles at the estimate, and nothing makes the agent sticky.
+		expect(settles().filter((s) => s.body.usageSource === "estimated")).toEqual([]);
+		await expect(readdir(join(stateDir, "transcripts", "estimate"))).rejects.toMatchObject({
+			code: "ENOENT",
+		});
+		// The file appears: its usage is posted, for real, at the next settle point.
+		await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+		await run("pre-tool-use.mjs", preInput("tu_2"));
+		await run("post-tool-use.mjs", postInput("tu_2"));
+		await run("stop.mjs", stopInput());
+		expect(
+			settles()
+				.filter((s) => s.body.usageSource !== undefined)
+				.map((s) => [s.body.usageSource, s.body.inputTokens]),
+		).toContainEqual(["provider", 9]);
+		expect(settles().map((s) => s.body.usageSource)).not.toContain("estimated");
+		expect((await readCursor()).accounted).toEqual(["msg_a"]);
+		expect((await readCursor()).estimateMode).toBe(false);
+	});
+
+	it("NOT WRITTEN YET, a subagent: no later subagent of the session inherits estimate mode from it", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(1, 1)));
+		// Subagent a1's first hook fires before its transcript exists.
+		const early = await run("pre-tool-use.mjs", preInput("tu_s1", { agent_id: "a1" }));
+		expect(early.stderr).toContain("transcript not written yet (ENOENT)");
+		await run("post-tool-use.mjs", postInput("tu_s1", { agent_id: "a1" }));
+		// A later subagent, whose transcript exists, posts its own usage for real.
+		await writeSubagent("a2", "Explore", responseEntries("msg_s2", SONNET, u(7, 7)));
+		const later = await run("pre-tool-use.mjs", preInput("tu_s2", { agent_id: "a2" }));
+		expect(later.stderr).not.toContain("settles at the estimate");
+		await run("post-tool-use.mjs", postInput("tu_s2", { agent_id: "a2" }));
+		expect(settles().map((s) => [s.body.usageSource, s.body.inputTokens])).toContainEqual([
+			"provider",
+			7,
+		]);
+		await expect(readdir(join(stateDir, "transcripts", "estimate"))).rejects.toMatchObject({
+			code: "ENOENT",
+		});
+	});
+
+	it("still missing past the grace window: unreadable for good, so the agent settles at the estimate", async () => {
+		await startServer(okResponder);
+		// The first hook to find it missing did so longer ago than the window.
+		await mkdir(join(stateDir, "transcripts", "missing"), { recursive: true, mode: 0o700 });
+		await writeFile(
+			join(stateDir, "transcripts", "missing", `${SESSION}__main`),
+			String(Date.now() - 61_000),
+		);
+		const pre = await run("pre-tool-use.mjs", preInput("tu_1"));
+		expect(pre.stderr).toContain(
+			"transcript unreadable (ENOENT); this agent now settles at the ESTIMATE",
+		);
+		await run("post-tool-use.mjs", postInput("tu_1"));
+		expect(settles().map((s) => s.body.usageSource)).toEqual(["estimated"]);
+		expect((await readCursor()).estimateMode).toBe(true);
+	});
+
+	it('a transcript read once and then gone is unreadable at once, never "not written yet"', async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(3, 3)));
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		await run("post-tool-use.mjs", postInput("tu_1"));
+		expect((await readCursor()).accounted).toEqual(["msg_a"]);
+		await rm(mainTranscript);
+		const pre = await run("pre-tool-use.mjs", preInput("tu_2"));
+		expect(pre.stderr).toContain(
+			"transcript unreadable (ENOENT); this agent now settles at the ESTIMATE",
+		);
+		expect((await readCursor()).estimateMode).toBe(true);
 	});
 
 	it("NO transcript path: the estimate is made sticky FIRST — a later hook that has the path never posts that agent's usage", async () => {
@@ -1330,12 +1413,14 @@ describe("estimate mode and the cursor", () => {
 
 	it("a STICKY agent stays sticky when its cursor is lost: the estimate marker lives outside the cursor", async () => {
 		await startServer(okResponder);
-		// No transcript file yet: sticky at the first hook.
+		// An unreadable transcript (a directory at its path): sticky at the first hook.
+		await mkdir(mainTranscript);
 		await run("pre-tool-use.mjs", preInput("tu_1"));
 		await run("post-tool-use.mjs", postInput("tu_1"));
 		expect((await readCursor()).estimateMode).toBe(true);
 		await rm(cursorPath());
 		// The transcript appears, holding the usage the estimate already stood for.
+		await rm(mainTranscript, { recursive: true });
 		await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
 		await run("pre-tool-use.mjs", preInput("tu_2"));
 		await run("post-tool-use.mjs", postInput("tu_2"));
@@ -3746,10 +3831,12 @@ describe("forked subagents — inherited messages are posted once", () => {
 
 	it("a fork of a parent in estimate mode posts none of what it inherited: it inherits the estimate mode", async () => {
 		await startServer(okResponder);
-		// The parent's transcript cannot be read at its first hook: it settles at the
-		// estimate for the rest of the session, and claims none of its responses.
+		// The parent's transcript cannot be read at its first hook (a directory at its path): it
+		// settles at the estimate for the rest of the session, and claims none of its responses.
+		await mkdir(mainTranscript);
 		await run("pre-tool-use.mjs", preInput("tu_1"));
 		await run("post-tool-use.mjs", postInput("tu_1"));
+		await rm(mainTranscript, { recursive: true });
 		await writeMain(inherited());
 		// Its fork's transcript begins with a copy of them.
 		await writeSubagent("f1", "fork", forkTranscript());

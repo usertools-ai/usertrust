@@ -336,22 +336,24 @@ function unnamed(input: Record<string, unknown>) {
 }
 
 /**
- * A parent whose transcript cannot be read at its first hook — so it settles at
- * the estimate from then on, and claims none of its responses — and, at once, its
- * fork, whose transcript begins with a copy of them: none of that usage may be
- * charged for real as well.
+ * A parent whose transcript cannot be read at its first hook (a directory stands at its path;
+ * a file merely not written yet would defer instead) — so it settles at the estimate from then
+ * on, and claims none of its responses — and, at once, its fork, whose transcript begins with a
+ * copy of them: none of that usage may be charged for real as well.
  */
 const FORK_OF_STICKY: Scenario = {
 	messages: 3,
 	estimates: true,
 	setup: async (world) => {
 		await mkdir(join(world.projectDir, SESSION, "subagents"), { recursive: true });
+		await mkdir(world.main);
 	},
 	steps: [
 		{ calls: [{ hook: "pre-tool-use.mjs", input: pre("tu_1") }] },
 		{ calls: [{ hook: "post-tool-use.mjs", input: post("tu_1") }] },
 		{
 			before: async (world) => {
+				await rm(world.main, { recursive: true });
 				await writeFile(world.main, "");
 				await append(world.main, [
 					...response("msg_1", SONNET, 1),

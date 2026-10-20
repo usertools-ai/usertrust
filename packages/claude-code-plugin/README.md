@@ -388,6 +388,13 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
 - **Denied usage.** If the remainder's authorize is refused (402 budget, 403
   policy, 429 anomaly), those responses are marked `denied` and never retried, and
   a stderr note gives the token counts that could not be recorded.
+- **Not written yet is not unreadable.** Claude Code writes transcripts
+  asynchronously, so a subagent's first hook can fire before its file exists. A
+  transcript a hook names that is missing, has never been read, and was first found
+  missing no more than 60 s ago, is *not written yet*: the hook gives its hold back
+  (nothing settles at the estimate), and the usage is posted for real at the next
+  settle point once the file exists. Missing for longer, or gone after it was read,
+  it is unreadable (below).
 - **Sticky estimate mode.** If an agent's transcript cannot be read at any hook,
   or a hook names no `transcript_path`, that agent switches to the per-call
   estimate for the rest of the session — settled as `usageSource: "estimated"`,

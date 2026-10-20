@@ -270,6 +270,17 @@ const CLAIMS_DIR = "claims";
 /** Where an agent's estimate mode is recorded, outside its cursor (see `stickToEstimate`). */
 const ESTIMATE_DIR = "estimate";
 
+/** Under the transcripts dir: when each agent's named transcript was first found missing (`notWrittenYet`). */
+const MISSING_DIR = "missing";
+
+/**
+ * How long a transcript Claude Code named may be missing (ENOENT) before it counts as unreadable
+ * for good. Claude Code writes transcripts asynchronously
+ * (https://code.claude.com/docs/en/hooks: the transcript "is written asynchronously and may lag"),
+ * so a subagent's first hook can fire before its file exists.
+ */
+export const MISSING_GRACE_MS = 60_000;
+
 /**
  * Untrusted strings in a path or an actor string (agent type/id) →
  * [A-Za-z0-9._-], at most 128 chars. Never a model id: see `modelId`.
@@ -1281,7 +1292,11 @@ async function ingest(cursor, path, since) {
 	try {
 		({ handle } = await openRegular(path));
 	} catch (err) {
-		return { ok: false, reason: `transcript unreadable (${err?.code ?? "error"})` };
+		return {
+			ok: false,
+			reason: `transcript unreadable (${err?.code ?? "error"})`,
+			code: err?.code,
+		};
 	}
 	const result = { ok: true, badLines: 0, longLines: 0, metered: false, atEnd: false };
 	const seen = { metered: false };
@@ -1329,7 +1344,11 @@ async function ingest(cursor, path, since) {
 		// being written (no newline yet) is not read at all, however far `position` went.
 		result.atEnd = cursor.byteOffset === size;
 	} catch (err) {
-		return { ok: false, reason: `transcript unreadable (${err?.code ?? "error"})` };
+		return {
+			ok: false,
+			reason: `transcript unreadable (${err?.code ?? "error"})`,
+			code: err?.code,
+		};
 	} finally {
 		await handle.close().catch(() => {});
 	}
@@ -1682,6 +1701,7 @@ async function cursorLocation(sessionId, agentId) {
 		cursorPath: join(dir.dir, `${name}.json`),
 		claimsDir: join(dir.dir, CLAIMS_DIR),
 		estimatePath: join(dir.dir, ESTIMATE_DIR, name),
+		missingPath: join(dir.dir, MISSING_DIR, name),
 		since,
 	};
 }
@@ -1739,6 +1759,33 @@ export async function stampFirstRun(sessionId) {
 	} catch {
 		// The first hook that needs it reports it.
 	}
+}
+
+/**
+ * Whether a transcript Claude Code named, found missing (ENOENT), may still be on its way: this
+ * agent has never read a byte of it (`byteOffset` 0: one that was read and is gone now is a
+ * failure), and the first hook that found it missing did so no more than `MISSING_GRACE_MS` ago.
+ * That first time is recorded once, by an exclusive create in the private state dir, and never
+ * moves. One that cannot be recorded or read counts as past the window: the agent settles at the
+ * estimate, as it did before this grace existed. Within it, the hook defers: the hold is given
+ * back and the usage stays in the transcript, to be posted for real once the file exists.
+ */
+async function notWrittenYet(where, cursor, now = Date.now()) {
+	if (cursor.byteOffset > 0) return false;
+	let first = now;
+	try {
+		await mkdir(dirname(where.missingPath), { recursive: true, mode: 0o700 });
+		await writeFile(where.missingPath, String(now), { flag: "wx", mode: 0o600 });
+	} catch (err) {
+		if (err?.code !== "EEXIST") return false;
+		try {
+			first = Number(await readRegular(where.missingPath, READ_BOUND.small));
+		} catch {
+			return false;
+		}
+		if (!Number.isFinite(first)) return false;
+	}
+	return now - first <= MISSING_GRACE_MS;
 }
 
 /**
@@ -1908,6 +1955,12 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 		}
 		const { live, finished, inFlight } = await reconcile(cursor, sessionId, agentId);
 		const ingested = await ingest(cursor, transcriptPath, where.since);
+		if (!ingested.ok && ingested.code === "ENOENT" && (await notWrittenYet(where, cursor))) {
+			// Not written yet, not unreadable: nothing was read, so nothing is saved, and the next
+			// hook reads the file from its first byte once it exists.
+			await release();
+			return { kind: "unavailable", reason: "transcript not written yet (ENOENT)" };
+		}
 		if (!ingested.ok) {
 			const sticky = await stickToEstimate(where, ingested.reason, true);
 			if (sticky.kind === "estimate") {

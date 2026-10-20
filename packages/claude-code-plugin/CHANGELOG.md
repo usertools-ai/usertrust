@@ -7,6 +7,19 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ## [Unreleased]
 
+### Fixed
+
+- **A transcript not written yet no longer switches an agent to estimates for the session.**
+  Claude Code writes a transcript asynchronously, so a subagent's first hook can fire before its
+  file exists. That missing file (ENOENT) was read as unreadable, so the agent settled at the
+  per-call estimate for the rest of the session, and every later subagent of the session
+  inherited it: real usage was replaced by small estimates. A transcript that is missing, has
+  never been read, and was first found missing no more than 60 s ago is now *not written yet*.
+  The hook gives its hold back, nothing settles at the estimate, and the usage is posted for real
+  at the next settle point once the file exists. Missing for longer, gone after it was read, or
+  unreadable for any other reason, it still settles at the estimate, as before, so no usage is
+  ever counted both ways.
+
 ## [3.0.3] - 2026-10-17
 
 ### Fixed
