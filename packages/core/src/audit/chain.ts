@@ -42,6 +42,7 @@ import {
 	listDirectory,
 	MAX_EVENT_LINE_BYTES,
 	MAX_INVENTORY_NAMES,
+	MAX_SEGMENT_BYTES,
 	MAX_TAIL_BYTES,
 	openFailure,
 	readLogTail,
@@ -1653,8 +1654,9 @@ function classifyForAppend(
 	auditDir: string,
 	logPath: string,
 	opened: ReturnType<typeof openLogByPath>,
-): { tail: TailState; lastLineBytes: number } {
+): { tail: TailState; lastLineBytes: number; lastLineLegacy: boolean; size: number } {
 	let log: LogObservation;
+	let size = 0;
 	if (opened.fd === undefined) {
 		log = opened.log;
 	} else {
@@ -1663,6 +1665,7 @@ function classifyForAppend(
 			if (!st.isFile()) {
 				log = { kind: "not_regular", fileKind: fileKindOf(st) };
 			} else {
+				size = st.size;
 				log = readLogTail(opened.fd, st.size);
 				if (log.kind === "tail" && !log.tail.fromStart && log.tail.lines.some(isLegacyEvent)) {
 					// The count is a full read, within the bound a whole log is read within: a legacy log past it
@@ -1687,8 +1690,13 @@ function classifyForAppend(
 		},
 		"writer",
 	);
-	const lastLineBytes = log.kind === "tail" ? (log.tail.lines.at(-1)?.length ?? 0) : 0;
-	return { tail, lastLineBytes };
+	const last = log.kind === "tail" ? log.tail.lines.at(-1) : undefined;
+	return {
+		tail,
+		lastLineBytes: last?.length ?? 0,
+		lastLineLegacy: last !== undefined && isLegacyEvent(last),
+		size,
+	};
 }
 
 /** The error an append refused in `tail` throws: nothing has been written. */
@@ -1952,10 +1960,16 @@ function createAuditWriterAt(
 		previousHash: string;
 		sequence: number;
 		lastLineBytes: number;
+		lastLineLegacy: boolean;
+		size: number;
 	} {
 		const opened = openLogByPath(logPath);
 		try {
-			const { tail, lastLineBytes } = classifyForAppend(auditDir, logPath, opened);
+			const { tail, lastLineBytes, lastLineLegacy, size } = classifyForAppend(
+				auditDir,
+				logPath,
+				opened,
+			);
 			const action = writerAction(tail);
 			if (action === "refuse") throw refusalOf(logPath, tail);
 			if (!baselineDurable) {
@@ -1979,6 +1993,8 @@ function createAuditWriterAt(
 				previousHash: head.hash,
 				sequence: head.sequence + 1,
 				lastLineBytes,
+				lastLineLegacy,
+				size,
 			};
 		} catch (err) {
 			if (opened.fd !== undefined) closeSync(opened.fd);
@@ -2032,6 +2048,16 @@ function createAuditWriterAt(
 					if (tailBytes > MAX_TAIL_BYTES) {
 						throw new Error(
 							`audit event refused: with it, the log's last two lines would take ${tailBytes} bytes, over the ${MAX_TAIL_BYTES}-byte bound they are read within (this event was not written)`,
+						);
+					}
+					// Nor a log the NEXT append could not count. Beside a legacy last line (an older version's,
+					// with no sequence), the next append counts the log's lines, within the bound a whole log is
+					// read within (`countLogLines`): an event that takes the log past it would leave every append
+					// after it refused, for good, before the second event of this version could follow.
+					const logBytes = head.size + lineBytes + 1;
+					if (head.lastLineLegacy && logBytes > MAX_SEGMENT_BYTES) {
+						throw new Error(
+							`audit event refused: with it, the log would be ${logBytes} bytes, over the ${MAX_SEGMENT_BYTES}-byte bound its lines are counted within while an older version's event is one of its last two lines (this event was not written)`,
 						);
 					}
 					if (fd !== undefined) break;

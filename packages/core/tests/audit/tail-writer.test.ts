@@ -674,6 +674,48 @@ describe("one rule for every line, in every reader", () => {
 		expect(readFileSync(metaPath(), "utf-8")).toBe(meta);
 		expect(deadLetters()).toHaveLength(1);
 	});
+
+	it("beside a legacy last line near the count's bound: an event that would take the log past it is refused, one that fits goes on, and the vault stays appendable", async () => {
+		mkdirSync(auditDir(), { recursive: true });
+		const ls = legacyChain(2);
+		// A sparse log 600 bytes under 1 GiB: a line of nothing, then the legacy chain's two lines, its last
+		// at position 3 (the count's), which the anchor records.
+		const GIB = 1024 * 1024 * 1024;
+		const tailText = `\n${ls.join("\n")}\n`;
+		const fd = openSync(logPath(), "w");
+		try {
+			ftruncateSync(fd, GIB - 600 - Buffer.byteLength(tailText));
+			writeSync(fd, tailText, GIB - 600 - Buffer.byteLength(tailText));
+		} finally {
+			closeSync(fd);
+		}
+		const last = JSON.parse(ls[1] as string) as { hash: string };
+		writeFileSync(metaPath(), JSON.stringify({ lastHash: last.hash, sequence: 3 }));
+		expect(statSync(logPath()).size).toBe(GIB - 600);
+		const w = createAuditWriter(root);
+		let over: unknown;
+		let fits: unknown;
+		let next: unknown;
+		try {
+			over = await outcome(
+				w.appendEvent({
+					kind: "tool_use",
+					actor: "local",
+					data: { transferId: "tx_over", pad: "x".repeat(1024) },
+				}),
+			);
+			expect(statSync(logPath()).size, "nothing written").toBe(GIB - 600);
+			fits = await outcome(w.appendEvent(input(4)));
+			// The legacy line is still one of the last two, so this append counts the log: it is within the bound.
+			next = await outcome(w.appendEvent(input(5)));
+		} finally {
+			w.release();
+		}
+		expect(message(over)).toMatch(/over the 1073741824-byte bound its lines are counted within/);
+		expect(fits).toBe("resolved");
+		expect(next).toBe("resolved");
+		expect(deadLetters()).toHaveLength(1);
+	});
 });
 
 describe("a FRESH vault goes on, whether its log is absent or an empty file", () => {

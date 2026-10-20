@@ -63,6 +63,8 @@ export const MAX_INVENTORY_NAMES = 100_000;
 const O_NOFOLLOW = fsConstants.O_NOFOLLOW ?? 0;
 const O_NONBLOCK = fsConstants.O_NONBLOCK ?? 0;
 const CHUNK = 64 * 1024;
+/** The read size a full count of a log's lines uses: larger, as it reads the whole file. */
+const COUNT_CHUNK = 1024 * 1024;
 const NEWLINE = 0x0a;
 
 /** A non-regular file's kind, in words the classifier uses. */
@@ -288,9 +290,10 @@ export function countLogLines(
 ): number | undefined {
 	if (size > maxBytes) return undefined;
 	let count = 0;
-	for (let position = 0; position < size; position += CHUNK) {
-		const chunk = readAt(fd, Math.min(CHUNK, size - position), position);
-		for (let i = 0; i < chunk.length; i++) if (chunk[i] === NEWLINE) count++;
+	for (let position = 0; position < size; position += COUNT_CHUNK) {
+		const chunk = readAt(fd, Math.min(COUNT_CHUNK, size - position), position);
+		// `indexOf` scans natively: a byte loop in JS took seconds a GiB, on every append that counts.
+		for (let at = chunk.indexOf(NEWLINE); at !== -1; at = chunk.indexOf(NEWLINE, at + 1)) count++;
 	}
 	return count;
 }
