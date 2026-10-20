@@ -4,7 +4,7 @@
 
 import { execFileSync } from "node:child_process";
 import { cp, mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
-import { createServer as createHttp, type Server } from "node:http";
+import { createServer as createHttp, type RequestListener, type Server } from "node:http";
 import { createServer as createHttps } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -40,7 +40,8 @@ function listen(server: Server, requests: string[]): Promise<Fake> {
 	});
 }
 const answer =
-	(requests: string[]) => (req: { url?: string }, res: import("node:http").ServerResponse) => {
+	(requests: string[]): RequestListener =>
+	(req, res) => {
 		requests.push(req.url ?? "");
 		res.writeHead(200, { "content-type": "application/json" });
 		res.end(CAPS);
