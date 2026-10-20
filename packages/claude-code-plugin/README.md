@@ -319,10 +319,11 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   spaces, over 256 characters) is sent as `unknown`, never rewritten into another.
 - **The model a hold names is the session's own.** A hold with no window (an
   estimate hold, a tool call with nothing new before it, and PostToolUse's fresh hold
-  for an estimate hold that expired) names, in order: the newest model its agent's
-  transcript state has read; the model of the newest response in the agent's
-  transcript, read from its tail for the model id only (estimate mode included, whose
-  usage is always estimated); the model
+  for an estimate hold that expired) names, in order: the model of the newest
+  response in the agent's transcript, read from its tail for the model id only
+  (estimate mode included, whose usage is always estimated), first because only the
+  file is always current; the newest model its agent's transcript state has read,
+  when the tail holds no response; the model
   Claude Code reported at SessionStart (its `model`, which Claude Code may omit); and
   otherwise `unknown`, which usertrust-server prices at the dearest rate it publishes
   and marks as a fallback, so a hold is never priced below the session's model. The

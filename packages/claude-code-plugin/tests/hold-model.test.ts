@@ -219,6 +219,49 @@ describe("the model a hold names is the session's own", () => {
 		expect(cursor.lastModel).toBe("unknown");
 	});
 
+	it("a hold made while another hook holds the agent's lock names the transcript's newest model, not the cursor's last saved one", async () => {
+		await writeTranscript(mainTranscript(), response("msg_h", HAIKU));
+		await pre("tu_1", { transcript_path: mainTranscript() });
+		await runHook(
+			POST,
+			{ ...call("tu_1"), transcript_path: mainTranscript(), tool_response: "ok" },
+			env,
+		);
+		// The session switched to Opus: its response is in the transcript, but another hook holds
+		// the agent's lock, so this one reads only the cursor saved before it (`lastModel` Haiku).
+		await writeFile(mainTranscript(), response("msg_h", HAIKU) + response("msg_o", OPUS));
+		const lock = join(stateDir, "transcripts", `${SESSION}__main.json.lock`);
+		await mkdir(lock);
+		await writeFile(join(lock, "owner"), "another-hook");
+		await pre("tu_2", { transcript_path: mainTranscript() });
+		expect(authorizes()[1]).toMatchObject({ model: OPUS, params: { modelSource: "transcript" } });
+	});
+
+	it("the order of the sources: the transcript's tail, then the cursor, then SessionStart, then `unknown`", async () => {
+		// In this process the module reads settings from process.env: never an installed config.
+		for (const name of ["UT_CC_CONFIG", "UT_SERVER_URL", "UT_SERVER_KEY"]) delete process.env[name];
+		process.env.UT_CC_STATE_DIR = stateDir;
+		const { holdModelFor, recordSessionModel } = (await import("../hooks/transcript.mjs")) as {
+			holdModelFor: (a: Record<string, unknown>) => Promise<{ model: string; source: string }>;
+			recordSessionModel: (session: string, model: unknown) => Promise<void>;
+		};
+		const at = (lastModel: string | null, input: Record<string, unknown> = {}) =>
+			holdModelFor({ sessionId: SESSION, agentId: "main", input, lastModel });
+		await writeTranscript(mainTranscript(), response("msg_o", OPUS));
+		const withTail = { transcript_path: mainTranscript() };
+		// The tail beats a cursor that lags it.
+		expect(await at(HAIKU, withTail)).toEqual({ model: OPUS, source: "transcript" });
+		// No transcript to read: the cursor; an explicit `unknown` from it stays unknown.
+		expect(await at(HAIKU)).toEqual({ model: HAIKU, source: "transcript" });
+		await recordSessionModel(SESSION, OPUS);
+		expect(await at("unknown")).toEqual({ model: "unknown", source: "unknown" });
+		// Neither: the session's reported model, then nothing.
+		expect(await at(null)).toEqual({ model: OPUS, source: "session" });
+		expect(
+			await holdModelFor({ sessionId: "other", agentId: "main", input: {}, lastModel: null }),
+		).toEqual({ model: "unknown", source: "unknown" });
+	});
+
 	it("before any response of its agent, a hold names the model Claude Code reported at SessionStart", async () => {
 		expect((await sessionStart(OPUS)).code).toBe(0);
 		// No transcript path: an estimate hold. And a subagent whose transcript holds no response yet.

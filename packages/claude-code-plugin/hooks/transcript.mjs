@@ -1854,11 +1854,14 @@ async function newestTranscriptModel(path) {
  * a transcript hold with no window, and PostToolUse's replacement of an expired hold. Never a
  * configured or built-in default, which priced an Opus session's holds at a cheaper model's
  * rate. In order:
- *  1. `lastModel`, the newest model the agent's cursor has read;
- *  2. the newest response in the agent's transcript (`newestTranscriptModel`), in estimate mode
- *     too (`UT_CC_USAGE=estimate`, or an agent that settles at the estimate): only that response's
- *     model id is read, never its usage, which is still estimated. Without it, a session that
- *     switched to a dearer model mid-session would go on holding and settling at the cheaper one;
+ *  1. the newest response in the agent's transcript (`newestTranscriptModel`), FIRST because only
+ *     the file is always current: a cursor can lag it (another hook holds the agent's lock, so its
+ *     `lastModel` is the one last saved; or a read stopped before the end), and a hold made just
+ *     after a switch to a dearer model would be priced at the cheaper one. In estimate mode too
+ *     (`UT_CC_USAGE=estimate`, or an agent that settles at the estimate): only that response's
+ *     model id is read, never its usage, which is still estimated;
+ *  2. `lastModel`, the newest model the agent's cursor has read, when the tail holds no response
+ *     (the newest one lies further back than `MODEL_TAIL_BYTES`) or the transcript is unreadable;
  *  3. the model Claude Code reported for the session at SessionStart (`recordSessionModel`);
  *  4. `unknown`: the server prices an id it does not know at the dearest rate it publishes
  *     (core pricing.ts `FALLBACK_RATE`) and marks the receipt `rateSource: "fallback"`, so an
@@ -1868,16 +1871,17 @@ async function newestTranscriptModel(path) {
  */
 export async function holdModelFor({ sessionId, agentId, input, lastModel }) {
 	const unknown = { model: UNKNOWN_MODEL, source: "unknown" };
-	// The newest response read named no usable model: `unknown`, never an older source's.
-	const known = modelId(lastModel);
-	if (known === UNKNOWN_MODEL) return unknown;
-	if (known !== null && known !== SYNTHETIC_MODEL) return { model: known, source: "transcript" };
+	// At each rung, a newest response that named no usable model is `unknown`, never an older
+	// source's model.
 	if (isAgentId(agentId)) {
 		const path = transcriptPathFor(input ?? {}, agentId);
 		const newest = path === undefined ? null : await newestTranscriptModel(path);
 		if (newest === UNKNOWN_MODEL) return unknown;
 		if (newest !== null) return { model: newest, source: "transcript" };
 	}
+	const known = modelId(lastModel);
+	if (known === UNKNOWN_MODEL) return unknown;
+	if (known !== null && known !== SYNTHETIC_MODEL) return { model: known, source: "transcript" };
 	const reported = await sessionModel(sessionId);
 	if (reported !== null) return { model: reported, source: "session" };
 	return unknown;
