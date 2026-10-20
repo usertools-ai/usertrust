@@ -6,7 +6,7 @@
 // - An `environment` session and a refused one run the hook here, in this process. So does
 //   SessionStart, which sends nothing itself: its one request (does the server list
 //   `job-type`?) is made, for a configured session, by a child of the kind below
-//   (`probeInChild`, session-probe.mjs), and the answer is the child's exit code.
+//   (`probeInChild`, session-probe.mjs), and the answer is a token the child writes to a pipe.
 // - A `configured` session's other hooks, all of which can send, run as a CHILD that
 //   sends: `node launch.mjs <hook> --ut-child ...`, with no node options, the
 //   working directory `/`, and nothing of the environment but the host variables a
@@ -52,7 +52,7 @@ import {
 	settings as resolvedSettings,
 	useSession,
 } from "./config.mjs";
-import { PROBE_LISTED, setChildProbe } from "./job-log.mjs";
+import { PROBE_READ_MAX, PROBE_TOKEN, setChildProbe } from "./job-log.mjs";
 import { launch, readStdin, recordWatchEvent, say } from "./lib.mjs";
 import {
 	alsoEnabledWarning,
@@ -242,11 +242,25 @@ async function warnOfPeer(input) {
  * server lists `job-type`. A child that cannot run, fails, is refused or outlives the bound is
  * `false` (no instruction), and the banner is the parent's, announced once either way. Its
  * stdout is not the parent's (SessionStart prints one JSON object, from here), and the answer
- * is its exit code.
+ * is the token it writes to a pipe (session-probe.mjs), read here with exit 0, never relayed.
  */
-function probeInChild(session, home) {
+export function probeInChild(session, home) {
 	return new Promise((resolve) => {
 		let child;
+		let output = "";
+		let over = false;
+		// The probe child dies with this launcher, as `runInChild`'s does: a signal to the
+		// launcher is forwarded, and the launcher's own exit takes the child with it.
+		const forward = (signal) => child?.kill(signal);
+		const onExit = () => child?.kill("SIGKILL");
+		const signals = ["SIGTERM", "SIGINT", "SIGHUP"];
+		const cleanup = () => {
+			clearTimeout(timer);
+			for (const signal of signals) process.off(signal, handlers[signal]);
+			process.off("exit", onExit);
+		};
+		const handlers = Object.fromEntries(signals.map((s) => [s, () => forward(s)]));
+		let timer;
 		try {
 			child = spawn(
 				process.execPath,
@@ -258,20 +272,34 @@ function probeInChild(session, home) {
 					`--ut-pin=${session.path}`,
 					...(home === null ? [] : [`--ut-home=${home}`]),
 				],
-				{ ...childOptions(), stdio: ["ignore", "ignore", "inherit"] },
+				{ ...childOptions(), stdio: ["ignore", "pipe", "inherit"] },
 			);
 		} catch {
 			resolve(false);
 			return;
 		}
-		const timer = setTimeout(() => child.kill("SIGKILL"), PROBE_KILL_MS);
+		for (const signal of signals) process.on(signal, handlers[signal]);
+		process.on("exit", onExit);
+		timer = setTimeout(() => child.kill("SIGKILL"), PROBE_KILL_MS);
+		// A bounded read, never relayed: SessionStart's stdout is one JSON object, this process's.
+		child.stdout.setEncoding("utf-8");
+		child.stdout.on("data", (chunk) => {
+			if (over) return;
+			if (output.length + chunk.length > PROBE_READ_MAX) {
+				// More than the token can be: not an answer. Stop reading and stop the child.
+				over = true;
+				child.kill("SIGKILL");
+			} else output += chunk;
+		});
+		child.stdout.on("error", () => {});
 		child.on("error", () => {
-			clearTimeout(timer);
+			cleanup();
 			resolve(false);
 		});
-		child.on("close", (code) => {
-			clearTimeout(timer);
-			resolve(code === PROBE_LISTED);
+		child.on("close", (code, signal) => {
+			cleanup();
+			// ONLY a clean exit 0 together with exactly the token line is "listed".
+			resolve(code === 0 && signal === null && !over && output === `${PROBE_TOKEN}\n`);
 		});
 	});
 }

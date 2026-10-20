@@ -17,6 +17,8 @@ const ALLOWED: Record<string, Array<{ file: string; fn: string }>> = {
 	"process.stdout.write": [
 		{ file: "lib.mjs", fn: "announce" },
 		{ file: "pre-tool-use.mjs", fn: "deny" },
+		// The probe child's one fixed token, read by the launcher and never shown to anyone.
+		{ file: "session-probe.mjs", fn: "acknowledge" },
 	],
 	systemMessage: [{ file: "lib.mjs", fn: "announce" }],
 };
@@ -94,6 +96,7 @@ describe("terminal sinks: one sanitizing writer, and nothing else writes", () =>
 		expect(held("lib.mjs", "announce", "process.stdout.write")).toBe(1);
 		expect(held("lib.mjs", "announce", "systemMessage")).toBe(1);
 		expect(held("pre-tool-use.mjs", "deny", "process.stdout.write")).toBe(1);
+		expect(held("session-probe.mjs", "acknowledge", "process.stdout.write")).toBe(1);
 	});
 
 	it("positive control: a raw write injected anywhere makes the guard fire", () => {

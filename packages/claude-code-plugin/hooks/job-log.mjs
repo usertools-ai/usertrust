@@ -407,8 +407,15 @@ export const JOB_TYPE_INSTRUCTION = [
 	"If this session was resumed or compacted and a job is already open for the same work, keep it and do not start another.",
 ].join(" ");
 
-/** The exit code of the child probe (session-probe.mjs) that found `job-type` listed. */
-export const PROBE_LISTED = 10;
+/**
+ * What the probe child (session-probe.mjs) writes to stdout, as one line, after it has verified a
+ * well-formed capability list holding `job-type`; the launcher takes ONLY this line together with
+ * exit 0 as "listed". An exit code could not carry it: several are node's own (10 is an
+ * internal bootstrap failure), so a child that died before it ran could have read as an answer.
+ */
+export const PROBE_TOKEN = "ut-job-type-listed";
+/** The longest the launcher reads from the probe child's stdout: far more than the token. */
+export const PROBE_READ_MAX = 256;
 
 /** How long SessionStart waits for the server's capabilities: well under the hook's 5 s. */
 export const TYPE_PROBE_MS = 1_500;

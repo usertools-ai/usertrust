@@ -2,14 +2,16 @@
 // guarantee: a configured session's requests are made from its sanitized child, never from the
 // parent that inherits the environment. Each test names the mutant it kills.
 
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { cp, mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { createServer as createHttp, type RequestListener, type Server } from "node:http";
 import { createServer as createHttps } from "node:https";
+import { createServer as createTcp, type Socket, type Server as TcpServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { runHook } from "./helpers/run-hook.js";
+import { LAUNCH, PASSWD_HOME_PRELOAD, pinsDir, runHook } from "./helpers/run-hook.js";
 
 vi.setConfig({ testTimeout: 30_000 });
 
@@ -202,17 +204,64 @@ describe("a configured session's SessionStart request is made from its isolated 
 			expect(Object.keys(JSON.parse(r.stdout))).toEqual(["systemMessage"]);
 			expect(count(r.stdout, BANNER)).toBe(1);
 		});
-		it("the answer is the child's EXIT CODE: its stdout is never the parent's", async () => {
+		const TOKEN = "ut-job-type-listed";
+		const answered = async (body: string) => {
 			const fake = await httpFake();
-			const hooksDir = await standIn(
-				'process.stdout.write("garbage that is not the hook\'s JSON"); process.exitCode = 10;',
+			const hooksDir = await standIn(body);
+			return start(await configured(`http://127.0.0.1:${fake.port}`), { hooksDir });
+		};
+		it("the answer is the TOKEN with exit 0, and the child's stdout is never the parent's", async () => {
+			const r = await answered(
+				`process.stdout.write(${JSON.stringify(`${TOKEN}\n`)}); process.exitCode = 0;`,
 			);
-			const r = await start(await configured(`http://127.0.0.1:${fake.port}`), { hooksDir });
-			// stdout is still ONE parseable object, and the exit code 10 means "listed"
+			// stdout is still ONE parseable object, and the token means "listed"
 			expect(contextOf(r.stdout)).toContain("usertrust-job.mjs start");
-			expect(r.stdout).not.toContain("garbage");
+			expect(r.stdout).not.toContain(TOKEN);
+			expect(Object.keys(JSON.parse(r.stdout)).sort()).toEqual([
+				"hookSpecificOutput",
+				"systemMessage",
+			]);
 			expect(count(r.stdout, BANNER)).toBe(1);
 		});
+		const notListed: Array<[string, string]> = [
+			// mutant: the exit code alone is taken (10 is node's own bootstrap failure)
+			["exit 10 with no token", "process.exitCode = 10;"],
+			["exit 0 with no token", "process.exitCode = 0;"],
+			// mutant: the token alone is taken
+			[
+				"the token with a nonzero exit",
+				`process.stdout.write(${JSON.stringify(`${TOKEN}\n`)}); process.exitCode = 1;`,
+			],
+			[
+				"the token, then a signal",
+				`process.stdout.write(${JSON.stringify(`${TOKEN}\n`)}, () => process.kill(process.pid, "SIGKILL"));`,
+			],
+			["output before the token", `process.stdout.write(${JSON.stringify(`x${TOKEN}\n`)});`],
+			["output after the token", `process.stdout.write(${JSON.stringify(`${TOKEN}\nmore\n`)});`],
+			["the token twice", `process.stdout.write(${JSON.stringify(`${TOKEN}\n${TOKEN}\n`)});`],
+			["the token without its newline", `process.stdout.write(${JSON.stringify(TOKEN)});`],
+			[
+				"more output than the bound, token included",
+				`process.stdout.write(${JSON.stringify(`${TOKEN}\n`)} + "y".repeat(400));`,
+			],
+		];
+		it("a child flooding stdout is cut off at the read bound, not left to the 3 s timer", async () => {
+			const r = await answered(
+				'setInterval(() => process.stdout.write("y".repeat(1000)), 5); await new Promise(() => {});',
+			);
+			// mutant: the read has no bound → the parent waits out the 3 s kill timer
+			expect(r.ms).toBeLessThan(2_500);
+			expect(Object.keys(JSON.parse(r.stdout))).toEqual(["systemMessage"]);
+			expect(count(r.stdout, BANNER)).toBe(1);
+		});
+		for (const [what, body] of notListed) {
+			it(`${what} is NOT listed`, async () => {
+				const r = await answered(body);
+				expect(r.code).toBe(0);
+				expect(Object.keys(JSON.parse(r.stdout))).toEqual(["systemMessage"]);
+				expect(count(r.stdout, BANNER)).toBe(1);
+			});
+		}
 	});
 
 	it("session-probe is a child only: run as a hook of its own it is not a hook", async () => {
@@ -223,5 +272,164 @@ describe("a configured session's SessionStart request is made from its isolated 
 		);
 		expect(r.code).toBe(1);
 		expect(r.stderr).toContain("launch.mjs runs a hook");
+	});
+
+	it("the module's own guard: run DIRECTLY (not through launch.mjs) it refuses and sends nothing", async () => {
+		const fake = await httpFake();
+		const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>(
+			(resolve) => {
+				execFile(
+					process.execPath,
+					[join(HOOKS, "session-probe.mjs")],
+					{
+						// An environment that would make it probe: a server that lists job-type.
+						env: {
+							PATH: process.env.PATH ?? "",
+							UT_SERVER_URL: `http://127.0.0.1:${fake.port}`,
+							UT_SERVER_KEY: "k",
+							UT_CC_STATE_DIR: join(tmpdir(), "utcc-iso-direct"),
+						},
+					},
+					(error, stdout, stderr) =>
+						resolve({
+							code: error === null ? 0 : ((error as { code?: number }).code ?? 1),
+							stdout,
+							stderr,
+						}),
+				);
+			},
+		);
+		// mutant: requireLaunch() removed → it probes, writes the token, exits 0
+		expect(result.code).toBe(1);
+		expect(result.stderr).toContain("a hook runs only through launch.mjs");
+		expect(result.stdout).not.toContain("ut-job-type-listed");
+		expect(fake.requests).toEqual([]);
+	});
+
+	describe("the probe child dies with its launcher, and ends itself", () => {
+		// A server that accepts the TCP connection and never answers the TLS handshake: the
+		// request's abort at its bound leaves connection work that keeps a process alive.
+		const stallers: TcpServer[] = [];
+		const held: Socket[] = [];
+		afterEach(() => {
+			for (const sock of held.splice(0)) sock.destroy();
+			for (const srv of stallers.splice(0)) srv.close();
+		});
+		async function staller(): Promise<number> {
+			const srv = createTcp((sock) => held.push(sock));
+			stallers.push(srv);
+			await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
+			return (srv.address() as { port: number }).port;
+		}
+		const alive = (pid: number) => {
+			try {
+				process.kill(pid, 0);
+				return true;
+			} catch {
+				return false;
+			}
+		};
+		const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+		const childOf = (pid: number): number | null => {
+			try {
+				const out = execFileSync("pgrep", ["-P", String(pid)], { encoding: "utf-8" });
+				return Number(out.trim().split("\n")[0]) || null;
+			} catch {
+				return null;
+			}
+		};
+		/** Start SessionStart's launcher against a stalling TLS server; resolves once its probe child exists. */
+		async function launcherWithStalledProbe() {
+			const port = await staller();
+			const env = await configured(`https://127.0.0.1:${port}`);
+			const launcher = spawn(
+				process.execPath,
+				["--import", PASSWD_HOME_PRELOAD, LAUNCH, "session-start"],
+				{
+					env: {
+						PATH: process.env.PATH ?? "",
+						CLAUDE_CONFIG_DIR: join(env.TEST_PASSWD_HOME, ".claude"),
+						CLAUDE_PROJECT_DIR: join(env.TEST_PASSWD_HOME, "project"),
+						...env,
+					},
+					stdio: ["pipe", "pipe", "pipe"],
+				},
+			);
+			launcher.stdin.end(
+				JSON.stringify({
+					hook_event_name: "SessionStart",
+					source: "startup",
+					session_id: "s-orph",
+				}),
+			);
+			let child: number | null = null;
+			for (let i = 0; i < 100 && child === null; i++) {
+				await sleep(50);
+				child = childOf(launcher.pid as number);
+			}
+			expect(child, "the probe child started").not.toBeNull();
+			return { launcher, child: child as number };
+		}
+		const goneWithin = async (pid: number, ms: number) => {
+			const until = Date.now() + ms;
+			while (alive(pid) && Date.now() < until) await sleep(25);
+			return !alive(pid);
+		};
+
+		it("SIGTERM to the launcher: the stalled probe child is gone within a second", async () => {
+			const { launcher, child } = await launcherWithStalledProbe();
+			const closed = new Promise((r) => launcher.on("close", r));
+			launcher.kill("SIGTERM");
+			// mutant: no signal forwarding or exit cleanup → the child outlives the launcher (the
+			// probe's own bound is 1.5 s away)
+			const gone = await goneWithin(child, 1_000);
+			if (!gone) process.kill(child, "SIGKILL");
+			expect(gone, "the probe child was left running").toBe(true);
+			await closed;
+		});
+
+		it("a launcher that simply EXITS takes its probe child with it (no signal involved)", async () => {
+			// A pin made by a real SessionStart, then a driver that starts the probe child
+			// (against a stand-in that never ends) and calls process.exit while it runs.
+			const fake = await httpFake();
+			const env = await configured(`http://127.0.0.1:${fake.port}`);
+			expect((await start(env, {}, "s-exit")).code).toBe(0);
+			const hooksDir = await mkdtemp(join(tmpdir(), "utcc-iso-hooks-"));
+			await cp(HOOKS, hooksDir, { recursive: true });
+			await writeFile(
+				join(hooksDir, "session-probe.mjs"),
+				"await new Promise(() => setInterval(() => {}, 1000));",
+			);
+			const code = `
+				const { probeInChild } = await import(${JSON.stringify(pathToFileURL(join(hooksDir, "launch.mjs")).href)});
+				void probeInChild({ path: ${JSON.stringify(join(pinsDir(env), "s-exit.json"))} }, ${JSON.stringify(env.TEST_PASSWD_HOME)});
+				setTimeout(() => process.exit(0), 700);
+			`;
+			const driver = spawn(process.execPath, ["--input-type=module", "-e", code], {
+				env: { PATH: process.env.PATH ?? "" },
+				stdio: "ignore",
+			});
+			const closed = new Promise((r) => driver.on("close", r));
+			let child: number | null = null;
+			for (let i = 0; i < 100 && child === null; i++) {
+				await sleep(20);
+				child = childOf(driver.pid as number);
+			}
+			expect(child, "the probe child started").not.toBeNull();
+			await closed;
+			// mutant: no cleanup on the launcher's exit → the stand-in child runs on, orphaned
+			const gone = await goneWithin(child as number, 500);
+			if (!gone) process.kill(child as number, "SIGKILL");
+			expect(gone, "the probe child outlived the launcher's exit").toBe(true);
+		});
+
+		it("the launcher KILLED outright (no cleanup can run): the probe child still ends itself", async () => {
+			const { launcher, child } = await launcherWithStalledProbe();
+			launcher.kill("SIGKILL");
+			// mutant: no process.exit / self-end timer in the child → a stalled connection keeps it alive
+			const gone = await goneWithin(child, 2_300);
+			if (!gone) process.kill(child, "SIGKILL");
+			expect(gone, "the probe child did not end by itself").toBe(true);
+		});
 	});
 });
