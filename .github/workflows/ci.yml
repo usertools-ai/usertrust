@@ -139,11 +139,13 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # scan-linear.test.ts runs in the scan-linear job below, not here (see that job).
       - name: Run tests with coverage
-        run: npx vitest run --coverage
+        run: npx vitest run --coverage --exclude packages/core/tests/harden/scan-linear.test.ts
       - name: Check coverage thresholds
         run: >-
           npx vitest run --coverage
+          --exclude packages/core/tests/harden/scan-linear.test.ts
           --coverage.thresholds.lines=92
           --coverage.thresholds.branches=84
           --coverage.thresholds.functions=90
@@ -155,6 +157,25 @@ jobs:
           name: coverage-report
           path: coverage/
           retention-days: 14
+
+  scan-linear:
+    name: scan-linear
+    # Same-repo branches and pushes run on Blacksmith; a FORK pull request stays on a
+    # GitHub-hosted runner (fork workflows still need maintainer approval per repo policy).
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2204' || 'ubuntu-latest' }}
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
+    # The detectors' linearity rows: each compares a scan's time on an input twice as long with its
+    # time on the input, several minutes of measuring. They run here, beside `test` and without
+    # coverage, so the test job does not wait on them. The test job excludes this file, and
+    # packages/core/tests/harden/scan-linear-ci.test.ts fails if either side drops it.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx vitest run packages/core/tests/harden/scan-linear.test.ts
 
   openclaw-contract:
     name: openclaw-contract
