@@ -24,7 +24,7 @@ const ServerConfigSchema = z.object({
 	port: z.number().int().min(1).max(65535).default(4519),
 	stateDir: z.string().default(".usertrust-server"),
 	enforcement: z.enum(["enforce", "evaluate_only"]).default("enforce"),
-	pendingTtlMs: z.number().int().positive().default(300_000),
+	pendingTtlMs: z.number().int().positive().max(MAX_LEDGER_TIMEOUT_MS).default(300_000),
 	/**
 	 * The longest life an authorize may ask its hold for (`holdTtlMs`, capability `hold-ttl`), in ms:
 	 * a request is clamped to [`pendingTtlMs`, this]. Unset means DEFAULT_MAX_PENDING_TTL_MS (one

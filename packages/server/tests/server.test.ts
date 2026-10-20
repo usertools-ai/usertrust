@@ -119,7 +119,6 @@ describe("HTTP control plane", () => {
 				"settle-unrecoverable",
 				"refused",
 				"hold-ttl",
-				"release-waits",
 			]);
 			await server?.close();
 			server = undefined;

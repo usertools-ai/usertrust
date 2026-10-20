@@ -166,130 +166,18 @@ describe("an authorize may ask its hold to live longer (`holdTtlMs`)", () => {
 		// A fractional pendingTtlMs that wins is rounded UP: never a ceiling below the sweep life.
 		expect(maxHoldLife({ pendingTtlMs: 1_200_500, maxPendingTtlMs: 300_000 })).toBe(1_201_000);
 	});
-});
 
-describe("`release-waits`: a release that finds the hold taken by another terminal waits for it", () => {
-	it("a release racing the sweep's slow void answers 404 only once that void has landed", async () => {
-		const fake = createFakeGovernor({ releaseDelayMs: 400 });
-		server = createUsertrustServer({
-			config: config({ pendingTtlMs: 300_000 }),
-			factory: async () => fake.governor,
-		});
-		const { port } = await server.listen();
-		const base = `http://127.0.0.1:${port}`;
-		const { json } = await authorize(base);
-		const transferId = String(json.transferId);
-		// The sweep claims the hold and starts its slow void.
-		const sweeping = server.sweepExpired(Date.now() + 10 * MINUTE);
-		const res = await fetch(`${base}/v1/release`, {
-			method: "POST",
-			headers: { "content-type": "application/json", authorization: `Bearer ${KEY}` },
-			body: JSON.stringify({ transferId }),
-		});
-		// Answered only after the void landed: its funds are free when the client hears 404.
-		const landedAtAnswer = fake.calls.released.includes(transferId);
-		expect(res.status).toBe(404);
-		expect(landedAtAnswer).toBe(true);
-		expect(await sweeping).toBe(1);
-	});
-
-	it("a terminal still running past the wait is a 409 `hold_active` (retry), never a 404", async () => {
-		const fake = createFakeGovernor({ releaseDelayMs: 600 });
-		server = createUsertrustServer({
-			config: config({ pendingTtlMs: 300_000 }),
-			factory: async () => fake.governor,
-			releaseWaitMs: 50,
-		});
-		const { port } = await server.listen();
-		const base = `http://127.0.0.1:${port}`;
-		const { json } = await authorize(base);
-		const sweeping = server.sweepExpired(Date.now() + 10 * MINUTE);
-		const res = await fetch(`${base}/v1/release`, {
-			method: "POST",
-			headers: { "content-type": "application/json", authorization: `Bearer ${KEY}` },
-			body: JSON.stringify({ transferId: String(json.transferId) }),
-		});
-		expect(res.status).toBe(409);
-		expect(((await res.json()) as { error: string }).error).toBe("hold_active");
-		await sweeping;
-	});
-
-	it.each([
-		["a void that failed", "ledger_unavailable", 409],
-		["a void the ledger no longer needed (the hold expired)", "pending_transfer_expired", 404],
-	])(
-		"a racing terminal whose release ended in %s (%s): the waiting release's status",
-		async (_name, voidError, status) => {
-			const fake = createFakeGovernor({
-				releaseDelayMs: 200,
-				release: { voidError },
-				holdTimeoutMs: 300_000,
-			});
-			server = createUsertrustServer({
-				config: config({ pendingTtlMs: 300_000 }),
-				factory: async () => fake.governor,
-			});
-			const { port } = await server.listen();
-			const base = `http://127.0.0.1:${port}`;
-			const { json } = await authorize(base);
-			const sweeping = server.sweepExpired(Date.now() + 10 * MINUTE);
-			const res = await fetch(`${base}/v1/release`, {
-				method: "POST",
-				headers: { "content-type": "application/json", authorization: `Bearer ${KEY}` },
-				body: JSON.stringify({ transferId: String(json.transferId) }),
-			});
-			expect(res.status).toBe(status);
-			const body = (await res.json()) as { error?: string; expiresInMs?: unknown };
-			if (status === 409) {
-				// The reservation stays until the hold's life runs out: the answer says when.
-				expect(body.error).toBe("hold_active");
-				expect(Number.isSafeInteger(body.expiresInMs)).toBe(true);
-			}
-			await sweeping;
+	it.each(["maxPendingTtlMs", "pendingTtlMs"])(
+		"a %s past the ledger's u32 seconds is refused at load",
+		async (field) => {
+			const dir = mkdtempSync(join(tmpdir(), "utsrv-ttl-cfg-"));
+			const path = join(dir, "server.json");
+			const base = { tenants: [{ id: "acme", keyHash: hashKey(KEY) }] };
+			writeFileSync(path, JSON.stringify({ ...base, [field]: 4_294_967_296_000 }));
+			await expect(loadServerConfig(path)).rejects.toThrow();
+			// The boundary itself is accepted.
+			writeFileSync(path, JSON.stringify({ ...base, [field]: 4_294_967_295_000 }));
+			expect((await loadServerConfig(path))[field as "pendingTtlMs"]).toBe(4_294_967_295_000);
 		},
 	);
-
-	it("a 409 for the sweep's own failed void states the LEDGER's remaining hold, not the spent sweep life", async () => {
-		// The sweep ends a hold at its 10 s life; the ledger holds it 300 s. Its void fails, so the
-		// funds stay reserved until the ledger's timeout: that is what the client must be told.
-		const fake = createFakeGovernor({
-			releaseDelayMs: 200,
-			release: { voidError: "ledger_unavailable" },
-			holdTimeoutMs: 300_000,
-		});
-		server = createUsertrustServer({
-			config: config({ pendingTtlMs: 10_000 }),
-			factory: async () => fake.governor,
-		});
-		const { port } = await server.listen();
-		const base = `http://127.0.0.1:${port}`;
-		const { json } = await authorize(base);
-		const sweeping = server.sweepExpired(Date.now() + 20_000);
-		const res = await fetch(`${base}/v1/release`, {
-			method: "POST",
-			headers: { "content-type": "application/json", authorization: `Bearer ${KEY}` },
-			body: JSON.stringify({ transferId: String(json.transferId) }),
-		});
-		expect(res.status).toBe(409);
-		const { expiresInMs } = (await res.json()) as { expiresInMs: number };
-		expect(expiresInMs).toBeGreaterThan(250_000);
-		expect(expiresInMs).toBeLessThanOrEqual(300_000);
-		await sweeping;
-	});
-
-	it("a maxPendingTtlMs past the ledger's u32 seconds is refused at load", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "utsrv-ttl-cfg-"));
-		const path = join(dir, "server.json");
-		const base = { tenants: [{ id: "acme", keyHash: hashKey(KEY) }] };
-		writeFileSync(path, JSON.stringify({ ...base, maxPendingTtlMs: 4_294_967_296_000 }));
-		await expect(loadServerConfig(path)).rejects.toThrow();
-		writeFileSync(path, JSON.stringify({ ...base, maxPendingTtlMs: 4_294_967_295_000 }));
-		expect((await loadServerConfig(path)).maxPendingTtlMs).toBe(4_294_967_295_000);
-	});
-
-	it("/v1/health lists `release-waits`", async () => {
-		const { base } = await start();
-		const health = (await (await fetch(`${base}/v1/health`)).json()) as { capabilities: string[] };
-		expect(health.capabilities).toContain("release-waits");
-	});
 });

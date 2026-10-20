@@ -83,12 +83,6 @@ const SERVER_CAPABILITIES = Object.freeze([
 	// own sweep life for it alike. /v1/health also states `maxHoldTtlMs`, the ceiling. An older server
 	// strips the key, and the hold keeps the default life.
 	"hold-ttl",
-	// `release-waits`: `POST /v1/release` for a hold another terminal has taken (the TTL sweep's void,
-	// a settle, an abort) waits for that terminal, bounded as a settle waits (`RELEASE_WAIT_MAX_MS`),
-	// before it answers. So its 404 `unknown transferId` means the hold's funds are free: a client
-	// may replace it at once. Past the bound it answers 409 `hold_active` (retry), never a 404.
-	// Without it, a 404 can come while the void is still in flight.
-	"release-waits",
 ]);
 /**
  * A dryRun server has no ledger, so it writes no `user_data` tags — but it records
@@ -1164,11 +1158,6 @@ export function createUsertrustServer(opts: {
 	 * For tests: a server leaves it unset.
 	 */
 	healthKeepAliveMs?: number;
-	/**
-	 * The longest a release waits for another terminal to land (`release-waits`), in ms. Defaults to
-	 * `RELEASE_WAIT_MAX_MS` (30 s). For tests: a server leaves it unset.
-	 */
-	releaseWaitMs?: number;
 }): UsertrustServer {
 	const { config } = opts;
 	const sink = opts.log;
@@ -1261,12 +1250,7 @@ export function createUsertrustServer(opts: {
 	// registers the terminal here in the same synchronous step: a route that took an entry out on its own,
 	// without registering, left a settle racing it nothing to wait on (it polled 2 s and answered a 409 the
 	// plugin reads as "claimed", so the usage was never charged or recorded).
-	// `ended` resolves when the terminal lands, to whether it provably ENDED the hold (`terminalEnded`):
-	// a release that waited on it (`release-waits`) answers "funds free" only then.
-	const claimed = new Map<
-		string,
-		{ kind: TerminalKind; done: Promise<void>; ended: Promise<boolean>; entry: PendingEntry }
-	>();
+	const claimed = new Map<string, { kind: TerminalKind; done: Promise<void> }>();
 	/**
 	 * Take an entry out of `pending` and run its terminal, registering the terminal in `claimed` in the same
 	 * step. The first caller wins (the entry is gone for every later one). With `restoreOnThrow`, a terminal that
@@ -1299,36 +1283,8 @@ export function createUsertrustServer(opts: {
 				claimed.delete(key);
 			}
 		})();
-		claimed.set(key, {
-			kind,
-			done: run.then(noop, noop),
-			ended: run.then(
-				(result) => terminalEnded(tenantId, transferId, kind, result),
-				() => false,
-			),
-			entry,
-		});
+		claimed.set(key, { kind, done: run.then(noop, noop) });
 		return run;
-	}
-
-	/**
-	 * Whether a terminal that landed provably ENDED its hold, so the hold's funds are free: a release,
-	 * abort, sweep or shutdown whose governor ended it with no ledger void error, or one of
-	 * `DONE_VOID_ERRORS` (the ledger no longer holds it); a settle that posted. A void that failed
-	 * otherwise leaves the reservation pending in the ledger until its timeout.
-	 */
-	function terminalEnded(
-		tenantId: string,
-		transferId: string,
-		kind: TerminalKind,
-		result: unknown,
-	): boolean {
-		if (kind === "settle") return recentlySettled.get(tenantId)?.get(transferId) === "settled";
-		if (result === null || typeof result !== "object") return false;
-		const outcome = result as { released?: unknown; aborted?: unknown; voidError?: unknown };
-		const ended = kind === "abort" ? outcome.aborted === true : outcome.released === true;
-		const voidError = outcome.voidError;
-		return ended && (voidError === undefined || DONE_VOID_ERRORS.has(String(voidError)));
 	}
 
 	/**
@@ -2095,55 +2051,6 @@ export function createUsertrustServer(opts: {
 		});
 	}
 
-	/**
-	 * Wait for the terminal that took this hold out of `pending` (`claimed`) to land, bounded as a
-	 * settle racing it is (`RELEASE_WAIT_MAX_MS`). `ended` when none is running or it provably ended
-	 * the hold (`terminalEnded`); otherwise `pending` (the bound ran out first) or `not-ended` (it
-	 * landed, but a ledger void failed: the reservation stays until the hold's timeout), each with
-	 * the hold's own entry, whose life the answer states.
-	 */
-	async function terminalLanded(
-		tenantId: string,
-		transferId: string,
-	): Promise<{ state: "ended" } | { state: "pending" | "not-ended"; entry: PendingEntry }> {
-		const inFlight = claimed.get(`${tenantId}\0${transferId}`);
-		if (inFlight === undefined) return { state: "ended" };
-		const waitMs = opts.releaseWaitMs ?? RELEASE_WAIT_MAX_MS;
-		const ended = await Promise.race([
-			inFlight.ended,
-			new Promise<null>((resolve) => setTimeout(() => resolve(null), waitMs).unref()),
-		]);
-		if (ended === true) return { state: "ended" };
-		return { state: ended === null ? "pending" : "not-ended", entry: inFlight.entry };
-	}
-
-	/**
-	 * A release whose hold another terminal took and has not provably ended: never a 404 (which says
-	 * the funds are free) but a 409 `hold_active`, with the hold's remaining life when it is known.
-	 * Still running past the bound: retry. Its void failed: the ledger releases it at that life.
-	 */
-	function answerNotEnded(
-		res: ServerResponse,
-		transferId: string,
-		landed: { state: "pending" | "not-ended"; entry: PendingEntry },
-	): void {
-		// The LEDGER's remaining hold, never the sweep's: the sweep's life may already be spent (its own
-		// void is the one that failed) while the ledger keeps the funds until its pending timeout. Unknown
-		// when the handle does not state that timeout: then no `expiresInMs`.
-		const timeout = landed.entry.auth.holdTimeoutMs;
-		const life =
-			timeout === undefined ? null : Math.max(0, Math.floor(timeout - monoAge(landed.entry)));
-		sendJson(res, 409, {
-			error: "hold_active",
-			reason:
-				landed.state === "pending"
-					? "another terminal is still ending this hold: retry the release"
-					: "the hold's ledger void did not complete: the ledger releases it when its life runs out",
-			transferId,
-			...expiresIn(life),
-		});
-	}
-
 	async function handleRelease(
 		tenant: TenantConfig,
 		body: unknown,
@@ -2155,18 +2062,7 @@ export function createUsertrustServer(opts: {
 			return;
 		}
 		const { transferId, reason, releaseClass } = parsed.data;
-		let entry = pending.get(transferId);
-		if (!entry || entry.tenantId !== tenant.id) {
-			// Taken by another terminal (`release-waits`): wait for it to land, so a 404 says the funds are
-			// free. One that THREW put the hold back, and this release ends it after all. One still running
-			// past the bound is a 409, never a 404 that would say the funds are free.
-			const landed = await terminalLanded(tenant.id, transferId);
-			entry = pending.get(transferId);
-			if (landed.state !== "ended" && !(entry && entry.tenantId === tenant.id)) {
-				answerNotEnded(res, transferId, landed);
-				return;
-			}
-		}
+		const entry = pending.get(transferId);
 		if (!entry || entry.tenantId !== tenant.id) {
 			// "unknown transferId", never "unknown route": a client that could not read this
 			// server's capabilities falls back to /v1/abort only on an unknown route.
@@ -2190,14 +2086,6 @@ export function createUsertrustServer(opts: {
 			// The governor no longer held it (its settle is in flight, or it already
 			// ended), so this request released nothing and must not say it did. The entry
 			// stays out: a hold the governor does not own is not the sweep's to meet again.
-			// A terminal that took it first is waited for, as above (`release-waits`).
-			if (outcome === NOT_CLAIMED) {
-				const landed = await terminalLanded(tenant.id, transferId);
-				if (landed.state !== "ended") {
-					answerNotEnded(res, transferId, landed);
-					return;
-				}
-			}
 			sendJson(res, 404, { error: "not_found", reason: "unknown transferId" });
 			return;
 		}
