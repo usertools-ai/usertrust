@@ -189,6 +189,7 @@ export { detectInjection } from "./policy/injection.js";
 export type { PIIDetection } from "./policy/pii.js";
 // PII detection
 export { detectPII, UNSCANNABLE } from "./policy/pii.js";
+export { PII_UNLISTED_FIELD_WARNING } from "./policy/pii-content.js";
 export type { CircuitBreakerSnapshot } from "./resilience/circuit.js";
 // Circuit breaker
 export { CircuitBreaker, CircuitBreakerRegistry, CircuitOpenError } from "./resilience/circuit.js";

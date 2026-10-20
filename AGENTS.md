@@ -76,7 +76,7 @@ the kit first, never committed here.
 | Ledger | `ledger/{client,engine,pricing}.ts` |
 | Audit | `audit/{chain,canonical,merkle,verify,read,dead-letters,rotation,entropy,quarantine}.ts` |
 | Anchoring | `audit/{anchor,anchor-verify,anchor-doctor,rekor,rekor-verify,sigv4}.ts` |
-| Policy | `policy/{gate,default-rules,pii,injection,canary,decay}.ts` |
+| Policy | `policy/{gate,default-rules,pii,pii-content,injection,canary,decay}.ts` |
 | Board | `board/{board,director,concerns}.ts` |
 | Budget | `budget/{allocation,attribution,context,runway}.ts` |
 | Runtime | `resilience/{circuit,scope}.ts`, `memory/patterns.ts`, `snapshot/checkpoint.ts` |
@@ -1529,10 +1529,17 @@ audit payload, because the proof must not become a channel for credentials or pr
 invariant is only as strong as the event shapes themselves: the DLQ persists whatever an event
 carried, verbatim (see the DLQ note above).
 
-**`redactPII` is pure.** It deep-clones and never mutates the caller's object. That is what makes
-`pii: "redact"` safe: PII the prompt scan finds never egresses: the outbound request is a redacted
-clone (fields the scan does not read are not redacted unless the prompt scan fired; see LIMITATIONS §11). `"block"`
-throws before any egress; `"warn"` forwards verbatim and redacts only the audit copy.
+**Redaction never mutates the caller's object, and it rewrites content only.** `redactPII` deep-clones;
+`redactContent` (`policy/pii-content.ts`) copies only the containers on the way to a replaced value and
+passes everything else by reference. That is what makes `pii: "redact"` safe: PII the prompt scan finds
+never egresses, and the outbound request is a copy with each content value that holds PII replaced.
+One closed per-provider schema in `policy/pii-content.ts` names the content fields for BOTH the scan
+and the redaction, so their scopes are equal by construction; every control field (credentials,
+headers, ids, `metadata`, tool declarations, replayed reasoning) is sent as written, and a field the
+schema does not name is left alone and reported once per governor under
+`USERTRUST_PII_UNLISTED_FIELD` (see LIMITATIONS.md, section 11). A field added to a provider's request type
+belongs in that schema, and `tests/policy/pii-content-sdk-types.test-d.ts` fails until it is there.
+`"block"` throws before any egress; `"warn"` forwards verbatim and redacts only the audit copy.
 
 **Signature trust is anchored by the operator's publisher→key registry, never by the embedded key.**
 A key embedded in a skill manifest is accepted only if it is in `config.supplyChain.publisherKeys`

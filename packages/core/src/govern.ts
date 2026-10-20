@@ -128,6 +128,13 @@ import {
 } from "./policy/gate.js";
 import { detectInjection } from "./policy/injection.js";
 import { builtInAborted, detectPII, redactPII } from "./policy/pii.js";
+import {
+	detectContentPII,
+	redactContent,
+	reportUnlistedFields,
+	requestSchema,
+	scanContent,
+} from "./policy/pii-content.js";
 import type { ProxyConnection } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
 import { isRealAbortSignal } from "./shared/abort-signal.js";
@@ -1602,6 +1609,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		resetTimeoutMs: config.circuitBreaker.resetTimeout,
 	});
 
+	// The request fields outside the PII content schema this governor has already reported.
+	const piiUnlistedReported = new Set<string>();
+
 	// 3. Proxy mode removed — throw early with clear error
 	if (opts?.proxy) {
 		throw new Error(
@@ -2254,7 +2264,13 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 					// d. PII check + redact-egress
 					if (config.pii !== "off") {
-						const piiResult = detectPII(promptParts);
+						// The scan reads the request's CONTENT (what the model reads) and redaction
+						// replaces only that: every control field (credentials, headers, cache keys,
+						// metadata, ids, replayed reasoning) is sent as the caller wrote it. A field
+						// the provider's schema does not name is left alone and reported by path.
+						const contentScan = scanContent(params, requestSchema(params, kind));
+						reportUnlistedFields(kind, contentScan.unlisted, piiUnlistedReported);
+						const piiResult = detectContentPII(contentScan);
 						if (piiResult.found && config.pii === "block") {
 							// block mode: throw BEFORE any egress.
 							denial.denialClass = "pii";
@@ -2267,15 +2283,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							);
 						}
 						if (config.pii === "redact" && piiResult.found) {
-							// redact mode: forward a redacted DEEP CLONE so PII never egresses.
-							// redactPII is pure — the caller's original object is never mutated.
-							// Google's request is the mirror, which keeps a real AbortSignal at
-							// `config.abortSignal` for the transport: the SDK never serializes it, so it
-							// is kept by reference whatever own fields it carries, the same signal the
-							// serialization check above left out (`snapshotSource`, by `isRealAbortSignal`).
-							// Any other provider's request here is the parse of its serialization.
-							const redactedBody = redactPII(params, { signalSent: kind === "google" })
-								.data as Record<string, unknown>;
+							// redact mode: forward a copy with each content value that holds PII
+							// replaced. Only the containers on the way to a replaced value are copied;
+							// everything else is the caller's own value, by reference, so Google's
+							// `config.abortSignal` and callable tools reach the SDK as they were. The
+							// caller's original object is never mutated.
+							const redactedBody = redactContent(params, contentScan) as Record<string, unknown>;
 							forwardArgs = [redactedBody, ...args.slice(1)];
 						}
 						// "warn" mode: continue, no transform (audit copy is redacted later).

@@ -581,23 +581,43 @@ Windows ACLs.
 ## 11. PII detection is a pattern scan of the prompt, not data-loss prevention
 
 `pii: "block"`, `"redact"` and `"warn"` act on what a pattern scan finds in the
-request's **prompt text**: `messages` (and a string `system`) for Anthropic,
-`messages` for OpenAI chat, `input` and a string `instructions` for OpenAI
-Responses, `contents` for Google. Everything else in the request is not read:
-tool and function definitions (including Google's callable tool declarations),
-an array-form `system` prompt, Google's `config` (including `systemInstruction`),
-`metadata`, and every other field. The model's response is never scanned. A secret
-in one of those fields goes to the provider as written, and when the prompt scan
-finds nothing, `"redact"` changes nothing.
+request's **content**, the text the model reads, inside the prompt fields:
+`messages` (and a string `system`) for Anthropic, `messages` for OpenAI chat,
+`input` and a string `instructions` for OpenAI Responses, `contents` for Google.
+Inside them it reads message text, tool results, and the arguments and inputs of
+earlier tool calls. It does not read the control values inside them: ids, names,
+URLs, media and file data, citations, and the model's own replayed reasoning
+(Anthropic thinking, redacted thinking and compaction blocks, OpenAI reasoning and
+compaction items, Google parts marked as thoughts or carrying a thought
+signature), which the provider needs back unchanged. Nothing outside the prompt
+fields is read: tool and function definitions (including Google's callable tool
+declarations), an array-form `system` prompt, Google's `config` (including
+`systemInstruction`), `metadata`, cache keys, safety identifiers, MCP server
+credentials and headers, and every other field. The model's response is never
+scanned. A secret in a field the scan does not read goes to the provider as
+written.
+
+`"redact"` rewrites exactly what the scan reads, and nothing else: each content
+string that matches is replaced in full, not only the matched characters, in a
+copy of the request, and every other value is sent as the caller wrote it. A tool
+call's JSON `arguments` string is parsed, its matching strings replaced and the
+JSON written out again, so it stays valid JSON; one that is not JSON is replaced
+in full. The content fields are a closed list per provider, written from the
+provider SDKs' request types. A field the list does not name (one a newer SDK
+adds, or a content block type it does not know) is neither scanned nor redacted:
+it is sent as written, and each governor reports it once, by its path and never its
+value, as a `USERTRUST_PII_UNLISTED_FIELD` process warning.
 
 The patterns cover email, phone, US SSN, credit card (Luhn), IPv4 and seven
 secret and token formats. They do not cover names, postal addresses, dates of
 birth, IPv6, non-US identifiers, bank account numbers or health data, and a string
-is checked as written (no decoding, no object keys, no non-string values). When
-`"redact"` does fire, it replaces every matching string in the whole request body
-in full, not only the matched characters. `createGovernor()` and `usertrust-server`
-scan the `messages` the caller passes and can block, but never redact egress.
-The full scope, per provider, is on the [PII Detection](https://usertrust.ai/docs/policy/pii) page.
+is checked as written (no decoding other than a tool call's JSON `arguments`, no
+object keys, no non-string values). The `llm_call` audit event's `piiDetected` and
+`piiPaths` are computed over every string in the prompt fields, control values
+included, so a type recorded there can sit in a value that was sent as written.
+`createGovernor()` and `usertrust-server` scan the `messages` the caller passes
+and can block, but never redact egress. The full scope, per provider, is on the
+[PII Detection](https://usertrust.ai/docs/policy/pii) page.
 
 ## 12. A stream aborted by the caller's own signal is not charged for what it consumed
 
