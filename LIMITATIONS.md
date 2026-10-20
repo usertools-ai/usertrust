@@ -415,10 +415,12 @@ warning (at the first failure, and with the count when the client is destroyed),
 `trust()` call and action, and headless `authorize()` (whose `settle()` stays fail-open);
 `usertrust-server` answers that tenant's authorize with `503 audit_refused`. Such a process's budget is
 not visible to vault readers either: the enforced-budget record
-(`effective-budget.json`) is published only by the process that holds the lock, so
-the ledger UI, `inspect`, `health` and `report` show the lock holder's budget, or
-"not yet published" before its first append, while the degraded process goes on
-enforcing its own.
+(`effective-budget.json`) is replaced only by the process that holds the lock, so
+the ledger UI, `inspect`, `health` and `report` show the lock holder's budget while
+the degraded process goes on enforcing its own. The exception is a vault with no
+record: a governor publishes its budget when it starts if none stands, so until the
+lock holder's first append they show the budget of whichever process started
+first.
 
 **Load ONE copy of usertrust per process, and use a vault from one thread.** The
 shared writer, and the registry that tells a live writer in this process from a

@@ -27,7 +27,10 @@
  *   otherwise join a marker to its value); joins the lines; and cuts only after that, at the
  *   printed clip. Every control, DEL and C1 character and three escape sequences, inside each
  *   marker, with and without a key that swallows the marker in the original, leave no readable
- *   credential. `sanitizeMapped` gives scrubForStderr's text and where each of its units was.
+ *   credential. A credential runs on past the caller's key only where the key holds what ended it
+ *   (a token's delimiter, a quoted value's closing quote), and a token inside a quoted value ends
+ *   at that value's closing quote. `sanitizeMapped` gives scrubForStderr's text and where each of
+ *   its units was.
  * - Linear, as a ratio: reading twice an input takes at most three times as long (a quadratic
  *   reader takes about four), at a size where one read takes 25 ms, each time the least of five
  *   samples of at least 50 ms, taken in turn at both sizes with both inputs built first (one flat
@@ -921,6 +924,69 @@ describe("internalErrorLine reads the original and the sanitized text, and redac
 			const message = (n: number): string => `${head}${key.repeat(n)}${tail}`;
 			expect(line(message(100_000), [key]), head).toBe(`${LINE}Error: ${printed}`);
 			expectLinear(head, (n) => () => line(message(n), [key]), 10_000);
+		}
+	}, 120_000);
+
+	it("a credential runs on only where the caller's key holds what ended it", () => {
+		const TAB = C(9);
+		const NUL = C(0);
+		const rows: [string, string[], string][] = [
+			// A key that starts where a credential's value does, with a quote or a delimiter that ends
+			// one: the marker has no credential of its own (a bare part), and the key's match joins it.
+			['Bearer "key,TK1 end', ['"key,'], "Bearer [redacted] end"],
+			[`Bearer${TAB}"key,TK1 end`, ['"key,'], "Bearer [redacted] end"],
+			["Bearer 'tenant-secret-123UPSTREAM", ["'tenant-secret-123"], "Bearer [redacted]"],
+			["api_key=;tenantTK1 end", [";tenant"], "api_key=[redacted] end"],
+			["x-api-key: ,tenant&TK1 end", [",tenant&"], "x-api-key: [redacted] end"],
+			// A gap after the key: what follows is kept, as 5.1.0 kept it.
+			['Bearer "key, TK1 end', ['"key,'], "Bearer [redacted] TK1 end"],
+			// Bare parts alone, with no key, are kept as they are.
+			['Bearer "key,TK1 end', [], 'Bearer "key,TK1 end'],
+			["Bearer ,x end; api_key=,x end", [], "Bearer ,x end; api_key=,x end"],
+			// A marker glued to the end of the key's match, which only the original text holds whole
+			// (`ESC S` takes the key's first character in the sanitized text).
+			[`${ESC}SECRETBea${NUL}rer TK1 end`, ["SECRET"], "[redacted]Bearer [redacted] end"],
+			// A marker sanitizing glues where a credential stops after running on past the key's match.
+			[`api_key=Ak xB${TAB}Bea${NUL}rer TK1 end`, ["k x"], "api_key=[redacted] end"],
+			// Two credentials of one kind in one part, each ended by a delimiter the key holds.
+			[
+				`X-Api-Key:TK0/earer${C(0x1f)}BeaTK0q${TAB}API_KEY: TK1/earer BeaTK1q end`,
+				["/earer Bea"],
+				"X-Api-Key:[redacted] end",
+			],
+			// A key's match that holds what ended the second of two values, and not the first.
+			[
+				`x-api-key: Bearer :${NUL}x-api-key: api_key=Tk&api_key=:`,
+				[`${NUL}T`],
+				"x-api-key: [redacted] [redacted]&api_key=[redacted]",
+			],
+			// A token inside a quoted value ends at the value's closing quote, which no key holds.
+			['x-api-key="a.api-key=T&k"tail end', ["&k"], 'x-api-key="[redacted]"tail end'],
+			[
+				'x-api-key="a.api-key:&T"Bearer TK1 end',
+				["api-key:&"],
+				'x-api-key="[redacted]"Bearer [redacted] end',
+			],
+			// A quoted value inside another, with the other quote: it ends at its own closing quote.
+			[`api_key="x-api-key: 'secret'" ECONNREFUSED`, [], 'api_key="[redacted]" ECONNREFUSED'],
+			[`x-api-key: 'a api_key="s"' ECONNREFUSED`, [], "x-api-key: '[redacted]' ECONNREFUSED"],
+			[`api_key='p x-api-key: "s"' tail`, [], "api_key='[redacted]' tail"],
+		];
+		for (const [message, secrets, printed] of rows) {
+			expect(line(message, secrets), JSON.stringify(message)).toBe(`${LINE}Error: ${printed}`);
+		}
+		// Linear: twice as many of each take at most three times as long.
+		const timed: [string, string][] = [
+			['Bearer "key,TK1 ', '"key,'],
+			["api_key=;tenantTK1 ", ";tenant"],
+			[`${ESC}SECRETBea${NUL}rer TK1 `, "SECRET"],
+			[`api_key=Ak xB${TAB}Bea${NUL}rer TK1 `, "k x"],
+			[`X-Api-Key:TK0/earer${C(0x1f)}BeaTK0q${TAB}`, "/earer Bea"],
+			['x-api-key="a.api-key=T&k"tail ', "&k"],
+			[`api_key="x-api-key: 'secret'" `, "secret"],
+		];
+		for (const [unit, key] of timed) {
+			expectLinear(JSON.stringify(unit), (n) => () => line(unit.repeat(n), [key]), 10_000);
 		}
 	}, 120_000);
 
