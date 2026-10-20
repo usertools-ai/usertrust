@@ -709,16 +709,20 @@ export function scanContent(root: unknown, schema: Node): ContentScan {
 					unlisted.add(`${pattern} (${describe(value)})`);
 					return;
 				}
-				for (const key of Object.keys(value)) {
+				// Own names, not only enumerable keys: a field the SDK reads by name (Google's request
+				// mirror keeps one the caller hid as a non-enumerable own property) is sent all the same.
+				for (const key of Object.getOwnPropertyNames(value)) {
 					// A key holding undefined is not serialized: nothing of it reaches the provider.
 					if (value[key] === undefined) continue;
-					const at = pattern === "" ? key : `${pattern}.${key}`;
 					const child = Object.hasOwn(node.fields, key) ? node.fields[key] : undefined;
-					if (child === undefined)
+					if (child !== undefined) {
+						visit(value[key], child, [...path, key], pattern === "" ? key : `${pattern}.${key}`);
+					} else if (Object.prototype.propertyIsEnumerable.call(value, key)) {
+						// A hidden key no schema names is read by no SDK and serialized by none: not sent.
 						unlisted.add(
 							pattern === "" ? nameForWarning(key) : `${pattern}.${nameForWarning(key)}`,
 						);
-					else visit(value[key], child, [...path, key], at);
+					}
 				}
 				return;
 			}
@@ -755,20 +759,50 @@ export function scanContent(root: unknown, schema: Node): ContentScan {
 	return { sites, unlisted: [...unlisted] };
 }
 
-/** The value a `jsonText` site is read and redacted as: its parse, or the string when it is not JSON. */
-function readJsonText(text: string): { parsed: true; value: unknown } | { parsed: false } {
-	try {
-		return { parsed: true, value: JSON.parse(text) };
-	} catch {
-		return { parsed: false };
-	}
+/** A string VALUE literal in a JSON text: its span `[start, end)` and the string it decodes to. */
+interface JsonString {
+	readonly start: number;
+	readonly end: number;
+	readonly value: string;
 }
 
-const siteValue = (site: ContentSite): unknown => {
-	if (site.leaf !== "jsonText") return site.value;
-	const read = readJsonText(site.value as string);
-	return read.parsed ? read.value : site.value;
-};
+/**
+ * Every string VALUE literal in a `jsonText` site, keys skipped, in order; undefined when the text
+ * is not JSON (it is then read and replaced as text). The scan and the redaction both read this
+ * list, so their scopes are equal: a member repeated under one key is listed each time, as it is
+ * sent, where a parse would keep only the last. One pass over the text with a stack of open
+ * containers, so any nesting the parse accepts is read without recursion.
+ */
+function jsonStringValues(text: string): JsonString[] | undefined {
+	try {
+		JSON.parse(text);
+	} catch {
+		return undefined;
+	}
+	const strings: JsonString[] = [];
+	const inObject: boolean[] = [];
+	let keyNext = false;
+	for (let i = 0; i < text.length; i++) {
+		const ch = text[i];
+		if (ch === "{" || ch === "[") {
+			inObject.push(ch === "{");
+			keyNext = ch === "{";
+		} else if (ch === "}" || ch === "]") {
+			inObject.pop();
+			keyNext = false;
+		} else if (ch === ",") {
+			keyNext = inObject.at(-1) === true;
+		} else if (ch === '"') {
+			let end = i + 1;
+			while (text[end] !== '"') end += text[end] === "\\" ? 2 : 1;
+			end += 1;
+			if (keyNext) keyNext = false;
+			else strings.push({ start: i, end, value: JSON.parse(text.slice(i, end)) as string });
+			i = end - 1;
+		}
+	}
+	return strings;
+}
 
 /** `a.b[2].c` for a site path and a path inside the site's value (`detectPII`'s own form). */
 function joinPath(path: readonly Segment[], inner: string): string {
@@ -785,69 +819,60 @@ function joinPath(path: readonly Segment[], inner: string): string {
 export function detectContentPII(scan: ContentScan): PIIDetection {
 	const types = new Set<string>();
 	const paths: string[] = [];
-	for (const site of scan.sites) {
-		const found = detectPII(siteValue(site));
+	const add = (site: ContentSite, value: unknown): void => {
+		const found = detectPII(value);
 		for (const type of found.types) types.add(type);
 		for (const inner of found.paths) paths.push(joinPath(site.path, inner));
+	};
+	for (const site of scan.sites) {
+		const strings = site.leaf === "jsonText" ? jsonStringValues(site.value as string) : undefined;
+		if (strings === undefined) add(site, site.value);
+		else for (const string of strings) add(site, string.value);
 	}
 	return { found: types.size > 0, types: [...types], paths };
 }
 
 /**
- * `text`, which must be valid JSON, with each string VALUE that holds PII replaced by its
- * redaction, or undefined when none does. Every other byte is kept as written: keys, whitespace,
- * and numbers, which a parse and re-serialization would change (one past 2^53 rounds, one past the
- * double range becomes `null`). One pass over the text with a stack of open containers, so any
- * nesting the parse accepted is handled without recursion.
+ * `text` with each of its string values (`strings`) that holds PII replaced by its redaction, or
+ * undefined when none does. Every other byte is kept as written: keys, whitespace, and numbers,
+ * which a parse and re-serialization would change (one past 2^53 rounds, one past the double range
+ * becomes `null`).
  */
-function redactJsonStrings(text: string): string | undefined {
-	const inObject: boolean[] = [];
-	let keyNext = false;
+function redactJsonStrings(text: string, strings: readonly JsonString[]): string | undefined {
 	let out = "";
 	let from = 0;
-	for (let i = 0; i < text.length; i++) {
-		const ch = text[i];
-		if (ch === "{" || ch === "[") {
-			inObject.push(ch === "{");
-			keyNext = ch === "{";
-		} else if (ch === "}" || ch === "]") {
-			inObject.pop();
-			keyNext = false;
-		} else if (ch === ",") {
-			keyNext = inObject.at(-1) === true;
-		} else if (ch === '"') {
-			let end = i + 1;
-			while (text[end] !== '"') end += text[end] === "\\" ? 2 : 1;
-			if (keyNext) keyNext = false;
-			else {
-				const redacted = redactPII(JSON.parse(text.slice(i, end + 1)) as string);
-				if (redacted.detection.found) {
-					out += `${text.slice(from, i)}${JSON.stringify(redacted.data)}`;
-					from = end + 1;
-				}
-			}
-			i = end;
-		}
+	for (const string of strings) {
+		const redacted = redactPII(string.value);
+		if (!redacted.detection.found) continue;
+		out += `${text.slice(from, string.start)}${JSON.stringify(redacted.data)}`;
+		from = string.end;
 	}
 	return from === 0 ? undefined : out + text.slice(from);
 }
 
-/** A shallow copy with the same prototype and own property descriptors. */
+/**
+ * A shallow copy with the same prototype and own properties, each as enumerable as before. Every
+ * property of the copy is configurable (and, holding a value, writable): the copy is ours to
+ * change, even where the caller froze its own object.
+ */
 function shallowCopy<V extends object>(value: V): V {
 	if (Array.isArray(value)) return value.slice() as V;
+	const descriptors: PropertyDescriptorMap = Object.getOwnPropertyDescriptors(value);
+	for (const key of Reflect.ownKeys(descriptors)) {
+		const descriptor = descriptors[key as string] as PropertyDescriptor;
+		descriptor.configurable = true;
+		if ("value" in descriptor) descriptor.writable = true;
+	}
 	return Object.defineProperties(
 		Object.create(Object.getPrototypeOf(value) as object | null) as V,
-		Object.getOwnPropertyDescriptors(value),
+		descriptors,
 	);
 }
 
 function define(target: object, key: Segment, value: unknown): void {
-	Object.defineProperty(target, key, {
-		value,
-		writable: true,
-		enumerable: true,
-		configurable: true,
-	});
+	// A hidden (non-enumerable) field stays hidden: a serializer that skips it must still skip it.
+	const enumerable = Object.getOwnPropertyDescriptor(target, key)?.enumerable ?? true;
+	Object.defineProperty(target, key, { value, writable: true, enumerable, configurable: true });
 }
 
 /**
@@ -869,8 +894,9 @@ export function redactContent(root: unknown, scan: ContentScan): unknown {
 	let out = root;
 	for (const site of scan.sites) {
 		let replacement: unknown;
-		if (site.leaf === "jsonText" && readJsonText(site.value as string).parsed) {
-			replacement = redactJsonStrings(site.value as string);
+		const strings = site.leaf === "jsonText" ? jsonStringValues(site.value as string) : undefined;
+		if (strings !== undefined) {
+			replacement = redactJsonStrings(site.value as string, strings);
 			if (replacement === undefined) continue;
 		} else {
 			const redacted = redactPII(site.value);

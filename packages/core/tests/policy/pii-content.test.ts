@@ -1046,6 +1046,44 @@ describe("fields the schema does not name", () => {
 		expect(s.unlisted).toEqual(["input[].content"]);
 	});
 
+	it("a hidden (non-enumerable) field the schema names is read and redacted, and stays hidden", () => {
+		const part = Object.defineProperty({}, "text", { value: EMAIL, enumerable: false });
+		const request: Loose = {
+			model: "gemini-2.5-flash",
+			contents: [{ role: "user", parts: [part] }],
+		};
+		const s = scan("google", request);
+		expect(s.unlisted).toEqual([]);
+		expect(detectContentPII(s).paths).toEqual(["contents[0].parts[0].text(email)"]);
+		const sent = redactContent(request, s) as Loose;
+		const sentPart = ((sent["contents"] as Loose[])[0] as { parts: Loose[] }).parts[0] as Loose;
+		expect(sentPart["text"]).toBe(R);
+		expect(Object.getOwnPropertyDescriptor(sentPart, "text")?.enumerable).toBe(false);
+		expect(part["text" as keyof typeof part]).toBe(EMAIL);
+	});
+
+	it("a frozen request is redacted into a copy, not thrown on", () => {
+		const deepFreeze = (v: unknown): void => {
+			if (typeof v !== "object" || v === null) return;
+			Object.freeze(v);
+			for (const child of Object.values(v)) deepFreeze(child);
+		};
+		const request = anthropic(EMAIL, { type: "text", text: EMAIL });
+		deepFreeze(request);
+		const sent = redactContent(request, scan("anthropic", request)) as Loose;
+		expect(JSON.stringify(sent)).not.toContain(EMAIL);
+		expect(JSON.stringify(request)).toContain(EMAIL);
+	});
+
+	it("a hidden key the schema does not name is not sent by any SDK, so it is not reported", () => {
+		const request = Object.defineProperty(
+			{ model: "m", max_tokens: 1, messages: [] },
+			"future_field",
+			{ value: EMAIL, enumerable: false },
+		);
+		expect(scan("anthropic", request).unlisted).toEqual([]);
+	});
+
 	it("a key such as constructor or __proto__ is unlisted, never found on a prototype", () => {
 		const request = JSON.parse(
 			'{"model":"m","max_tokens":1,"messages":[],"constructor":"x","__proto__":{"a":1}}',
@@ -1156,6 +1194,21 @@ describe("JSON-string arguments", () => {
 		expect(
 			((sent["messages"] as Loose[])[1] as { function_call: Loose }).function_call["arguments"],
 		).toBe(expected);
+	});
+
+	it("are scanned and redacted value by value, a member repeated under one key included", () => {
+		const text = `{"to":"${EMAIL}","to":"public"}`;
+		const request = chat("hi", {
+			role: "assistant",
+			content: null,
+			function_call: { name: "send", arguments: text },
+		});
+		const s = scan("openai", request);
+		expect(detectContentPII(s).paths).toEqual(["messages[1].function_call.arguments(email)"]);
+		const sent = redactContent(request, s) as Loose;
+		expect(
+			((sent["messages"] as Loose[])[1] as { function_call: Loose }).function_call["arguments"],
+		).toBe(`{"to":"${R}","to":"public"}`);
 	});
 
 	it("nested deeper than a recursive serializer reaches are redacted, not thrown on", () => {

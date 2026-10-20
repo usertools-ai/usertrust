@@ -314,6 +314,18 @@ describe("under pii redact, through the real SDKs", () => {
 		expect(bare).toContain("[REDACTED:email]");
 	});
 
+	it("Google: a text part the caller hid (non-enumerable), which the SDK still sends, is redacted", async () => {
+		const hidden = Object.defineProperty({}, "text", { value: EMAIL, enumerable: false });
+		const c = await google();
+		await c.models.generateContent({
+			model: "gemini-2.5-flash",
+			contents: [{ role: "user", parts: [hidden, { text: "and the rest" }] }],
+		});
+		const sent = JSON.stringify(bodies[0]);
+		expect(sent).not.toContain(EMAIL);
+		expect(sent).toContain("[REDACTED:email]");
+	});
+
 	it("OpenAI chat: a tool call's JSON arguments are sent as valid JSON, with the address redacted", async () => {
 		const c = await openai();
 		await c.chat.completions.create({
