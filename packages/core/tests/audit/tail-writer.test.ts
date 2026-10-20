@@ -21,6 +21,7 @@ import {
 	closeSync,
 	existsSync,
 	constants as fsConstants,
+	ftruncateSync,
 	lstatSync,
 	mkdirSync,
 	mkdtempSync,
@@ -30,8 +31,10 @@ import {
 	readSync,
 	renameSync,
 	rmSync,
+	statSync,
 	symlinkSync,
 	writeFileSync,
+	writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -639,6 +642,37 @@ describe("one rule for every line, in every reader", () => {
 		expect(r).not.toBeInstanceOf(Error);
 		expect((r as { torn: unknown }).torn).not.toBeNull();
 		expect(verifyVault(join(root, VAULT_DIR)).valid).toBe(true);
+	});
+
+	it("a legacy tail at the end of a log over the bound a whole log is read within: TAIL_OVERSIZE, and the log is never counted through", async () => {
+		mkdirSync(auditDir(), { recursive: true });
+		const ls = legacyChain(2);
+		// A sparse log: 1 GiB that stores nothing, then a newline and a legacy chain's two lines. The tail read
+		// backward is legacy, so only a count of every line could place it, and no verifier reads a log this size.
+		const GIB = 1024 * 1024 * 1024;
+		const fd = openSync(logPath(), "w");
+		try {
+			ftruncateSync(fd, GIB);
+			writeSync(fd, `\n${ls.join("\n")}\n`, GIB);
+		} finally {
+			closeSync(fd);
+		}
+		writeFileSync(metaPath(), legacyAnchor(ls));
+		const size = statSync(logPath()).size;
+		const meta = readFileSync(metaPath(), "utf-8");
+		const w = createAuditWriter(root);
+		let refused: unknown;
+		try {
+			refused = await outcome(w.appendEvent(input(9)));
+		} finally {
+			w.release();
+		}
+		expect(refused).toBeInstanceOf(AuditTailMismatchError);
+		expect((refused as InstanceType<typeof AuditTailMismatchError>).state).toBe("TAIL_OVERSIZE");
+		// Nothing written (the log is compared by size: reading it whole is what this row forbids).
+		expect(statSync(logPath()).size).toBe(size);
+		expect(readFileSync(metaPath(), "utf-8")).toBe(meta);
+		expect(deadLetters()).toHaveLength(1);
 	});
 });
 

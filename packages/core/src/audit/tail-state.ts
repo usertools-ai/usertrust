@@ -279,7 +279,7 @@ export function classifyAuditTail(snapshot: TailSnapshot, mode: ClassifyMode): T
 		case "oversize":
 			return result(
 				"TAIL_OVERSIZE",
-				`the audit log's last lines are over the read limit (${log.size} bytes)`,
+				`the audit log is over what its classification may read (${log.size} bytes): its last lines, or every line of a legacy log`,
 			);
 		case "absent":
 		case "tail":

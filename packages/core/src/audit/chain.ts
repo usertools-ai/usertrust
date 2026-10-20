@@ -49,7 +49,6 @@ import {
 import {
 	classifyAuditTail,
 	type LogObservation,
-	type LogTail,
 	MAX_ANCHOR_BYTES,
 	parseLine,
 	type TailState,
@@ -1642,7 +1641,8 @@ function isLegacyEvent(line: Buffer): boolean {
  * directory itself is the one the OS opens at its path, as every reader lists it). Whenever one of
  * the last two lines is a legacy event (one without a `sequence`, written by an older version), its
  * position is its line number, so the log's lines are counted: a full read, on every append and
- * pre-flight while such a line is one of the last two (a vault's first appends after an upgrade).
+ * pre-flight while such a line is one of the last two (a vault's first appends after an upgrade),
+ * within the bound a whole log is read within (a legacy log past it is TAIL_OVERSIZE, never read).
  * A read that fails on the open log is LOG_UNREADABLE, by name, like any other input.
  */
 /**
@@ -1665,8 +1665,13 @@ function classifyForAppend(
 			} else {
 				log = readLogTail(opened.fd, st.size);
 				if (log.kind === "tail" && !log.tail.fromStart && log.tail.lines.some(isLegacyEvent)) {
-					const tail: LogTail = { ...log.tail, count: countLogLines(opened.fd, st.size) };
-					log = { kind: "tail", tail };
+					// The count is a full read, within the bound a whole log is read within: a legacy log past it
+					// is one no verifier reads either, so it is refused as oversize, never read through.
+					const count = countLogLines(opened.fd, st.size);
+					log =
+						count === undefined
+							? { kind: "oversize", size: st.size }
+							: { kind: "tail", tail: { ...log.tail, count } };
 				}
 			}
 		} catch (err) {

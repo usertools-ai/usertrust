@@ -12,7 +12,8 @@
  *    a log over V8's string limit (512 MiB) could not be;
  *  - a log's tail is read BACKWARD from its end, until it holds its last two complete lines, never
  *    the whole file (`countLogLines`, a full read, is for a legacy log only: its last event carries
- *    no sequence, so its position is its line count).
+ *    no sequence, so its position is its line count; and it reads no log over the bound a whole log
+ *    is read within).
  *
  * IDENTICAL in packages/core/src/audit/tail-read.ts and packages/verify/src/tail-read.ts (the
  * file-diff test pins them, import lines aside).
@@ -274,8 +275,18 @@ export function readLogTail(
 	return { kind: "tail", tail };
 }
 
-/** The number of complete lines (newlines) in the first `size` bytes of `fd`: one full read. */
-export function countLogLines(fd: number, size: number): number {
+/**
+ * The number of complete lines (newlines) in the first `size` bytes of `fd`: one full read, within
+ * `maxBytes` (the bound a whole log is read within). A log past it is never read, and `undefined`
+ * says so: a hostile file of any length (a sparse one costs nothing to make) must not hold the
+ * caller for as long as reading it takes.
+ */
+export function countLogLines(
+	fd: number,
+	size: number,
+	maxBytes = MAX_SEGMENT_BYTES,
+): number | undefined {
+	if (size > maxBytes) return undefined;
 	let count = 0;
 	for (let position = 0; position < size; position += CHUNK) {
 		const chunk = readAt(fd, Math.min(CHUNK, size - position), position);
