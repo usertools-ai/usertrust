@@ -322,8 +322,9 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   for an estimate hold that expired) names the model of the newest response in the
   agent's transcript, scanned back from its end, for the model id only (estimate mode
   included, whose usage is always estimated): only the file is always current. A
-  newest response whose model is missing or not a usable id, a newest response line
-  that does not parse (corrupt, or still being written), a transcript that cannot be
+  newest response whose model is missing or not a usable id, a final line its newline
+  has not yet ended (still being written, whatever it holds so far), a newest
+  response line that does not parse (corrupt), a transcript that cannot be
   read or inspected (a line over the ingest's limit, or more scanned than it reads),
   all mean `unknown`. The file can lag the conversation (Claude Code writes it
   asynchronously), so a `PostModelSwitch` hook records each switch of the session's

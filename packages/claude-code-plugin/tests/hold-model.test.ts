@@ -311,12 +311,27 @@ describe("the model a hold names is the session's own", () => {
 			model: OPUS,
 			source: "transcript",
 		});
-		// A newest response line cut short (corrupt, or still being written) after a cheaper one:
-		// it cannot be inspected, so `unknown`, never the older Haiku line's model.
-		s = await fresh();
+		// Only a line its newline has ended is evidence. A final line without it is still being
+		// written, so `unknown`, never the older Haiku line's model, whatever it holds so far:
 		const whole = response("msg_o", OPUS);
-		const cut = whole.slice(0, whole.indexOf('"usage"') + 12);
-		await writeFile(s.path, response("msg_h", HAIKU) + cut);
+		for (const partial of [
+			// cut after its `"usage"` key,
+			whole.slice(0, whole.indexOf('"usage"') + 12),
+			// cut before it (it does not yet read as a response at all),
+			whole.slice(0, whole.indexOf('"usage"') - 1),
+			// or whole, and parsing, but not yet ended by its newline.
+			whole.slice(0, -1),
+		]) {
+			s = await fresh();
+			await writeFile(s.path, response("msg_h", HAIKU) + partial);
+			expect(await at(s.sessionId, { transcript_path: s.path })).toEqual(unknown);
+		}
+		// A COMPLETE line holding `"usage"` that does not parse is a corrupt response: `unknown` too.
+		s = await fresh();
+		await writeFile(
+			s.path,
+			`${response("msg_h", HAIKU)}${whole.slice(0, whole.indexOf('"usage"') + 12)}\n`,
+		);
 		expect(await at(s.sessionId, { transcript_path: s.path })).toEqual(unknown);
 		// A newest line over the ingest's line limit (16 MiB): it cannot be inspected, `unknown`.
 		s = await fresh();

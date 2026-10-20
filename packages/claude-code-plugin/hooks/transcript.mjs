@@ -1927,10 +1927,10 @@ async function readSwitches(dir) {
 
 /**
  * A transcript line's response, as `{ model, at }`: its model id, `unknown` when unusable, and its
- * `timestamp` in epoch ms (NaN when it has none); or undefined when it is no response. A line that
- * holds the `"usage"` key but does not parse is `unknown`, never passed over for an older response:
- * that key cannot occur inside escaped JSON text, so such a line is a response that is corrupt, or
- * still being written.
+ * `timestamp` in epoch ms (NaN when it has none); or undefined when it is no response. A complete
+ * line that holds the `"usage"` key but does not parse is `unknown`, never passed over for an older
+ * response: that key cannot occur inside escaped JSON text, so such a line is a corrupt response.
+ * (A line still being written never gets here: `newestTranscriptModel`.)
  */
 function responseModelOf(line) {
 	if (!line.includes(USAGE_FIELD)) return undefined;
@@ -1954,8 +1954,8 @@ function responseModelOf(line) {
  * - the newest complete response line, its model `unknown` when it names no usable one (never an
  *   older response's, which may be cheaper);
  * - `UNINSPECTABLE`, an `unknown` model, when the transcript cannot be inspected: unreadable for any
- *   reason but ENOENT, a line over `MAX_LINE_BYTES`, or `MAX_READ_BYTES` scanned without reaching
- *   its start;
+ *   reason but ENOENT, a final line its newline has not yet ended (still being written, whatever it
+ *   holds), a line over `MAX_LINE_BYTES`, or `MAX_READ_BYTES` scanned without reaching its start;
  * - `NO_RESPONSE` only after a read back to its first byte found no response;
  * - `TRANSCRIPT_MISSING` when it does not exist (ENOENT).
  * Nothing here is posted.
@@ -1982,6 +1982,10 @@ async function newestTranscriptModel(path) {
 				if (bytesRead === 0) return UNINSPECTABLE;
 				read += bytesRead;
 			}
+			// Only a line its newline has ended is evidence. A final one without it is still being
+			// written (Claude Code appends asynchronously), whatever it holds so far, parsed or not and
+			// with or without its `"usage"` key: the response it will be cannot be told yet.
+			if (end === size && chunk[chunk.length - 1] !== 0x0a) return UNINSPECTABLE;
 			const buffer = carry.length === 0 ? chunk : Buffer.concat([chunk, carry]);
 			// Newest first: every line after a newline is whole.
 			let stop = buffer.length;
