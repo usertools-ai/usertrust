@@ -67,6 +67,18 @@ export const DEFAULT_LEDGER_TIMEOUT_MS = 5_000;
 /** `maxPendingTtlMs` when the config leaves it unset: one hour. */
 export const DEFAULT_MAX_PENDING_TTL_MS = 3_600_000;
 
+/**
+ * The longest life an authorize may ask for, as the server applies it everywhere (the clamp,
+ * `/v1/health`'s `maxHoldTtlMs`, and each tenant's governor): `maxPendingTtlMs`, never less than
+ * `pendingTtlMs`.
+ */
+export function maxHoldLife(config: {
+	pendingTtlMs: number;
+	maxPendingTtlMs?: number | undefined;
+}): number {
+	return Math.max(config.maxPendingTtlMs ?? DEFAULT_MAX_PENDING_TTL_MS, config.pendingTtlMs);
+}
+
 export type TenantConfig = z.infer<typeof TenantSchema>;
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
 

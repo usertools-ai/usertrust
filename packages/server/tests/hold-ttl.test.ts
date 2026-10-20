@@ -113,6 +113,25 @@ describe("an authorize may ask its hold to live longer (`holdTtlMs`)", () => {
 		expect(opts?.maxHoldTtlMs).toBe(45 * MINUTE);
 	});
 
+	it("a pendingTtlMs above maxPendingTtlMs is the ceiling everywhere: the clamp, health and each governor", async () => {
+		const fake = createFakeGovernor();
+		let opts: GovernorOpts | undefined;
+		server = createUsertrustServer({
+			config: config({ pendingTtlMs: 20 * MINUTE, maxPendingTtlMs: 300_000 }),
+			factory: async (given) => {
+				opts = given;
+				return fake.governor;
+			},
+		});
+		const { port } = await server.listen();
+		const base = `http://127.0.0.1:${port}`;
+		await authorize(base, { holdTtlMs: 60 * MINUTE });
+		const health = (await (await fetch(`${base}/v1/health`)).json()) as Record<string, unknown>;
+		expect(fake.calls.authorizeParams[0]?.holdTtlMs).toBe(20 * MINUTE);
+		expect(health.maxHoldTtlMs).toBe(20 * MINUTE);
+		expect(opts?.maxHoldTtlMs).toBe(20 * MINUTE);
+	});
+
 	it("/v1/health lists `hold-ttl` and states the ceiling", async () => {
 		const { base } = await start({ maxPendingTtlMs: 45 * MINUTE });
 		const health = (await (await fetch(`${base}/v1/health`)).json()) as Record<string, unknown>;

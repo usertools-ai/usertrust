@@ -4,7 +4,10 @@
 import { join, resolve, sep } from "node:path";
 import type { Governor, GovernorOpts } from "usertrust";
 import { createGovernor, kernelVaultBase, securePrivateVault, VAULT_DIR } from "usertrust";
-import { DEFAULT_MAX_PENDING_TTL_MS, type ServerConfig, type TenantConfig } from "./config.js";
+import { maxHoldLife, type ServerConfig, type TenantConfig } from "./config.js";
+
+/** core's `LEDGER_HOLD_TIMEOUT_MS`: the shortest ceiling `createGovernor()` accepts. */
+const DEFAULT_HOLD_LIFE_MS = 300_000;
 
 export type GovernorFactory = (opts: GovernorOpts) => Promise<Governor>;
 
@@ -80,9 +83,10 @@ export class GovernorPool {
 		const opts: GovernorOpts = {
 			vaultBase: tenantVaultBase(this.config, tenant),
 			dryRun: this.config.dryRun,
-			// The longest hold an authorize may ask for (`holdTtlMs`): the server's own ceiling, so
-			// a hold's ledger timeout and its sweep life agree.
-			maxHoldTtlMs: this.config.maxPendingTtlMs ?? DEFAULT_MAX_PENDING_TTL_MS,
+			// The longest hold an authorize may ask for (`holdTtlMs`): the server's own effective
+			// ceiling, so a hold's ledger timeout and its sweep life agree. Never below core's default
+			// hold life, which createGovernor() refuses.
+			maxHoldTtlMs: Math.max(maxHoldLife(this.config), DEFAULT_HOLD_LIFE_MS),
 		};
 		if (tenant.budget !== undefined) opts.budget = tenant.budget;
 		if (tenant.tier !== undefined) opts.tier = tenant.tier;

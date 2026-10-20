@@ -573,8 +573,8 @@ export async function recordPending(sessionId, agentId, entry, { settling = fals
 				...(typeof entry.estimatedInputTokens === "number"
 					? { estimatedInputTokens: entry.estimatedInputTokens }
 					: {}),
-				// The life its authorize asked for (`holdTtlFor`): a `.settling` record of it is stale
-				// only after that (transcript.mjs `staleSettlingAfter`).
+				// The hold's life as its authorize knew it (pre-tool-use.mjs `holdLifeField`): a
+				// `.settling` record of it is stale only after that (transcript.mjs `staleSettlingAfter`).
 				...(Number.isSafeInteger(entry.holdTtlMs) ? { holdTtlMs: entry.holdTtlMs } : {}),
 				// Which server and tenant made the hold: never the key itself.
 				...tenantBinding(),

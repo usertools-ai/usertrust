@@ -382,6 +382,18 @@ async function keepForRelease(entry, claim, outcome) {
  * the record goes, as Stop writes it (lib.mjs `cleanup`). Returns false when the
  * record is fresh, or another hook took it first.
  */
+/**
+ * The hold's life as its record keeps it (`holdTtlMs`, read by transcript.mjs `staleSettlingAfter`):
+ * the longer of what it asked for and what the server's answer states it has left (`expiresInMs`).
+ * The server can grant more than was asked (its `pendingTtlMs` is a floor), so the request alone
+ * could read a live hold's record as stale. Nothing when neither is known.
+ */
+function holdLifeField(asked, json) {
+	const stated = Number.isSafeInteger(json?.expiresInMs) ? json.expiresInMs : 0;
+	const life = Math.max(asked ?? 0, stated);
+	return life > 0 ? { holdTtlMs: life } : {};
+}
+
 async function abandonSettling(entry) {
 	if (!(Date.now() - entry.mtimeMs > staleSettlingAfter(entry))) return false;
 	const taken = `${entry.path}.abandoned.${process.pid}.${Math.random().toString(36).slice(2)}`;
@@ -696,7 +708,7 @@ async function reserve(input) {
 					transferId: json.transferId,
 					startedAt: new Date(callMs).toISOString(),
 					estimatedInputTokens,
-					...(holdTtlMs === undefined ? {} : { holdTtlMs }),
+					...holdLifeField(holdTtlMs, json),
 					...(settlesAtEstimate
 						? {}
 						: {

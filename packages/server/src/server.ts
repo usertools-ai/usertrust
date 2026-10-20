@@ -15,7 +15,7 @@ import type {
 import { sanitizeReleaseReason } from "usertrust";
 import { sanitizeMapped, scrubForStderr } from "./cli/scrub.js";
 import type { ServerConfig, TenantConfig } from "./config.js";
-import { DEFAULT_LEDGER_TIMEOUT_MS, DEFAULT_MAX_PENDING_TTL_MS, resolveTenant } from "./config.js";
+import { DEFAULT_LEDGER_TIMEOUT_MS, maxHoldLife, resolveTenant } from "./config.js";
 import { EventBus } from "./events.js";
 import {
 	type HealthChildSpawner,
@@ -161,8 +161,7 @@ export function holdLife(
 	config: { pendingTtlMs: number; maxPendingTtlMs?: number | undefined },
 ): number {
 	if (requested === undefined) return config.pendingTtlMs;
-	const max = Math.max(config.maxPendingTtlMs ?? DEFAULT_MAX_PENDING_TTL_MS, config.pendingTtlMs);
-	return Math.min(Math.max(requested, config.pendingTtlMs), max);
+	return Math.min(Math.max(requested, config.pendingTtlMs), maxHoldLife(config));
 }
 
 /**
@@ -2170,7 +2169,7 @@ export function createUsertrustServer(opts: {
 				version: SERVER_VERSION,
 				capabilities: config.dryRun ? DRY_RUN_CAPABILITIES : SERVER_CAPABILITIES,
 				// The longest hold an authorize may ask for (`hold-ttl`).
-				maxHoldTtlMs: holdLife(Number.MAX_SAFE_INTEGER, config),
+				maxHoldTtlMs: maxHoldLife(config),
 				logLinesDropped,
 			});
 			return;

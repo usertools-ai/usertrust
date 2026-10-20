@@ -24,6 +24,8 @@ let stateDir: string;
 let env: Record<string, string>;
 /** What /v1/health publishes. */
 let health: Record<string, unknown>;
+/** The life each authorize answer states, when it states one. */
+let expiresInMs: number | undefined;
 
 function startFake(): Promise<number> {
 	authorizes = [];
@@ -43,7 +45,11 @@ function startFake(): Promise<number> {
 				const body = JSON.parse(raw || "{}") as Record<string, unknown>;
 				if (req.url === "/v1/authorize") {
 					authorizes.push(body);
-					return reply(200, { transferId: `tx_${next++}`, estimatedCost: 1 });
+					return reply(200, {
+						transferId: `tx_${next++}`,
+						estimatedCost: 1,
+						...(expiresInMs === undefined ? {} : { expiresInMs }),
+					});
 				}
 				return reply(200, {});
 			});
@@ -58,6 +64,7 @@ function startFake(): Promise<number> {
 beforeEach(async () => {
 	stateDir = await mkdtemp(join(tmpdir(), "utcc-ttl-"));
 	health = { status: "ok", capabilities: ["hold-ttl", "release"], maxHoldTtlMs: 60 * MINUTE };
+	expiresInMs = undefined;
 	const port = await startFake();
 	env = {
 		UT_CC_STATE_DIR: stateDir,
@@ -138,14 +145,21 @@ describe("a call's hold is asked to outlive the call", () => {
 		expect(authorizes.map((a) => Object.hasOwn(a, "holdTtlMs"))).toEqual([false, false]);
 	});
 
-	it("the hold records the life it asked for", async () => {
+	it("the hold records the life it asked for, or the longer one the server states it granted", async () => {
 		await pre("Bash", { command: "make", timeout: 15 * MINUTE });
-		const names = (await readdir(stateDir)).filter((n) => n.startsWith(`${SESSION}__main__`));
-		expect(names).toHaveLength(1);
-		const hold = JSON.parse(await readFile(join(stateDir, names[0] ?? ""), "utf-8")) as {
-			holdTtlMs?: number;
-		};
-		expect(hold.holdTtlMs).toBe(16 * MINUTE);
+		// A server whose floor (`pendingTtlMs`) is 30 minutes grants a 3-minute request 30.
+		expiresInMs = 30 * MINUTE;
+		await pre("Bash", { command: "ls" });
+		const lives = [];
+		for (const name of (await readdir(stateDir))
+			.filter((n) => n.startsWith(`${SESSION}__main__`))
+			.sort()) {
+			lives.push(
+				(JSON.parse(await readFile(join(stateDir, name), "utf-8")) as { holdTtlMs?: number })
+					.holdTtlMs,
+			);
+		}
+		expect(lives).toEqual([16 * MINUTE, 30 * MINUTE]);
 	});
 });
 
