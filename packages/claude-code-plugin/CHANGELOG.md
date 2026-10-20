@@ -7,6 +7,17 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ## [Unreleased]
 
+### Added
+
+- **A long tool call's hold is asked to outlive it.** A hold lived five minutes, so a Bash command or
+  a subagent that ran longer lost its reservation partway through, and in enforce mode concurrent
+  calls could spend into that budget. Against a server that honours `hold-ttl`, PreToolUse now asks
+  for a longer life (`holdTtlMs`), never above the server's stated ceiling: a Bash or PowerShell call
+  its own `timeout` (else `BASH_DEFAULT_TIMEOUT_MS`) plus a grace, and an Agent or Task call the
+  ceiling. A new setting, `holdGraceMs` (`UT_CC_HOLD_GRACE_MS`, default 60 000 ms), sets the grace.
+  An older server is sent nothing new. The hold records what it asked for, so a crashed hook's
+  `.settling` record of it is read as abandoned only once that life has passed too.
+
 ## [3.0.3] - 2026-10-17
 
 ### Fixed

@@ -498,6 +498,11 @@ export interface TrustEngine {
 		 * they never select an account. Omitted → all zero, exactly as before.
 		 */
 		userData?: PrincipalLedgerTags | undefined;
+		/**
+		 * The ledger's pending timeout for this hold, in whole seconds: the life the
+		 * authorize asked for (`AuthorizeParams.holdTtlMs`). Omitted → `LEDGER_HOLD_TIMEOUT_MS`.
+		 */
+		timeoutSeconds?: number | undefined;
 	}): Promise<{ transferId: string }>;
 	/**
 	 * Settle a PENDING hold. `actualAmount` is CAPPED at the reserved amount —
@@ -5056,6 +5061,7 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 			amount: number;
 			debitAccountId?: bigint | undefined;
 			userData?: PrincipalLedgerTags | undefined;
+			timeoutSeconds?: number | undefined;
 		}): Promise<{ transferId: string }> {
 			// An ATTRIBUTED hold names its own debit account — the cost-center
 			// envelope the governor derived at authorize. Unattributed holds keep
@@ -5069,7 +5075,7 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 					code: XFER_SPEND,
 					// Named, not the client's default: the ledger expires the hold at this
 					// timeout, and a headless handle publishes it (`holdTimeoutMs`).
-					timeoutSeconds: LEDGER_HOLD_TIMEOUT_MS / 1000,
+					timeoutSeconds: params.timeoutSeconds ?? LEDGER_HOLD_TIMEOUT_MS / 1000,
 					// The principal's roll-up tags ride the hold; post/void inherit them.
 					...(params.userData !== undefined
 						? {

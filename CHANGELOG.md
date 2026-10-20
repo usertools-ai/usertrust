@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A hold can be asked to live longer than five minutes (`holdTtlMs`).** A call expected to run
+  past the default, such as a long command or a subagent, can ask for its hold to outlive it, so its
+  budget stays reserved until it settles. Before, every hold lived five minutes: a longer call lost its
+  reservation mid-call, and in enforce mode concurrent calls could spend into that budget.
+  - **Core:** `authorize({ holdTtlMs })` sets the hold's ledger pending timeout (TigerBeetle's own
+    per-transfer `timeout`), clamped to [`LEDGER_HOLD_TIMEOUT_MS`, the governor's `maxHoldTtlMs`] and
+    rounded up to whole seconds. The handle's `holdTimeoutMs` says what was used. `createGovernor`
+    takes `maxHoldTtlMs` (default one hour); a value below the default life is a `RangeError`. An
+    invalid `holdTtlMs` is a `TypeError` before any I/O. `GovernorOpts` is now exported.
+  - **usertrust-server:** `/v1/authorize` accepts `holdTtlMs`, clamped to [`pendingTtlMs`,
+    `maxPendingTtlMs`] (new config, default one hour). That life is both the ledger's timeout and the
+    server's own sweep life for the hold, so `expiresInMs` and the sweep agree. A new capability,
+    `hold-ttl`, and `/v1/health` states the ceiling as `maxHoldTtlMs`. An older server strips the key,
+    and its holds keep the default life.
+  - **The trade:** a hold whose client crashes keeps its budget reserved for up to its life before the
+    ledger voids it, so a longer ceiling holds a crashed client's reservation longer.
+
 ### Changed
 
 - **`pii: "redact"` now rewrites only the content the model reads, and sends every control field as written.** Until now, when the prompt held PII, redaction replaced every matching string in the whole request body, including fields the scan never reads. That broke calls and changed what they did: an MCP server's `authorization_token` (Anthropic) or `Authorization` header (OpenAI Responses `tools`, Google `streamableHttpTransport.headers`) was sent as `[REDACTED:...]` and refused by the server, a header passed through Google's `config.httpOptions.headers` was rewritten on the wire, and `prompt_cache_key`, `safety_identifier` and `metadata` values were rewritten. Now redaction rewrites only a closed list, per provider, of the content inside the prompt fields (`messages` and a string `system` for Anthropic, `messages` for OpenAI chat, `input` and `instructions` for OpenAI Responses, `contents` for Google), written from each SDK's request types. Within them, ids, names, URLs, media and file data, citations and the model's own replayed reasoning (thinking and compaction blocks, reasoning items, Google parts with a thought signature) are not rewritten. `block` refuses what it refused before (the scan of every string in the prompt fields, control values included), and also what the content scan finds: a value written with JSON escapes in a tool call's `arguments`, and a Google text part hidden from enumeration that the SDK sends. When it finds PII in a value redaction leaves as written (a name, an id, an object key or a number in a tool call's `arguments`, replayed reasoning), `redact` now refuses the call with `PolicyDeniedError`, as `block` does, before anything is sent, where it used to rewrite that value. A tool call's JSON `arguments` keep their text: only the string values in them that match are replaced, in place, so they stay valid JSON and every other character, numbers included, is sent as written. Tool and function definitions, including the declarations of Google callable tools, are no longer redacted. Under `warn` and `redact`, the `llm_call` audit event's `piiDetected` and `piiPaths` also record what the content scan finds, with paths from the request root, so a value written with JSON escapes that `warn` sends is recorded. See LIMITATIONS.md 11.

@@ -121,6 +121,7 @@ export type {
 	Authorization,
 	AuthorizeParams,
 	Governor,
+	GovernorOpts,
 	ReleaseOutcome,
 	SettleParams,
 	UnheldSettlementOutcome,

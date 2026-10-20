@@ -94,6 +94,7 @@ Either way, a session reads its settings once, at its first hook: see
 | `UT_CC_MODEL`        | `claude-sonnet-4-6`      | Model for an estimate hold before any transcript model is known |
 | `UT_CC_USAGE`        | `transcript`             | `estimate` settles per-call estimates only       |
 | `UT_CC_STATE_DIR`    | `~/.claude/usertrust-cc` | Pending holds, and what was already posted (keep it; see below) |
+| `UT_CC_HOLD_GRACE_MS` | `60000`                 | How much longer than a Bash call's timeout its hold is asked to live, in ms, 0 to 3 600 000 (see [Long tool calls](#long-tool-calls)) |
 | `UT_CC_SEND_CONTENT` | `1`                      | `0` sends `{"redacted":true}` instead of content |
 | `UT_FAIL_OPEN`       | unset                    | Enforce mode only: `1` lets tool calls through when governance is down |
 
@@ -136,6 +137,7 @@ The path is built from your account's home directory (`os.userInfo().homedir`), 
 | `model`       | no       | `claude-sonnet-4-6` | Model for an estimate hold (`UT_CC_MODEL`)                |
 | `unit`        | no       | unset               | The principal's `unit` (`UT_CC_UNIT`)                     |
 | `role`        | no       | unset               | The principal's `role` (`UT_CC_ROLE`)                     |
+| `holdGraceMs` | no       | `60000`             | A Bash call's hold life past its timeout, in ms, 0 to 3 600 000 (`UT_CC_HOLD_GRACE_MS`) |
 
 **With `UT_CC_CONFIG` set, even to an empty string, the session is configured:**
 every setting comes from the file, and no `UT_*` variable is read, nor
@@ -729,7 +731,8 @@ In both modes PostToolUse/Stop/SubagentStop never block — the tool already ran
 an estimate hold is marked settle-attempted (`.settling`) before its one settle,
 and one whose settle goes unanswered is given back at Stop — never settled again —
 and the server's pending-TTL sweep voids anything orphaned. A call can wait at Claude
-Code's permission prompt for longer than the server keeps a hold (five minutes).
+Code's permission prompt for longer than the server keeps a hold (five minutes; see
+[Long tool calls](#long-tool-calls) for a call that runs longer).
 A transcript hold whose settle then answers 404 gives its window back to a later
 settle point. An estimate hold is charged once, on a fresh hold of its own — but
 only on a clean 404 `unknown transferId` to its one settle. The plugin settles
@@ -975,6 +978,24 @@ When a later probe fails, an entry under a day old that lists `principal` lets t
 hook send its principal anyway, and stderr says so. It is never used for anything
 else: an idempotency key is sent only to a server whose live probe says it honours
 one, as a server that strips the key would let a retried settle post twice.
+
+### Long tool calls
+
+A hold lives five minutes by default: a call that runs longer finds it voided by the ledger before
+it settles, and in enforce mode its budget stops being reserved partway through. Against a server
+that honours `hold-ttl` (it lists it in `/v1/health` `capabilities` and states its ceiling as
+`maxHoldTtlMs`), PreToolUse asks for a longer life (`holdTtlMs`) where a call can outlast the default:
+
+| Tool | Hold life asked for |
+| ---- | ------------------- |
+| `Bash`, `PowerShell` | The call's own `timeout` (Claude Code passes one whenever it wants longer than the default), else `BASH_DEFAULT_TIMEOUT_MS` (two minutes unset), plus `holdGraceMs` (`UT_CC_HOLD_GRACE_MS`, default 60 000 ms) |
+| `Agent`, `Task` | The server's ceiling: a subagent runs until it is done (its own calls hold their own usage) |
+| A background command, any other tool | Nothing: the default |
+
+Never more than the server's ceiling, and nothing at all to a server that does not list `hold-ttl`
+(an older one would strip the key). The hold records what it asked for, so a crashed hook's
+`.settling` record of it is read as abandoned only once that life has passed too. A hold whose
+call never reports back keeps its budget reserved for up to that life, until the ledger voids it.
 
 ## From watching to enforcing
 
