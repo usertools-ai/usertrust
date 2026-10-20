@@ -114,8 +114,10 @@ async function estimateUsageTo(sessionId, entry) {
  * which a settle racing the sweep waits for too. The server does not state it, so it is copied here.
  */
 const RELEASE_WAIT_MAX_MS = 30_000;
-/** What a replacement's retry keeps of the hook's budget past its wait: its authorize and settle. */
-const REPLACEMENT_RETRY_MIN_MS = 1_000;
+/** What a replacement's retry keeps of the hook's budget past its wait, for its own authorize. */
+const RETRY_AUTHORIZE_RESERVE_MS = 1_500;
+/** ...and for the fresh hold's settle, which the retried authorize can never take. */
+const RETRY_SETTLE_RESERVE_MS = 1_500;
 /** A wait shorter than this is no wait: the retry is skipped. */
 const RETRY_WAIT_FLOOR_MS = 50;
 
@@ -262,7 +264,7 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 	const principal = principalCapable(capabilities)
 		? estimatePrincipalFor(sessionId, agentId, input.agent_type)
 		: undefined;
-	const authorizeReplacement = () =>
+	const authorizeReplacement = (request = withinBudget()) =>
 		serverRequest(
 			"/v1/authorize",
 			{
@@ -282,7 +284,7 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 				// and usage start, not whatever job is open now.
 				...authorizeLabels(entry),
 			},
-			withinBudget(),
+			request,
 		);
 	let auth;
 	try {
@@ -290,9 +292,14 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 		// A hold the server called `gone` may be one its sweep is still voiding, its funds still
 		// reserved: a replacement refused for the budget then waits for that void once, and asks
 		// again. The wait is the server's own bound on one (`RELEASE_WAIT_MAX_MS`), within what the
-		// hook has left past the retry's own requests; too little left, and no retry. A second
-		// refusal is final (below).
-		const wait = Math.min(RELEASE_WAIT_MAX_MS, timeLeft() - REPLACEMENT_RETRY_MIN_MS);
+		// hook has left past the retry's authorize AND the fresh hold's settle; too little left, and no
+		// retry. The retried authorize is capped so the settle's share stays out of its reach: a hold
+		// granted with no time left to settle it would leave the call uncharged. A second refusal is
+		// final (below).
+		const wait = Math.min(
+			RELEASE_WAIT_MAX_MS,
+			timeLeft() - RETRY_AUTHORIZE_RESERVE_MS - RETRY_SETTLE_RESERVE_MS,
+		);
 		if (
 			endedAs === "gone" &&
 			auth.status === 402 &&
@@ -300,7 +307,9 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 			wait >= RETRY_WAIT_FLOOR_MS
 		) {
 			await new Promise((resolve) => setTimeout(resolve, wait));
-			auth = await authorizeReplacement();
+			auth = await authorizeReplacement({
+				timeoutMs: Math.min(5000, timeLeft() - RETRY_SETTLE_RESERVE_MS),
+			});
 		}
 	} catch (err) {
 		// No answer. The call RAN and nothing will charge it, as when the fresh hold is refused (below):

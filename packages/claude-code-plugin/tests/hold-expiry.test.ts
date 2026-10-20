@@ -47,7 +47,7 @@ let giveBackAnswer: { status: number; json: unknown };
 /** How many of the next authorizes are refused for the budget (402 `budget_exceeded`). */
 let refuseAuthorizes: number;
 /** Extra milliseconds the fake holds its answer, by path: a slow server uses up the hook's budget. */
-let slowBy: Map<string, number>;
+let slowBy: Map<string, number | number[]>;
 let nextTransfer: number;
 
 function startFake(): Promise<number> {
@@ -89,7 +89,9 @@ function startFake(): Promise<number> {
 					}
 					return reply(404, { reason: "unknown route" });
 				};
-				const delay = slowBy.get(req.url ?? "") ?? 0;
+				// A number delays every request to the path; a list, each in turn (then none).
+				const slow = slowBy.get(req.url ?? "");
+				const delay = Array.isArray(slow) ? (slow.shift() ?? 0) : (slow ?? 0);
 				if (delay > 0) setTimeout(answer, delay);
 				else answer();
 			});
@@ -272,6 +274,23 @@ describe("a hold's life, as the server states it", () => {
 			expect(authorizes()).toHaveLength(2);
 			expect(await callRanGaps()).toHaveLength(1);
 		});
+
+		it("a retry late in the budget still leaves its fresh hold's settle the time to land", async () => {
+			life = 0;
+			await pre("tu_1", {}, ESTIMATE);
+			await outlive();
+			giveBackAnswer = GONE;
+			refuseAuthorizes = 1;
+			// A slow give-back and a slow first refusal: the retry comes late, and its settle is slow too.
+			slowBy.set("/v1/release", 2_000);
+			slowBy.set("/v1/authorize", [2_000, 300]);
+			slowBy.set("/v1/settle", 1_200);
+			await post("tu_1", {}, ESTIMATE);
+			expect(authorizes()).toHaveLength(3);
+			expect(settled().map((s) => s.transferId)).toEqual(["tx_2"]);
+			// The settle landed: no gap of any kind, so the call was charged.
+			expect((await records()).filter((r) => r.kind === "gap")).toEqual([]);
+		}, 20_000);
 
 		it("with no room left in the hook's budget for the wait, no retry: the call-ran gap", async () => {
 			life = 0;
