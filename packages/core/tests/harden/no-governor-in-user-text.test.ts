@@ -11,15 +11,22 @@
  * command asserts over a tree, not the repo):
  *
  *  (a) string, template and JSX-text literals in the shipped sources, read from the syntax tree so
- *      a comment or an identifier is not a hit. Every literal that says "governor" must be declared
+ *      a comment or an identifier is not a hit. "Shipped" is DERIVED, not listed: each package's
+ *      `files` array in its package.json names what it publishes (a directory is walked, a
+ *      .mjs/.js/.ts/.tsx entry is read; `dist` is skipped and `src` is read in its place, because
+ *      `src` is what builds `dist`; LICENSE, NOTICE, README, CHANGELOG and JSON are not code). So
+ *      the claude-code-plugin's `bin/` and `hooks/` are covered because it lists them, and a
+ *      directory added to a `files` array is covered without anyone editing this file. A `files`
+ *      entry that is a glob or a negation cannot be resolved and fails the test rather than being
+ *      skipped. The site's `app/` is added by hand: it is not a package. Every literal that says "governor" must be declared
  *      in ALLOWED_LITERALS with the reason it stays. A declared entry that no longer matches fails
  *      too, so the list cannot rot into a blanket exemption.
  *  (b) prose in the READMEs, LIMITATIONS, docs/ and the site's content, outside fenced code and
  *      inline code spans. No allowlist: a code span is where `createGovernor()` belongs.
  *
  * WHAT A GREEN RUN CLAIMS: no undeclared literal or prose sentence in these trees says "governor".
- * It does not claim the trees are complete; the scope is the two lists below, and a new shipped
- * directory must be added to them. The "positive control" cases prove the scanners can see a
+ * It does not claim the trees are complete: the scope is the `files` arrays plus the prose list
+ * below, and a new kind of shipped text outside both must be added to them. The "positive control" cases prove the scanners can see a
  * planted hit, so a scanner that silently matches nothing cannot pass for a clean tree.
  */
 
@@ -113,10 +120,51 @@ function walk(dir: string, accept: (name: string) => boolean, out: string[] = []
 	return out;
 }
 
-/** The literal-bearing source files: build inputs that ship, plus the plugin's hooks. */
+const CODE = /\.(ts|tsx|mts|js|mjs)$/;
+const isCode = (n: string): boolean => CODE.test(n) && !/\.d\.ts$/.test(n);
+
+/**
+ * The code files one package ships, derived from its package.json `files`. `src` is always read
+ * (it builds `dist`, which `files` lists instead). A package with no readable package.json
+ * contributes `src` only.
+ */
+function packageSourceFiles(pkgDir: string, out: string[] = []): string[] {
+	walk(join(pkgDir, "src"), isCode, out);
+	let manifest: { files?: unknown; private?: unknown };
+	try {
+		manifest = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8"));
+	} catch {
+		return out;
+	}
+	const files = manifest.files;
+	if (!Array.isArray(files)) {
+		// Without `files`, npm ships everything it does not ignore, which this scan cannot derive: fail
+		// closed for a package that can be published rather than scan only `src` and call it covered.
+		if (manifest.private !== true)
+			throw new Error(`${pkgDir}: a publishable package without "files"`);
+		return out;
+	}
+	for (const entry of files) {
+		if (typeof entry !== "string") throw new Error(`${pkgDir}: a non-string "files" entry`);
+		// Any glob syntax npm's packlist honours: * ? [ ] { } ! and the extended forms @( +( ( ).
+		if (/[*?[\]{}()!]/.test(entry)) {
+			throw new Error(`${pkgDir}: "files" entry ${JSON.stringify(entry)} is a glob or a negation`);
+		}
+		const path = resolve(pkgDir, entry);
+		if (relative(pkgDir, path).startsWith("..")) continue;
+		if (entry === "dist" || entry === "src") continue;
+		if (existsSync(path) && !CODE.test(entry)) {
+			walk(path, isCode, out);
+		} else if (isCode(entry) && existsSync(path)) {
+			out.push(path);
+		}
+	}
+	return out;
+}
+
+/** The literal-bearing source files: what each package ships, plus the site's app. */
 function sourceFiles(root: string): string[] {
 	const out: string[] = [];
-	const code = (n: string): boolean => /\.(ts|tsx|mts|js|mjs)$/.test(n) && !/\.d\.ts$/.test(n);
 	const pkgs = join(root, "packages");
 	let names: string[] = [];
 	try {
@@ -124,13 +172,10 @@ function sourceFiles(root: string): string[] {
 	} catch {
 		// no packages directory: nothing to scan
 	}
-	for (const pkg of names) {
-		walk(join(pkgs, pkg, "src"), code, out);
-		walk(join(pkgs, pkg, "hooks"), code, out);
-	}
+	for (const pkg of names) packageSourceFiles(join(pkgs, pkg), out);
 	// The marketing/docs site's app: its copy is user-facing text too.
-	walk(join(root, "site", "app"), code, out);
-	return out.sort();
+	walk(join(root, "site", "app"), isCode, out);
+	return [...new Set(out)].sort();
 }
 
 /** Every literal in one file whose text names the governor, as the literal's own text. */
@@ -363,6 +408,8 @@ describe("no 'governor' in text a person reads", () => {
 		expect(src).toContain("packages/core/src/headless.ts");
 		expect(src).toContain("packages/ui/src/shared/budget-display.ts");
 		expect(src.some((f) => f.startsWith("packages/claude-code-plugin/hooks/"))).toBe(true);
+		// Shipped through `files`, not through a hard-coded directory name.
+		expect(src).toContain("packages/claude-code-plugin/bin/usertrust-job.mjs");
 		const prose = proseFiles(REPO).map((f) => relPath(REPO, f));
 		expect(prose).toContain("README.md");
 		expect(prose).toContain("LIMITATIONS.md");
@@ -388,6 +435,59 @@ describe("no 'governor' in text a person reads", () => {
 			expect(found.filter((p) => p.startsWith("packages/x/src/a.ts:"))).toHaveLength(2);
 			expect(found.filter((p) => p.startsWith("packages/x/src/b.tsx:"))).toHaveLength(1);
 			expect(found.join("\n")).not.toContain("comment");
+		});
+
+		it("scans exactly what a package's `files` publishes (bin, hooks, a file), not dist or a README", () => {
+			const pkg = (files: string[]): Record<string, string> => ({
+				"packages/x/package.json": JSON.stringify({ name: "x", files }),
+				"packages/x/bin/x.mjs": 'console.log("ask the governor");\n',
+				"packages/x/tool.mjs": 'console.log("the governor");\n',
+				"packages/x/dist/y.js": 'console.log("the governor");\n',
+				"packages/x/other/z.mjs": 'console.log("the governor");\n',
+			});
+			const names = (files: string[]): string[] =>
+				sourceFiles(fixture(pkg(files))).map((f) => f.split("/").slice(-2).join("/"));
+			// `bin` listed: its literal is found and reported.
+			const root = fixture(pkg(["dist", "bin", "LICENSE"]));
+			expect(checkLiterals(root, []).map((p) => p.split(":")[0])).toEqual(["packages/x/bin/x.mjs"]);
+			// `bin` dropped from the derivation (here: from the fixture's `files`): the same literal is
+			// no longer reached, so the control above is exercising the derivation and nothing else.
+			expect(checkLiterals(fixture(pkg(["dist", "LICENSE"])), [])).toEqual([]);
+			// A single code file is read, an unlisted directory and `dist` never are.
+			expect(names(["tool.mjs"])).toEqual(["x/tool.mjs"]);
+			expect(names(["dist", "bin"])).toEqual(["bin/x.mjs"]);
+		});
+
+		it("refuses a `files` entry it cannot resolve instead of skipping it", () => {
+			const root = fixture({
+				"packages/x/package.json": JSON.stringify({ files: ["dist", "bin/*.mjs"] }),
+			});
+			expect(() => sourceFiles(root)).toThrow(/glob or a negation/);
+		});
+
+		it("refuses npm's extended globs, and a publishable package with no `files` at all", () => {
+			for (const entry of [
+				"bin/@(usertrust-job).mjs",
+				"bin/+(usertrust-job).mjs",
+				"bin/[a].mjs",
+				"!bin",
+			]) {
+				const root = fixture({
+					"packages/x/package.json": JSON.stringify({ files: ["dist", entry] }),
+				});
+				expect(() => sourceFiles(root), entry).toThrow(/glob or a negation/);
+			}
+			// npm ships everything not ignored when `files` is absent: not derivable, so a failure, not `src` only.
+			const open = fixture({
+				"packages/x/package.json": JSON.stringify({ name: "x" }),
+				"packages/x/bin/x.mjs": 'console.log("the governor");\n',
+			});
+			expect(() => sourceFiles(open)).toThrow(/without "files"/);
+			// A private package has no publish surface: its `src` is read and nothing is claimed beyond it.
+			const priv = fixture({
+				"packages/x/package.json": JSON.stringify({ name: "x", private: true }),
+			});
+			expect(sourceFiles(priv)).toEqual([]);
 		});
 
 		it("an allowlist entry covers exactly its literal and count, and goes stale loudly", () => {
