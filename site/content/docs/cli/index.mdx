@@ -79,10 +79,14 @@ Checks:
 Create and restore vault state checkpoints:
 
 ```bash
-npx usertrust snapshot           # create a snapshot
-npx usertrust snapshot --list    # list available snapshots
-npx usertrust snapshot --restore <name>  # restore from snapshot
+npx usertrust snapshot create <name>    # create a snapshot
+npx usertrust snapshot list             # list available snapshots
+npx usertrust snapshot restore <name>   # restore from snapshot
 ```
+
+<Callout type="warn">
+`snapshot restore` overwrites the live audit log, spend ledger, policies and config with the snapshot's, with no warning and no backup, and exits 0 even when it refuses. `snapshot create` with a name that already exists overwrites that snapshot. Read the `Snapshot restored:` line, or `"success": true` under `--json`, not the exit code. See [LIMITATIONS.md](https://github.com/usertools-ai/usertrust/blob/master/LIMITATIONS.md) section 15.
+</Callout>
 
 ## usertrust tb
 

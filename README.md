@@ -76,6 +76,8 @@ The `receipt` returned from every governed call:
 }
 ```
 
+A model id written the way a gateway or cloud platform writes it (a Bedrock, Vertex or OpenRouter id, a `-latest` alias without a row of its own, or an id in another case) is priced at the fallback rate, the table's dearest, and some reports and the dashboard show its provider as `unknown`. See [LIMITATIONS.md](https://github.com/usertools-ai/usertrust/blob/master/LIMITATIONS.md) section 16 for how to price such an id.
+
 ## Install
 
 ```bash
@@ -191,6 +193,8 @@ usertrust snapshot      # Checkpoint/restore vault state
 usertrust tb            # TigerBeetle process management
 usertrust completions   # Shell completions (bash, zsh, fish)
 ```
+
+`usertrust snapshot restore <name>` overwrites the live audit log, spend ledger, policies and config with no warning and no backup, and exits 0 even when it refuses. Read the `Snapshot restored:` line, or `"success": true` under `--json`, not the exit code. See [LIMITATIONS.md](https://github.com/usertools-ai/usertrust/blob/master/LIMITATIONS.md) section 15.
 
 ### JSON output
 
@@ -348,7 +352,7 @@ The verify package has zero runtime dependencies. It reads JSONL, recomputes SHA
 
 `usertrust-verify` takes the path to the `.usertrust` directory; `usertrust verify` takes the project root that contains it. Giving `usertrust-verify` the project root reports a missing audit directory, not a tampered chain.
 
-**Known issue in 4.1.0:** on a vault with no external anchor, deleting the most recent records is reported only until the next governed call from a freshly started process; after that, verification passes over the shortened chain. An anchor catches the deletion of the records it covers (those up to the tree size it recorded); records appended after the last anchor are still unanchored. Emptying `events.jsonl` while its `.meta` sidecar remains is not silent: the next append continues from the sidecar's hash and verification reports the gap. More generally, someone who can rewrite both the vault file and its sidecar can only be caught by evidence held outside the vault: an external anchor, or receipts you retained. Enable [external anchoring](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md) if the chain is your evidence. See `LIMITATIONS.md` section 8.
+**Known issue, present in current releases (first documented in 4.1.0):** on a vault with no external anchor, the chain is checked only against itself. If the newest events are deleted and the `.meta` sidecar is deleted or rewritten to match, `usertrust verify` and `usertrust-verify` pass (exit 0, `UNANCHORED`). If the sidecar is left alone, deleting the most recent records is reported only until the next governed call from a freshly started process; after that, verification passes over the shortened chain. To detect either, run with `--anchors <file>` and `--pubkey <pem>` against an external anchor: a rollback below an anchor then fails with `ANCHOR_MISMATCH`. An anchor catches the deletion of the records it covers (those up to the tree size it recorded); records appended after the last anchor are still unanchored. Emptying `events.jsonl` while its `.meta` sidecar remains is not silent: the next append continues from the sidecar's hash and verification reports the gap. More generally, someone who can rewrite both the vault file and its sidecar can only be caught by evidence held outside the vault: an external anchor, or receipts you retained. Enable [external anchoring](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md) if the chain is your evidence. See `LIMITATIONS.md` section 8.
 
 With [external anchoring](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md) enabled, verification goes further: the auditor fetches signed checkpoints from an append-only store the operator cannot rewrite and pins the public key out-of-band — so even a fully re-hashed rewrite of the vault fails:
 
