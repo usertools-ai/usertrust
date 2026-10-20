@@ -20,7 +20,8 @@ npm, and its version is its own: the `usertrust` packages and their
   at SessionStart; and otherwise `unknown`, which usertrust-server prices at the dearest rate it
   publishes. The transcript can lag the conversation, so a new `PostModelSwitch` hook records
   each switch of the session's model, and a newest response from before it that names another
-  model is `unknown`. That hook is registered in its own file, `hooks/model-switch.json`: a Claude
+  model is `unknown`. Each run keeps its own record, and switches recorded within 10 seconds of
+  the newest are read together: two that name different models are ambiguous, and `unknown`. That hook is registered in its own file, `hooks/model-switch.json`: a Claude
   Code before v2.1.251 does not know the event and rejects a whole hooks file that names it, so
   it loses only this hook. Estimate mode (`UT_CC_USAGE=estimate`) now reads the
   transcript tail for the model id only, so a model switched to mid-session is held and settled

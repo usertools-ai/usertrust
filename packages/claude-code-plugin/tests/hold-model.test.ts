@@ -373,8 +373,46 @@ describe("the model a hold names is the session's own", () => {
 		// response that a readable record would leave as it is.
 		s = await switched();
 		await writeFile(s.path, response("msg_h", HAIKU, -10_000));
-		await writeFile(join(stateDir, "transcripts", "session-models", `${s.sessionId}.switch`), "{");
+		const records = join(stateDir, "transcripts", "session-models", `${s.sessionId}.switches`);
+		await writeFile(join(records, "1.corrupt.json"), "{");
 		expect(await at(s.sessionId, { transcript_path: s.path })).toEqual(unknown);
+		// Two hook runs that overlapped can land out of order: an earlier switch to Haiku recorded
+		// AFTER a later one to Opus. Records that close together are read as one ambiguous switch,
+		// so a lagging Haiku response is `unknown`, never taken for the session's model.
+		s = await switched();
+		const overlapped = join(stateDir, "transcripts", "session-models", `${s.sessionId}.switches`);
+		const now = Date.now();
+		await writeFile(
+			join(overlapped, `${now + 1000}.1.a.json`),
+			JSON.stringify({ model: HAIKU, at: now + 1000 }),
+		);
+		await writeFile(s.path, response("msg_h", HAIKU, 10_000));
+		expect(await at(s.sessionId, { transcript_path: s.path })).toEqual(unknown);
+		// With no response to read, before anything was read, an ambiguous switch names no model either.
+		await recordModelSwitch("switch-ambiguous", HAIKU);
+		await recordModelSwitch("switch-ambiguous", OPUS);
+		expect(await at("switch-ambiguous", {})).toEqual(unknown);
+		// A response dated after the newest record is still the transcript's.
+		await writeFile(s.path, response("msg_h", HAIKU, -20_000));
+		expect(await at(s.sessionId, { transcript_path: s.path })).toEqual(transcript(HAIKU));
+		// Two switches in quick succession each keep a record of their own, so neither replaces the
+		// other: their order cannot be told from records that close, and a lagging response is
+		// `unknown`, even one naming the later switch's model.
+		await recordModelSwitch("switch-twice", HAIKU);
+		await recordModelSwitch("switch-twice", OPUS);
+		const twice = join(projectDir, "switch-twice.jsonl");
+		await writeFile(twice, response("msg_o", OPUS, 10_000));
+		expect(await at("switch-twice", { transcript_path: twice })).toEqual(unknown);
+		// A record well before the newest is a switch that came before it, not an overlap: the newest
+		// alone names the session's model, and a new record removes it.
+		s = await switched();
+		const spaced = join(stateDir, "transcripts", "session-models", `${s.sessionId}.switches`);
+		const old = Date.now() - 60_000;
+		await writeFile(join(spaced, `${old}.1.b.json`), JSON.stringify({ model: HAIKU, at: old }));
+		await writeFile(s.path, response("msg_o", OPUS, 10_000));
+		expect(await at(s.sessionId, { transcript_path: s.path })).toEqual(transcript(OPUS));
+		await recordModelSwitch(s.sessionId, OPUS);
+		expect((await readdir(spaced)).filter((name) => name.startsWith(`${old}.`))).toEqual([]);
 		// No response yet, never read: the switch's model, over the SessionStart one it is newer than.
 		await recordSessionModel("switch-start", OPUS);
 		await recordModelSwitch("switch-start", HAIKU);

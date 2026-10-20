@@ -330,7 +330,10 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   model (`to_model`, whenever it changes: a `/model`, an automatic fallback, a
   resume), and a newest response from before the latest switch that names another
   model means `unknown`, for every agent of the session; one dated after it is the
-  transcript's to say. With no response to read, the hold names the model of the
+  transcript's to say. Each run of the hook keeps a record of its own, and switches
+  recorded within 10 seconds of the newest are read together, since two runs that
+  overlap can land out of order: when they name different models, the switch is
+  ambiguous, and a hold that depends on it means `unknown`. With no response to read, the hold names the model of the
   session's latest switch, else the one Claude Code reported at SessionStart (its
   `model`, which Claude Code may omit), but only for
   the main agent (it is the session's model, and a subagent may run a dearer one;

@@ -1775,8 +1775,18 @@ const SESSION_MODEL_DIR = join("transcripts", "session-models");
 /** `lastSwitch`'s answer when a switch may be recorded but cannot be read. */
 const SWITCH_UNREADABLE = Symbol("switch unreadable");
 
-/** The record of a session's latest model switch (`recordModelSwitch`). */
-const switchName = (sessionId) => `${sanitize(sessionId)}.switch`;
+/** A session's model switches (`recordModelSwitch`): one record per hook run, never overwritten. */
+const switchDir = (sessionId) => join(SESSION_MODEL_DIR, `${sanitize(sessionId)}.switches`);
+
+/**
+ * How far apart two switch records can be and still have landed out of order. A hook writes its
+ * record within its own timeout (5 s, hooks/model-switch.json), so an earlier switch whose record
+ * lands after a later one's lies within that of it. Twice that, for margin.
+ */
+const SWITCH_OVERLAP_MS = 10_000;
+
+/** More switch records than this in one session's directory are not read: `SWITCH_UNREADABLE`. */
+const MAX_SWITCH_RECORDS = 256;
 
 /** `newestTranscriptModel`'s answers that name no model: the file is missing, or holds no response. */
 const TRANSCRIPT_MISSING = Symbol("transcript missing");
@@ -1825,50 +1835,66 @@ async function sessionModel(sessionId) {
  * Record a switch of the session's model: PostModelSwitch's `to_model`, "the model ID the switch
  * changes to", with when this hook saw it (https://code.claude.com/docs/en/hooks#postmodelswitch).
  * Claude Code runs it after every change of the session's model: one requested, an automatic
- * fallback, a plan-mode setting, a resume. Only the latest is kept. An unusable `to_model` leaves
- * any earlier record as it is. Local, bounded, and it never throws.
+ * fallback, a plan-mode setting, a resume. Each run writes a record of its own, so two runs that
+ * overlap never replace each other's (`lastSwitch` reads them together); records too old to matter
+ * are then removed. An unusable `to_model` records nothing. Local, bounded, and it never throws.
  */
 export async function recordModelSwitch(sessionId, model) {
 	try {
 		const id = modelId(model);
 		if (typeof sessionId !== "string" || sessionId === "") return;
 		if (id === null || id === SYNTHETIC_MODEL || id === UNKNOWN_MODEL) return;
-		const dir = await privateDir(SESSION_MODEL_DIR);
+		const dir = await privateDir(switchDir(sessionId));
 		if (!dir.ok) return;
-		await writeAtomic(
-			join(dir.dir, switchName(sessionId)),
-			JSON.stringify({ model: id, at: Date.now() }),
-		);
+		const at = Date.now();
+		const name = `${at}.${process.pid}.${randomBytes(6).toString("hex")}.json`;
+		await writeAtomic(join(dir.dir, name), JSON.stringify({ model: id, at }));
+		for (const other of await readdir(dir.dir)) {
+			const recorded = Number.parseInt(other, 10);
+			if (other.endsWith(".json") && recorded < at - SWITCH_OVERLAP_MS) {
+				await unlink(join(dir.dir, other)).catch(() => {});
+			}
+		}
 	} catch {
 		// The next hold resolves without it.
 	}
 }
 
 /**
- * The session's latest switch (`recordModelSwitch`) as `{ model, at }`, null when none is
- * recorded, or `SWITCH_UNREADABLE` when one may be but cannot be read (fail dearest): from a
- * directory that fails `privateDir`'s checks for any reason but ENOENT, or a record that cannot be
- * read or does not parse.
+ * The session's latest switch (`recordModelSwitch`) as `{ models, at }`: `at` the newest record's
+ * time, and `models` every model recorded within `SWITCH_OVERLAP_MS` of it, since records that
+ * close may have landed out of order. One model means the session's model is known; more mean the
+ * latest switch is ambiguous. Null when none is recorded, or `SWITCH_UNREADABLE` when one may be
+ * but cannot be read (fail dearest): from a directory that fails `privateDir`'s checks for any
+ * reason but ENOENT, more than `MAX_SWITCH_RECORDS`, or a record that cannot be read or does not
+ * parse. A record still being written (`.tmp`) is not yet one.
  */
 async function lastSwitch(sessionId) {
 	if (typeof sessionId !== "string" || sessionId === "") return null;
-	const dir = await privateDir(SESSION_MODEL_DIR, { create: false });
+	const dir = await privateDir(switchDir(sessionId), { create: false });
 	if (!dir.ok) return dir.reason.includes("ENOENT") ? null : SWITCH_UNREADABLE;
-	let text;
+	const records = [];
 	try {
-		text = await readRegular(join(dir.dir, switchName(sessionId)), READ_BOUND.small);
+		const names = (await readdir(dir.dir)).filter((name) => !name.endsWith(".tmp"));
+		if (names.length > MAX_SWITCH_RECORDS) return SWITCH_UNREADABLE;
+		for (const name of names) {
+			const record = JSON.parse(await readRegular(join(dir.dir, name), READ_BOUND.small));
+			const id = modelId(record?.model);
+			if (id === null || id === UNKNOWN_MODEL || !Number.isSafeInteger(record.at)) {
+				return SWITCH_UNREADABLE;
+			}
+			records.push({ model: id, at: record.at });
+		}
 	} catch (err) {
-		return err?.code === "ENOENT" ? null : SWITCH_UNREADABLE;
+		// The directory went between the check and the read: nothing recorded.
+		return err?.code === "ENOENT" && records.length === 0 ? null : SWITCH_UNREADABLE;
 	}
-	try {
-		const record = JSON.parse(text);
-		const id = modelId(record?.model);
-		if (id === null || id === UNKNOWN_MODEL || !Number.isSafeInteger(record.at))
-			return SWITCH_UNREADABLE;
-		return { model: id, at: record.at };
-	} catch {
-		return SWITCH_UNREADABLE;
-	}
+	if (records.length === 0) return null;
+	const at = Math.max(...records.map((record) => record.at));
+	const models = new Set(
+		records.filter((record) => record.at >= at - SWITCH_OVERLAP_MS).map((record) => record.model),
+	);
+	return { models, at };
 }
 
 /**
@@ -1990,14 +2016,16 @@ async function seenBefore(sessionId, agentId) {
  *     inspected, is `unknown`. The file may LAG: Claude Code writes it asynchronously, so it "may
  *     not yet include the current turn's most recent messages when a hook fires"
  *     (https://code.claude.com/docs/en/hooks#common-input-fields). So when the session's latest
- *     model switch (`recordModelSwitch`) names another model than that response, and the response
- *     is not dated after the switch (or bears no date), the response may predate it: `unknown`,
+ *     model switch (`recordModelSwitch`) names another model than that response, or is ambiguous
+ *     (two hook runs that overlapped name different models), and the response is not dated after
+ *     the switch (or bears no date), the response may predate it: `unknown`,
  *     never the cheaper of the two, and never the switch's model either, since a one-turn
  *     fallback model can serve a turn without a switch. A switch record that cannot be read is
  *     `unknown` too. It counts for every agent of the session: an automatic fallback changes the
  *     session's model;
  *  2. with no response to read (the transcript is missing, holds none, or no path names it), the
- *     model of the session's latest switch, else the one Claude Code reported for the session at
+ *     model of the session's latest switch (`unknown` when it is ambiguous), else the one Claude
+ *     Code reported for the session at
  *     SessionStart (`recordSessionModel`), for the MAIN agent only: it is the session's model,
  *     and a subagent may run a dearer one (Claude Code's
  *     SubagentStart input names no model, https://code.claude.com/docs/en/hooks#subagentstart-input,
@@ -2021,17 +2049,21 @@ export async function holdModelFor({ sessionId, agentId, input, lastModel, readB
 		if (typeof newest === "object") {
 			await markSeen(sessionId, agentId);
 			if (newest.model === UNKNOWN_MODEL || switched === SWITCH_UNREADABLE) return unknown;
-			// NaN (no date) is never after the switch.
-			if (switched !== null && switched.model !== newest.model && !(newest.at > switched.at)) {
-				return unknown;
-			}
+			// NaN (no date) is never after the switch. Before it, only the one model the session
+			// switched to is taken: another model, or an ambiguous switch, is `unknown`.
+			const current = switched?.models.size === 1 && switched.models.has(newest.model);
+			if (switched !== null && !(newest.at > switched.at) && !current) return unknown;
 			return { model: newest.model, source: "transcript" };
 		}
 	}
 	const read =
 		readBefore === true || modelId(lastModel) !== null || (await seenBefore(sessionId, agentId));
 	if (read || agentId !== "main" || switched === SWITCH_UNREADABLE) return unknown;
-	if (switched !== null) return { model: switched.model, source: "session" };
+	if (switched !== null) {
+		return switched.models.size === 1
+			? { model: [...switched.models][0], source: "session" }
+			: unknown;
+	}
 	const reported = await sessionModel(sessionId);
 	if (reported !== null) return { model: reported, source: "session" };
 	return unknown;
