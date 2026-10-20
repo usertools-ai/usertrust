@@ -617,6 +617,7 @@ async function reserve(input) {
 			agentId,
 			input,
 			lastModel: prepared.lastModel,
+			readBefore: prepared.readBefore === true,
 		});
 		const holdModel = () => window?.model ?? fallback.model;
 		const modelSource = () => (window ? "transcript" : fallback.source);

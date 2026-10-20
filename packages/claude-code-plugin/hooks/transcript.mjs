@@ -764,9 +764,16 @@ async function privateStateDir() {
 
 /**
  * <state>/<name>, made and checked as `privateStateDir` is. With `create: false` (a read) it is
- * only checked, and a missing one is unavailable: a read never makes a directory.
+ * only checked, and a missing one is unavailable: a read never makes a directory. A nested name
+ * (`transcripts/session-models`) is checked level by level, its parent first: nothing is made in,
+ * or trusted from, a directory that fails the checks itself.
  */
 async function privateDir(name, { create = true } = {}) {
+	const parent = dirname(name);
+	if (parent !== ".") {
+		const above = await privateDir(parent, { create });
+		if (!above.ok) return above;
+	}
 	const dir = join(stateRoot(), name);
 	try {
 		if (create) await mkdir(dir, { recursive: true, mode: 0o700 });
@@ -1758,11 +1765,16 @@ export async function stampFirstRun(sessionId) {
 	}
 }
 
-/** Under the state dir: the model Claude Code reported for each session (`recordSessionModel`). */
-const SESSION_MODEL_DIR = "session-models";
+/**
+ * Under the state dir, beside the other per-session transcript state: the model Claude Code
+ * reported for each session (`recordSessionModel`), and which agents have read a response
+ * (`markSeen`).
+ */
+const SESSION_MODEL_DIR = join("transcripts", "session-models");
 
-/** How much of a transcript's end `newestTranscriptModel` reads. */
-const MODEL_TAIL_BYTES = 4 * READ_CHUNK_BYTES;
+/** `newestTranscriptModel`'s answers that name no model: the file is missing, or holds no response. */
+const TRANSCRIPT_MISSING = Symbol("transcript missing");
+const NO_RESPONSE = Symbol("no response");
 
 /**
  * Record the model Claude Code reports for a session: SessionStart's `model`, "the active
@@ -1801,51 +1813,102 @@ async function sessionModel(sessionId) {
 	}
 }
 
+/** A transcript line's response model: its id, `unknown` when unusable, or undefined when it is no response. */
+function responseModelOf(line) {
+	if (!line.includes(USAGE_FIELD)) return undefined;
+	let entry;
+	try {
+		entry = JSON.parse(line.toString("utf-8"));
+	} catch {
+		return undefined;
+	}
+	if (!isObject(entry?.message?.usage)) return undefined;
+	const id = modelId(entry.message.model);
+	// The `<synthetic>` placeholder is no response of any model.
+	if (id === SYNTHETIC_MODEL) return undefined;
+	return id ?? UNKNOWN_MODEL;
+}
+
 /**
- * The model of the NEWEST response in a transcript, read from its last `MODEL_TAIL_BYTES`
- * (complete lines only), or null when that part holds none. A response's `message.model`, and
- * `unknown` when it is missing or unusable: never an older response's, which may be cheaper. The
- * `<synthetic>` placeholder is not a response of any model, and is passed over. Nothing here is
- * posted.
+ * The model of the NEWEST response in a transcript, scanned BACKWARD from its end in
+ * `READ_CHUNK_BYTES` chunks, so a response line of any size the ingest accepts is read whole:
+ * - the newest complete response line's model, and `unknown` when it names no usable one (never an
+ *   older response's, which may be cheaper);
+ * - `unknown` too when the transcript cannot be inspected: unreadable for any reason but ENOENT, a
+ *   line over `MAX_LINE_BYTES`, or `MAX_READ_BYTES` scanned without reaching its start;
+ * - `NO_RESPONSE` only after a read back to its first byte found no response;
+ * - `TRANSCRIPT_MISSING` when it does not exist (ENOENT).
+ * A line still being written (the last, with no newline yet) does not parse, and is passed over.
+ * Nothing here is posted.
  */
 async function newestTranscriptModel(path) {
 	let handle;
 	try {
 		({ handle } = await openRegular(path));
-	} catch {
-		return null;
+	} catch (err) {
+		return err?.code === "ENOENT" ? TRANSCRIPT_MISSING : UNKNOWN_MODEL;
 	}
 	try {
 		const { size } = await handle.stat();
-		const start = Math.max(0, size - MODEL_TAIL_BYTES);
-		const buffer = Buffer.alloc(size - start);
-		let read = 0;
-		while (read < buffer.length) {
-			const { bytesRead } = await handle.read(buffer, read, buffer.length - read, start + read);
-			if (bytesRead === 0) break;
-			read += bytesRead;
-		}
-		const lines = buffer.subarray(0, read).toString("utf-8").split("\n");
-		// A tail that starts mid-file starts mid-line: that first piece is not a line.
-		if (start > 0) lines.shift();
-		for (let i = lines.length - 1; i >= 0; i--) {
-			if (!lines[i].includes('"usage"')) continue;
-			let entry;
-			try {
-				entry = JSON.parse(lines[i]);
-			} catch {
-				continue;
+		let end = size;
+		// The bytes before the first newline seen so far: a line whose start lies further back.
+		let carry = Buffer.alloc(0);
+		while (end > 0) {
+			if (size - end >= MAX_READ_BYTES) return UNKNOWN_MODEL;
+			const start = Math.max(0, end - READ_CHUNK_BYTES);
+			const chunk = Buffer.alloc(end - start);
+			let read = 0;
+			while (read < chunk.length) {
+				const { bytesRead } = await handle.read(chunk, read, chunk.length - read, start + read);
+				if (bytesRead === 0) return UNKNOWN_MODEL;
+				read += bytesRead;
 			}
-			if (!isObject(entry?.message?.usage)) continue;
-			const id = modelId(entry.message.model);
-			if (id === SYNTHETIC_MODEL) continue;
-			return id ?? UNKNOWN_MODEL;
+			const buffer = carry.length === 0 ? chunk : Buffer.concat([chunk, carry]);
+			// Newest first: every line after a newline is whole.
+			let stop = buffer.length;
+			let newline = stop > 0 ? buffer.lastIndexOf(0x0a, stop - 1) : -1;
+			while (newline !== -1) {
+				const found = responseModelOf(buffer.subarray(newline + 1, stop));
+				if (found !== undefined) return found;
+				stop = newline;
+				newline = stop > 0 ? buffer.lastIndexOf(0x0a, stop - 1) : -1;
+			}
+			carry = buffer.subarray(0, stop);
+			if (carry.length > MAX_LINE_BYTES) return UNKNOWN_MODEL;
+			end = start;
 		}
-		return null;
+		// At its first byte: the carry is the transcript's first line.
+		return responseModelOf(carry) ?? NO_RESPONSE;
 	} catch {
-		return null;
+		return UNKNOWN_MODEL;
 	} finally {
 		await handle.close().catch(() => {});
+	}
+}
+
+/** The marker that a hold of this agent has read a response from its transcript (`holdModelFor`). */
+const seenName = (sessionId, agentId) => `${sanitize(sessionId)}__${agentId}.seen`;
+
+/** Record, once, that a hold of this agent read a response from its transcript. Never throws. */
+async function markSeen(sessionId, agentId) {
+	try {
+		const dir = await privateDir(SESSION_MODEL_DIR);
+		if (!dir.ok) return;
+		await writeFile(join(dir.dir, seenName(sessionId, agentId)), "", { flag: "wx", mode: 0o600 });
+	} catch {
+		// Recorded already (EEXIST), or not now: the cursor is the other record of it.
+	}
+}
+
+/** Whether `markSeen` recorded this agent; true when that cannot be told (fail dearest). */
+async function seenBefore(sessionId, agentId) {
+	const dir = await privateDir(SESSION_MODEL_DIR, { create: false });
+	if (!dir.ok) return !dir.reason.includes("ENOENT");
+	try {
+		await lstat(join(dir.dir, seenName(sessionId, agentId)));
+		return true;
+	} catch (err) {
+		return err?.code !== "ENOENT";
 	}
 }
 
@@ -1853,35 +1916,38 @@ async function newestTranscriptModel(path) {
  * The model a hold is authorized at when no transcript window names one: every estimate hold,
  * a transcript hold with no window, and PostToolUse's replacement of an expired hold. Never a
  * configured or built-in default, which priced an Opus session's holds at a cheaper model's
- * rate. In order:
- *  1. the newest response in the agent's transcript (`newestTranscriptModel`), FIRST because only
- *     the file is always current: a cursor can lag it (another hook holds the agent's lock, so its
- *     `lastModel` is the one last saved; or a read stopped before the end), and a hold made just
- *     after a switch to a dearer model would be priced at the cheaper one. In estimate mode too
- *     (`UT_CC_USAGE=estimate`, or an agent that settles at the estimate): only that response's
- *     model id is read, never its usage, which is still estimated;
- *  2. `lastModel`, the newest model the agent's cursor has read, when the tail holds no response
- *     (the newest one lies further back than `MODEL_TAIL_BYTES`) or the transcript is unreadable;
- *  3. the model Claude Code reported for the session at SessionStart (`recordSessionModel`);
- *  4. `unknown`: the server prices an id it does not know at the dearest rate it publishes
- *     (core pricing.ts `FALLBACK_RATE`) and marks the receipt `rateSource: "fallback"`, so an
- *     unknown model is never priced below the session's.
- * Returns `{ model, source }`, `source` being `transcript`, `session` or `unknown`: what the
+ * rate, and never a model cheaper than the one the session might be using NOW:
+ *  1. the newest response in the agent's transcript (`newestTranscriptModel`): only the file is
+ *     always current (a cursor lags it while another hook holds the agent's lock, or when a read
+ *     stopped before the end). In estimate mode too (`UT_CC_USAGE=estimate`, or an agent that
+ *     settles at the estimate): only that response's model id is read, never its usage, which is
+ *     still estimated. A newest response with no usable model, or a transcript that cannot be
+ *     inspected, is `unknown`;
+ *  2. with no response to read (the transcript is missing, holds none, or no path names it), the
+ *     model Claude Code reported for the session at SessionStart (`recordSessionModel`), but ONLY
+ *     while it is provably current: before this agent has read anything (its cursor has read no
+ *     byte and names no model, and no hold of it has read a response, `markSeen`). After that a
+ *     switch may have happened since, so the transcript gone, or never named, is `unknown`;
+ *  3. `unknown`: the server prices an id it does not know at the dearest rate it publishes (core
+ *     pricing.ts `FALLBACK_RATE`) and marks the receipt `rateSource: "fallback"`.
+ * `readBefore` is whether this agent's cursor has read a byte; `lastModel`, the model it last
+ * read. Returns `{ model, source }`, `source` being `transcript`, `session` or `unknown`: what the
  * hold's `params.modelSource` says. Never throws.
  */
-export async function holdModelFor({ sessionId, agentId, input, lastModel }) {
+export async function holdModelFor({ sessionId, agentId, input, lastModel, readBefore = false }) {
 	const unknown = { model: UNKNOWN_MODEL, source: "unknown" };
-	// At each rung, a newest response that named no usable model is `unknown`, never an older
-	// source's model.
-	if (isAgentId(agentId)) {
-		const path = transcriptPathFor(input ?? {}, agentId);
-		const newest = path === undefined ? null : await newestTranscriptModel(path);
-		if (newest === UNKNOWN_MODEL) return unknown;
-		if (newest !== null) return { model: newest, source: "transcript" };
+	if (!isAgentId(agentId)) return unknown;
+	const path = transcriptPathFor(input ?? {}, agentId);
+	if (path !== undefined) {
+		const newest = await newestTranscriptModel(path);
+		if (typeof newest === "string") {
+			await markSeen(sessionId, agentId);
+			return newest === UNKNOWN_MODEL ? unknown : { model: newest, source: "transcript" };
+		}
 	}
-	const known = modelId(lastModel);
-	if (known === UNKNOWN_MODEL) return unknown;
-	if (known !== null && known !== SYNTHETIC_MODEL) return { model: known, source: "transcript" };
+	const read =
+		readBefore === true || modelId(lastModel) !== null || (await seenBefore(sessionId, agentId));
+	if (read) return unknown;
 	const reported = await sessionModel(sessionId);
 	if (reported !== null) return { model: reported, source: "session" };
 	return unknown;
@@ -2025,7 +2091,12 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 			// A cursor from before the marker: record it now.
 			return stickToEstimate(where, peek.cursor.estimateReason ?? "transcript unreadable", false);
 		}
-		return { kind: "busy", lastModel: peek.cursor.lastModel, transcriptPath };
+		return {
+			kind: "busy",
+			lastModel: peek.cursor.lastModel,
+			readBefore: peek.cursor.byteOffset > 0,
+			transcriptPath,
+		};
 	}
 	try {
 		// Again under the lock: a hook that recorded estimate mode since the check
@@ -2145,7 +2216,7 @@ export async function prepareWindow({
 		return { mode: opened.kind, reason: opened.reason, becameSticky: opened.becameSticky === true };
 	}
 	const none = async () => {};
-	const empty = (lastModel, agentType) => ({
+	const empty = (lastModel, agentType, readBefore) => ({
 		mode: "transcript",
 		window: null,
 		key: null,
@@ -2153,6 +2224,7 @@ export async function prepareWindow({
 		agentTypeRaw: agentType.raw,
 		principal: principalFor(sessionId, agentId, agentType.raw),
 		lastModel,
+		readBefore,
 		commit: none,
 		settledElsewhere: none,
 		abandon: none,
@@ -2162,6 +2234,7 @@ export async function prepareWindow({
 		return empty(
 			opened.lastModel,
 			await agentTypeFor(opened.transcriptPath, agentId, agentTypeHint),
+			opened.readBefore,
 		);
 	}
 	const { cursor } = opened;
@@ -2190,7 +2263,7 @@ export async function prepareWindow({
 	} catch (err) {
 		await opened.release();
 		say(`usertrust: transcript window skipped — ${errText(err)}`);
-		return empty(cursor.lastModel, agentType);
+		return empty(cursor.lastModel, agentType, cursor.byteOffset > 0);
 	}
 	let decided = false;
 	const key = window === null ? null : vehicleKey(sessionId, agentId, window.ids);
@@ -2202,6 +2275,7 @@ export async function prepareWindow({
 		agentTypeRaw: agentType.raw,
 		principal: principalFor(sessionId, agentId, agentType.raw),
 		lastModel: cursor.lastModel,
+		readBefore: cursor.byteOffset > 0,
 		async commit(transferId) {
 			if (window === null || decided) return;
 			decided = true;

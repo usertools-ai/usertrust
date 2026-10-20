@@ -4,7 +4,7 @@
 // at the estimate), a transcript hold with no window, and PostToolUse's replacement of an expired
 // estimate hold. With no source at all a hold names `unknown`, which the server prices at the
 // dearest rate it publishes (core pricing.ts `FALLBACK_RATE`), and says so (`params.modelSource`).
-import { chmod, mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -239,7 +239,7 @@ describe("the model a hold names is the session's own", () => {
 		expect(authorizes()[1]).toMatchObject({ model: OPUS, params: { modelSource: "transcript" } });
 	});
 
-	it("the order of the sources: the transcript's tail, then the cursor, then SessionStart, then `unknown`", async () => {
+	it("every source and outcome, directly: the newest response read now, the SessionStart model only while provably current, else `unknown`", async () => {
 		// In this process the module reads settings from process.env: never an installed config.
 		for (const name of ["UT_CC_CONFIG", "UT_SERVER_URL", "UT_SERVER_KEY"]) delete process.env[name];
 		process.env.UT_CC_STATE_DIR = stateDir;
@@ -247,22 +247,75 @@ describe("the model a hold names is the session's own", () => {
 			holdModelFor: (a: Record<string, unknown>) => Promise<{ model: string; source: string }>;
 			recordSessionModel: (session: string, model: unknown) => Promise<void>;
 		};
-		const at = (lastModel: string | null, input: Record<string, unknown> = {}) =>
-			holdModelFor({ sessionId: SESSION, agentId: "main", input, lastModel });
-		await writeTranscript(mainTranscript(), response("msg_o", OPUS));
-		const withTail = { transcript_path: mainTranscript() };
-		// The tail beats a cursor that lags it.
-		expect(await at(HAIKU, withTail)).toEqual({ model: OPUS, source: "transcript" });
-		// No transcript to read: the cursor; an explicit `unknown` from it stays unknown.
-		expect(await at(HAIKU)).toEqual({ model: HAIKU, source: "transcript" });
-		await recordSessionModel(SESSION, OPUS);
-		expect(await at("unknown")).toEqual({ model: "unknown", source: "unknown" });
-		// Neither: the session's reported model, then nothing.
-		expect(await at(null)).toEqual({ model: OPUS, source: "session" });
-		expect(
-			await holdModelFor({ sessionId: "other", agentId: "main", input: {}, lastModel: null }),
-		).toEqual({ model: "unknown", source: "unknown" });
-	});
+		let n = 0;
+		/** A fresh session whose SessionStart reported Opus, and a transcript path under it. */
+		const fresh = async () => {
+			n += 1;
+			const sessionId = `direct-${n}`;
+			await recordSessionModel(sessionId, OPUS);
+			return { sessionId, path: join(projectDir, `${sessionId}.jsonl`) };
+		};
+		const at = (
+			sessionId: string,
+			input: Record<string, unknown>,
+			extra: Record<string, unknown> = {},
+		) => holdModelFor({ sessionId, agentId: "main", input, lastModel: null, ...extra });
+		const session = { model: OPUS, source: "session" };
+		const unknown = { model: "unknown", source: "unknown" };
+
+		// The newest response decides, over a cursor that names another model.
+		let s = await fresh();
+		await writeFile(s.path, response("msg_h", HAIKU) + response("msg_o", OPUS));
+		expect(await at(s.sessionId, { transcript_path: s.path }, { lastModel: HAIKU })).toEqual({
+			model: OPUS,
+			source: "transcript",
+		});
+		// Then the file is gone: this agent read a response, so `unknown`, never SessionStart.
+		await rm(s.path);
+		expect(await at(s.sessionId, { transcript_path: s.path })).toEqual(unknown);
+
+		// Missing, and this agent never read anything: SessionStart (not written yet).
+		s = await fresh();
+		expect(await at(s.sessionId, { transcript_path: s.path })).toEqual(session);
+		// Missing after its cursor read bytes, or named a model: `unknown`.
+		expect(await at(s.sessionId, { transcript_path: s.path }, { readBefore: true })).toEqual(
+			unknown,
+		);
+		expect(await at(s.sessionId, { transcript_path: s.path }, { lastModel: HAIKU })).toEqual(
+			unknown,
+		);
+		// No path at all, never read: SessionStart; with no record either: `unknown`.
+		expect(await at(s.sessionId, {})).toEqual(session);
+		expect(await at("no-record", {})).toEqual(unknown);
+
+		// Readable, but no response in it (only a user line), never read: SessionStart.
+		s = await fresh();
+		await writeFile(s.path, `${JSON.stringify({ type: "user", message: { content: "hi" } })}\n`);
+		expect(await at(s.sessionId, { transcript_path: s.path })).toEqual(session);
+
+		// Unreadable (a directory at its path): `unknown`, even before anything was read.
+		s = await fresh();
+		await mkdir(s.path);
+		expect(await at(s.sessionId, { transcript_path: s.path })).toEqual(unknown);
+
+		// A newest response line longer than any fixed tail (5 MiB): read whole, its model named.
+		s = await fresh();
+		await writeFile(
+			s.path,
+			response("msg_h", HAIKU) + response("msg_o", OPUS, 0, "x".repeat(5 << 20)),
+		);
+		expect(await at(s.sessionId, { transcript_path: s.path })).toEqual({
+			model: OPUS,
+			source: "transcript",
+		});
+		// A newest line over the ingest's line limit (16 MiB): it cannot be inspected, `unknown`.
+		s = await fresh();
+		await writeFile(
+			s.path,
+			response("msg_h", HAIKU) + response("msg_o", OPUS, 0, "x".repeat(17 << 20)),
+		);
+		expect(await at(s.sessionId, { transcript_path: s.path })).toEqual(unknown);
+	}, 30_000);
 
 	it("before any response of its agent, a hold names the model Claude Code reported at SessionStart", async () => {
 		expect((await sessionStart(OPUS)).code).toBe(0);
@@ -281,7 +334,7 @@ describe("the model a hold names is the session's own", () => {
 		await sessionStart(OPUS);
 		await pre("tu_1");
 		// Writable by the group: whatever it holds could have been planted, so it is not read.
-		await chmod(join(stateDir, "session-models"), 0o770);
+		await chmod(join(stateDir, "transcripts", "session-models"), 0o770);
 		await pre("tu_2");
 		expect(authorizes()).toMatchObject([
 			{ model: OPUS, params: { modelSource: "session" } },
@@ -306,7 +359,9 @@ describe("the model a hold names is the session's own", () => {
 		]);
 		expect(JSON.stringify(seen)).not.toContain("claude-sonnet-4-6");
 		// Looking for a session's model makes nothing: only SessionStart's record does.
-		expect(await readdir(stateDir)).not.toContain("session-models");
+		expect(await readdir(join(stateDir, "transcripts")).catch(() => [])).not.toContain(
+			"session-models",
+		);
 	});
 
 	it("UT_CC_USAGE=estimate names the transcript's newest model: a switch from Haiku to Opus mid-session is held and settled at Opus", async () => {
@@ -334,9 +389,10 @@ describe("the model a hold names is the session's own", () => {
 		expect(JSON.stringify(seen.filter((s) => s.path === "/v1/settle"))).not.toContain(
 			'"usageSource":"provider"',
 		);
-		// Without a readable transcript, the SessionStart model, as before.
+		// The transcript gone now: this agent has read responses already, so a switch may have
+		// happened since, and the SessionStart model (Haiku) could be cheaper. `unknown`.
 		await pre("tu_3", { transcript_path: join(projectDir, "missing.jsonl") }, estimate);
-		expect(authorizes()[2]).toMatchObject({ model: HAIKU, params: { modelSource: "session" } });
+		expect(authorizes()[2]).toMatchObject({ model: "unknown", params: { modelSource: "unknown" } });
 	});
 
 	it("PostToolUse's replacement of an expired estimate hold is authorized at the HOLD's model, not one resolved later", async () => {

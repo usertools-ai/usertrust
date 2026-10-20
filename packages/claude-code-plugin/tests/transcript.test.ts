@@ -2717,8 +2717,11 @@ describe("estimate holds", () => {
 		// one stderr line is watch mode's (the default) reason for letting the call
 		// through, which lands in Claude Code's debug log; there is no other note.
 		expect(pre.stderr).toBe("usertrust: reserved tx_1 (1 ut)\n");
+		// `session-models`: the hold read the transcript's newest model id (only that), and marked
+		// this agent as having read a response (transcript.mjs `holdModelFor`).
 		expect((await readdir(join(stateDir, "transcripts"))).sort()).toEqual([
 			"estimate",
+			"session-models",
 			"since",
 			"since-session",
 		]);

@@ -319,23 +319,23 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   spaces, over 256 characters) is sent as `unknown`, never rewritten into another.
 - **The model a hold names is the session's own.** A hold with no window (an
   estimate hold, a tool call with nothing new before it, and PostToolUse's fresh hold
-  for an estimate hold that expired) names, in order: the model of the newest
-  response in the agent's transcript, read from its tail for the model id only
-  (estimate mode included, whose usage is always estimated), first because only the
-  file is always current; the newest model its agent's transcript state has read,
-  when the tail holds no response; the model
-  Claude Code reported at SessionStart (its `model`, which Claude Code may omit); and
-  otherwise `unknown`, which usertrust-server prices at the dearest rate it publishes
-  and marks as a fallback, so a hold is never priced below the session's model. The
-  newest response decides: one whose model is missing or not a usable id makes the hold
-  `unknown`, never an older response's model, which may be cheaper. A
-  fresh hold for an expired one names the model the expired hold was authorized at.
+  for an estimate hold that expired) names the model of the newest response in the
+  agent's transcript, scanned back from its end, for the model id only (estimate mode
+  included, whose usage is always estimated): only the file is always current. A
+  newest response whose model is missing or not a usable id, a transcript that cannot
+  be read or inspected (a line over the ingest's limit, or more scanned than it reads),
+  all mean `unknown`. With no response to read, the hold names the model Claude Code
+  reported at SessionStart (its `model`, which Claude Code may omit), but only while
+  that is provably current: before this agent has read anything. After that a switch
+  may have happened since, so a transcript gone or never named means `unknown`.
+  usertrust-server prices `unknown` at the dearest rate it publishes and marks it as a
+  fallback, so a hold is never priced below the model the session may now be using.
+  A fresh hold for an expired one names the model the expired hold was authorized at.
   The authorize says which it used in `params.modelSource` (`transcript`, `session`,
   `hold` or `unknown`). The model is not a setting: `UT_CC_MODEL`, or a config file's
   `model`, is ignored, and SessionStart says so. A model switch mid-session is named
-  by the next response, which every tool call follows, in either mode: the transcript
-  mode reads it with the response's usage, the estimate mode reads only its model id.
-  The plugin installs no `PostModelSwitch` hook.
+  by the next response, which every tool call follows, in either mode; the plugin
+  installs no `PostModelSwitch` hook.
 - **Forked subagents.** A forked subagent's transcript begins with a copy of its
   ancestor's entries — the same response ids — so the plugin posts each response
   id from ONE agent only: the first agent to claim it (a file per id under
