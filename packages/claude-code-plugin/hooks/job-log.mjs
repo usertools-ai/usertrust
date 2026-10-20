@@ -40,6 +40,7 @@ import { mkdir, open, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
 	appendRegular,
+	capabilityListMalformed,
 	eachLine,
 	guardMode,
 	JOB_TYPES,
@@ -406,23 +407,52 @@ export const JOB_TYPE_INSTRUCTION = [
 	"If this session was resumed or compacted and a job is already open for the same work, keep it and do not start another.",
 ].join(" ");
 
+/** The exit code of the child probe (session-probe.mjs) that found `job-type` listed. */
+export const PROBE_LISTED = 10;
+
 /** How long SessionStart waits for the server's capabilities: well under the hook's 5 s. */
 export const TYPE_PROBE_MS = 1_500;
 
 /**
- * The instruction above, or null. Only for a server that lists `job-type` in `/v1/health`
- * `capabilities`: against an older one the instruction would have the agent label work whose
- * type is never recorded. Everything else is null, never a thrown error and never a wait past
- * `TYPE_PROBE_MS`: a probe that times out or fails, health output that is not a capability
- * list, a refused configuration. The caller still announces its banner exactly once.
+ * Whether the server lists `job-type` in `/v1/health` `capabilities`, asked in THIS process:
+ * one health request of at most `TYPE_PROBE_MS`. False for everything else, never a thrown
+ * error: a probe that times out or fails, a refused configuration, and health output whose
+ * capability list is not a list of strings (a half-readable list is not trusted for this one
+ * decision, even when the literal is in it).
  */
-export async function jobTypeInstruction() {
+export async function probeJobType() {
 	try {
 		const capabilities = await serverCapabilities({ maxMs: TYPE_PROBE_MS });
-		return capabilities !== null && capabilities.has("job-type") ? JOB_TYPE_INSTRUCTION : null;
+		return (
+			capabilities !== null &&
+			!capabilityListMalformed(capabilities) &&
+			capabilities.has("job-type")
+		);
 	} catch {
-		return null;
+		return false;
 	}
+}
+
+/**
+ * The launcher's answer for a CONFIGURED session, whose request is made from its isolated child
+ * (launch.mjs `probeInChild`), not from the parent that runs SessionStart: undefined until the
+ * launcher sets it, then true or false. A parent that asked for itself would send under the
+ * environment the child exists to keep out (a CA store, a proxy).
+ */
+let childProbe;
+export function setChildProbe(answer) {
+	childProbe = answer === true;
+}
+
+/**
+ * The instruction above, or null. Only for a server that lists `job-type`: against an older one
+ * the instruction would have the agent label work whose type is never recorded. Everything else
+ * is null, never a thrown error and never a wait past `TYPE_PROBE_MS`. The caller still
+ * announces its banner exactly once.
+ */
+export async function jobTypeInstruction() {
+	const listed = childProbe !== undefined ? childProbe : await probeJobType();
+	return listed ? JOB_TYPE_INSTRUCTION : null;
 }
 
 // ── Writing: ONE append of ONE complete line, no lock ──

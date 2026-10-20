@@ -111,6 +111,13 @@ const logLines = async (sid = SID) =>
 		.filter(Boolean)
 		.map((l) => JSON.parse(l) as Record<string, unknown>);
 
+/** The string literals of `export const NAME = [ ... ]` in a TypeScript source text. */
+function listIn(source: string, name: string): string[] {
+	const found = new RegExp(`export const ${name}\\s*=\\s*\\[([^\\]]*)\\]`).exec(source);
+	if (found === null) throw new Error(`no export const ${name} in the source`);
+	return [...(found[1] ?? "").matchAll(/"([^"]*)"/g)].map((m) => m[1] as string);
+}
+
 // ── 2.1: the CLI ──
 
 describe("usertrust-job.mjs start --type: refusals write nothing", () => {
@@ -329,6 +336,32 @@ describe("the job log parser: a bad type or source makes the WHOLE log invalid",
 		);
 		expect((await jobLog()).labelsAt(p, T0 + 1.5)).toEqual({ job: "job-a" });
 		expect((await jobLog()).labelsAt(p, T0 + 5)).toEqual({});
+	});
+	it("the type lists are core's, read from core's source (a tree-relative parity check)", async () => {
+		// The root is derived from THIS file's location, never the cwd: a whole-repo assertion
+		// asserts over the tree it lives in (AGENTS.md).
+		const source = await readFile(
+			join(import.meta.dirname, "..", "..", "core", "src", "shared", "job.ts"),
+			"utf-8",
+		);
+		const core = { types: listIn(source, "JOB_TYPES"), sources: listIn(source, "TYPE_SOURCES") };
+		const lib = await jobLog();
+		const plugin = await pluginLib();
+		// mutant: a type added to the plugin's list only → these fail
+		expect(lib.JOB_TYPES).toEqual(core.types);
+		expect(plugin.JOB_TYPES).toEqual(core.types);
+		expect(lib.TYPE_SOURCES).toEqual(core.sources);
+		// The CLI has no list of its own: it takes both from job-log.mjs.
+		const cli = await readFile(CLI, "utf-8");
+		expect(cli).not.toMatch(/["']bugfix["']/);
+		expect(cli).toMatch(/JOB_TYPES[\s\S]*TYPE_SOURCES[\s\S]*from "..\/hooks\/job-log\.mjs"/);
+		// Positive controls: the extractor finds both arrays in the real source, and a planted
+		// source with a different list is told apart from the plugin's.
+		expect(core.types.length).toBeGreaterThan(0);
+		expect(core.sources.length).toBeGreaterThan(0);
+		const planted = source.replace('"research",', '"research",\n\t"chore",');
+		expect(listIn(planted, "JOB_TYPES")).not.toEqual(lib.JOB_TYPES);
+		expect(() => listIn("export const OTHER = [];", "JOB_TYPES")).toThrow();
 	});
 	it("the type list the plugin carries is the list the spec closes", async () => {
 		const lib = await jobLog();
@@ -600,6 +633,19 @@ describe("SessionStart: ONE JSON object, the agent's instruction only for a serv
 				"capabilities is a string, not a list",
 				async () => ({
 					url: `http://127.0.0.1:${(await healthServer({ body: JSON.stringify({ capabilities: "job-type" }) })).port}`,
+				}),
+			],
+			[
+				// The literal IS in the list, but the list is not a list of strings: not trusted.
+				"capabilities is a list with a null and a number beside the literal job-type",
+				async () => ({
+					url: `http://127.0.0.1:${(await healthServer({ body: JSON.stringify({ capabilities: ["job-type", null, 17] }) })).port}`,
+				}),
+			],
+			[
+				"capabilities is a list with an object beside the literal job-type",
+				async () => ({
+					url: `http://127.0.0.1:${(await healthServer({ body: JSON.stringify({ capabilities: ["job", "job-type", { x: 1 }] }) })).port}`,
 				}),
 			],
 			[

@@ -1599,6 +1599,20 @@ export async function serverRequest(path, body, { timeoutMs = 5000 } = {}) {
 
 let capabilitiesRead;
 
+/** The capability sets built from a health answer whose list was not a list of strings. */
+const MALFORMED_LISTS = new WeakSet();
+
+/**
+ * Whether the health answer `capabilities` came from carried a `capabilities` value that was
+ * not a list of strings (a non-list, or a list with a non-string in it). The Set itself holds
+ * only the strings that were readable, so a caller that must not act on a half-readable answer
+ * (`job-log.mjs` `probeJobType`) asks this first. A missing list is an older server's, not
+ * malformed.
+ */
+export function capabilityListMalformed(capabilities) {
+	return MALFORMED_LISTS.has(capabilities);
+}
+
 /**
  * Read the capabilities AGAIN, discarding a cached UNKNOWN. serverCapabilities() caches
  * its answer for the hook process, which is right for a settled answer but wrong for a
@@ -1777,6 +1791,14 @@ export function serverCapabilities({ maxMs = 2_000 } = {}) {
 			const json = JSON.parse(text);
 			const list = Array.isArray(json?.capabilities) ? json.capabilities : [];
 			const capabilities = new Set(list.filter((c) => typeof c === "string"));
+			// Existing decisions (job, principal, keys) keep reading the strings that are there;
+			// a decision that must not trust a half-readable list asks `capabilityListMalformed`.
+			if (
+				json?.capabilities !== undefined &&
+				!(Array.isArray(json.capabilities) && list.every((c) => typeof c === "string"))
+			) {
+				MALFORMED_LISTS.add(capabilities);
+			}
 			principalCachedAt = null;
 			await rememberCapabilities(capabilities);
 			return capabilities;

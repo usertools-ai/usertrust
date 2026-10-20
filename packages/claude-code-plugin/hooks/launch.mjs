@@ -3,8 +3,10 @@
 // THE PARENT, the process Claude Code starts, reads the hook's input and resolves its
 // session's settings from the session's pin (session.mjs, which makes the pin when
 // the session has none). Then:
-// - An `environment` session, a refused one, and SessionStart (which sends nothing)
-//   run the hook here, in this process.
+// - An `environment` session and a refused one run the hook here, in this process. So does
+//   SessionStart, which sends nothing itself: its one request (does the server list
+//   `job-type`?) is made, for a configured session, by a child of the kind below
+//   (`probeInChild`, session-probe.mjs), and the answer is the child's exit code.
 // - A `configured` session's other hooks, all of which can send, run as a CHILD that
 //   sends: `node launch.mjs <hook> --ut-child ...`, with no node options, the
 //   working directory `/`, and nothing of the environment but the host variables a
@@ -50,6 +52,7 @@ import {
 	settings as resolvedSettings,
 	useSession,
 } from "./config.mjs";
+import { PROBE_LISTED, setChildProbe } from "./job-log.mjs";
 import { launch, readStdin, recordWatchEvent, say } from "./lib.mjs";
 import {
 	alsoEnabledWarning,
@@ -71,6 +74,10 @@ const HOOKS = new Set([
 	"session-end",
 ]);
 const CHILD = "--ut-child";
+/** The probe child (session-probe.mjs): not a hook of hooks.json, so only ever started as a child. */
+const PROBE = "session-probe";
+/** The longest the parent waits for the probe child: the probe's own bound (1.5 s) plus its start. */
+const PROBE_KILL_MS = 3_000;
 /** A child's exit when it will not run: its environment or its pin is not what it was given. */
 export const CHILD_REFUSED = 3;
 
@@ -229,6 +236,46 @@ async function warnOfPeer(input) {
 	else if (peer.state === "unknown") setPeerWarning(unknownWarning(peer.why));
 }
 
+/**
+ * SessionStart's one request, for a configured session, from the same isolated child its other
+ * hooks send from: no node options, cwd `/`, nothing of the environment. Resolves to whether the
+ * server lists `job-type`. A child that cannot run, fails, is refused or outlives the bound is
+ * `false` (no instruction), and the banner is the parent's, announced once either way. Its
+ * stdout is not the parent's (SessionStart prints one JSON object, from here), and the answer
+ * is its exit code.
+ */
+function probeInChild(session, home) {
+	return new Promise((resolve) => {
+		let child;
+		try {
+			child = spawn(
+				process.execPath,
+				[
+					LAUNCH,
+					PROBE,
+					CHILD,
+					`--ut-started=${Date.now()}`,
+					`--ut-pin=${session.path}`,
+					...(home === null ? [] : [`--ut-home=${home}`]),
+				],
+				{ ...childOptions(), stdio: ["ignore", "ignore", "inherit"] },
+			);
+		} catch {
+			resolve(false);
+			return;
+		}
+		const timer = setTimeout(() => child.kill("SIGKILL"), PROBE_KILL_MS);
+		child.on("error", () => {
+			clearTimeout(timer);
+			resolve(false);
+		});
+		child.on("close", (code) => {
+			clearTimeout(timer);
+			resolve(code === PROBE_LISTED);
+		});
+	});
+}
+
 /** The parent: resolve the session, then run the hook here or as a child. */
 async function parent(hook) {
 	const text = await readStdin();
@@ -242,8 +289,12 @@ async function parent(hook) {
 	known.settings = session.settings;
 	if (session.path !== null) touchPin(session.path);
 	if (hook === "session-start") sweep({ passwdHome: home, uid });
-	const sends = hook !== "session-start";
-	if (session.kind === "configured" && session.settings.refused === null && sends) {
+	const configured = session.kind === "configured" && session.settings.refused === null;
+	if (hook === "session-start" && configured) {
+		// The parent prints SessionStart's banner; only the request leaves, and from the child.
+		setChildProbe(childUnsupported() === null ? await probeInChild(session, home) : false);
+	}
+	if (configured && hook !== "session-start") {
 		const unsupported = childUnsupported();
 		if (unsupported !== null) await childFailed(hook, session.settings, input, unsupported);
 		else await runInChild(hook, text, input, session, home);
@@ -314,7 +365,7 @@ function isScript() {
 
 if (isScript()) {
 	const hook = process.argv[2];
-	if (!HOOKS.has(hook)) {
+	if (!HOOKS.has(hook) && !(hook === PROBE && process.argv.includes(CHILD))) {
 		say("usertrust: launch.mjs runs a hook: session-start, pre-tool-use, ...");
 		process.exitCode = 1;
 	} else if (process.argv.includes(CHILD)) {

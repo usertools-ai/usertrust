@@ -164,6 +164,11 @@ directory `/`, and with nothing of the environment but Claude Code's own
   does not see `NODE_EXTRA_CA_CERTS`.
 - The child also checks its own environment: holding anything else, it refuses to
   run and sends nothing.
+- SessionStart's one request, the check for `"job-type"` that decides whether the agent is
+  asked to type its jobs, is made from that same kind of child (the banner and everything else
+  SessionStart prints stay with the parent). A child that cannot run or fails means no
+  instruction, and the banner as before. An environment-configured session makes the request
+  from the process itself, as it always sent.
 - **Configured sessions do not run on Windows yet.** Windows adds `SYSTEMROOT`,
   `SYSTEMDRIVE` and `TEMP` to a child's environment, with the parent's values, and
   `SYSTEMROOT` decides where system libraries are found. So on Windows a configured
