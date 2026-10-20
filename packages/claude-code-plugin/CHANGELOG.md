@@ -7,6 +7,19 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ## [Unreleased]
 
+### Fixed
+
+- **A hold past its life is never settled.** A tool call that outlives its hold (a Bash command
+  or a permission prompt longer than the server's five minutes) found the hold voided by the
+  ledger's pending timeout. Its settle could only fail, as a 410 `settlement_unrecoverable`, which
+  the server records as spend it never charged, although the plugin then charged that usage
+  itself. PreToolUse now records when each hold's life ends, from the authorize answer's
+  `expiresInMs` (`hold-expiry`), counted from the clock read before the authorize was sent. Past
+  it, PostToolUse sends no settle, and the hold takes the path a gone answer takes. An estimate
+  hold's call is charged once on a fresh hold. A transcript hold's window goes back to a later
+  settle point, or, under a key, is retried under it. An older server states no life, and nothing
+  changes.
+
 ## [3.0.3] - 2026-10-17
 
 ### Fixed

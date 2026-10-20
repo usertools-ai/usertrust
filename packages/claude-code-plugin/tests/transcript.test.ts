@@ -3911,8 +3911,9 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 	/**
 	 * A server that holds what it authorizes, forgets what `expire` names, logs
 	 * charges, and refuses every authorize after `refuse` (a budget 402). Each answer
-	 * states a fresh 300 s life (`expiresInMs`, `hold-expiry`), which the plugin does
-	 * not consult: it never reuses a hold however much life one has left.
+	 * states a fresh 300 s life (`expiresInMs`, `hold-expiry`). The plugin never reuses a
+	 * hold however much life one has left; it records only when that life ends, and
+	 * sends no settle past it (hold-expiry.test.ts).
 	 */
 	function holdingServer() {
 		const pending = new Set<string>();
@@ -5649,10 +5650,11 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			const { port: realPort } = await real.listen();
 			await startServer({ forwardTo: `http://127.0.0.1:${realPort}`, key: KEY });
 			await run("pre-tool-use.mjs", preInput("tu_1"), env);
-			// The server states the hold's life (#239), and the plugin does not keep it: it
-			// never reuses a hold, so it has no use for one.
+			// The server states the hold's life (#239). The plugin never reuses a hold, so it
+			// keeps only when that life ends (`expiresAt`), past which it sends no settle.
 			expect(authorizes()[0]?.response).toHaveProperty("expiresInMs");
 			expect(Object.hasOwn(await record(), "expiresInMs")).toBe(false);
+			expect(typeof (await record()).expiresAt).toBe("number");
 			const again = await run("pre-tool-use.mjs", preInput("tu_1"), env);
 			expect(again.stderr).toContain("earlier hold");
 			expect(authorizes()).toHaveLength(2);

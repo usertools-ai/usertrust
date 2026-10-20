@@ -53,6 +53,7 @@ import {
 	failureOutcome,
 	giveBack,
 	giveBackInvalid,
+	holdExpired,
 	holdUsageStart,
 	isGated,
 	isSettleGone,
@@ -204,13 +205,19 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 		return;
 	}
 	const at = { sessionId, agentId, entry };
-	const response = await settleOnce(at, { transferId: entry.transferId, ...usage });
-	if (response.status === 200) {
+	// Past its recorded life the hold is gone (lib.mjs `holdExpired`): no settle is sent, and it
+	// takes the path a gone answer takes, below. Sent, the settle could only fail, as a 410 the
+	// server records as spend it never charged, though the call is charged here, once.
+	const expired = holdExpired(entry);
+	const response = expired
+		? null
+		: await settleOnce(at, { transferId: entry.transferId, ...usage });
+	if (response?.status === 200) {
 		await noteIfAmbiguous(at, response, entry.transferId);
 		await unlink(claimed).catch(() => {});
 		return;
 	}
-	if (!holdIsGone(response)) {
+	if (!expired && !holdIsGone(response)) {
 		say(
 			`usertrust: settle ${entry.transferId} returned ${response.status}; hold kept for Stop cleanup`,
 		);
@@ -223,14 +230,15 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 		return;
 	}
 	if (!isGated(entry)) {
+		const answer = expired ? "is past its life" : "returned 404";
 		say(
-			`usertrust: settle ${entry.transferId} returned 404, but the hold was not recorded under the settle-attempt gate, so it may have been charged already; hold kept for Stop cleanup`,
+			`usertrust: settle ${entry.transferId} ${answer}, but the hold was not recorded under the settle-attempt gate, so it may have been charged already; hold kept for Stop cleanup`,
 		);
 		await settleGap({
 			...at,
 			transferId: entry.transferId,
 			outcome: "failed",
-			reason: "settle returned 404 for a hold recorded without the settle-attempt gate",
+			reason: `settle ${answer} for a hold recorded without the settle-attempt gate`,
 		});
 		return;
 	}

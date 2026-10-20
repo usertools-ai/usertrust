@@ -138,6 +138,7 @@ import {
 	clearPending,
 	failureOutcome,
 	guardMode,
+	holdExpired,
 	holdUsageStart,
 	isAlreadySettled,
 	isSettleGone,
@@ -2180,7 +2181,19 @@ async function settleBody(transferId, counts, labels) {
 	};
 }
 
-async function settleAt(transferId, counts, { keyed, labels = {} }) {
+async function settleAt(transferId, counts, { keyed, labels = {}, expiresAt }) {
+	if (holdExpired({ expiresAt })) {
+		// Past its recorded life the hold is gone (lib.mjs `holdExpired`), and nothing is sent. So
+		// nothing posted through it, under a key or not: its window is released to a later settle
+		// point, as an unkeyed gone answer releases it, and a keyed window, whose key its ids
+		// derive, is posted there under the same key.
+		return {
+			outcome: "released",
+			reason: "the hold is past its life, so no settle was sent",
+			holdEnded: true,
+			unknownTransfer: true,
+		};
+	}
 	let settle;
 	try {
 		const body = await settleBody(transferId, counts, labels);
@@ -2248,7 +2261,7 @@ async function settleOutcome(transferId, settle, keyed) {
  * server no longer has (a 404 `unknown transferId`: it expired, or another hook
  * ended it) is gone already, and carried nothing: returned, either way.
  */
-async function returnEmptyHold(transferId) {
+async function returnEmptyHold(transferId, expiresAt) {
 	const capabilities = await serverCapabilities();
 	if (capabilities === null || capabilities.has("release")) {
 		try {
@@ -2278,7 +2291,7 @@ async function returnEmptyHold(transferId) {
 		}
 	}
 	const zero = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
-	const result = await settleAt(transferId, zero, { keyed: false });
+	const result = await settleAt(transferId, zero, { keyed: false, expiresAt });
 	if (result.outcome === "settled" || result.unknownTransfer === true)
 		return { outcome: "returned" };
 	// The settle at zero stands in for a release, so it ends as one: a give-back that did not end
@@ -2311,7 +2324,7 @@ export async function settleTranscriptHold(sessionId, entry, { keepUnendedClaim 
 	if (callTimeout() < minCall()) return { outcome: "deferred", reason: "out of time" };
 	const ids = entry.assignedIds ?? [];
 	if (ids.length === 0) {
-		const result = await returnEmptyHold(entry.transferId);
+		const result = await returnEmptyHold(entry.transferId, entry.expiresAt);
 		await clearPending(entry.path);
 		return result;
 	}
@@ -2348,7 +2361,11 @@ export async function settleTranscriptHold(sessionId, entry, { keepUnendedClaim 
 		return { outcome: "deferred", reason: `hold could not be claimed (${err?.code ?? "error"})` };
 	}
 	const keyed = typeof entry.idempotencyKey === "string";
-	const result = await settleAt(entry.transferId, counts, { keyed, labels: jobHoldFields(entry) });
+	const result = await settleAt(entry.transferId, counts, {
+		keyed,
+		labels: jobHoldFields(entry),
+		expiresAt: entry.expiresAt,
+	});
 	if (result.outcome === "deferred" && result.unsent === true) {
 		// The preflight above passed but the capabilities went unknown before the body was built. A claimed hold must not be
 		// journalled as done for a settle that never went out: hand the file back so a later settle point retries it.

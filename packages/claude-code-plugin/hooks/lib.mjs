@@ -573,6 +573,9 @@ export async function recordPending(sessionId, agentId, entry, { settling = fals
 				...(typeof entry.estimatedInputTokens === "number"
 					? { estimatedInputTokens: entry.estimatedInputTokens }
 					: {}),
+				// When the hold's life ends, on this machine's clock (`holdExpiresAt`): past it, no
+				// settle is sent (`holdExpired`).
+				...(Number.isSafeInteger(entry.expiresAt) ? { expiresAt: entry.expiresAt } : {}),
 				// Which server and tenant made the hold: never the key itself.
 				...tenantBinding(),
 				// A transcript-mode hold also records what it will settle: the model it
@@ -1290,6 +1293,7 @@ export async function listPending(sessionId, agentId) {
 				...(typeof parsed.estimatedInputTokens === "number"
 					? { estimatedInputTokens: parsed.estimatedInputTokens }
 					: {}),
+				...(Number.isSafeInteger(parsed.expiresAt) ? { expiresAt: parsed.expiresAt } : {}),
 				// The mark as written, whatever its value: `isGated` judges it.
 				...(Object.hasOwn(parsed, "gate") ? { gate: parsed.gate } : {}),
 				// A quarantined hold whose call ran (`quarantineHold`).
@@ -1822,6 +1826,31 @@ export function isUnknownRoute(response) {
  */
 export function isUnknownTransfer(response) {
 	return response.status === 404 && response.json?.reason === "unknown transferId";
+}
+
+/**
+ * When a hold's life ends, on this machine's clock: the authorize answer's `expiresInMs`
+ * (usertrust-server's `hold-expiry`, a DURATION) added to the clock read just BEFORE that
+ * authorize was sent (`sentAt`). That is never later than the hold's last moment, whatever the
+ * offset between the two machines' clocks. Undefined when the answer states no life: an older
+ * server, or a hold whose life the server does not know.
+ */
+export function holdExpiresAt(sentAt, json) {
+	const life = json?.expiresInMs;
+	if (!Number.isSafeInteger(sentAt) || !Number.isSafeInteger(life) || life < 0) return undefined;
+	return sentAt + life;
+}
+
+/**
+ * Whether a hold is past its recorded life (`holdExpiresAt`). Then the ledger's pending timeout
+ * has voided it, or is about to: a settle can only fail, as a 410 `settlement_unrecoverable` the
+ * server records as spend it never charged, though this plugin charges that usage itself (a
+ * fresh hold, or a later settle point). So no settle is sent, and the hold takes the path a gone
+ * answer takes. Skipping is safe even when a clock is wrong and the hold is still live: nothing
+ * posts through it, and it lapses unposted.
+ */
+export function holdExpired(entry, now = Date.now()) {
+	return Number.isSafeInteger(entry?.expiresAt) && now > entry.expiresAt;
 }
 
 /**
