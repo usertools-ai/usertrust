@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **An audit writer released and then appended to took the vault's lock again and kept it.** `createAuditWriter()` accepted an append after `release()`: the event landed on the chain, but the append took the vault's writer lock again and nothing released it. Every later writer on that vault in the same process (the next `usertrust secret` writer, or another direct `createAuditWriter()` caller) was refused with `AuditWriterLockHeldError`, marked itself degraded and dead-lettered each event. An append after `release()`, including one already queued when `release()` was called, now takes the lock for that append only and gives it back when it finishes, as a `trust()` client or `createGovernor()` already did. If another writer holds the lock at that moment, the late append is refused and that writer's lock is left alone. A lock the late append cannot give back is reported as a `USERTRUST_AUDIT_LOCK_LEFT` warning, never thrown over the append's own result.
+
 ## [5.2.0] - 2026-10-19
 
 ### Read before upgrading
