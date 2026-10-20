@@ -49,7 +49,7 @@ Events are stored as JSONL (one JSON object per line) in `.usertrust/audit/event
 
 The audit chain has one writer per vault:
 
-- **Within one process, clients share it.** Every `trust()` client and `createGovernor()` governor in a process that opens the same vault appends through ONE writer (one async mutex, one cached tail), so concurrent governed calls from any of them land on one linked chain.
+- **Within one process, clients share it.** Every `trust()` client and `createGovernor()` controller in a process that opens the same vault appends through ONE writer (one async mutex, one cached tail), so concurrent governed calls from any of them land on one linked chain.
 - **Across processes, the advisory file lock keeps one.** A second process that opens the same vault does not get to write: its audit writes fail with an error naming the lock holder, and its events go to the dead-letter queue (below) when that write succeeds, which `usertrust verify` then reports. Its calls still settle: only a `trust()` client with `audit.failClosed` refuses them instead; `createGovernor()` and `usertrust-server` never enforce `audit.failClosed`, and report `auditDegraded`. Give each process its own vault (`vaultBase`), or run `usertrust-server` and have every process call it.
 
 Chain integrity holds for the one process that owns the vault; it is not shared across processes.

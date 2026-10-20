@@ -1691,7 +1691,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							denial.piiTypes = piiResult.types;
 							throw new PolicyDeniedError(
 								`PII detected: ${piiResult.types.join(", ")}`,
-								'PII enforcement blocked this call. Use { pii: "warn" } to log instead of block; the headless governor does not redact egress — redaction is the integrating host\'s responsibility.',
+								'PII enforcement blocked this call. Use { pii: "warn" } to log instead of block; the headless controller does not redact egress — redaction is the integrating host\'s responsibility.',
 							);
 						}
 					}

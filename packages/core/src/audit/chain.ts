@@ -1963,8 +1963,8 @@ export function openSharedAuditWriter(
 		warnAuditDegraded(
 			vault,
 			when === "open"
-				? `${writes} failed while this governor was open`
-				: `${writes} failed after this governor was destroyed`,
+				? `${writes} failed while this controller was open`
+				: `${writes} failed after this controller was destroyed`,
 		);
 	}
 

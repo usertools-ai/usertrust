@@ -96,7 +96,7 @@ export function registerEnforcedBudget(
 		registries.set(key, registry);
 	}
 	const reg = registry;
-	const id = Symbol("governor");
+	const id = Symbol("controller");
 	reg.live.set(id, budget);
 	// The record is written through THIS caller's path: any alias of the vault reaches the same physical file.
 	const publishIfHeld = (): void => {

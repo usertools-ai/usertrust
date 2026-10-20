@@ -210,7 +210,7 @@ describe("PII denial hints name only the remedy their own path can perform", () 
 		// settles around a call the integrating host makes itself. `pii: "redact"`
 		// cannot strip anything here, so the hint must not claim it will.
 		expect(err.hint).toBe(
-			'PII enforcement blocked this call. Use { pii: "warn" } to log instead of block; the headless governor does not redact egress — redaction is the integrating host\'s responsibility.',
+			'PII enforcement blocked this call. Use { pii: "warn" } to log instead of block; the headless controller does not redact egress — redaction is the integrating host\'s responsibility.',
 		);
 		expect(err.hint).not.toContain("strip PII before egress");
 

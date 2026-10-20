@@ -1938,7 +1938,7 @@ export function createUsertrustServer(opts: {
 			if (outcome.outcome === "held") {
 				sendJson(res, 409, {
 					error: "hold_active",
-					reason: "the governor still holds this transferId",
+					reason: "the controller still holds this transferId",
 					transferId,
 				});
 				return;
@@ -2165,7 +2165,7 @@ export function createUsertrustServer(opts: {
 			if (governor === undefined) {
 				sendJson(res, 503, {
 					error: "ledger_unavailable",
-					reason: `the tenant's governor was not ready within ${ledgerTimeoutMs} ms; retry later`,
+					reason: `the tenant's controller was not ready within ${ledgerTimeoutMs} ms; retry later`,
 					retryAfterMs: ledgerTimeoutMs,
 					ledger: tenantLedger(tenant),
 				});

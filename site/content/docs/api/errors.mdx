@@ -85,9 +85,9 @@ To change PII enforcement, set `pii` in the config file `trust()` reads: `.usert
 ## The denial correlation handle
 
 Both denial errors above carry `auditEventHash` — the hash of the chain event
-the governor wrote when it refused the call. It is the join between the
+the controller wrote when it refused the call. It is the join between the
 exception your code logged and the record an auditor reads: `policy_denied` for
-a governor decision (a policy rule, a budget-family rule, PII, injection, an
+a controller decision (a policy rule, a budget-family rule, PII, injection, an
 unpriceable model, or a refused ungoverned SDK method on any provider), `ledger_rejected` for the ledger's own atomic refusal of the
 hold.
 
@@ -173,7 +173,7 @@ class LedgerUnavailableError extends Error {
 
 **When it fires:** Before any LLM call, during the connection check or PENDING hold attempt. This is failure mode 15.4 -- no tokens are at risk because no hold was placed.
 
-**Hint:** `'Start TigerBeetle 0.17.x (tigerbeetle format … then tigerbeetle start --addresses=<address>) or use { dryRun: true } to skip the ledger.'`, where `<address>` is the ledger the governor was configured with (`127.0.0.1:3001` by default).
+**Hint:** `'Start TigerBeetle 0.17.x (tigerbeetle format … then tigerbeetle start --addresses=<address>) or use { dryRun: true } to skip the ledger.'`, where `<address>` is the ledger the controller was configured with (`127.0.0.1:3001` by default).
 
 <Callout type="warn">
 `usertrust tb start` does not manage TigerBeetle in this version: it prints the same

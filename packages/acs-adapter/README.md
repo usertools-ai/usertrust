@@ -47,7 +47,7 @@ if (result.verdict.decision === "allow") {
 
 `createMockGovernor`, `mockPolicyDecider` and `runDemo` are test and demo helpers, not for
 production use. The mock keeps budgets in memory, with no ledger and no disk. In production,
-give `CompositeEvaluator` a governor from `createGovernor()` in `usertrust/headless`.
+give `CompositeEvaluator` a controller from `createGovernor()` in `usertrust/headless`.
 
 `runDemo()` produces an infrastructure-free transcript of all three contract lines.
 

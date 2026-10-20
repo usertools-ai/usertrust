@@ -1187,7 +1187,7 @@ describe("no definite over-budget claim when the governor's counter contradicts 
 		expect(text).not.toContain("(OVER BUDGET)");
 		expect(text).toContain("POSSIBLY OVER BUDGET");
 		expect(text).toContain(
-			"The chain and the governor's counter disagree: a crash between an SDK call's audit record and its budget commit, or a counter error.",
+			"The chain and the controller's counter disagree: a crash between an SDK call's audit record and its budget commit, or a counter error.",
 		);
 		// neutral: it never asserts the counter is wrong
 		expect(text).toContain("Either leg may be wrong.");

@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Only `RangeError` is caught. Any other error still throws, so a bug is never reported as an unscannable value.
   - The name is exported as `UNSCANNABLE`.
 
+### Changed
+
+- **Text a person reads now says "controller", not "governor".** The budget-and-money component is called the controller in the dashboard, the CLI and report output, server and plugin messages, and the docs. The API and wire names did not change: the `Governor` type, `createGovernor()`, `GovernorOpts` and the `budgetSource: "governor"` value keep their names, so code that calls the API or reads the `budgetSource` value is unaffected. Hold-release reasons such as `governor destroyed` keep their text too, because other code matches them byte for byte. Records written from now on carry the new word where the text was prose (for example the hint in the `policy_denied` event's recorded error when a headless call is blocked for PII); existing chains are not rewritten, so one vault can hold both spellings. A script that matches one of the old message strings (a `reason` the server returns, a CLI line, that hint, the `budgetProvenance` text in `usertrust inspect --json` and `usertrust health --json`, which now reads "several controllers" or "no controller has recorded the budget it enforces") needs the new word.
+
 ### Fixed
 
 - **`usertrust-server` logged a very long error message as "(the error could not be read)".** Before writing an internal error to its log, the server redacts api-key values, and the pattern it used could not finish on an unclosed quoted value of about 10 million characters, so the line lost the error's reason. A regular expression now finds only where a value starts, and a loop finds where a quoted one ends: it reads a message of any length, and redacts exactly what the pattern did. If a pattern still cannot finish, the message is replaced by `[redacted: the message could not be scanned]`.

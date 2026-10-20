@@ -394,7 +394,7 @@ in-process mutex. Stale locks from crashed processes are reclaimed; live ones ar
 never stolen.
 
 **Within one process, every client shares the vault's writer.** Any number of
-`trust()` clients and `createGovernor()` governors on one vault (an Anthropic and
+`trust()` clients and `createGovernor()` controllers on one vault (an Anthropic and
 an OpenAI client, say) append through ONE writer, so all their events land on one
 chain. A vault is recognised by its directories' identity on disk, resolved when
 the client is created, so every spelling of it shares the writer. Not covered: a
@@ -555,10 +555,10 @@ explicit bypass in testing, a real TigerBeetle for production.
 ## 10. Vault permissions stop at the vault's parent directory, and at Windows
 
 On Linux and macOS every directory usertrust creates in a vault is `0700` and
-every file `0600`, whatever the umask. A governor closes an existing `.usertrust/`
+every file `0600`, whatever the umask. A controller closes an existing `.usertrust/`
 that other users can read, and refuses one that another user owns: it compares
 the owner with the process's effective uid, and running as root is no exception.
-A governor creates an absent `.usertrust/` itself, exclusively, and then checks
+A controller creates an absent `.usertrust/` itself, exclusively, and then checks
 it like an existing one, so a `.usertrust/` that another user creates first is
 refused, not adopted. That holds in a shared parent directory that is sticky, such
 as `/tmp`, where only an entry's owner can rename or remove it. It cannot hold in
@@ -607,7 +607,7 @@ the gap, on OpenAI and Anthropic `create({ stream: true })`.
 
 A ledger-backed `usertrust-server` waits at most `ledgerTimeoutMs` (default 5 seconds) for
 its ledger on `POST /v1/authorize`, including the wait behind the tenant's earlier
-authorizes (the governor serves them one at a time), then answers `503 ledger_unavailable`:
+authorizes (the controller serves them one at a time), then answers `503 ledger_unavailable`:
 nothing was authorized. `retryAfterMs` is a suggested wait, not a promise that a retry succeeds: a
 client that can wait backs off with jitter, and one with a hard time budget, such as the Claude Code
 plugin's PreToolUse, may make one short retry instead (the server README's *Retrying*). The
@@ -617,7 +617,7 @@ returns; the hold it then creates is voided at once, never registered as pending
 such a request is outstanding, every authorize on that tenant gets the same 503 at once. If
 it never completes, they keep failing fast until it does: the fail-closed direction.
 
-- A tenant's governor is created on its first authorize, inside the deadline, so the first
+- A tenant's controller is created on its first authorize, inside the deadline, so the first
   authorize after boot on a slow ledger can get the 503, which is retryable.
 - While that creation itself hangs, fast-fail does not engage: each authorize waits one
   deadline before its 503.
@@ -629,7 +629,7 @@ it never completes, they keep failing fast until it does: the fail-closed direct
 - `GET /v1/health` reports the ledger as `ledger` (`ok` is `false` when it is `unreachable`)
   only where a health child observes it: the CLI's default, but not `createUsertrustServer()`'s,
   which answers `ledger: "unknown"` and `ok: true` through an outage unless `ledgerHealth` is
-  `"child"`. Health also reads `unknown` while a tenant's governor is still being created, after
+  `"child"`. Health also reads `unknown` while a tenant's controller is still being created, after
   a tenant's config changed since start (until a restart), and while an observer child that died
   waits out its cooldown (five minutes by default). If its replacements keep failing, `unknown`
   lasts as long as they do. Each child holds one TigerBeetle session, per distinct configured
@@ -669,10 +669,10 @@ destroys a client it knows was evicted, and it knows in two ways:
   code. tigerbeetle-node raises "closed" otherwise only for a client that was destroyed.
 
 Either way the request is retried on a fresh client, and the evicted client is dropped and
-left open. At shutdown a governor asks its client first: its `destroy()` makes one empty
+left open. At shutdown a controller asks its client first: its `destroy()` makes one empty
 request (bounded at 2 s) after its voids, its audit flush and its audit lock release, and
-leaves the client open if that request shows an eviction. So neither a governor nor
-`usertrust-server`, whose shutdown tears every tenant's governor down at once, aborts on an
+leaves the client open if that request shows an eviction. So neither a controller nor
+`usertrust-server`, whose shutdown tears every tenant's controller down at once, aborts on an
 evicted client.
 
 An evicted client left open holds no thread, file descriptor or memory that grows with
@@ -694,10 +694,10 @@ What is still open:
   process. A program that uses `TrustTBClient` directly and may sit idle should make one ledger
   request before `destroy()` (it marks an evicted client, which `destroy()` then leaves), or
   end with `process.exit()` without calling `destroy()`.
-- **An eviction learned in the instant between a governor's shutdown request and the destroy
+- **An eviction learned in the instant between a controller's shutdown request and the destroy
   that follows it** (no `await` between them) still aborts. The client learns of an eviction
   from its own traffic about 25 s after the cluster pushed the session out, so this needs that
-  moment to fall inside one synchronous step. By then the governor has finished its voids, its
+  moment to fall inside one synchronous step. By then the controller has finished its voids, its
   audit flush and its lock release, so what is lost is the exit status (134, which a supervisor
   reads as a crash) and anything the process does after `destroy()`.
 

@@ -126,16 +126,16 @@ function reconciliationLines(m: ReportModel): string[] {
 	const out: string[] = [];
 	if (b.uncertainTransfers > 0) {
 		out.push(
-			`${b.uncertainTransfers} transfer(s) are UNCERTAIN: the chain does not say whether the governor's counter added them (${walletStr(b.recordedSessionUncertain)} session, ${walletStr(b.recordedAttributedUncertain)} attributed). They are in the upper bound only, never in the definite figure or the VERIFIED claim.`,
+			`${b.uncertainTransfers} transfer(s) are UNCERTAIN: the chain does not say whether the controller's counter added them (${walletStr(b.recordedSessionUncertain)} session, ${walletStr(b.recordedAttributedUncertain)} attributed). They are in the upper bound only, never in the definite figure or the VERIFIED claim.`,
 		);
 	}
 	if (led.unreadable) {
 		out.push(
-			"The governor's spend ledger (spend-ledger.json) exists but could not be read, so it could not be compared with the chain. It is a plain file the chain does not verify.",
+			"The controller's spend ledger (spend-ledger.json) exists but could not be read, so it could not be compared with the chain. It is a plain file the chain does not verify.",
 		);
 	} else if (led.differs && led.recorded !== null) {
 		out.push(
-			`DIFFERENCE: the governor's spend ledger (as recorded by the governor; not chain-verified) says ${tokens(led.recorded)} units, outside what the chain accounts for: ${walletStr(lower)} definite, up to ${walletStr(upper)} counting uncertain and cost-center spend. The chain and the governor's counter disagree: a crash between an SDK call's audit record and its budget commit, or a counter error. Either leg may be wrong.`,
+			`DIFFERENCE: the controller's spend ledger (as recorded by the controller; not chain-verified) says ${tokens(led.recorded)} units, outside what the chain accounts for: ${walletStr(lower)} definite, up to ${walletStr(upper)} counting uncertain and cost-center spend. The chain and the controller's counter disagree: a crash between an SDK call's audit record and its budget commit, or a counter error. Either leg may be wrong.`,
 		);
 	}
 	return out;
@@ -163,7 +163,7 @@ function budgetLines(m: ReportModel, v: (s: string) => string): string[] {
 			: "";
 	const undenominated = undenom(b.recordedSessionUndenominated);
 	const lines = [
-		`Configured budget ${utStr(b.configuredUt)} (budget units: usd-priced and nominal, as the governor enforces them), source: ${v(b.source ?? "unknown")}. Session-wallet debits the chain shows the governor counted (definite): ${walletStr(b.recordedSessionWallet)} = ${split(b.recordedSessionUt, b.recordedSessionNominal)}${undenominated}; ${pct(b.usedFraction ?? 0)} of the budget used${b.overBudget ? " (OVER BUDGET)" : b.overBudgetDisputed ? " (POSSIBLY OVER BUDGET: the chain and the governor's counter disagree, so no definite claim is made)" : ""}. This week: ${walletStr(b.windowSessionWallet)} = ${split(b.windowSessionUt, b.windowSessionNominal)}${undenom(b.windowSessionUndenominated)}.`,
+		`Configured budget ${utStr(b.configuredUt)} (budget units: usd-priced and nominal, as the controller enforces them), source: ${v(b.source ?? "unknown")}. Session-wallet debits the chain shows the controller counted (definite): ${walletStr(b.recordedSessionWallet)} = ${split(b.recordedSessionUt, b.recordedSessionNominal)}${undenominated}; ${pct(b.usedFraction ?? 0)} of the budget used${b.overBudget ? " (OVER BUDGET)" : b.overBudgetDisputed ? " (POSSIBLY OVER BUDGET: the chain and the controller's counter disagree, so no definite claim is made)" : ""}. This week: ${walletStr(b.windowSessionWallet)} = ${split(b.windowSessionUt, b.windowSessionNominal)}${undenom(b.windowSessionUndenominated)}.`,
 	];
 	if (
 		b.recordedAttributedWallet > 0 ||
@@ -171,12 +171,12 @@ function budgetLines(m: ReportModel, v: (s: string) => string): string[] {
 		b.recordedAttributedUncertain > 0
 	) {
 		lines.push(
-			`Upper bound: ${pct(b.usedFractionUpper ?? 0)} of the budget used if the session also paid for the cost-center spend (ATTRIBUTED: its payer is not recorded, the cost-center envelope with a ledger or the session in a dry run; ${walletStr(b.recordedAttributedWallet)} = ${split(b.recordedAttributedUt, b.recordedAttributedNominal)}${undenom(b.recordedAttributedUndenominated)}) and every uncertain transfer was counted${b.possiblyOverBudget ? " (WOULD BE OVER BUDGET)" : ""}. "Over budget" is claimed only on the definite figure, and only when the governor's counter does not contradict it.`,
+			`Upper bound: ${pct(b.usedFractionUpper ?? 0)} of the budget used if the session also paid for the cost-center spend (ATTRIBUTED: its payer is not recorded, the cost-center envelope with a ledger or the session in a dry run; ${walletStr(b.recordedAttributedWallet)} = ${split(b.recordedAttributedUt, b.recordedAttributedNominal)}${undenom(b.recordedAttributedUndenominated)}) and every uncertain transfer was counted${b.possiblyOverBudget ? " (WOULD BE OVER BUDGET)" : ""}. "Over budget" is claimed only on the definite figure, and only when the controller's counter does not contradict it.`,
 		);
 	}
 	lines.push(...reconciliationLines(m));
 	lines.push(
-		"Session-wallet debits mirror what the governor's own counter adds: a call or action once its post was decided (including an ambiguous one), plus a capped settlement whose call record is missing; never a void or a release.",
+		"Session-wallet debits mirror what the controller's own counter adds: a call or action once its post was decided (including an ambiguous one), plus a capped settlement whose call record is missing; never a void or a release.",
 	);
 	lines.push("This is the configured budget against recorded spend, not the live ledger balance.");
 	return lines;
@@ -187,7 +187,7 @@ function budgetLines(m: ReportModel, v: (s: string) => string): string[] {
  * shortfall or ambiguity IS counted in the budget section as undenominated wallet units, because the governor counted it.
  */
 const WITHOUT_CALL_NOTE =
-	"These records qualify a call (a shortfall, an ambiguity, an implausible-usage note, a failure marker) but the chain holds no record of the call itself. Their amounts are usertokens with no denomination assumed, and they are in no spend (dollar) figure. A standalone shortfall or ambiguity is counted in the budget section as undenominated wallet units, because the governor counted it; a standalone ambiguity is also in the unconfirmed totals.";
+	"These records qualify a call (a shortfall, an ambiguity, an implausible-usage note, a failure marker) but the chain holds no record of the call itself. Their amounts are usertokens with no denomination assumed, and they are in no spend (dollar) figure. A standalone shortfall or ambiguity is counted in the budget section as undenominated wallet units, because the controller counted it; a standalone ambiguity is also in the unconfirmed totals.";
 
 /** The disclosure line for ungoverned call attempts, stated ONCE for both renderers; the count follows it. */
 const UNGOVERNED_LINE = "Ungoverned call attempts (opted out with allowUngoverned, unmetered):";
@@ -222,7 +222,7 @@ export const NOT_CLAIMED: readonly string[] = [
 	"Denied or blocked calls moved no money and carry no dollar figure. Nothing here claims money was saved or prevented.",
 	"Cache-write cost is shown as a cost driver, not as avoidable spend.",
 	"Budget status compares the vault's configured budget with spend recorded in the chain. It is not the live ledger balance.",
-	"After a crash between an SDK call's audit record and its budget commit, the definite lower bound can include that call. The governor's counter leg flags the disagreement, and no definite over-budget claim is made then.",
+	"After a crash between an SDK call's audit record and its budget commit, the definite lower bound can include that call. The controller's counter leg flags the disagreement, and no definite over-budget claim is made then.",
 ];
 
 function rowsTable(title: string, rows: readonly Row[], keyHeader: string): string[] {

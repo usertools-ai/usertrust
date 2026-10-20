@@ -662,7 +662,7 @@ describe("usertrust health: the budget's provenance, in both modes", () => {
 		await run(dir);
 		const text = lines.join("\n");
 		expect(text).toContain(
-			"Budget utilization:      unknown: not yet published; no governor has recorded the budget it enforces",
+			"Budget utilization:      unknown: not yet published; no controller has recorded the budget it enforces",
 		);
 		expect(text).not.toContain("no budget configured");
 	});
