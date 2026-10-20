@@ -2264,17 +2264,23 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 					// d. PII check + redact-egress
 					if (config.pii !== "off") {
-						// Every mode decides on one scan: every string in the prompt fields, control
-						// values included. Redaction below rewrites less than this reads, never more.
+						// Two scans, and block decides on both, so it is never narrower than either.
+						// The prompt-field scan reads every string in the prompt fields, control values
+						// included. The content scan reads what redaction rewrites, as the SDK sends
+						// it: a tool call's JSON arguments decoded, and a Google text part hidden from
+						// enumeration that the SDK still sends.
 						const piiResult = detectPII(promptParts);
-						if (piiResult.found && config.pii === "block") {
+						const contentScan = scanContent(params, requestSchema(params, kind));
+						const contentPII = detectContentPII(contentScan);
+						if ((piiResult.found || contentPII.found) && config.pii === "block") {
 							// block mode: throw BEFORE any egress.
+							const types = [...new Set([...piiResult.types, ...contentPII.types])];
 							denial.denialClass = "pii";
 							// TYPE names only — a matched value is the very thing that must
 							// not reach the chain, or the DLQ behind it.
-							denial.piiTypes = piiResult.types;
+							denial.piiTypes = types;
 							throw new PolicyDeniedError(
-								`PII detected: ${piiResult.types.join(", ")}`,
+								`PII detected: ${types.join(", ")}`,
 								'PII enforcement blocked this call. Use { pii: "warn" } to log instead, or { pii: "redact" } to strip PII before egress.',
 							);
 						}
@@ -2287,16 +2293,15 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							// callable tools reach the SDK as they were. The caller's original object is
 							// never mutated. A field the provider's schema does not name is not rewritten,
 							// and is reported by path.
-							const contentScan = scanContent(params, requestSchema(params, kind));
 							reportUnlistedFields(kind, contentScan.unlisted, piiUnlistedReported);
-							const rewrite = detectContentPII(contentScan).found;
+							const rewrite = contentPII.found;
 							const redactedBody = rewrite
 								? (redactContent(params, contentScan) as Record<string, unknown>)
 								: params;
-							// What the scan above detects and redaction cannot rewrite without changing
+							// What the prompt-field scan detects and redaction cannot rewrite without changing
 							// the call (a name or an id, an object key, a number in a tool call's JSON
 							// arguments, replayed reasoning, a field the schema does not name) is refused
-							// as block refuses it, before any egress: redact never sends a value the scan
+							// as block refuses it, before any egress: redact never sends a value either scan
 							// detects.
 							const left = piiResult.found
 								? detectPII(extractPromptParts(redactedBody, kind))

@@ -580,8 +580,8 @@ Windows ACLs.
 
 ## 11. PII detection is a pattern scan of the prompt, not data-loss prevention
 
-`pii: "block"`, `"redact"` and `"warn"` all act on one pattern scan of the
-request's **prompt fields**: `messages` (and a string `system`) for Anthropic,
+`pii: "block"`, `"redact"` and `"warn"` act on a pattern scan of the request's
+**prompt fields**: `messages` (and a string `system`) for Anthropic,
 `messages` for OpenAI chat, `input` and a string `instructions` for OpenAI
 Responses, `contents` for Google. Every string inside them is checked, at any
 depth: message text and tool results, and also the control values beside them
@@ -622,10 +622,11 @@ The patterns cover email, phone, US SSN, credit card (Luhn), IPv4 and seven
 secret and token formats. They do not cover names, postal addresses, dates of
 birth, IPv6, non-US identifiers, bank account numbers or health data, and a string
 is checked as written (no decoding, no object keys, no non-string values).
-Redaction alone decodes a tool call's JSON `arguments` to find the string values
-it replaces, so it also replaces a value written with JSON escapes, which the scan
-does not match and `"block"` does not refuse. The `llm_call` audit event's
-`piiDetected` and `piiPaths` come from the same scan. `createGovernor()` and
+Redaction reads the content as the SDK sends it: it decodes a tool call's JSON
+`arguments` to find the string values it replaces, and reads a Google text part
+the caller hid from enumeration. `"block"` refuses what either read finds, so a
+value written with JSON escapes is refused too. The `llm_call` audit event's
+`piiDetected` and `piiPaths` come from the prompt-field scan. `createGovernor()` and
 `usertrust-server` scan the `messages` the caller passes and can block, but never
 redact egress. The full scope, per provider, is on the
 [PII Detection](https://usertrust.ai/docs/policy/pii) page.

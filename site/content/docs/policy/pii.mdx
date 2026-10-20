@@ -24,7 +24,7 @@ Set the `pii` field in the config file `trust()` loads: `.usertrust/usertrust.co
 
 ## What the scan reads
 
-Every mode decides on the same scan: every string value inside the request's **prompt fields**, at any depth, and nothing outside them. That includes the **control** values beside the text: ids, names, URLs, media data, and the model's own replayed reasoning. A tool call's `arguments` is checked as one string, keys and numbers included.
+The scan reads every string value inside the request's **prompt fields**, at any depth, and nothing outside them. That includes the **control** values beside the text: ids, names, URLs, media data, and the model's own replayed reasoning. A tool call's `arguments` is checked as one string, keys and numbers included.
 
 `"redact"` rewrites less than that: only the **content**, the text the model reads, which is a closed list per provider, written from each SDK's own request types. The control values are left as you wrote them, because the provider needs them back unchanged.
 
@@ -77,7 +77,7 @@ When the scan finds PII, usertrust forwards a copy of the request in which every
 
 - The replacement is for the **whole string value**, not just the matched characters: a message that contains one email address is replaced in full.
 - A tool call's JSON `arguments` string keeps its text: only the string values inside it that match are replaced, in place, so it is still valid JSON and every other character (keys, numbers of any size, whitespace) is sent as written. A string that is not JSON is replaced in full. Keys are never replaced.
-- To find those values, redaction decodes a tool call's JSON `arguments`, so it also replaces a value written with JSON escapes, which the scan does not match and `"block"` does not refuse.
+- To find those values, redaction reads the content as the SDK sends it: it decodes a tool call's JSON `arguments`, so it also replaces a value written with JSON escapes, and it reads a Google text part hidden from enumeration. `"block"` refuses what this read finds as well as what the scan finds.
 - **Every control field is sent as you wrote it**: MCP server credentials and headers, `httpOptions` headers, cache keys, safety identifiers, `metadata`, ids, and replayed reasoning, which the provider refuses if it is changed. They are not redacted even when the prompt beside them is.
 - **PII the scan finds in a value redaction leaves as written refuses the call**, as `"block"` does: an address in a message's `name` or in replayed reasoning, an object key or a number in a tool call's `arguments`, a value in a field inside the prompt fields that the content list does not name. `PolicyDeniedError` is thrown before anything is sent. `"redact"` never sends a value the scan detects.
 - PII in a field the scan does not read (a `tools` description, a `system` block array, a Google `config.systemInstruction`) goes to the provider as written.

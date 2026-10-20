@@ -374,6 +374,47 @@ describe("under pii redact, through the real SDKs", () => {
 		},
 	);
 
+	it("Google: under pii block, a hidden (non-enumerable) text part the SDK sends, also held in a function response, is refused", async () => {
+		const hidden = Object.defineProperty({}, "text", { value: EMAIL, enumerable: false });
+		const c = await google("block");
+		const call = c.models.generateContent({
+			model: "gemini-2.5-flash",
+			contents: [
+				{ role: "user", parts: [hidden, { text: "and the rest" }] },
+				{
+					role: "user",
+					parts: [{ functionResponse: { name: "lookup", response: { item: hidden } } }],
+				},
+			],
+		});
+		await expect(call).rejects.toBeInstanceOf(PolicyDeniedError);
+		expect(bodies).toHaveLength(0);
+	});
+
+	it("OpenAI chat: under pii block, an address written with JSON escapes in a tool call's arguments is refused", async () => {
+		const c = await openai("block");
+		const call = c.chat.completions.create({
+			model: "gpt-4o",
+			messages: [
+				{ role: "user", content: "send it" },
+				{
+					role: "assistant",
+					content: null,
+					tool_calls: [
+						{
+							id: "call_1",
+							type: "function",
+							function: { name: "send", arguments: '{"to":"alice\\u0040example.com"}' },
+						},
+					],
+				},
+				{ role: "tool", tool_call_id: "call_1", content: "sent" },
+			],
+		});
+		await expect(call).rejects.toBeInstanceOf(PolicyDeniedError);
+		expect(bodies).toHaveLength(0);
+	});
+
 	it("Google: a text part the caller hid (non-enumerable), which the SDK still sends, is redacted", async () => {
 		const hidden = Object.defineProperty({}, "text", { value: EMAIL, enumerable: false });
 		const c = await google();

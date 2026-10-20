@@ -1531,9 +1531,10 @@ carried, verbatim (see the DLQ note above).
 
 **Redaction never mutates the caller's object, and it rewrites content only.** `redactPII` deep-clones;
 `redactContent` (`policy/pii-content.ts`) copies only the containers on the way to a replaced value and
-passes everything else by reference. Every mode decides on ONE scan, `detectPII` over every string in
-the prompt fields, control values included (`extractPromptParts`); never narrow it to the content
-schema, or `"block"` lets out what it refused before. A closed per-provider schema in
+passes everything else by reference. `"block"` decides on BOTH scans: `detectPII` over every string in the
+prompt fields, control values included (`extractPromptParts`), and the content scan, which reads
+what the SDK sends (decoded JSON `arguments`, hidden Google text parts); never drop either, or
+`"block"` lets out what one of them refuses. A closed per-provider schema in
 `policy/pii-content.ts` names the content fields `"redact"` rewrites; every control field
 (credentials, headers, ids, `metadata`, tool declarations, replayed reasoning) is sent as written,
 and a field the schema does not name is not rewritten and is reported once per governor under
