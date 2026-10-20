@@ -55,7 +55,6 @@ const VARIABLES = {
 	failOpen: "UT_FAIL_OPEN",
 	stateDir: "UT_CC_STATE_DIR",
 	usage: "UT_CC_USAGE",
-	model: "UT_CC_MODEL",
 	sendContent: "UT_CC_SEND_CONTENT",
 	unit: "UT_CC_UNIT",
 	role: "UT_CC_ROLE",
@@ -68,7 +67,14 @@ const VARIABLES = {
 const HOST_VARIABLES = ["CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS"];
 
 const DEFAULT_URL = "http://127.0.0.1:4519";
-const DEFAULT_MODEL = "claude-sonnet-4-6";
+
+/**
+ * The model a hold names is never a setting: it is the session's own (transcript.mjs
+ * `holdModelFor`). A configured one priced an Opus session's holds at a cheaper model's rate.
+ * These are where it used to be set; one still set is ignored, and SessionStart says so.
+ */
+const MODEL_VARIABLE = "UT_CC_MODEL";
+const MODEL_FIELD = "model";
 
 /** Where a config file must be, under the passwd home. */
 const ANCHOR = [".config", "usertrust"];
@@ -76,7 +82,7 @@ const ANCHOR = [".config", "usertrust"];
 /** The largest config file read. */
 const MAX_CONFIG_BYTES = 64 * 1024;
 
-/** A key or a model: visible ASCII, so neither can break a header or a log line. */
+/** A key: visible ASCII, so it can break neither a header nor a log line. */
 const VISIBLE = /^[\x21-\x7e]{1,1024}$/;
 
 /** The default state dir, under a given home. */
@@ -98,7 +104,7 @@ function fromEnvironment(env) {
 			env.UT_CC_STATE_DIR ??
 			join(env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), "usertrust-cc"),
 		usage: env.UT_CC_USAGE === "estimate" ? "estimate" : "transcript",
-		model: env.UT_CC_MODEL ?? DEFAULT_MODEL,
+		ignoredModel: Object.hasOwn(env, MODEL_VARIABLE),
 		sendContent: env.UT_CC_SEND_CONTENT !== "0",
 		unit: env.UT_CC_UNIT,
 		role: env.UT_CC_ROLE,
@@ -132,7 +138,7 @@ export function refusedSettings(
 		failOpen,
 		stateDir: stateDir ?? defaultStateDir(passwdHome ?? homedir()),
 		usage: "transcript",
-		model: DEFAULT_MODEL,
+		ignoredModel: false,
 		sendContent: false,
 		unit: undefined,
 		role: undefined,
@@ -165,8 +171,9 @@ function isHttpUrl(value) {
  * A config file's text, checked field by field: the settings, or the fixed reason
  * it is refused. Required: `url` (http or https), `key`, `mode` (`watch` or
  * `enforce`) and an absolute `stateDir`. Optional: `failOpen` and `sendContent`
- * (booleans), `usage` (`transcript` or `estimate`), `model`, `unit` and `role`
- * (strings). Fields it does not know are ignored.
+ * (booleans), `usage` (`transcript` or `estimate`), `unit` and `role` (strings).
+ * Fields it does not know are ignored, `model` among them (`MODEL_FIELD`), which only
+ * makes SessionStart say it is ignored.
  */
 export function parseConfig(text) {
 	let value;
@@ -197,7 +204,6 @@ export function parseConfig(text) {
 		failOpen: [false, (v) => typeof v === "boolean"],
 		sendContent: [true, (v) => typeof v === "boolean"],
 		usage: ["transcript", (v) => v === "transcript" || v === "estimate"],
-		model: [DEFAULT_MODEL, (v) => typeof v === "string" && VISIBLE.test(v)],
 		unit: [undefined, (v) => typeof v === "string"],
 		role: [undefined, (v) => typeof v === "string"],
 	};
@@ -209,6 +215,7 @@ export function parseConfig(text) {
 		mode,
 		unrecognizedMode: undefined,
 		stateDir,
+		ignoredModel: Object.hasOwn(value, MODEL_FIELD),
 	};
 	for (const [name, [fallback, valid]] of Object.entries(optional)) {
 		const given = field(name);
@@ -467,6 +474,16 @@ export function howToSet(name, value) {
 /** What a setting is called in this session: its variable, or its field in the config file. */
 export function settingName(name) {
 	return settings().configured ? `the config file's "${name}"` : VARIABLES[name];
+}
+
+/**
+ * The session-start line for a model that is still set where it used to be (`MODEL_VARIABLE`,
+ * or the config file's `MODEL_FIELD`), or null: it is ignored, never an error.
+ */
+export function ignoredModelNote() {
+	if (settings().ignoredModel !== true) return null;
+	const where = settings().configured ? `the config file's "${MODEL_FIELD}"` : MODEL_VARIABLE;
+	return `usertrust: ${where} is ignored: model is no longer configurable, and the session's own model is used.`;
 }
 
 /**

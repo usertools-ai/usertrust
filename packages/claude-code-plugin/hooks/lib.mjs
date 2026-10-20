@@ -247,14 +247,6 @@ export function announce(text, max = MAX_NOTE_CHARS) {
 }
 
 /**
- * The model an authorize names when no transcript says one: every estimate hold,
- * and a transcript hold before its first model is known.
- */
-export function defaultModel() {
-	return settings().model;
-}
-
-/**
  * Whether the plugin may block a tool call. It never grants one, in either mode
  * (see `proceed` in pre-tool-use.mjs). `watch` (the default) NEVER blocks: a
  * budget, policy or anomaly refusal (402/403/429) is written down as a
@@ -577,8 +569,8 @@ export async function recordPending(sessionId, agentId, entry, { settling = fals
 				...tenantBinding(),
 				// A transcript-mode hold also records what it will settle: the model it
 				// was authorized at, the transcript message ids assigned to it, and their
-				// summed counts.
-				...(entry.usage === "transcript" ? transcriptHoldFields(entry) : {}),
+				// summed counts. An estimate hold records its model alone (`estimateHoldModel`).
+				...(entry.usage === "transcript" ? transcriptHoldFields(entry) : estimateHoldModel(entry)),
 				// The job labels this hold was authorized with: what its settle names and what
 				// a replacement hold must carry (the labels belong to the HOLD, not the clock).
 				...jobHoldFields(entry),
@@ -1233,6 +1225,16 @@ function refusedOf(value) {
 	return Object.keys(out).length > 0 ? out : undefined;
 }
 
+/**
+ * An estimate hold's model, as it was authorized: what PostToolUse authorizes a replacement of
+ * the expired hold at (post-tool-use.mjs `settleEstimateHold`). Absent on an older record.
+ */
+function estimateHoldModel(entry) {
+	return typeof entry.holdModel === "string" && entry.holdModel !== ""
+		? { holdModel: entry.holdModel }
+		: {};
+}
+
 function transcriptHoldFields(entry) {
 	const fields = {
 		usage: "transcript",
@@ -1296,7 +1298,9 @@ export async function listPending(sessionId, agentId) {
 				...(parsed.ran === true ? { ran: true } : {}),
 				...(typeof parsed.serverUrl === "string" ? { serverUrl: parsed.serverUrl } : {}),
 				...(typeof parsed.keyHash === "string" ? { keyHash: parsed.keyHash } : {}),
-				...(parsed.usage === "transcript" ? transcriptHoldFields(parsed) : {}),
+				...(parsed.usage === "transcript"
+					? transcriptHoldFields(parsed)
+					: estimateHoldModel(parsed)),
 				...jobHoldFields(parsed),
 				...(typeof parsed.startedAt === "string" ? { startedAt: parsed.startedAt } : {}),
 				mtimeMs,

@@ -74,7 +74,6 @@ import {
 	breakerOpen,
 	claimForRelease,
 	claimForSettle,
-	defaultModel,
 	estimateTokens,
 	giveBack,
 	giveBackInvalid,
@@ -111,6 +110,7 @@ import {
 	authorizeLabels,
 	estimatePrincipalFor,
 	holdEstimate,
+	holdModelFor,
 	isoOf,
 	OUTCOME_NOTES,
 	prepareWindow,
@@ -611,7 +611,16 @@ async function reserve(input) {
 						),
 						...(window?.usageTo === undefined ? {} : { usageTo: window.usageTo }),
 					};
-		const fallbackModel = prepared.lastModel ?? defaultModel();
+		// The model when no window names one (transcript.mjs `holdModelFor`): never a default.
+		const fallback = await holdModelFor({
+			sessionId,
+			agentId,
+			input,
+			lastModel: prepared.lastModel,
+			readBefore: prepared.readBefore === true,
+		});
+		const holdModel = () => window?.model ?? fallback.model;
+		const modelSource = () => (window ? "transcript" : fallback.source);
 		// Never past the hook's own budget: a hook killed mid-call leaves the tool
 		// ungoverned and this agent's lock held.
 		const callTimeout = () => Math.min(5_000, timeLeft() - 500);
@@ -619,7 +628,7 @@ async function reserve(input) {
 			serverRequest(
 				"/v1/authorize",
 				{
-					model: window?.model ?? fallbackModel,
+					model: holdModel(),
 					// Both legs: a 1-token output hold under-debited every large tool result
 					// because settle prices the whole response. A window's usage is
 					// ADDED, so the pre-call budget check still covers the upcoming tool.
@@ -637,8 +646,9 @@ async function reserve(input) {
 								agent_id: agentId,
 								agent_type: prepared.agentType,
 								messages: window.ids.length,
+								modelSource: modelSource(),
 							}
-						: { hook: "PreToolUse", tool_name: toolName },
+						: { hook: "PreToolUse", tool_name: toolName, modelSource: modelSource() },
 					actor: window
 						? `claude-code:${sessionId}:${prepared.agentType}:${safeName(agentId, "main")}`
 						: `claude-code:${sessionId}`,
@@ -691,11 +701,13 @@ async function reserve(input) {
 					transferId: json.transferId,
 					startedAt: new Date(callMs).toISOString(),
 					estimatedInputTokens,
+					// The model the hold was authorized at: a replacement of an expired estimate hold is
+					// authorized at it too (post-tool-use.mjs `settleEstimateHold`).
+					holdModel: holdModel(),
 					...(settlesAtEstimate
 						? {}
 						: {
 								usage: "transcript",
-								holdModel: window?.model ?? fallbackModel,
 								assignedIds: window?.ids ?? [],
 								...(window?.counts ?? {}),
 								...(window && keyed

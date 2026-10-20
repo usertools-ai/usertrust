@@ -979,7 +979,11 @@ describe("the remainder and leftover holds", () => {
 		await writeMain(responseEntries("msg_a", SONNET, u(1, 1), {}, { complete: false }));
 		await run("pre-tool-use.mjs", preInput("tu_1"));
 		// Nothing complete yet: the hold is the tool estimate alone, as before.
-		expect(authorizes()[0]?.body.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });
+		expect(authorizes()[0]?.body.params).toEqual({
+			hook: "PreToolUse",
+			tool_name: "Bash",
+			modelSource: "transcript",
+		});
 		expect(authorizes()[0]?.body.actor).toBe(`claude-code:${SESSION}`);
 		await run("stop.mjs", stopInput());
 		expect(settles()).toHaveLength(0);
@@ -1168,9 +1172,12 @@ describe("estimate mode and the cursor", () => {
 				usageSource: "estimated",
 			});
 		}
-		expect(authorizes()).toHaveLength(2);
-		for (const a of authorizes())
-			expect(a.body.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });
+		// The first hold could read no transcript: `unknown`. The second names the model of the
+		// transcript it can read now, though it still settles at the estimate.
+		expect(authorizes().map((a) => a.body.params)).toEqual([
+			{ hook: "PreToolUse", tool_name: "Bash", modelSource: "unknown" },
+			{ hook: "PreToolUse", tool_name: "Bash", modelSource: "transcript" },
+		]);
 		expect((await readCursor()).accounted).toEqual([]);
 	});
 
@@ -1189,9 +1196,12 @@ describe("estimate mode and the cursor", () => {
 			["estimated", TOOL_INPUT_ESTIMATE],
 			["estimated", TOOL_INPUT_ESTIMATE],
 		]);
-		for (const a of authorizes()) {
-			expect(a.body.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });
-		}
+		// The first hold names no transcript: `unknown`. The later one names the model of the
+		// transcript it is given, and still settles at the estimate.
+		expect(authorizes().map((a) => a.body.params)).toEqual([
+			{ hook: "PreToolUse", tool_name: "Bash", modelSource: "unknown" },
+			{ hook: "PreToolUse", tool_name: "Bash", modelSource: "transcript" },
+		]);
 		expect(pre.stderr).toContain("no transcript path; this agent now settles at the ESTIMATE");
 	});
 
@@ -1216,9 +1226,12 @@ describe("estimate mode and the cursor", () => {
 			["estimated", TOOL_INPUT_ESTIMATE],
 			["estimated", TOOL_INPUT_ESTIMATE],
 		]);
-		for (const a of authorizes()) {
-			expect(a.body.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });
-		}
+		// The first hold names no transcript: `unknown`. The later one names the model of the
+		// transcript it is given, and still settles at the estimate.
+		expect(authorizes().map((a) => a.body.params)).toEqual([
+			{ hook: "PreToolUse", tool_name: "Bash", modelSource: "unknown" },
+			{ hook: "PreToolUse", tool_name: "Bash", modelSource: "transcript" },
+		]);
 	});
 
 	it.each([
@@ -1307,7 +1320,11 @@ describe("estimate mode and the cursor", () => {
 		await run("post-tool-use.mjs", postInput("tu_1"));
 		await run("stop.mjs", stopInput());
 		expect(settles().map((s) => s.body.usageSource)).toEqual(["estimated"]);
-		expect(authorizes()[0]?.body.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });
+		expect(authorizes()[0]?.body.params).toEqual({
+			hook: "PreToolUse",
+			tool_name: "Bash",
+			modelSource: "transcript",
+		});
 	});
 
 	it("NO transcript path while another hook holds the agent's lock: nothing is recorded, the hold is given back", async () => {
@@ -1358,7 +1375,11 @@ describe("estimate mode and the cursor", () => {
 		// (an older server: settled at zero), never settled at the estimate.
 		const pre = await run("pre-tool-use.mjs", preInput("tu_1"));
 		expect(pre.stderr).toContain("corrupt");
-		expect(authorizes()[0]?.body.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });
+		expect(authorizes()[0]?.body.params).toEqual({
+			hook: "PreToolUse",
+			tool_name: "Bash",
+			modelSource: "transcript",
+		});
 		await run("post-tool-use.mjs", postInput("tu_1"));
 		expect(settles().map((s) => [s.body.usageSource, s.body.inputTokens])).toEqual([
 			["provider", 0],
@@ -1595,7 +1616,13 @@ describe("hardening", () => {
 		const pre = await run("pre-tool-use.mjs", preInput("tu_1"));
 		expect(pre.code).toBe(0);
 		expect(pre.stderr).toContain("writable by group or others");
-		expect(authorizes()[0]?.body.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });
+		// The session's model-switch record cannot be trusted here, nor its absence: a switch to a
+		// dearer model may be hidden, so the newest response's model is not taken (`unknown`).
+		expect(authorizes()[0]?.body.params).toEqual({
+			hook: "PreToolUse",
+			tool_name: "Bash",
+			modelSource: "unknown",
+		});
 		await run("post-tool-use.mjs", postInput("tu_1"));
 		const stop = await run("stop.mjs", stopInput());
 		expect(stop.stderr).toContain("writable by group or others");
@@ -1619,7 +1646,11 @@ describe("hardening", () => {
 		expect(stop.code).toBe(0);
 		expect(requests).toEqual([]);
 		await run("pre-tool-use.mjs", preInput("tu_1", { agent_id: evil }));
-		expect(authorizes()[0]?.body.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });
+		expect(authorizes()[0]?.body.params).toEqual({
+			hook: "PreToolUse",
+			tool_name: "Bash",
+			modelSource: "unknown",
+		});
 		expect(await readdir(join(stateDir, "transcripts")).catch(() => [])).toEqual([]);
 	});
 
@@ -2195,6 +2226,7 @@ describe("estimate holds", () => {
 				["/v1/authorize", null, 200],
 				["/v1/settle", "tx_2", 200],
 			]);
+			// The replacement is authorized at the expired hold's model: its transcript's newest.
 			expect(authorizes()[1]?.body).toMatchObject({
 				model: SONNET,
 				estimatedInputTokens: TOOL_INPUT_ESTIMATE,
@@ -2731,7 +2763,7 @@ describe("estimate holds", () => {
 			model: SONNET,
 			estimatedInputTokens: TOOL_INPUT_ESTIMATE,
 			maxOutputTokens: TOOL_OUTPUT_HOLD,
-			params: { hook: "PreToolUse", tool_name: "Bash" },
+			params: { hook: "PreToolUse", tool_name: "Bash", modelSource: "transcript" },
 			actor: `claude-code:${SESSION}`,
 			messages: [{ role: "user", content: '{"command":"ls"}' }],
 		});
@@ -2742,6 +2774,8 @@ describe("estimate holds", () => {
 			agentId: "main",
 			sessionId: SESSION,
 			estimatedInputTokens: 4,
+			// The model it was authorized at: the transcript's newest response's (its id only).
+			holdModel: SONNET,
 			// When the call was received: kept on every hold, whatever the server honours.
 			startedAt: expect.any(String),
 			serverUrl: `http://127.0.0.1:${port}`,
@@ -2762,8 +2796,11 @@ describe("estimate holds", () => {
 		// one stderr line is watch mode's (the default) reason for letting the call
 		// through, which lands in Claude Code's debug log; there is no other note.
 		expect(pre.stderr).toBe("usertrust: reserved tx_1 (1 ut)\n");
+		// `session-models`: the hold read the transcript's newest model id (only that), and marked
+		// this agent as having read a response (transcript.mjs `holdModelFor`).
 		expect((await readdir(join(stateDir, "transcripts"))).sort()).toEqual([
 			"estimate",
+			"session-models",
 			"since",
 			"since-session",
 		]);
@@ -2975,6 +3012,7 @@ describe("with a server that honours keys, principal and release (usertrust #205
 						agent_id: "main",
 						agent_type: "main",
 						messages: 1,
+						modelSource: "transcript",
 					},
 					{ id: "main", type: "main", origin, unit: "platform", role: "release-engineer" },
 				],
@@ -3055,15 +3093,15 @@ describe("with a server that honours keys, principal and release (usertrust #205
 			const attributed = { origin, unit: "platform", role: "release-engineer" };
 			expect(authorizes().map((a) => [a.body.params, a.body.principal])).toEqual([
 				[
-					{ hook: "PreToolUse", tool_name: "Bash" },
+					{ hook: "PreToolUse", tool_name: "Bash", modelSource: "unknown" },
 					{ id: "main", type: "main", ...attributed },
 				],
 				[
-					{ hook: "PreToolUse", tool_name: "Bash" },
+					{ hook: "PreToolUse", tool_name: "Bash", modelSource: "unknown" },
 					{ id: "a1", type: "Explore", ...attributed },
 				],
 				[
-					{ hook: "PreToolUse", tool_name: "Bash" },
+					{ hook: "PreToolUse", tool_name: "Bash", modelSource: "unknown" },
 					{ id: "a2", type: "subagent", ...attributed },
 				],
 			]);
@@ -3077,7 +3115,12 @@ describe("with a server that honours keys, principal and release (usertrust #205
 			await chmod(dir, 0o777);
 			const pre = await run("pre-tool-use.mjs", preInput("tu_1"), attribution);
 			expect(pre.stderr).toContain("writable by group or others");
-			expect(authorizes()[0]?.body.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });
+			// No trusted model-switch record either: `unknown` (transcript.mjs `holdModelFor`).
+			expect(authorizes()[0]?.body.params).toEqual({
+				hook: "PreToolUse",
+				tool_name: "Bash",
+				modelSource: "unknown",
+			});
 			expect(authorizes()[0]?.body.principal).toEqual({
 				id: "main",
 				type: "main",
@@ -3358,7 +3401,11 @@ describe("with a server that honours keys, principal and release (usertrust #205
 		expect(pre.stdout).toBe("");
 		expect(authorizes().map((a) => a.status)).toEqual([409, 200]);
 		expect(authorizes()[1]?.body).not.toHaveProperty("idempotencyKey");
-		expect(authorizes()[1]?.body.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });
+		expect(authorizes()[1]?.body.params).toEqual({
+			hook: "PreToolUse",
+			tool_name: "Bash",
+			modelSource: "transcript",
+		});
 		expect((await readCursor()).accounted).toEqual(["msg_a"]);
 		await run("post-tool-use.mjs", postInput("tu_1"));
 		await run("stop.mjs", stopInput());
@@ -3741,7 +3788,11 @@ describe("forked subagents — inherited messages are posted once", () => {
 		expect(pre.code).toBe(0);
 		await run("post-tool-use.mjs", postInput("tu_f", { agent_id: "f1" }));
 		expect(settles().map((s) => s.body.usageSource)).toEqual(["estimated"]);
-		expect(authorizes()[0]?.body.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });
+		expect(authorizes()[0]?.body.params).toEqual({
+			hook: "PreToolUse",
+			tool_name: "Bash",
+			modelSource: "transcript",
+		});
 	});
 
 	it("a fork of a parent in estimate mode posts none of what it inherited: it inherits the estimate mode", async () => {

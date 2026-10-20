@@ -1,0 +1,16 @@
+{
+	"description": "usertrust: the session's model switches (Claude Code v2.1.251 or later; an older one rejects this file alone)",
+	"hooks": {
+		"PostModelSwitch": [
+			{
+				"hooks": [
+					{
+						"type": "command",
+						"command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/launch.mjs\" post-model-switch",
+						"timeout": 5
+					}
+				]
+			}
+		]
+	}
+}
