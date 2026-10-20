@@ -580,6 +580,74 @@ describe("the model a hold names is the session's own", () => {
 		},
 	);
 
+	it("a run whose own `.pending` a newer run already cleared records its switch, and leaves no failure mark", async () => {
+		const sessionId = "switch-mark-cleared";
+		const child = `
+			import fs from "node:fs/promises";
+			import { syncBuiltinESMExports } from "node:module";
+			const { transcript, sessionId, opus } = JSON.parse(process.env.CASE);
+			const unlink = fs.unlink;
+			// A newer run's prune took this run's mark first: it is gone when this run removes it.
+			fs.unlink = async (file) => {
+				if (String(file).endsWith(".pending")) {
+					await unlink(file);
+					throw Object.assign(new Error("gone"), { code: "ENOENT" });
+				}
+				return unlink(file);
+			};
+			syncBuiltinESMExports();
+			const { holdModelFor, recordModelSwitch } = await import(transcript);
+			await recordModelSwitch(sessionId, opus);
+			const read = await holdModelFor({ sessionId, agentId: "main", input: {}, lastModel: null });
+			process.stdout.write(JSON.stringify(read));
+		`;
+		const { stdout } = await promisify(execFile)(
+			process.execPath,
+			["--input-type=module", "-e", child],
+			{
+				env: {
+					PATH: process.env.PATH ?? "",
+					HOME: stateDir,
+					UT_CC_STATE_DIR: stateDir,
+					CASE: JSON.stringify({ transcript: TRANSCRIPT, sessionId, opus: OPUS }),
+				},
+			},
+		);
+		expect(JSON.parse(stdout)).toEqual({ model: OPUS, source: "session" });
+		const names = await readdir(
+			join(stateDir, "transcripts", "session-models", `${sessionId}.switches`),
+		);
+		expect(names.filter((n) => n.endsWith(".failed") || n.endsWith(".pending"))).toEqual([]);
+	});
+
+	it("overlapping switch runs never leave a failure mark: a live writer's `.pending` is kept, a dead one's cleared", async () => {
+		for (const name of ["UT_CC_CONFIG", "UT_SERVER_URL", "UT_SERVER_KEY"]) delete process.env[name];
+		process.env.UT_CC_STATE_DIR = stateDir;
+		const { holdModelFor, recordModelSwitch } = (await import(TRANSCRIPT)) as {
+			holdModelFor: (a: Record<string, unknown>) => Promise<{ model: string; source: string }>;
+			recordModelSwitch: (session: string, model: unknown) => Promise<void>;
+		};
+		const sessionId = "switch-overlap-marks";
+		await recordModelSwitch(sessionId, HAIKU);
+		const dir = join(stateDir, "transcripts", "session-models", `${sessionId}.switches`);
+		// An older run still writing (its mark 1 s old), and one that died long ago (60 s).
+		const live = `${Date.now() - 1_000}.1.live.pending`;
+		const dead = `${Date.now() - 60_000}.1.dead.pending`;
+		await writeFile(join(dir, live), "");
+		await writeFile(join(dir, dead), "");
+		await recordModelSwitch(sessionId, HAIKU);
+		const names = await readdir(dir);
+		expect(names).toContain(live);
+		expect(names).not.toContain(dead);
+		expect(names.filter((n) => n.endsWith(".failed"))).toEqual([]);
+		// The live writer finishes: its mark goes, and the switch reads as recorded.
+		await rm(join(dir, live));
+		expect(await holdModelFor({ sessionId, agentId: "main", input: {}, lastModel: null })).toEqual({
+			model: HAIKU,
+			source: "session",
+		});
+	});
+
 	it("the PostModelSwitch hook records the switch, prints nothing for Claude's context, and a hold reads it", async () => {
 		await writeTranscript(mainTranscript(), response("msg_h", HAIKU, 10_000));
 		await pre("tu_1", { transcript_path: mainTranscript() });

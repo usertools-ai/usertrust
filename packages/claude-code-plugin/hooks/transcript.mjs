@@ -1863,18 +1863,25 @@ export async function recordModelSwitch(sessionId, model) {
 	try {
 		await writeFile(pending, "", { flag: "wx", mode: 0o600 });
 		await writeAtomic(join(dir.dir, `${base}.json`), JSON.stringify({ model: id, at }));
-		await unlink(pending);
 	} catch {
 		await markSwitchFailed(dir.dir, base);
+		// Its failure mark stands in for it: a `.pending` left behind would read as a live writer.
+		await unlink(pending).catch(() => {});
 		return;
 	}
+	// The record is complete. A mark already gone was cleared by a newer run, never a failure.
+	await unlink(pending).catch(() => {});
 	try {
 		for (const other of await readdir(dir.dir)) {
 			const recorded = Number.parseInt(other, 10);
-			// Superseded: a record too old to overlap this one, and any mark a run before this one left.
+			// Superseded: a record too old to overlap this one, a failure mark a run before this one
+			// left, and a `.pending` mark of a run too old to be still writing (a run writes within its
+			// hook's timeout, well inside the overlap window). A younger one is a live writer's: kept.
 			const stale = other.endsWith(".json")
 				? recorded < at - SWITCH_OVERLAP_MS
-				: (other.endsWith(".pending") || other.endsWith(".failed")) && recorded < at;
+				: other.endsWith(".failed")
+					? recorded < at
+					: other.endsWith(".pending") && recorded < at - SWITCH_OVERLAP_MS;
 			if (stale) await unlink(join(dir.dir, other)).catch(() => {});
 		}
 	} catch {
