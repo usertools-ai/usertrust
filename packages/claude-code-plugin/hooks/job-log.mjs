@@ -7,7 +7,9 @@
 // THE LOG: <state>/jobs/<session_id>.jsonl (0600), append-only, one newline-
 // terminated JSON object per line: { sid, ts, op, job }. `op` is `session-start`
 // (written by the SessionStart hook, once, for a NEW session id), `start` or `stop`
-// (written by `bin/usertrust-job.mjs`). `ts` is ISO with milliseconds on THIS
+// (written by `bin/usertrust-job.mjs`). A `start` may also carry `type` (what KIND of work the
+// job is, from the closed list `JOB_TYPES`) and `typeSource` (`explicit` or `agent`): the keys are
+// ABSENT on an untyped start, so an untyped line is byte-identical to what it always was. `ts` is ISO with milliseconds on THIS
 // machine's clock, which the hooks, the CLI and the transcript all share.
 //
 // A hook reads its OWN session's file on every call and resolves the job at the
@@ -23,7 +25,8 @@
 // appenders can differ by a few ms) can never place a `start` before a line that precedes it.
 //
 // VALID means: every line's `sid` is the session's; the first line is `session-start` and
-// no other is; every `op` is known; `start` names a valid job id. A line that is not JSON, or
+// no other is; every `op` is known; `start` names a valid job id; a `type` is on a `start` and
+// is in the closed list; a `typeSource` is beside a `type` and is `agent` or `explicit`. A line that is not JSON, or
 // a last line with no newline (a torn line), makes the log INVALID: `jobState: "invalid"` on
 // the records and a named gap in coverage, never a guess. NOTHING here repairs, truncates or
 // reorders a log: the reader is the authority and it only reads.
@@ -39,14 +42,20 @@ import {
 	appendRegular,
 	eachLine,
 	guardMode,
+	JOB_TYPES,
 	PRE_METERING,
 	READ_BOUND,
 	readRegular,
 	recordWatchEvent,
 	sanitize,
+	serverCapabilities,
 	stateRoot,
+	TYPE_SOURCES,
+	withoutJobType,
 	writeFileAtomic,
 } from "./lib.mjs";
+
+export { JOB_TYPES, TYPE_SOURCES };
 
 /** 1-128 of `[A-Za-z0-9._:-]`: usertrust core's `PRINCIPAL_FIELD_PATTERN`, pinned by a test. */
 export const JOB_ID = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -78,7 +87,8 @@ export function jobLogPath(sessionId) {
  * of one line (`readJobLog` streams it). `line(text, terminated)` takes each line in order,
  * as `eachLine` gives it (null for a line too long to read); `result()` is { state: "none" }
  * (nothing written), { state: "invalid", reason }, or { state: "ok", events, last, clockSteps,
- * maxRawMs } where each event is { index, tsMs, ts, op, job }.
+ * maxRawMs } where each event is { index, tsMs, ts, op, job } (a typed `start` also has
+ * `jobType`, and `typeSource` when the line named one).
  */
 export function jobLogParser(sessionId) {
 	let i = 0;
@@ -132,6 +142,17 @@ export function jobLogParser(sessionId) {
 		if (rec.op === "start" && !(typeof rec.job === "string" && JOB_ID.test(rec.job))) {
 			return `line ${i + 1} has a bad job id`;
 		}
+		// Fail closed, like every rule here: a type the closed list does not hold, a type on any
+		// op but `start`, a source with no type, or a source outside {explicit, agent} makes the
+		// whole log INVALID, never a guess. An absent `type` is simply untyped.
+		const hasType = Object.hasOwn(rec, "type");
+		const hasSource = Object.hasOwn(rec, "typeSource");
+		if (hasType && rec.op !== "start") return `line ${i + 1} has a type on a ${rec.op}`;
+		if (hasType && !JOB_TYPES.includes(rec.type)) return `line ${i + 1} has an unknown type`;
+		if (hasSource && !hasType) return `line ${i + 1} has a typeSource without a type`;
+		if (hasSource && !TYPE_SOURCES.includes(rec.typeSource)) {
+			return `line ${i + 1} has an unknown typeSource`;
+		}
 		effectiveMs = tsMs;
 		maxRawMs = Math.max(maxRawMs, rawMs);
 		events.push({
@@ -140,6 +161,9 @@ export function jobLogParser(sessionId) {
 			ts: rec.ts,
 			op: rec.op,
 			job: rec.op === "start" ? rec.job : null,
+			// Only on a typed start: every other event keeps exactly its old shape.
+			...(hasType ? { jobType: rec.type } : {}),
+			...(hasSource ? { typeSource: rec.typeSource } : {}),
 		});
 		return null;
 	};
@@ -199,28 +223,44 @@ export function jobAtEvents(events, tMs) {
 	return openAtEvents(events, tMs)?.job ?? null;
 }
 
-/** The open job at `tMs` and the ts of the `start` that opened THIS interval of it, or null. */
+/**
+ * The open job at `tMs` and the position of the `start` that opened THIS interval of it, or null.
+ * The interval carries the type that start declared (`jobType`, `typeSource`), if it did: a type
+ * belongs to the START, so a later start of the same job id with another type is a new interval.
+ */
 export function openAtEvents(events, tMs) {
 	let open = null;
 	for (const e of events) {
 		if (!(e.tsMs < tMs)) break;
-		if (e.op === "start") open = { job: e.job, since: e.index };
-		else if (e.op === "stop") open = null;
+		if (e.op === "start") {
+			open = {
+				job: e.job,
+				since: e.index,
+				...(e.jobType === undefined ? {} : { jobType: e.jobType }),
+				...(e.typeSource === undefined ? {} : { typeSource: e.typeSource }),
+			};
+		} else if (e.op === "stop") open = null;
 	}
 	return open;
 }
 
 /**
  * The labels a record at `tMs` carries, from a parsed log: {} (no log, or no open
- * job), { job }, or { jobState: "invalid" } (a log that cannot be trusted, or a time
- * that cannot be read).
+ * job), { job, jobType?, typeSource? } (the type and source only when the open job's
+ * `start` declared them), or { jobState: "invalid" } (a log that cannot be trusted, or a
+ * time that cannot be read).
  */
 export function labelsAt(parsed, tMs) {
 	if (parsed.state === "none") return {};
 	if (parsed.state === "invalid") return { jobState: "invalid" };
 	if (!Number.isFinite(tMs)) return { jobState: "invalid" };
-	const job = jobAtEvents(parsed.events, tMs);
-	return job === null ? {} : { job };
+	const open = openAtEvents(parsed.events, tMs);
+	if (open === null) return {};
+	return {
+		job: open.job,
+		...(open.jobType === undefined ? {} : { jobType: open.jobType }),
+		...(open.typeSource === undefined ? {} : { typeSource: open.typeSource }),
+	};
 }
 
 /** Read this session's log NOW (never cached) and return its resolver. */
@@ -266,7 +306,14 @@ async function noteSuspect(sessionId, maxRawMs) {
 	}
 }
 
-export async function resolveJob(sessionId) {
+/**
+ * `types`: whether the labels may carry the open job's type (`jobType`, `typeSource`). The
+ * caller says so only for a server that lists `job-type` (lib.mjs `jobTypeCapable`); the default
+ * is NO, so a labeller that forgets to ask sends the job and never a type an older server would
+ * strip in silence. It is the ONE gate between the log and every outgoing label; `keyAt` is not
+ * affected (a type change is a new `start` line, which already opens a new interval).
+ */
+export async function resolveJob(sessionId, { types = false } = {}) {
 	const read = async () => {
 		try {
 			return (await readJobLog(jobLogPath(sessionId), sessionId)).parsed;
@@ -299,7 +346,10 @@ export async function resolveJob(sessionId) {
 	return {
 		parsed,
 		/** Raw labels at `tMs`. LABELLING goes through `labelsFor`, never this: it owns the guard. */
-		at: (tMs) => labelsAt(parsed, tMs),
+		at: (tMs) => {
+			const labels = labelsAt(parsed, tMs);
+			return types ? labels : withoutJobType(labels);
+		},
 		/**
 		 * Whether the log's latest stamp is more than a clock step AHEAD of the clock that read it: a fast clock wrote it and has since been corrected, so nothing was clamped and the
 		 * job open "now" cannot be trusted. That call's job is unknown (a gap), never a guess.
@@ -335,6 +385,44 @@ export async function resolveJob(sessionId) {
 			return `none#${began?.index ?? ""}`;
 		},
 	};
+}
+
+// ── The agent's instruction (SessionStart's `additionalContext`) ──
+
+/**
+ * What the agent is told at session start, so a job gets a TYPE without anyone asking. FIXED
+ * text: nothing from the session, the user, the server or the environment is interpolated, so
+ * there is nothing for a hostile value to ride in on. Under 1,000 characters (a test pins it).
+ * It is added to the agent's context and saved in the session transcript: it is not hidden.
+ * The type it asks for is a declaration by the agent (`--source agent`), not evidence.
+ */
+export const JOB_TYPE_INSTRUCTION = [
+	"usertrust labels this session's spend by job and by what kind of work each job is.",
+	"At the start of each distinct task, run as an ordinary Bash call:",
+	"usertrust-job.mjs start --type <type> --source agent <short-id>",
+	`where <type> is one of ${JOB_TYPES.join(", ")} and <short-id> is a short name for the task (letters, digits and . _ : - only).`,
+	"When the task changes, run it again with the new type and id.",
+	"Do not ask the user first.",
+	"If this session was resumed or compacted and a job is already open for the same work, keep it and do not start another.",
+].join(" ");
+
+/** How long SessionStart waits for the server's capabilities: well under the hook's 5 s. */
+export const TYPE_PROBE_MS = 1_500;
+
+/**
+ * The instruction above, or null. Only for a server that lists `job-type` in `/v1/health`
+ * `capabilities`: against an older one the instruction would have the agent label work whose
+ * type is never recorded. Everything else is null, never a thrown error and never a wait past
+ * `TYPE_PROBE_MS`: a probe that times out or fails, health output that is not a capability
+ * list, a refused configuration. The caller still announces its banner exactly once.
+ */
+export async function jobTypeInstruction() {
+	try {
+		const capabilities = await serverCapabilities({ maxMs: TYPE_PROBE_MS });
+		return capabilities !== null && capabilities.has("job-type") ? JOB_TYPE_INSTRUCTION : null;
+	} catch {
+		return null;
+	}
 }
 
 // ── Writing: ONE append of ONE complete line, no lock ──
@@ -405,8 +493,24 @@ export async function writeSessionStart(sessionId, source) {
  * started is exactly the resume-without-id file this refuses. It polls for that line (a
  * friendly refusal; nothing correct depends on it), then appends ONE line. Returns
  * { ok: true, ts } or { ok: false, reason }.
+ *
+ * A `start` may declare a `type` (from `JOB_TYPES`) and its `typeSource`; they are written ONLY
+ * when given, so an untyped line is byte-identical to what it always was. The reader fails
+ * closed on a bad pair, so a caller that passes one here would make its own log invalid: this
+ * refuses it instead, before anything is written (`TypeError`).
  */
-export async function appendJobOp(sessionId, op, job, { waitMs = DEFAULT_WAIT_MS } = {}) {
+export async function appendJobOp(
+	sessionId,
+	op,
+	job,
+	{ waitMs = DEFAULT_WAIT_MS, type, typeSource } = {},
+) {
+	if (
+		(type !== undefined && (op !== "start" || !JOB_TYPES.includes(type))) ||
+		(typeSource !== undefined && (type === undefined || !TYPE_SOURCES.includes(typeSource)))
+	) {
+		throw new TypeError("a job type is on a start, from the closed list, and its source beside it");
+	}
 	const log = jobLogPath(sessionId);
 	const deadline = Date.now() + waitMs;
 	let seen;
@@ -434,7 +538,14 @@ export async function appendJobOp(sessionId, op, job, { waitMs = DEFAULT_WAIT_MS
 	const open = jobAtEvents(seen.events, Number.POSITIVE_INFINITY);
 	if (op === "stop" && open === null) return { ok: true, noop: true, ts: seen.last.ts };
 	const ts = new Date(Date.now()).toISOString();
-	await appendLine(log, { sid: sessionId, ts, op, job: op === "start" ? job : null });
+	await appendLine(log, {
+		sid: sessionId,
+		ts,
+		op,
+		job: op === "start" ? job : null,
+		...(type === undefined ? {} : { type }),
+		...(typeSource === undefined ? {} : { typeSource }),
+	});
 	return { ok: true, ts, replaced: op === "start" && open !== null ? open : null };
 }
 

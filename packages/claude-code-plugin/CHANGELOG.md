@@ -7,6 +7,26 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ## [Unreleased]
 
+### Added
+
+- **Say what KIND of work a job is: `usertrust-job.mjs start --type <type> [--source agent|explicit] <job-id>`.**
+  The type is one of a closed list, `feature`, `bugfix`, `review`, `test`, `docs`, `ops`, `research`,
+  `other`, and rides every record of the job (`jobType`, `typeSource`) beside the job itself, so cost by
+  kind of work is a query. An unknown type is refused (exit 2, the list printed), `--source` without
+  `--type` is refused, and the source is `explicit` when a type is given and none is said. Job logs may
+  carry `type` and `typeSource` on a `start` line; a log with an unknown one, or a type on any other
+  line, is invalid like any other bad line, and older logs read as they did. It needs a usertrust-server
+  that lists `"job-type"` in `/v1/health` `capabilities`; a server that lists `"job"` alone is sent the
+  job and no type, and a hold's settle names exactly the type its authorize was sent. A type is a
+  declaration, not evidence: with `--source agent` it is the model's own label, and an open job's type
+  stays until the next `start` or `stop`.
+- **SessionStart asks the agent to type its jobs.** For a server that lists `"job-type"`, the one
+  SessionStart message now also carries a fixed instruction for the agent (the banner is unchanged and
+  still shown once): run `usertrust-job.mjs start --type <type> --source agent <short-id>` at the start
+  of each distinct task and again when the task changes, without asking. It is added on every start,
+  resume, clear, compact and fork, after one health request of at most 1.5 s; if that fails or times out,
+  only the banner is shown. Claude Code saves injected context in the session transcript.
+
 ## [3.0.3] - 2026-10-17
 
 ### Fixed
