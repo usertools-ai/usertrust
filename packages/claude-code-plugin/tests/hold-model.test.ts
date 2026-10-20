@@ -308,6 +308,13 @@ describe("the model a hold names is the session's own", () => {
 			model: OPUS,
 			source: "transcript",
 		});
+		// A newest response line cut short (corrupt, or still being written) after a cheaper one:
+		// it cannot be inspected, so `unknown`, never the older Haiku line's model.
+		s = await fresh();
+		const whole = response("msg_o", OPUS);
+		const cut = whole.slice(0, whole.indexOf('"usage"') + 12);
+		await writeFile(s.path, response("msg_h", HAIKU) + cut);
+		expect(await at(s.sessionId, { transcript_path: s.path })).toEqual(unknown);
 		// A newest line over the ingest's line limit (16 MiB): it cannot be inspected, `unknown`.
 		s = await fresh();
 		await writeFile(
@@ -317,16 +324,18 @@ describe("the model a hold names is the session's own", () => {
 		expect(await at(s.sessionId, { transcript_path: s.path })).toEqual(unknown);
 	}, 30_000);
 
-	it("before any response of its agent, a hold names the model Claude Code reported at SessionStart", async () => {
-		expect((await sessionStart(OPUS)).code).toBe(0);
-		// No transcript path: an estimate hold. And a subagent whose transcript holds no response yet.
+	it("before any response of its agent, the main agent's hold names the SessionStart model, and a subagent's is `unknown`", async () => {
+		expect((await sessionStart(HAIKU)).code).toBe(0);
+		// The main agent, no transcript path: an estimate hold at the session's model.
 		await pre("tu_1");
+		// A subagent whose transcript holds no response yet: SessionStart names the SESSION's model,
+		// and the subagent may run a dearer one (nothing tells its own before its first response).
 		await writeTranscript(mainTranscript(), "");
 		await writeTranscript(agentTranscript("a2"), "");
 		await pre("tu_2", { agent_id: "a2", transcript_path: mainTranscript() });
 		expect(authorizes()).toMatchObject([
-			{ model: OPUS, params: { modelSource: "session" } },
-			{ model: OPUS, params: { modelSource: "session" } },
+			{ model: HAIKU, params: { modelSource: "session" } },
+			{ model: "unknown", params: { modelSource: "unknown" } },
 		]);
 	});
 

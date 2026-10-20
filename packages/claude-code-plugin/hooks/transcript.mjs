@@ -1813,14 +1813,19 @@ async function sessionModel(sessionId) {
 	}
 }
 
-/** A transcript line's response model: its id, `unknown` when unusable, or undefined when it is no response. */
+/**
+ * A transcript line's response model: its id, `unknown` when unusable, or undefined when it is no
+ * response. A line that holds the `"usage"` key but does not parse is `unknown`, never passed over
+ * for an older response: that key cannot occur inside escaped JSON text, so such a line is a
+ * response that is corrupt, or still being written.
+ */
 function responseModelOf(line) {
 	if (!line.includes(USAGE_FIELD)) return undefined;
 	let entry;
 	try {
 		entry = JSON.parse(line.toString("utf-8"));
 	} catch {
-		return undefined;
+		return UNKNOWN_MODEL;
 	}
 	if (!isObject(entry?.message?.usage)) return undefined;
 	const id = modelId(entry.message.model);
@@ -1924,7 +1929,10 @@ async function seenBefore(sessionId, agentId) {
  *     still estimated. A newest response with no usable model, or a transcript that cannot be
  *     inspected, is `unknown`;
  *  2. with no response to read (the transcript is missing, holds none, or no path names it), the
- *     model Claude Code reported for the session at SessionStart (`recordSessionModel`), but ONLY
+ *     model Claude Code reported for the session at SessionStart (`recordSessionModel`), for the
+ *     MAIN agent only: it is the session's model, and a subagent may run a dearer one (Claude Code's
+ *     SubagentStart input names no model, https://code.claude.com/docs/en/hooks#subagentstart-input,
+ *     and the Agent tool's `resolvedModel` arrives only once the subagent has finished). And ONLY
  *     while it is provably current: before this agent has read anything (its cursor has read no
  *     byte and names no model, and no hold of it has read a response, `markSeen`). After that a
  *     switch may have happened since, so the transcript gone, or never named, is `unknown`;
@@ -1947,7 +1955,7 @@ export async function holdModelFor({ sessionId, agentId, input, lastModel, readB
 	}
 	const read =
 		readBefore === true || modelId(lastModel) !== null || (await seenBefore(sessionId, agentId));
-	if (read) return unknown;
+	if (read || agentId !== "main") return unknown;
 	const reported = await sessionModel(sessionId);
 	if (reported !== null) return { model: reported, source: "session" };
 	return unknown;

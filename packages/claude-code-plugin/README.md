@@ -322,11 +322,14 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   for an estimate hold that expired) names the model of the newest response in the
   agent's transcript, scanned back from its end, for the model id only (estimate mode
   included, whose usage is always estimated): only the file is always current. A
-  newest response whose model is missing or not a usable id, a transcript that cannot
-  be read or inspected (a line over the ingest's limit, or more scanned than it reads),
+  newest response whose model is missing or not a usable id, a newest response line
+  that does not parse (corrupt, or still being written), a transcript that cannot be
+  read or inspected (a line over the ingest's limit, or more scanned than it reads),
   all mean `unknown`. With no response to read, the hold names the model Claude Code
-  reported at SessionStart (its `model`, which Claude Code may omit), but only while
-  that is provably current: before this agent has read anything. After that a switch
+  reported at SessionStart (its `model`, which Claude Code may omit), but only for
+  the main agent (it is the session's model, and a subagent may run a dearer one;
+  nothing names a subagent's own model before its first response), and only while
+  that is provably current: before the agent has read anything. After that a switch
   may have happened since, so a transcript gone or never named means `unknown`.
   usertrust-server prices `unknown` at the dearest rate it publishes and marks it as a
   fallback, so a hold is never priced below the model the session may now be using.
