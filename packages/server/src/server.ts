@@ -83,6 +83,11 @@ const SERVER_CAPABILITIES = Object.freeze([
 	// own sweep life for it alike. /v1/health also states `maxHoldTtlMs`, the ceiling. An older server
 	// strips the key, and the hold keeps the default life.
 	"hold-ttl",
+	// `release-waits`: `POST /v1/release` for a hold another terminal has taken (the TTL sweep's void,
+	// a settle, an abort) waits for that terminal, bounded as a settle waits (`RELEASE_WAIT_MAX_MS`),
+	// before it answers. So its 404 `unknown transferId` means the hold's funds are free: a client
+	// may replace it at once. Without it, a 404 can come while the void is still in flight.
+	"release-waits",
 ]);
 /**
  * A dryRun server has no ledger, so it writes no `user_data` tags — but it records
@@ -2051,6 +2056,19 @@ export function createUsertrustServer(opts: {
 		});
 	}
 
+	/**
+	 * Wait for the terminal that took this hold out of `pending` (`claimed`) to land, bounded as a
+	 * settle racing it is (`RELEASE_WAIT_MAX_MS`). Nothing to wait for when none is running.
+	 */
+	async function terminalLanded(tenantId: string, transferId: string): Promise<void> {
+		const inFlight = claimed.get(`${tenantId}\0${transferId}`);
+		if (inFlight === undefined) return;
+		await Promise.race([
+			inFlight.done,
+			new Promise<void>((resolve) => setTimeout(resolve, RELEASE_WAIT_MAX_MS).unref()),
+		]);
+	}
+
 	async function handleRelease(
 		tenant: TenantConfig,
 		body: unknown,
@@ -2062,7 +2080,13 @@ export function createUsertrustServer(opts: {
 			return;
 		}
 		const { transferId, reason, releaseClass } = parsed.data;
-		const entry = pending.get(transferId);
+		let entry = pending.get(transferId);
+		if (!entry || entry.tenantId !== tenant.id) {
+			// Taken by another terminal (`release-waits`): wait for it to land, so a 404 says the funds are
+			// free. One that THREW put the hold back, and this release ends it after all.
+			await terminalLanded(tenant.id, transferId);
+			entry = pending.get(transferId);
+		}
 		if (!entry || entry.tenantId !== tenant.id) {
 			// "unknown transferId", never "unknown route": a client that could not read this
 			// server's capabilities falls back to /v1/abort only on an unknown route.
@@ -2086,6 +2110,8 @@ export function createUsertrustServer(opts: {
 			// The governor no longer held it (its settle is in flight, or it already
 			// ended), so this request released nothing and must not say it did. The entry
 			// stays out: a hold the governor does not own is not the sweep's to meet again.
+			// A terminal that took it first is waited for, as above (`release-waits`).
+			if (outcome === NOT_CLAIMED) await terminalLanded(tenant.id, transferId);
 			sendJson(res, 404, { error: "not_found", reason: "unknown transferId" });
 			return;
 		}

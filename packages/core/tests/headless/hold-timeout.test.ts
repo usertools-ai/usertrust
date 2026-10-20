@@ -139,6 +139,15 @@ describe("an authorize may ask its hold to live longer (`holdTtlMs`), clamped to
 		await gov.abort(short, new Error("done"));
 	});
 
+	it("a ceiling that is not a whole number of seconds is rounded down: a hold never outlives it", async () => {
+		const gov = await createGovernor({ vaultBase: ledgerVault(), maxHoldTtlMs: 300_001 });
+		cleanup.push(() => gov.destroy());
+		const auth = await gov.authorize({ model: "claude-sonnet-4-6", holdTtlMs: 400_000 });
+		expect(heldTimeout()).toEqual([300]);
+		expect(auth.holdTimeoutMs).toBe(300_000);
+		await gov.abort(auth, new Error("done"));
+	});
+
 	it("the default ceiling is one hour", async () => {
 		const gov = await createGovernor({ vaultBase: ledgerVault() });
 		cleanup.push(() => gov.destroy());

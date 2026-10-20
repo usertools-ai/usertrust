@@ -70,13 +70,19 @@ export const DEFAULT_MAX_PENDING_TTL_MS = 3_600_000;
 /**
  * The longest life an authorize may ask for, as the server applies it everywhere (the clamp,
  * `/v1/health`'s `maxHoldTtlMs`, and each tenant's governor): `maxPendingTtlMs`, never less than
- * `pendingTtlMs`.
+ * `pendingTtlMs`, in whole seconds (the ledger's timeout is in seconds). A config built without
+ * the schema can lack either; then the default stands.
  */
 export function maxHoldLife(config: {
-	pendingTtlMs: number;
+	pendingTtlMs?: number | undefined;
 	maxPendingTtlMs?: number | undefined;
 }): number {
-	return Math.max(config.maxPendingTtlMs ?? DEFAULT_MAX_PENDING_TTL_MS, config.pendingTtlMs);
+	const finite = (v: number | undefined) => (Number.isFinite(v) ? (v as number) : 0);
+	const ceiling = Math.max(
+		finite(config.maxPendingTtlMs) || DEFAULT_MAX_PENDING_TTL_MS,
+		finite(config.pendingTtlMs),
+	);
+	return Math.floor(ceiling / 1000) * 1000;
 }
 
 export type TenantConfig = z.infer<typeof TenantSchema>;

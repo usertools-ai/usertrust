@@ -17,7 +17,7 @@
 import type { GovernorOpts } from "usertrust";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ServerConfig } from "../src/config.js";
-import { DEFAULT_MAX_PENDING_TTL_MS, hashKey } from "../src/config.js";
+import { DEFAULT_MAX_PENDING_TTL_MS, hashKey, maxHoldLife } from "../src/config.js";
 import { createUsertrustServer, holdLife, type UsertrustServer } from "../src/server.js";
 import { createFakeGovernor } from "./helpers/fake-governor.js";
 
@@ -150,5 +150,38 @@ describe("an authorize may ask its hold to live longer (`holdTtlMs`)", () => {
 		expect(holdLife(10 * MINUTE, { pendingTtlMs: 20 * MINUTE, maxPendingTtlMs: 300_000 })).toBe(
 			20 * MINUTE,
 		);
+		// In whole seconds, the ledger's unit: never above the configured ceiling.
+		expect(maxHoldLife({ pendingTtlMs: 300_000, maxPendingTtlMs: 600_500 })).toBe(600_000);
+		// A config built without the schema can lack pendingTtlMs: the default ceiling, never NaN.
+		expect(maxHoldLife({})).toBe(DEFAULT_MAX_PENDING_TTL_MS);
+		expect(maxHoldLife({ maxPendingTtlMs: Number.NaN })).toBe(DEFAULT_MAX_PENDING_TTL_MS);
+	});
+
+describe("`release-waits`: a release that finds the hold taken by another terminal waits for it", () => {
+	it("a release racing the sweep's slow void answers 404 only once that void has landed", async () => {
+		const fake = createFakeGovernor({ releaseDelayMs: 400 });
+		server = createUsertrustServer({ config: config({ pendingTtlMs: 300_000 }), factory: async () => fake.governor });
+		const { port } = await server.listen();
+		const base = `http://127.0.0.1:${port}`;
+		const { json } = await authorize(base);
+		const transferId = String(json.transferId);
+		// The sweep claims the hold and starts its slow void.
+		const sweeping = server.sweepExpired(Date.now() + 10 * MINUTE);
+		const res = await fetch(`${base}/v1/release`, {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: `Bearer ${KEY}` },
+			body: JSON.stringify({ transferId }),
+		});
+		// Answered only after the void landed: its funds are free when the client hears 404.
+		const landedAtAnswer = fake.calls.released.includes(transferId);
+		expect(res.status).toBe(404);
+		expect(landedAtAnswer).toBe(true);
+		expect(await sweeping).toBe(1);
+	});
+
+	it("/v1/health lists `release-waits`", async () => {
+		const { base } = await start();
+		const health = (await (await fetch(`${base}/v1/health`)).json()) as { capabilities: string[] };
+		expect(health.capabilities).toContain("release-waits");
 	});
 });

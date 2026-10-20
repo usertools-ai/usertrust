@@ -1285,12 +1285,15 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	const isDryRun = opts?.dryRun ?? process.env.USERTRUST_DRY_RUN === "true";
 	const isTestEnv = process.env.USERTRUST_TEST === "1" || process.env.NODE_ENV === "test";
 	const destroyDrainMs = (isTestEnv ? opts?._destroyDrainMs : undefined) ?? 5_000;
-	const maxHoldTtlMs = opts?.maxHoldTtlMs ?? DEFAULT_MAX_HOLD_TTL_MS;
-	if (!Number.isSafeInteger(maxHoldTtlMs) || maxHoldTtlMs < LEDGER_HOLD_TIMEOUT_MS) {
+	const askedMaxHoldTtlMs = opts?.maxHoldTtlMs ?? DEFAULT_MAX_HOLD_TTL_MS;
+	if (!Number.isSafeInteger(askedMaxHoldTtlMs) || askedMaxHoldTtlMs < LEDGER_HOLD_TIMEOUT_MS) {
 		throw new RangeError(
 			`createGovernor(): maxHoldTtlMs must be an integer of at least ${LEDGER_HOLD_TIMEOUT_MS}`,
 		);
 	}
+	// In whole seconds, rounded DOWN: the ledger's timeout is in seconds, and a life rounded up to
+	// one (`holdLifeMs`) must never exceed the ceiling.
+	const maxHoldTtlMs = Math.floor(askedMaxHoldTtlMs / 1000) * 1000;
 
 	// 2. Initialize subsystems
 	const vaultPath = vaultBase;
