@@ -568,6 +568,89 @@ describe("Audit Chain Writer — advisory lock", () => {
 	});
 });
 
+describe("Audit Chain Writer: an append after release()", () => {
+	// A writer that is released and then appended to (a terminal record whose provider call
+	// outlived its governor's destroy() drain) once took the vault's lock again and kept it:
+	// nothing released it a second time, so every later writer on the vault failed on the lock
+	// and dead-lettered its records. A late append now holds the lock for that append only.
+	let tempDir: string;
+	let lockPath: string;
+	let logPath: string;
+	const writers: Array<ReturnType<typeof createAuditWriter>> = [];
+
+	const open = (): ReturnType<typeof createAuditWriter> => {
+		const w = createAuditWriter(tempDir);
+		writers.push(w);
+		return w;
+	};
+	const append = (w: ReturnType<typeof createAuditWriter>, n: number) =>
+		w.appendEvent({ kind: "test.late", actor: "sys", data: { n } });
+	const chainNs = (): unknown[] =>
+		readFileSync(logPath, "utf-8")
+			.trim()
+			.split("\n")
+			.map((line) => (JSON.parse(line) as { data: { n: unknown } }).data.n);
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "trust-audit-late-"));
+		lockPath = join(tempDir, VAULT_DIR, "audit", ".audit-writer.lock");
+		logPath = join(tempDir, VAULT_DIR, "audit", "events.jsonl");
+	});
+
+	afterEach(() => {
+		for (const w of writers.splice(0)) w.release();
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("lands on the chain and leaves the lock released, so the next writer appends", async () => {
+		const first = open();
+		await append(first, 1);
+		first.release();
+		expect(existsSync(lockPath)).toBe(false);
+
+		await append(first, 2);
+		expect(existsSync(lockPath)).toBe(false);
+
+		const second = open();
+		await append(second, 3);
+		await append(second, 4);
+		expect(second.isDegraded()).toBe(false);
+		expect(chainNs()).toEqual([1, 2, 3, 4]);
+	});
+
+	it("appends still queued when release() lands each land, and leave the lock released", async () => {
+		const first = open();
+		await append(first, 1);
+		const queued = [append(first, 2), append(first, 3)];
+		first.release();
+		await Promise.all(queued);
+		expect(existsSync(lockPath)).toBe(false);
+
+		const second = open();
+		await append(second, 4);
+		expect(second.isDegraded()).toBe(false);
+		expect(chainNs()).toEqual([1, 2, 3, 4]);
+	});
+
+	it("is refused while another writer holds the lock, and leaves that writer's lock in place", async () => {
+		const first = open();
+		await append(first, 1);
+		first.release();
+		const second = open();
+		await append(second, 2);
+		const owner = second.lockOwner?.();
+		expect(owner).toBeDefined();
+
+		await expect(append(first, 3)).rejects.toBeInstanceOf(AuditWriterLockHeldError);
+		expect(existsSync(lockPath)).toBe(true);
+		expect(second.lockOwner?.()).toEqual(owner);
+
+		await append(second, 4);
+		expect(second.isDegraded()).toBe(false);
+		expect(chainNs()).toEqual([1, 2, 4]);
+	});
+});
+
 describe("Audit Chain Writer — lockAtCreate (the lock taken in the factory)", () => {
 	let tempDir: string;
 	const writers: Array<ReturnType<typeof createAuditWriter>> = [];
