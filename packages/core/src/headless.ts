@@ -146,8 +146,10 @@ import {
 	captureJob,
 	captureUsageTo,
 	type JobCapture,
+	type JobType,
 	type ReleaseClass,
 	releaseClassRefusal,
+	type TypeSource,
 	usageTimeRefusal,
 } from "./shared/job.js";
 import {
@@ -170,7 +172,19 @@ import { governorVaultBase } from "./shared/vault-base.js";
 // the root export for the argument type of a method it can already see here.
 export type { EnvelopeDescriptor, EnvelopeStatus } from "./budget/context.js";
 // The wire's ISO-8601 UTC rule for `usageFrom`/`usageTo`, shared for the reason above.
-export { RELEASE_CLASSES, type ReleaseClass, usageTimeRefusal } from "./shared/job.js";
+// `JOB_TYPES`/`TYPE_SOURCES` are the closed lists `AuthorizeParams.jobType`/`typeSource` accept;
+// an integration that offers a choice, or validates one before sending, reads them here.
+export {
+	JOB_TYPES,
+	type JobType,
+	jobTypeRefusal,
+	RELEASE_CLASSES,
+	type ReleaseClass,
+	TYPE_SOURCES,
+	type TypeSource,
+	typeSourceRefusal,
+	usageTimeRefusal,
+} from "./shared/job.js";
 // Same reason for the principal: an integration that passes `principal` to
 // `authorize()` gets its type, its field rule and its ledger tags from the entry
 // point it already imports — the tags are what a `query_transfers` roll-up filters on.
@@ -274,6 +288,13 @@ export interface Authorization {
 	 */
 	job?: string | undefined;
 	/**
+	 * The job's TYPE and who declared it, for REPORTING: copied from the authorize capture and
+	 * never read back by the governor, exactly like `job` (a caller editing the handle changes
+	 * no record). A declaration, not evidence. Absent for an untyped call.
+	 */
+	jobType?: JobType | undefined;
+	typeSource?: TypeSource | undefined;
+	/**
 	 * The ledger's pending timeout this call's hold was reserved with, in ms
 	 * (`LEDGER_HOLD_TIMEOUT_MS`): TigerBeetle expires the hold on its own that long
 	 * after creating it. Absent when no ledger hold was made (dry run). A DURATION,
@@ -300,7 +321,8 @@ interface AuthorizationCapture {
 	/** The frozen principal captured at authorize, or `undefined` when none was given. */
 	readonly principal: Principal | undefined;
 	/**
-	 * The frozen job labels captured at authorize (`job`, `jobState`, `usageFrom`);
+	 * The frozen job labels captured at authorize (`job`, `jobType`, `typeSource`,
+	 * `jobState`, `usageFrom`);
 	 * `{}` for an unlabelled call. Every record this hold produces spreads it, so
 	 * release and TTL expiry carry the hold's job and usage start too.
 	 */
@@ -404,6 +426,15 @@ export interface AuthorizeParams {
 	 * the principal's field rule and captured once, before any I/O.
 	 */
 	job?: string | undefined;
+	/**
+	 * Which KIND of work the job was (`JOB_TYPES`), and who declared it (`TYPE_SOURCES`).
+	 * Same standing as `job`: a label, never a payer, validated and captured once, before
+	 * any I/O. A type needs a `job` (a type labels a job); `typeSource` needs a `jobType`;
+	 * `jobState: "invalid"` excludes both. A violation is a `TypeError`. A SETTLE carries
+	 * neither: the type is fixed by this capture, and no later params can relabel the hold.
+	 */
+	jobType?: JobType | undefined;
+	typeSource?: TypeSource | undefined;
 	/** `"invalid"` when the caller's job state could not be trusted; exclusive with `job`. */
 	jobState?: "invalid" | undefined;
 	/** When the usage this hold covers began (ISO-8601 UTC); inherited by release and expiry records. */
@@ -1421,6 +1452,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// before any I/O, and every record below spreads this one capture.
 			const jobAudit = captureJob({
 				job: params.job,
+				jobType: params.jobType,
+				typeSource: params.typeSource,
 				jobState: params.jobState,
 				usageFrom: params.usageFrom,
 			});
@@ -1817,6 +1850,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// or transports it.
 				...(captured !== undefined ? { costCenter: captured.attribution.costCenter } : {}),
 				...(jobAudit.job !== undefined ? { job: jobAudit.job } : {}),
+				...(jobAudit.jobType !== undefined ? { jobType: jobAudit.jobType } : {}),
+				...(jobAudit.typeSource !== undefined ? { typeSource: jobAudit.typeSource } : {}),
 			};
 			// destroy() may have begun while this call awaited (the budget lock, the policy,
 			// the reserve). It claims every hold registered before it, and a hold registered

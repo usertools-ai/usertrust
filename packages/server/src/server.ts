@@ -9,8 +9,10 @@ import type {
 	AbortOutcome,
 	Authorization,
 	Governor,
+	JobType,
 	ReleaseClass,
 	ReleaseOutcome,
+	TypeSource,
 } from "usertrust";
 import { sanitizeReleaseReason } from "usertrust";
 import { sanitizeMapped, scrubForStderr } from "./cli/scrub.js";
@@ -67,6 +69,12 @@ const SERVER_CAPABILITIES = Object.freeze([
 	// `usageTo` (and a `job`/`jobState` it must agree with). All recorded verbatim on
 	// the audit records, none a pricing input, none selecting a wallet.
 	"job",
+	// `job-type`: authorize accepts `jobType` (the closed `JOB_TYPES` list) and `typeSource`
+	// (`explicit` | `agent`) beside a `job`, and settle accepts either only to be CHECKED against
+	// the hold's. Both are recorded verbatim on every record that carries `job`. A type is a
+	// DECLARATION, not evidence, and no pricing, policy or wallet input. An older server strips
+	// both keys, so a client sends them only to a server that lists this.
+	"job-type",
 	// `settle-unrecoverable`: `POST /v1/settle` for a transferId this server holds no hold for no
 	// longer answers a bare 404 (and drops real provider spend): it answers `410
 	// settlement_unrecoverable` (recorded on the chain, counted per tenant as
@@ -139,7 +147,13 @@ interface PendingEntry {
 	 * parse of the authorize body: what a settle's `job` is checked against, and the
 	 * floor of its `usageTo`. Never read from the handle, which is the caller's.
 	 */
-	labels: { job?: string; jobState?: "invalid"; usageFrom?: string };
+	labels: {
+		job?: string;
+		jobType?: JobType;
+		typeSource?: TypeSource;
+		jobState?: "invalid";
+		usageFrom?: string;
+	};
 }
 
 /**
@@ -1700,6 +1714,8 @@ export function createUsertrustServer(opts: {
 			startedMono,
 			labels: {
 				...(parsed.data.job === undefined ? {} : { job: parsed.data.job }),
+				...(parsed.data.jobType === undefined ? {} : { jobType: parsed.data.jobType }),
+				...(parsed.data.typeSource === undefined ? {} : { typeSource: parsed.data.typeSource }),
 				...(parsed.data.jobState === undefined ? {} : { jobState: parsed.data.jobState }),
 				...(parsed.data.usageFrom === undefined ? {} : { usageFrom: parsed.data.usageFrom }),
 			},
@@ -1744,7 +1760,8 @@ export function createUsertrustServer(opts: {
 			sendJson(res, 400, { error: "bad_request", reason: "invalid settle request" });
 			return;
 		}
-		const { transferId, job, jobState, ...usage } = parsed.data;
+		// The echo fields are taken OUT of `usage`: they are checked below, never metered or passed on.
+		const { transferId, job, jobState, jobType, typeSource, ...usage } = parsed.data;
 		const entry = pending.get(transferId);
 		if (!entry || entry.tenantId !== tenant.id) {
 			await handleUnheldSettle(tenant, transferId, usage, res);
@@ -1761,6 +1778,19 @@ export function createUsertrustServer(opts: {
 			sendJson(res, 400, {
 				error: "bad_request",
 				reason: "settle job differs from the hold's job",
+			});
+			return;
+		}
+		// The type is fixed by the authorize capture exactly as the job is: an echo that names a
+		// type (or a source) the hold does not carry, including any type on an untyped hold, is
+		// refused before the claim.
+		if (
+			(jobType !== undefined && jobType !== entry.labels.jobType) ||
+			(typeSource !== undefined && typeSource !== entry.labels.typeSource)
+		) {
+			sendJson(res, 400, {
+				error: "bad_request",
+				reason: "settle job type differs from the hold's",
 			});
 			return;
 		}
@@ -1873,7 +1903,7 @@ export function createUsertrustServer(opts: {
 	async function handleUnheldSettle(
 		tenant: TenantConfig,
 		transferId: string,
-		usage: Omit<SettleRequest, "transferId" | "job" | "jobState">,
+		usage: Omit<SettleRequest, "transferId" | "job" | "jobState" | "jobType" | "typeSource">,
 		res: ServerResponse,
 	): Promise<void> {
 		const key = `${tenant.id}\0${transferId}`;

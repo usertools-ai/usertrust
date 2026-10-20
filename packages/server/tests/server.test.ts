@@ -115,6 +115,7 @@ describe("HTTP control plane", () => {
 				"release",
 				"cache-write-1h",
 				"job",
+				"job-type",
 				"settle-unrecoverable",
 				"refused",
 			]);
