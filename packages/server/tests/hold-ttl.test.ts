@@ -156,11 +156,15 @@ describe("an authorize may ask its hold to live longer (`holdTtlMs`)", () => {
 		expect(maxHoldLife({})).toBe(DEFAULT_MAX_PENDING_TTL_MS);
 		expect(maxHoldLife({ maxPendingTtlMs: Number.NaN })).toBe(DEFAULT_MAX_PENDING_TTL_MS);
 	});
+});
 
 describe("`release-waits`: a release that finds the hold taken by another terminal waits for it", () => {
 	it("a release racing the sweep's slow void answers 404 only once that void has landed", async () => {
 		const fake = createFakeGovernor({ releaseDelayMs: 400 });
-		server = createUsertrustServer({ config: config({ pendingTtlMs: 300_000 }), factory: async () => fake.governor });
+		server = createUsertrustServer({
+			config: config({ pendingTtlMs: 300_000 }),
+			factory: async () => fake.governor,
+		});
 		const { port } = await server.listen();
 		const base = `http://127.0.0.1:${port}`;
 		const { json } = await authorize(base);
@@ -177,6 +181,27 @@ describe("`release-waits`: a release that finds the hold taken by another termin
 		expect(res.status).toBe(404);
 		expect(landedAtAnswer).toBe(true);
 		expect(await sweeping).toBe(1);
+	});
+
+	it("a terminal still running past the wait is a 409 `hold_active` (retry), never a 404", async () => {
+		const fake = createFakeGovernor({ releaseDelayMs: 600 });
+		server = createUsertrustServer({
+			config: config({ pendingTtlMs: 300_000 }),
+			factory: async () => fake.governor,
+			releaseWaitMs: 50,
+		});
+		const { port } = await server.listen();
+		const base = `http://127.0.0.1:${port}`;
+		const { json } = await authorize(base);
+		const sweeping = server.sweepExpired(Date.now() + 10 * MINUTE);
+		const res = await fetch(`${base}/v1/release`, {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: `Bearer ${KEY}` },
+			body: JSON.stringify({ transferId: String(json.transferId) }),
+		});
+		expect(res.status).toBe(409);
+		expect(((await res.json()) as { error: string }).error).toBe("hold_active");
+		await sweeping;
 	});
 
 	it("/v1/health lists `release-waits`", async () => {

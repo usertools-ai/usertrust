@@ -86,7 +86,8 @@ const SERVER_CAPABILITIES = Object.freeze([
 	// `release-waits`: `POST /v1/release` for a hold another terminal has taken (the TTL sweep's void,
 	// a settle, an abort) waits for that terminal, bounded as a settle waits (`RELEASE_WAIT_MAX_MS`),
 	// before it answers. So its 404 `unknown transferId` means the hold's funds are free: a client
-	// may replace it at once. Without it, a 404 can come while the void is still in flight.
+	// may replace it at once. Past the bound it answers 409 `hold_active` (retry), never a 404.
+	// Without it, a 404 can come while the void is still in flight.
 	"release-waits",
 ]);
 /**
@@ -1163,6 +1164,11 @@ export function createUsertrustServer(opts: {
 	 * For tests: a server leaves it unset.
 	 */
 	healthKeepAliveMs?: number;
+	/**
+	 * The longest a release waits for another terminal to land (`release-waits`), in ms. Defaults to
+	 * `RELEASE_WAIT_MAX_MS` (30 s). For tests: a server leaves it unset.
+	 */
+	releaseWaitMs?: number;
 }): UsertrustServer {
 	const { config } = opts;
 	const sink = opts.log;
@@ -2058,15 +2064,26 @@ export function createUsertrustServer(opts: {
 
 	/**
 	 * Wait for the terminal that took this hold out of `pending` (`claimed`) to land, bounded as a
-	 * settle racing it is (`RELEASE_WAIT_MAX_MS`). Nothing to wait for when none is running.
+	 * settle racing it is (`RELEASE_WAIT_MAX_MS`): true once it has (or when none is running), false
+	 * when the bound ran out first and it still holds the hold.
 	 */
-	async function terminalLanded(tenantId: string, transferId: string): Promise<void> {
+	async function terminalLanded(tenantId: string, transferId: string): Promise<boolean> {
 		const inFlight = claimed.get(`${tenantId}\0${transferId}`);
-		if (inFlight === undefined) return;
-		await Promise.race([
-			inFlight.done,
-			new Promise<void>((resolve) => setTimeout(resolve, RELEASE_WAIT_MAX_MS).unref()),
+		if (inFlight === undefined) return true;
+		const waitMs = opts.releaseWaitMs ?? RELEASE_WAIT_MAX_MS;
+		return Promise.race([
+			inFlight.done.then(() => true),
+			new Promise<boolean>((resolve) => setTimeout(() => resolve(false), waitMs).unref()),
 		]);
+	}
+
+	/** A release that waited out another terminal's bound: the hold is not yet ended, so retry. */
+	function answerStillEnding(res: ServerResponse, transferId: string): void {
+		sendJson(res, 409, {
+			error: "hold_active",
+			reason: "another terminal is still ending this hold: retry the release",
+			transferId,
+		});
 	}
 
 	async function handleRelease(
@@ -2083,8 +2100,12 @@ export function createUsertrustServer(opts: {
 		let entry = pending.get(transferId);
 		if (!entry || entry.tenantId !== tenant.id) {
 			// Taken by another terminal (`release-waits`): wait for it to land, so a 404 says the funds are
-			// free. One that THREW put the hold back, and this release ends it after all.
-			await terminalLanded(tenant.id, transferId);
+			// free. One that THREW put the hold back, and this release ends it after all. One still running
+			// past the bound is a 409, never a 404 that would say the funds are free.
+			if (!(await terminalLanded(tenant.id, transferId))) {
+				answerStillEnding(res, transferId);
+				return;
+			}
 			entry = pending.get(transferId);
 		}
 		if (!entry || entry.tenantId !== tenant.id) {
@@ -2111,7 +2132,10 @@ export function createUsertrustServer(opts: {
 			// ended), so this request released nothing and must not say it did. The entry
 			// stays out: a hold the governor does not own is not the sweep's to meet again.
 			// A terminal that took it first is waited for, as above (`release-waits`).
-			if (outcome === NOT_CLAIMED) await terminalLanded(tenant.id, transferId);
+			if (outcome === NOT_CLAIMED && !(await terminalLanded(tenant.id, transferId))) {
+				answerStillEnding(res, transferId);
+				return;
+			}
 			sendJson(res, 404, { error: "not_found", reason: "unknown transferId" });
 			return;
 		}
