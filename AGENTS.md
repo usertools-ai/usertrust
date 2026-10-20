@@ -1531,13 +1531,15 @@ carried, verbatim (see the DLQ note above).
 
 **Redaction never mutates the caller's object, and it rewrites content only.** `redactPII` deep-clones;
 `redactContent` (`policy/pii-content.ts`) copies only the containers on the way to a replaced value and
-passes everything else by reference. That is what makes `pii: "redact"` safe: PII the prompt scan finds
-never egresses, and the outbound request is a copy with each content value that holds PII replaced.
-One closed per-provider schema in `policy/pii-content.ts` names the content fields for BOTH the scan
-and the redaction, so their scopes are equal by construction; every control field (credentials,
-headers, ids, `metadata`, tool declarations, replayed reasoning) is sent as written, and a field the
-schema does not name is left alone and reported once per governor under
-`USERTRUST_PII_UNLISTED_FIELD` (see LIMITATIONS.md, section 11). A field added to a provider's request type
+passes everything else by reference. Every mode decides on ONE scan, `detectPII` over every string in
+the prompt fields, control values included (`extractPromptParts`); never narrow it to the content
+schema, or `"block"` lets out what it refused before. A closed per-provider schema in
+`policy/pii-content.ts` names the content fields `"redact"` rewrites; every control field
+(credentials, headers, ids, `metadata`, tool declarations, replayed reasoning) is sent as written,
+and a field the schema does not name is not rewritten and is reported once per governor under
+`USERTRUST_PII_UNLISTED_FIELD`. That is what makes `pii: "redact"` safe: the copy is scanned again,
+and PII the scan still finds in it (a value redaction leaves as written) refuses the call as
+`"block"` does, so PII the scan finds never egresses (see LIMITATIONS.md, section 11). A field added to a provider's request type
 belongs in that schema, and `tests/policy/pii-content-sdk-types.test-d.ts` fails until it is there.
 `"block"` throws before any egress; `"warn"` forwards verbatim and redacts only the audit copy.
 

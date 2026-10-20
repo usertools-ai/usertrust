@@ -135,7 +135,7 @@ Default: `"warn"`. PII detection mode, applied to the prompt text of each govern
 
 | Mode | Behavior |
 |------|----------|
-| `redact` | When the prompt scan finds PII, forward a copy of the request in which each matching content string (the text the model reads) is replaced by `[REDACTED:<types>]`; every other field, such as credentials, headers, cache keys and `metadata`, is sent as written |
+| `redact` | When the prompt scan finds PII, forward a copy of the request in which each matching content string (the text the model reads) is replaced by `[REDACTED:<types>]`; every other field, such as credentials, headers, cache keys and `metadata`, is sent as written. PII the scan finds in a value it cannot rewrite (a name, an id, an object key or a number in tool-call `arguments`, replayed reasoning) throws a `PolicyDeniedError`, as `block` does |
 | `warn` | Allow the request unchanged; the `llm_call` audit event records the PII types and paths (never the values) |
 | `block` | Throw a `PolicyDeniedError` if the prompt scan finds PII |
 | `off` | Disable PII detection entirely |

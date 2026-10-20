@@ -19,28 +19,30 @@ Set the `pii` field in the config file `trust()` loads: `.usertrust/usertrust.co
 |------|----------|
 | `"warn"` | Default. Forward the request unchanged. The `llm_call` audit event records the PII types and the paths where they were found, never the values. |
 | `"block"` | Throw `PolicyDeniedError` before anything is sent, when the scan finds PII. |
-| `"redact"` | When the scan finds PII, forward a copy of the request in which the content that holds it is replaced, and every other field is as you wrote it (see [What redaction does](#what-redaction-does)). |
+| `"redact"` | When the scan finds PII, forward a copy of the request in which the content that holds it is replaced, and every other field is as you wrote it. If the scan finds PII in a value redaction leaves as written, throw `PolicyDeniedError` instead, before anything is sent (see [What redaction does](#what-redaction-does)). |
 | `"off"` | Disable PII detection. |
 
 ## What the scan reads
 
-The scan reads the request's **content**, inside its prompt fields, and nothing else. The content is a closed list per provider, written from each SDK's own request types: the text of messages, tool results, and the arguments and inputs of earlier tool calls. Inside the prompt fields, the **control** values beside it are not read: ids, names, URLs, media and file data, citations, cache markers, and the model's own replayed reasoning, which the provider needs back unchanged.
+Every mode decides on the same scan: every string value inside the request's **prompt fields**, at any depth, and nothing outside them. That includes the **control** values beside the text: ids, names, URLs, media data, and the model's own replayed reasoning. A tool call's `arguments` is checked as one string, keys and numbers included.
 
-| Client method | Prompt fields | Content read inside them | Not read |
+`"redact"` rewrites less than that: only the **content**, the text the model reads, which is a closed list per provider, written from each SDK's own request types. The control values are left as you wrote them, because the provider needs them back unchanged.
+
+| Client method | Prompt fields (scanned) | Content (what `"redact"` rewrites) | Left as written by `"redact"` (scanned only inside the prompt fields) |
 |---|---|---|---|
 | Anthropic `messages.create`, `messages.stream`, `messages.parse` (and the `beta.messages` equivalents) | `messages`, and `system` when it is a plain string | a string message; `text` blocks; a document's `title`, `context` and text; search results' `title` and text; `tool_use`, `server_tool_use` and `mcp_tool_use` `input` (its string values); tool results, including code execution and bash `stdout` / `stderr`, text editor output and fetched pages; advisor results; mid-conversation system text | `thinking`, `redacted_thinking` and `compaction` blocks; images, base64, URL and file documents; citations; ids and names; `system` given as an array of blocks; `tools`, `tool_choice`, `metadata`, `mcp_servers`, `stop_sequences` and every other request field |
 | OpenAI `chat.completions.create` | `messages` | the text of every message and text part; an assistant's refusal; tool calls' `arguments` (as JSON) and custom tool calls' `input`; a legacy `function_call`'s `arguments` | names, `tool_call_id`, tool call ids; image, audio and file parts; an assistant's `audio`; `tools` and `functions` (definitions), `metadata`, `user`, `prompt_cache_key`, `safety_identifier`, `prediction` and every other request field |
 | OpenAI `responses.create` | `input` and `instructions` when it is a string | message text (`input_text`, `output_text`, `refusal`); function, custom tool and MCP calls' arguments and outputs, an MCP call's error, an MCP approval's reason; shell, local shell and apply_patch outputs; a program's code and result; a tool search call's arguments | `reasoning` and `compaction` items, item references; local shell and apply_patch calls (their commands, environment and patches); image and file parts; annotations; ids and names; `tools`, `prompt`, `metadata`, `text`, `previous_response_id` and every other request field; content held server-side by an earlier response |
 | Google `models.generateContent` | `contents` | text parts; `functionCall.args` and `functionResponse.response` (their string values); executable code and its output; tool calls' args and tool responses | parts marked `thought: true` or carrying a non-empty `thoughtSignature`; inline and file data; ids and names; everything in `config`, including `systemInstruction`, `httpOptions` and `tools` (callable tool declarations, MCP servers) |
 
-A field the list does not name, such as one a newer SDK adds or a content block of a type it does not know, is neither scanned nor redacted. It is sent as written, and each governor reports it once, by its path and never its value, as a process warning with the code `USERTRUST_PII_UNLISTED_FIELD` (also printed with `console.warn`). A key or block type that is not a plain identifier, or that itself looks like PII, is shown in that path as `<not shown>`.
+A field the content list does not name, such as one a newer SDK adds or a content block of a type it does not know, is not redacted. Under `"redact"`, each governor reports it once, by its path and never its value, as a process warning with the code `USERTRUST_PII_UNLISTED_FIELD` (also printed with `console.warn`). A key or block type that is not a plain identifier, or that itself looks like PII, is shown in that path as `<not shown>`.
 
 Other things the scan never reads:
 
 - **Responses.** Only the request is scanned. The model's output is not.
-- **Object keys.** Only string values are checked, so a key that spells an email address is not.
-- **Non-string values.** A phone number stored as a JSON number is not a string and is not checked.
-- **Encoded content.** A string is checked as written. Base64, images, PDFs and other encodings are not decoded. The one exception is a tool call's JSON `arguments` string, whose values are checked one by one.
+- **Object keys.** Only string values are checked, so a key of an object in the request that spells an email address is not. A tool call's `arguments` is a single string, so the keys in its text are checked.
+- **Non-string values.** A phone number stored as a number value is not a string and is not checked. Inside a tool call's `arguments` text it is.
+- **Encoded content.** A string is checked as written. Base64, images, PDFs, JSON escapes and other encodings are not decoded.
 
 ### Governed actions and the headless governor
 
@@ -71,17 +73,19 @@ Each string is tested against these patterns. A match anywhere inside the string
 
 ## What redaction does
 
-`"redact"` rewrites exactly the content the scan reads. When the scan finds PII, usertrust forwards a copy of the request in which every content string that matches a pattern is replaced by `[REDACTED:<types>]`, for example `[REDACTED:email,phone]`.
+When the scan finds PII, usertrust forwards a copy of the request in which every content string that matches a pattern is replaced by `[REDACTED:<types>]`, for example `[REDACTED:email,phone]`.
 
 - The replacement is for the **whole string value**, not just the matched characters: a message that contains one email address is replaced in full.
 - A tool call's JSON `arguments` string keeps its text: only the string values inside it that match are replaced, in place, so it is still valid JSON and every other character (keys, numbers of any size, whitespace) is sent as written. A string that is not JSON is replaced in full. Keys are never replaced.
+- To find those values, redaction decodes a tool call's JSON `arguments`, so it also replaces a value written with JSON escapes, which the scan does not match and `"block"` does not refuse.
 - **Every control field is sent as you wrote it**: MCP server credentials and headers, `httpOptions` headers, cache keys, safety identifiers, `metadata`, ids, and replayed reasoning, which the provider refuses if it is changed. They are not redacted even when the prompt beside them is.
+- **PII the scan finds in a value redaction leaves as written refuses the call**, as `"block"` does: an address in a message's `name` or in replayed reasoning, an object key or a number in a tool call's `arguments`, a value in a field inside the prompt fields that the content list does not name. `PolicyDeniedError` is thrown before anything is sent. `"redact"` never sends a value the scan detects.
 - PII in a field the scan does not read (a `tools` description, a `system` block array, a Google `config.systemInstruction`) goes to the provider as written.
 - Your own object is never changed; usertrust redacts a copy.
 
 ## What is recorded
 
-With `"warn"` or `"redact"`, the `llm_call` audit event carries `piiDetected` (the types) and `piiPaths` (where, for example `[0].content(email)`), computed over every string in the prompt fields, control values included: a type recorded there can sit in a value that was sent as written. The values themselves are never stored.
+With `"warn"` or `"redact"`, the `llm_call` audit event carries `piiDetected` (the types) and `piiPaths` (where, for example `[0].content(email)`), computed by the same scan. The values themselves are never stored.
 
 ## PIIDetection result
 

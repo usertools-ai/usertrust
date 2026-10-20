@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * Which parts of an LLM request the PII scan reads, and the only parts `pii: "redact"` rewrites.
+ * The only parts of an LLM request `pii: "redact"` rewrites.
  *
  * A request carries two kinds of string. CONTENT is text the model reads: the prompt, tool
  * results, the arguments of earlier tool calls. CONTROL is everything else the provider or a
@@ -12,15 +12,17 @@
  * what it does (a different cache key), so it is sent exactly as the caller wrote it.
  *
  * Each provider's request is described by a CLOSED schema below, derived from the request types
- * of the provider SDKs (`@anthropic-ai/sdk`, `openai`, `@google/genai`). The scan reads the
- * content sites the schema names, and redaction replaces only those, in a copy: every other value
- * of the request, at any depth, is the caller's own value, by reference. A field the schema does
- * not name (a newer SDK's field, a block type it does not know) is neither read nor rewritten;
- * it is reported by its path, never its value, so a gap in the schema is seen instead of guessed.
+ * of the provider SDKs (`@anthropic-ai/sdk`, `openai`, `@google/genai`). Redaction replaces the
+ * content sites the schema names, in a copy: every other value of the request, at any depth, is
+ * the caller's own value, by reference. A field the schema does not name (a newer SDK's field, a
+ * block type it does not know) is not rewritten; it is reported by its path, never its value, so
+ * a gap in the schema is seen instead of guessed.
  *
- * The fields read are those the scan read before (the prompt): Anthropic `messages` and a string
- * `system`, OpenAI chat `messages`, OpenAI Responses `input` and `instructions`, Google `contents`.
- * Inside them, only content is read.
+ * The content sites lie inside the prompt fields: Anthropic `messages` and a string `system`,
+ * OpenAI chat `messages`, OpenAI Responses `input` and `instructions`, Google `contents`. What
+ * decides whether a call holds PII is not this module: every mode, redact included, decides on
+ * `detectPII` over every string in those fields, control values included, so a value it detects
+ * that redaction leaves as written is refused (govern.ts, step d).
  */
 
 import type { LLMClientKind } from "../shared/types.js";
@@ -601,13 +603,16 @@ const googlePart: ChooseNode = {
 			: GOOGLE_PART,
 };
 export const GOOGLE_CONTENT = obj({ role: C, parts: arr(googlePart) });
-/** An element of `contents`: a string, a Content (`parts` / `role`), or a bare Part. */
+/**
+ * An element of `contents`: a string, a Content, or a bare Part. An object is a Content only when
+ * its `parts` is an array, as the SDK decides it (`_isContent`) and google-afc.ts `isContent` does;
+ * anything else, `{ role: "user", text }` and `{ parts: null, text }` included, is sent as a Part.
+ */
 const googleContentsElement = either({
 	string: T,
 	object: {
 		kind: "choose",
-		choose: (value) =>
-			value.parts !== undefined || value.role !== undefined ? GOOGLE_CONTENT : googlePart,
+		choose: (value) => (Array.isArray(value.parts) ? GOOGLE_CONTENT : googlePart),
 	},
 });
 export const GOOGLE_REQUEST = obj({
@@ -984,7 +989,7 @@ export function reportUnlistedFields(
 		}
 		reported.add(path);
 		warn(
-			`PII scan: ${PROVIDER_NAMES[kind]} request field ${scrubForWarning(path)} is not in the content schema; it is neither scanned nor redacted, and is sent as written`,
+			`PII scan: ${PROVIDER_NAMES[kind]} request field ${scrubForWarning(path)} is not in the content schema; redaction does not rewrite it`,
 		);
 	}
 }

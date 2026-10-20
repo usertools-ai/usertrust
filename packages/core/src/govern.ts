@@ -2264,13 +2264,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 					// d. PII check + redact-egress
 					if (config.pii !== "off") {
-						// The scan reads the request's CONTENT (what the model reads) and redaction
-						// replaces only that: every control field (credentials, headers, cache keys,
-						// metadata, ids, replayed reasoning) is sent as the caller wrote it. A field
-						// the provider's schema does not name is left alone and reported by path.
-						const contentScan = scanContent(params, requestSchema(params, kind));
-						reportUnlistedFields(kind, contentScan.unlisted, piiUnlistedReported);
-						const piiResult = detectContentPII(contentScan);
+						// Every mode decides on one scan: every string in the prompt fields, control
+						// values included. Redaction below rewrites less than this reads, never more.
+						const piiResult = detectPII(promptParts);
 						if (piiResult.found && config.pii === "block") {
 							// block mode: throw BEFORE any egress.
 							denial.denialClass = "pii";
@@ -2282,14 +2278,38 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								'PII enforcement blocked this call. Use { pii: "warn" } to log instead, or { pii: "redact" } to strip PII before egress.',
 							);
 						}
-						if (config.pii === "redact" && piiResult.found) {
-							// redact mode: forward a copy with each content value that holds PII
-							// replaced. Only the containers on the way to a replaced value are copied;
-							// everything else is the caller's own value, by reference, so Google's
-							// `config.abortSignal` and callable tools reach the SDK as they were. The
-							// caller's original object is never mutated.
-							const redactedBody = redactContent(params, contentScan) as Record<string, unknown>;
-							forwardArgs = [redactedBody, ...args.slice(1)];
+						if (config.pii === "redact") {
+							// redact mode: forward a copy with each CONTENT value (what the model reads)
+							// that holds PII replaced. Every control value (credentials, headers, cache
+							// keys, metadata, ids, replayed reasoning) is sent as the caller wrote it. Only
+							// the containers on the way to a replaced value are copied; everything else is
+							// the caller's own value, by reference, so Google's `config.abortSignal` and
+							// callable tools reach the SDK as they were. The caller's original object is
+							// never mutated. A field the provider's schema does not name is not rewritten,
+							// and is reported by path.
+							const contentScan = scanContent(params, requestSchema(params, kind));
+							reportUnlistedFields(kind, contentScan.unlisted, piiUnlistedReported);
+							const rewrite = detectContentPII(contentScan).found;
+							const redactedBody = rewrite
+								? (redactContent(params, contentScan) as Record<string, unknown>)
+								: params;
+							// What the scan above detects and redaction cannot rewrite without changing
+							// the call (a name or an id, an object key, a number in a tool call's JSON
+							// arguments, replayed reasoning, a field the schema does not name) is refused
+							// as block refuses it, before any egress: redact never sends a value the scan
+							// detects.
+							const left = piiResult.found
+								? detectPII(extractPromptParts(redactedBody, kind))
+								: piiResult;
+							if (left.found) {
+								denial.denialClass = "pii";
+								denial.piiTypes = left.types;
+								throw new PolicyDeniedError(
+									`PII detected: ${left.types.join(", ")}`,
+									'PII redaction cannot remove it without changing a value the call needs as written (a name or id, an object key, a number, replayed reasoning). Remove it from the request, or use { pii: "warn" } to send it and log the types.',
+								);
+							}
+							if (rewrite) forwardArgs = [redactedBody, ...args.slice(1)];
 						}
 						// "warn" mode: continue, no transform (audit copy is redacted later).
 					}

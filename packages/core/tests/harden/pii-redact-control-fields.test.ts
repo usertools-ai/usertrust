@@ -21,6 +21,7 @@ import { GoogleGenAI } from "@google/genai";
 import OpenAI from "openai";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { type TrustEngine, trust } from "../../src/govern.js";
+import { PolicyDeniedError } from "../../src/shared/errors.js";
 
 vi.mock("tigerbeetle-node", () => ({
 	createClient: vi.fn(() => ({
@@ -123,7 +124,7 @@ afterEach(async () => {
 	rmSync(vault, { recursive: true, force: true });
 });
 
-async function govern(raw: unknown): Promise<Loose> {
+async function govern(raw: unknown, pii: "redact" | "block" | "warn" = "redact"): Promise<Loose> {
 	const engine = {
 		spendPending: vi.fn(async (p: { transferId: string }) => ({ transferId: p.transferId })),
 		postPendingSpend: vi.fn(async () => {}),
@@ -132,7 +133,7 @@ async function govern(raw: unknown): Promise<Loose> {
 	const client = await trust(raw as Loose, {
 		budget: 1_000_000,
 		vaultBase: vault,
-		pii: "redact",
+		pii,
 		_engine: engine,
 	});
 	open.push(client);
@@ -148,7 +149,7 @@ const anthropic = () =>
 			maxRetries: 0,
 		}),
 	);
-const openai = () =>
+const openai = (pii: "redact" | "block" | "warn" = "redact") =>
 	govern(
 		new OpenAI({
 			apiKey: "k",
@@ -156,8 +157,10 @@ const openai = () =>
 			fetch: recordingFetch as typeof fetch,
 			maxRetries: 0,
 		}),
+		pii,
 	);
-const google = () => govern(new GoogleGenAI({ apiKey: "k" }));
+const google = (pii: "redact" | "block" | "warn" = "redact") =>
+	govern(new GoogleGenAI({ apiKey: "k" }), pii);
 
 const prompt = (pii: boolean) =>
 	pii ? `my email is ${EMAIL}, summarize my order` : "summarize my order";
@@ -274,7 +277,7 @@ describe("under pii redact, through the real SDKs", () => {
 	it("Anthropic: a replayed thinking block is sent byte for byte while the text beside it is redacted", async () => {
 		const thinking = {
 			type: "thinking",
-			thinking: `I will write to ${EMAIL}`,
+			thinking: "I will look up who to write to",
 			signature: "EqQBCkYIBRgCKkB",
 		};
 		const c = await anthropic();
@@ -290,6 +293,32 @@ describe("under pii redact, through the real SDKs", () => {
 		const blocks = bodies[0]?.messages?.[1]?.content;
 		expect(blocks?.[0]).toEqual(thinking);
 		expect(blocks?.[1]).toEqual({ type: "text", text: "[REDACTED:email]" });
+	});
+
+	it("Anthropic: PII in a replayed thinking block, which redaction cannot rewrite, refuses the call and sends nothing", async () => {
+		const c = await anthropic();
+		const call = c.messages.create({
+			model: "claude-sonnet-4-5",
+			max_tokens: 64,
+			messages: [
+				{ role: "user", content: "who do I write to?" },
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "thinking",
+							thinking: `I will write to ${EMAIL}`,
+							signature: "EqQBCkYIBRgCKkB",
+						},
+						{ type: "text", text: "noted" },
+					],
+				},
+				{ role: "user", content: "thanks" },
+			],
+		});
+		await expect(call).rejects.toBeInstanceOf(PolicyDeniedError);
+		await expect(call).rejects.toThrow("PII detected: email");
+		expect(bodies).toHaveLength(0);
 	});
 
 	it("Google: a part whose thoughtSignature key holds undefined or an empty string is content, and is redacted", async () => {
@@ -313,6 +342,37 @@ describe("under pii redact, through the real SDKs", () => {
 		expect(bare).not.toContain(EMAIL);
 		expect(bare).toContain("[REDACTED:email]");
 	});
+
+	it.each([
+		["a role and no parts", { role: "user", text: EMAIL }],
+		["parts that are not an array", { parts: null, text: EMAIL }],
+	])(
+		"Google: an element of contents with %s is a Part, as the SDK sends it, and its text is redacted",
+		async (_, element) => {
+			const c = await google();
+			await c.models.generateContent({ model: "gemini-2.5-flash", contents: [element] as Loose });
+			expect(bodies).toHaveLength(1);
+			const sent = JSON.stringify(bodies[0]);
+			expect(sent).not.toContain(EMAIL);
+			expect(sent).toContain("[REDACTED:email]");
+		},
+	);
+
+	it.each([
+		["a role and no parts", { role: "user", text: EMAIL }],
+		["parts that are not an array", { parts: null, text: EMAIL }],
+	])(
+		"Google: under pii block, an element of contents with %s that holds PII is refused",
+		async (_, element) => {
+			const c = await google("block");
+			const call = c.models.generateContent({
+				model: "gemini-2.5-flash",
+				contents: [element] as Loose,
+			});
+			await expect(call).rejects.toBeInstanceOf(PolicyDeniedError);
+			expect(bodies).toHaveLength(0);
+		},
+	);
 
 	it("Google: a text part the caller hid (non-enumerable), which the SDK still sends, is redacted", async () => {
 		const hidden = Object.defineProperty({}, "text", { value: EMAIL, enumerable: false });
@@ -407,5 +467,80 @@ describe("under pii redact, through the real SDKs", () => {
 			emit.mockRestore();
 			log.mockRestore();
 		}
+	});
+});
+
+/**
+ * Every mode decides on the same scan as before redaction was narrowed to content: every string in
+ * the prompt fields, control values included, each read as written. A value it detects that
+ * redaction leaves as written is refused under redact as block refuses it. `warn` is each row's
+ * control: the same request is sent, with the value as written.
+ */
+describe.each([
+	{
+		where: "an address in a chat message's name",
+		messages: [{ role: "user", name: EMAIL, content: "summarize my order" }],
+		sent: (b: Loose) => b.messages[0].name,
+		value: EMAIL,
+		type: "email",
+	},
+	{
+		where: "an address as an object key in a tool call's JSON arguments",
+		messages: [
+			{ role: "user", content: "send it" },
+			{
+				role: "assistant",
+				content: null,
+				tool_calls: [
+					{
+						id: "call_1",
+						type: "function",
+						function: { name: "send", arguments: `{"${EMAIL}":"primary"}` },
+					},
+				],
+			},
+			{ role: "tool", tool_call_id: "call_1", content: "sent" },
+		],
+		sent: (b: Loose) => b.messages[1].tool_calls[0].function.arguments,
+		value: `{"${EMAIL}":"primary"}`,
+		type: "email",
+	},
+	{
+		where: "a card number as a JSON number in a tool call's arguments",
+		messages: [
+			{ role: "user", content: "pay it" },
+			{
+				role: "assistant",
+				content: null,
+				tool_calls: [
+					{
+						id: "call_1",
+						type: "function",
+						function: { name: "pay", arguments: '{"card":4111111111111111}' },
+					},
+				],
+			},
+			{ role: "tool", tool_call_id: "call_1", content: "paid" },
+		],
+		sent: (b: Loose) => b.messages[1].tool_calls[0].function.arguments,
+		value: '{"card":4111111111111111}',
+		type: "credit_card",
+	},
+])("PII the scan detects in $where", ({ messages, sent, value, type }) => {
+	for (const mode of ["block", "redact"] as const) {
+		it(`pii ${mode} refuses the call and sends nothing`, async () => {
+			const c = await openai(mode);
+			const call = c.chat.completions.create({ model: "gpt-4o", messages });
+			await expect(call).rejects.toBeInstanceOf(PolicyDeniedError);
+			await expect(call).rejects.toThrow(`PII detected: ${type}`);
+			expect(bodies).toHaveLength(0);
+		});
+	}
+
+	it("pii warn (the control) sends it as written", async () => {
+		const c = await openai("warn");
+		await c.chat.completions.create({ model: "gpt-4o", messages });
+		expect(bodies).toHaveLength(1);
+		expect(sent(bodies[0])).toBe(value);
 	});
 });
