@@ -901,11 +901,15 @@ log, which reads as none (job tagging is off for that session; it fails honest, 
 at once can lose one bit, which yields untagged calls and so gaps, never a false clean.
 
 **A hold's life is published, as a duration on one clock.** Both `createTBEngine` factories pass
-`LEDGER_HOLD_TIMEOUT_MS` as the pending transfer's `timeout` explicitly, and a headless
-`Authorization` publishes the same value as `holdTimeoutMs` (absent in dry run).
+the pending transfer's `timeout` explicitly: the life the authorize asked for (`holdTtlMs`, clamped to
+[`LEDGER_HOLD_TIMEOUT_MS`, the governor's `maxHoldTtlMs`] and rounded up to whole seconds, never past
+the ceiling, which is itself in whole seconds), else `LEDGER_HOLD_TIMEOUT_MS`. A headless
+`Authorization` publishes the value used as `holdTimeoutMs` (absent in dry run).
 `usertrust-server` answers every authorize with `expiresInMs` (capability `hold-expiry`): the longest
-the hold can still be pending, the shorter of its `pendingTtlMs` sweep and that timeout, minus the
-hold's age (`remainingLifeMs`). A settle, a void or a restart can end the hold sooner; no expiry can.
+the hold can still be pending, the shorter of its own sweep life (`pendingTtlMs`, or the life its
+authorize asked for, capability `hold-ttl`, clamped to the server's ceiling) and that timeout, minus
+the hold's age (`remainingLifeMs`). The server's clamp, its `/v1/health` `maxHoldTtlMs` and each
+tenant's governor share one ceiling (`maxHoldLife`), so the ledger and the sweep agree. A settle, a void or a restart can end the hold sooner; no expiry can.
 - The sweep ends a hold when that life reaches 0, so the sweep and the answer are one rule.
 - A ledger hold whose handle does not state its timeout gets NO `expiresInMs` (an absence is never read
   as "no limit"), and the sweep falls back to `pendingTtlMs` for it.
@@ -1987,12 +1991,14 @@ this.
 
 There is no root `build` script; each package builds itself (`npm run build -w usertrust`, etc.).
 
-**CI** (`.github/workflows/ci.yml`) runs seven jobs on Node 22, on every push to `master` and every
+**CI** (`.github/workflows/ci.yml`) runs eight jobs on Node 22, on every push to `master` and every
 **non-draft** PR: `agent-config` (the agent-config check, described below), `lint`, `typecheck`,
-`test` (coverage, with the thresholds above), `openclaw-contract` (the host contract, described
-below), `tb-integration` (a real single-node TigerBeetle cluster, sha256-pinned binary), and
-`site-build` (the site's own install, tests and production build). There is **no path filter** —
-every non-draft PR runs all seven regardless of what changed. A draft PR runs `agent-config` alone.
+`test` (coverage, with the thresholds above), `scan-linear` (the detectors' linearity timings in
+`packages/core/tests/harden/scan-linear.test.ts`, run alone and without coverage; `test` excludes
+that file), `openclaw-contract` (the host contract, described below), `tb-integration` (a real
+single-node TigerBeetle cluster, sha256-pinned binary), and `site-build` (the site's own install,
+tests and production build). There is **no path filter**: every non-draft PR runs all eight
+regardless of what changed. A draft PR runs `agent-config` alone.
 
 The TigerBeetle server version in CI is pinned to match `tigerbeetle-node` in `packages/core` and
 must be bumped in lockstep — **never `latest`**. The client must never be newer than the server. The
