@@ -15,6 +15,8 @@ const HOOKS = join(import.meta.dirname, "..", "hooks");
 const SESSION_START = join(HOOKS, "session-start.mjs");
 const PRE = join(HOOKS, "pre-tool-use.mjs");
 const POST = join(HOOKS, "post-tool-use.mjs");
+/** Imported in-process by a computed path, as the other tests import hook modules (no declarations). */
+const TRANSCRIPT = join(HOOKS, "transcript.mjs");
 
 const OPUS = "claude-opus-5-5";
 const HAIKU = "claude-haiku-5-5";
@@ -241,7 +243,7 @@ describe("the model a hold names is the session's own", () => {
 		// In this process the module reads settings from process.env: never an installed config.
 		for (const name of ["UT_CC_CONFIG", "UT_SERVER_URL", "UT_SERVER_KEY"]) delete process.env[name];
 		process.env.UT_CC_STATE_DIR = stateDir;
-		const { holdModelFor, recordSessionModel } = (await import("../hooks/transcript.mjs")) as {
+		const { holdModelFor, recordSessionModel } = (await import(TRANSCRIPT)) as {
 			holdModelFor: (a: Record<string, unknown>) => Promise<{ model: string; source: string }>;
 			recordSessionModel: (session: string, model: unknown) => Promise<void>;
 		};
