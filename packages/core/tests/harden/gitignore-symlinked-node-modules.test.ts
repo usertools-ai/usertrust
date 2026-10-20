@@ -13,25 +13,19 @@
  * (an installed node_modules is a real directory) cannot decide the answer, and run git with no
  * global or system configuration and no global excludes file, so a developer's own ignore rules
  * cannot decide it either. Row (c) is the positive control: the same check reports a path that the
- * rules do not ignore.
+ * rules do not ignore. Row (d) is the mutant: the same rules with the trailing slash put back are
+ * caught.
  */
 
 import { type SpawnSyncReturns, spawnSync } from "node:child_process";
-import {
-	copyFileSync,
-	mkdirSync,
-	mkdtempSync,
-	readFileSync,
-	rmSync,
-	symlinkSync,
-	writeFileSync,
-} from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
+const NODE_MODULES_RULE = /^(\/?node_modules)(\/?)$/gm;
 
 /** The caller's environment without anything that points git at another repository or config. */
 function gitEnv(): NodeJS.ProcessEnv {
@@ -70,7 +64,9 @@ const ignoreFiles = trackedFiles.filter((f) => posix.basename(f) === ".gitignore
 const places = (() => {
 	const found = new Set<string>();
 	for (const file of ignoreFiles) {
-		if (/^\/?node_modules\/?$/m.test(readFileSync(join(REPO_ROOT, file), "utf8"))) {
+		if (
+			new RegExp(NODE_MODULES_RULE.source, "m").test(readFileSync(join(REPO_ROOT, file), "utf8"))
+		) {
 			found.add(posix.dirname(file));
 		}
 	}
@@ -87,8 +83,14 @@ afterAll(() => {
 	for (const dir of scratchDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-/** A scratch repository holding the tracked .gitignore files, with a node_modules in every place. */
-function scratchRepo(kind: "symlink" | "directory"): string {
+/**
+ * A scratch repository holding the tracked .gitignore files (each passed through `rewrite`), with
+ * a node_modules in every place.
+ */
+function scratchRepo(
+	kind: "symlink" | "directory",
+	rewrite: (text: string) => string = (text) => text,
+): string {
 	const repo = mkdtempSync(join(tmpdir(), "ignore-node-modules-"));
 	const target = mkdtempSync(join(tmpdir(), "ignore-node-modules-target-"));
 	scratchDirs.push(repo, target);
@@ -96,7 +98,7 @@ function scratchRepo(kind: "symlink" | "directory"): string {
 	if (init.status !== 0) throw new Error(`git init failed: ${init.stderr}`);
 	for (const file of ignoreFiles) {
 		mkdirSync(join(repo, posix.dirname(file)), { recursive: true });
-		copyFileSync(join(REPO_ROOT, file), join(repo, file));
+		writeFileSync(join(repo, file), rewrite(readFileSync(join(REPO_ROOT, file), "utf8")));
 	}
 	for (const place of places) {
 		const at = join(repo, place, "node_modules");
@@ -144,5 +146,11 @@ describe("a symlinked node_modules is ignored like a directory", () => {
 		const probes = places.map((place) => posix.join(place, "probe.ts"));
 		for (const probe of probes) writeFileSync(join(repo, probe), "");
 		expect(notIgnored(repo, probes)).toEqual(probes);
+	});
+
+	it("(d) mutant: with the trailing slash put back on every rule, the symlinks are caught", () => {
+		const repo = scratchRepo("symlink", (text) => text.replace(NODE_MODULES_RULE, "$1/"));
+		const paths = places.map(nodeModulesIn);
+		expect(notIgnored(repo, paths)).toEqual(paths);
 	});
 });
