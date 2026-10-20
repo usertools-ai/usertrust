@@ -136,6 +136,7 @@ import {
 	callStart,
 	cleanup,
 	clearPending,
+	endExpiredHold,
 	failureOutcome,
 	guardMode,
 	holdExpired,
@@ -2182,11 +2183,12 @@ async function settleBody(transferId, counts, labels) {
 }
 
 async function settleAt(transferId, counts, { keyed, labels = {}, expiresAt }) {
-	if (holdExpired({ expiresAt })) {
-		// Past its recorded life the hold is gone (lib.mjs `holdExpired`), and nothing is sent. So
-		// nothing posted through it, under a key or not: its window is released to a later settle
-		// point, as an unkeyed gone answer releases it, and a keyed window, whose key its ids
-		// derive, is posted there under the same key.
+	if (holdExpired({ expiresAt }) && (await endExpiredHold(transferId, callTimeout()))) {
+		// Past its recorded life, and given back with the server's confirmation (lib.mjs
+		// `endExpiredHold`): no settle is sent, so nothing posted through it, under a key or not.
+		// Its window is released to a later settle point, as an unkeyed gone answer releases it,
+		// and a keyed window, whose key its ids derive, is posted there under the same key.
+		// Unconfirmed, the settle below is sent as before.
 		return {
 			outcome: "released",
 			reason: "the hold is past its life, so no settle was sent",

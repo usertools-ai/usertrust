@@ -49,6 +49,7 @@ import {
 	callStart,
 	claimForSettle,
 	defaultModel,
+	endExpiredHold,
 	estimateTokens,
 	failureOutcome,
 	giveBack,
@@ -205,10 +206,12 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 		return;
 	}
 	const at = { sessionId, agentId, entry };
-	// Past its recorded life the hold is gone (lib.mjs `holdExpired`): no settle is sent, and it
-	// takes the path a gone answer takes, below. Sent, the settle could only fail, as a 410 the
-	// server records as spend it never charged, though the call is charged here, once.
-	const expired = holdExpired(entry);
+	// Past its recorded life the hold is given back first (lib.mjs `endExpiredHold`). Once the
+	// server confirms it ended, no settle is sent, and it takes the path a gone answer takes,
+	// below. Sent, the settle could only fail, as a 410 the server records as spend it never
+	// charged, though the call is charged here, once. Unconfirmed, the settle is sent as before.
+	const expired =
+		holdExpired(entry) && (await endExpiredHold(entry.transferId, withinBudget().timeoutMs));
 	const response = expired
 		? null
 		: await settleOnce(at, { transferId: entry.transferId, ...usage });

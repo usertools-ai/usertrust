@@ -1845,12 +1845,28 @@ export function holdExpiresAt(sentAt, json) {
  * Whether a hold is past its recorded life (`holdExpiresAt`). Then the ledger's pending timeout
  * has voided it, or is about to: a settle can only fail, as a 410 `settlement_unrecoverable` the
  * server records as spend it never charged, though this plugin charges that usage itself (a
- * fresh hold, or a later settle point). So no settle is sent, and the hold takes the path a gone
- * answer takes. Skipping is safe even when a clock is wrong and the hold is still live: nothing
- * posts through it, and it lapses unposted.
+ * fresh hold, or a later settle point). So no settle is sent (`endExpiredHold`), and the hold
+ * takes the path a gone answer takes.
  */
 export function holdExpired(entry, now = Date.now()) {
 	return Number.isSafeInteger(entry?.expiresAt) && now > entry.expiresAt;
+}
+
+/**
+ * End a hold past its life (`holdExpired`) before anything replaces it, and say whether the
+ * server confirms it ended: released (200), or gone (404 `unknown transferId`). The server counts
+ * a hold against the budget until its own sweep, which can run well after the hold's last moment,
+ * so a replacement asked for beside it could be refused; and a clock that is wrong may leave it
+ * live. Unconfirmed, the caller sends the settle as before. No release class: it proves nothing.
+ * Never throws.
+ */
+export async function endExpiredHold(transferId, timeoutMs) {
+	try {
+		const response = await releaseHold(transferId, "the hold is past its life", { timeoutMs });
+		return response.status === 200 || isUnknownTransfer(response);
+	} catch {
+		return false;
+	}
 }
 
 /**

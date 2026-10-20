@@ -42,6 +42,8 @@ let env: Record<string, string>;
 let life: number | undefined;
 /** The capabilities /v1/health publishes. */
 let capabilities: string[];
+/** How a release (or, on a server without one, an abort) is answered. */
+let giveBackAnswer: { status: number; json: unknown };
 let nextTransfer: number;
 
 function startFake(): Promise<number> {
@@ -73,7 +75,9 @@ function startFake(): Promise<number> {
 				}
 				if (req.url === "/v1/settle")
 					return reply(200, { settled: true, transferId: body.transferId });
-				if (req.url === "/v1/release") return reply(200, { released: true });
+				if (req.url === "/v1/release" || req.url === "/v1/abort") {
+					return reply(giveBackAnswer.status, giveBackAnswer.json);
+				}
 				return reply(404, { reason: "unknown route" });
 			});
 		});
@@ -89,6 +93,7 @@ beforeEach(async () => {
 	projectDir = await mkdtemp(join(tmpdir(), "utcc-expiry-project-"));
 	life = 60_000;
 	capabilities = ["hold-expiry", "release"];
+	giveBackAnswer = { status: 200, json: { released: true } };
 	const port = await startFake();
 	env = {
 		UT_CC_STATE_DIR: stateDir,
@@ -177,13 +182,42 @@ describe("a hold's life, as the server states it", () => {
 		expect(result.code).toBe(0);
 		// No settle of the expired hold, so no `settlement_unrecoverable` on the server.
 		expect(settled().map((s) => s.transferId)).toEqual(["tx_2"]);
+		// Given back first, and only then replaced: the server counts a hold against the budget until
+		// its own sweep, so a replacement asked for beside it could be refused.
+		const order = seen.map(
+			(s) => `${s.path} ${s.body.transferId ?? s.body.params?.replaces ?? ""}`,
+		);
+		expect(order.indexOf("/v1/release tx_1")).toBeGreaterThan(-1);
+		expect(order.indexOf("/v1/release tx_1")).toBeLessThan(order.indexOf("/v1/authorize tx_1"));
 		expect(authorizes()[1]?.params?.replaces).toBe("tx_1");
 		expect(await readdir(stateDir)).not.toContain(expect.stringContaining("tx_1"));
 	});
 
+	it("an estimate hold past its life whose give-back the server does not confirm is settled as before", async () => {
+		life = 0;
+		await pre("tu_1", {}, ESTIMATE);
+		await outlive();
+		giveBackAnswer = { status: 503, json: { error: "unavailable" } };
+		await post("tu_1", {}, ESTIMATE);
+		// Unconfirmed, the hold may still be counted, or still live: its own settle is sent.
+		expect(settled().map((s) => s.transferId)).toEqual(["tx_1"]);
+		expect(authorizes()).toHaveLength(1);
+	});
+
+	it("a transcript hold past its life whose give-back the server does not confirm is settled as before", async () => {
+		await runHook(SESSION_START, { session_id: SESSION, source: "startup" }, env);
+		await writeFile(mainTranscript(), response("msg_a"));
+		life = 0;
+		await pre("tu_1", { transcript_path: mainTranscript() });
+		await outlive();
+		giveBackAnswer = { status: 503, json: { error: "unavailable" } };
+		await post("tu_1", { transcript_path: mainTranscript() });
+		expect(settled().map((s) => s.transferId)).toContain("tx_1");
+	});
+
 	it("a transcript hold past its life is never settled: its window is posted once at Stop", async () => {
-		// An older server's capabilities: no keys, so the window goes back unkeyed.
-		capabilities = ["hold-expiry"];
+		// No keys: the window goes back unkeyed.
+		capabilities = ["hold-expiry", "release"];
 		await runHook(SESSION_START, { session_id: SESSION, source: "startup" }, env);
 		await writeFile(mainTranscript(), response("msg_a"));
 		life = 0;
@@ -229,6 +263,8 @@ describe("a hold's life, as the server states it", () => {
 
 	it("an empty transcript hold past its life, on a server that cannot release, is never settled at zero", async () => {
 		capabilities = ["hold-expiry"];
+		// Such a server gives a hold back through abort, which answers that the hold is gone.
+		giveBackAnswer = { status: 404, json: { error: "not_found", reason: "unknown transferId" } };
 		// A response from before metering: read, never posted, so the hold carries no window.
 		await mkdir(projectDir, { recursive: true });
 		await writeFile(mainTranscript(), response("msg_old", 3_600_000));

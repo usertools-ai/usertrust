@@ -733,9 +733,12 @@ Code's permission prompt, or a long Bash command run, for longer than the server
 keeps a hold (five minutes). A server that states each hold's life (`hold-expiry`:
 the authorize answer's `expiresInMs`) lets PreToolUse record when it ends, counted
 from the clock read before the authorize, so never later than the hold's last
-moment. Past it, no settle is sent: it could only fail, as a 410
+moment. Past it, the hold is given back first: the server counts a hold against the
+budget until its own sweep, so a replacement asked for beside it could be refused.
+Once the server confirms it ended, no settle is sent: it could only fail, as a 410
 `settlement_unrecoverable` the server records as spend it never charged, though the
 plugin charges that usage itself. The hold takes the path a gone answer takes, below.
+Unconfirmed, the settle is sent as before.
 An older server states no life, and the settle is sent as before.
 A transcript hold whose settle then answers 404, or is past its life, gives its
 window back to a later settle point (or, authorized under a key, is retried under
