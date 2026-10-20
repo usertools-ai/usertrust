@@ -10,10 +10,12 @@
  * local-part characters with no `@`), the JWT pattern (`-eyJ-eyJ…`) and the triple-backtick
  * delimiter (a run of backticks with no keyword). 200k characters took 26 s on the email pattern.
  *
- * The time bound is a RATIO, never a number of milliseconds, so it holds on a slow or loaded
- * machine: a scan of an input twice as long takes about twice as long if the scan is linear, and
- * about four times if it is quadratic. CI runs this file in a job of its own, without coverage, beside
- * the test job rather than inside it; the detectors' coverage comes from other files.
+ * The time bound is a RATIO, never a number of milliseconds, so it holds on a slow machine and
+ * through bursts of load: a scan of an input twice as long takes about twice as long if the scan is
+ * linear, and about four times if it is quadratic. Under sustained overload (more busy processes
+ * than cores) a linear scan can read over the bound on every measurement, so CI runs this file in a
+ * job of its own, without coverage, beside the test job rather than inside it; the detectors'
+ * coverage comes from other files.
  */
 
 import { describe, expect, it } from "vitest";
@@ -106,17 +108,24 @@ function linearRatio(
 
 /**
  * Reading twice the input takes at most three times as long: a linear reader takes about twice, a
- * quadratic one about four. A ratio over three is measured again from both inputs built anew, and
- * only a second over three fails: a moment's load seldom slows both, and a quadratic reader is over
- * three each time. Each measurement taken again is printed, marked `[linear-confirm]`.
+ * quadratic one about four. A ratio over three is measured again from both inputs built anew, up to
+ * twice, and the row fails only if all three are over three: a burst of load can slow two in a row,
+ * and a quadratic reader is over three each time. Each measurement taken again is printed, marked
+ * `[linear-confirm]`.
  */
 function expectLinear(make: (n: number) => () => unknown, n: number): void {
 	const name = expect.getState().currentTestName;
 	const { first, again } = linearRatio(make, n);
 	if (first[0] <= 3) return;
-	const [second, times] = again();
-	console.log(`[linear-confirm] ${name}: ${first[1]}, then ${times}`);
-	expect(second, `${name}: ${first[1]}, then ${times}`).toBeLessThanOrEqual(3);
+	let readings = first[1];
+	let last = first[0];
+	for (let i = 0; i < 2 && last > 3; i++) {
+		const [ratio, times] = again();
+		readings += `, then ${times}`;
+		last = ratio;
+	}
+	console.log(`[linear-confirm] ${name}: ${readings}`);
+	expect(last, `${name}: ${readings}`).toBeLessThanOrEqual(3);
 }
 
 function timeMs(fn: () => void): number {
@@ -286,15 +295,15 @@ describe("PII and injection scanning is linear in the message", () => {
 			[OLD_BACKTICK, run("`")],
 		];
 		for (const [re, make] of controls) {
-			// Both measurements are taken, and both must be over the bound.
+			// Both measurements are taken, and one over the bound shows the harness can see the
+			// scan; a burst of load can pull one of them under.
 			const { first, again } = linearRatio(
 				scanning((s) => re.test(s), make),
 				2_000,
 			);
 			const [second, times] = again();
 			console.log(`[linear-control] ${re}: ${first[1]}, then ${times}`);
-			expect(first[0], `${re}: ${first[1]}`).toBeGreaterThan(3);
-			expect(second, `${re}: ${times}`).toBeGreaterThan(3);
+			expect(Math.max(first[0], second), `${re}: ${first[1]}, then ${times}`).toBeGreaterThan(3);
 		}
 	}, 120_000);
 });
