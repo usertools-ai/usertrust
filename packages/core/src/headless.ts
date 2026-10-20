@@ -132,7 +132,12 @@ import {
 import { detectPII } from "./policy/pii.js";
 import type { ProxyConnection } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
-import { DEFAULT_BUDGET, LEDGER_HOLD_TIMEOUT_MS, VAULT_DIR } from "./shared/constants.js";
+import {
+	DEFAULT_BUDGET,
+	DEFAULT_MAX_HOLD_TTL_MS,
+	LEDGER_HOLD_TIMEOUT_MS,
+	VAULT_DIR,
+} from "./shared/constants.js";
 import {
 	InsufficientBalanceError,
 	LedgerUnavailableError,
@@ -205,6 +210,14 @@ export interface GovernorOpts extends Omit<TrustOpts, "allowUngoverned"> {
 	 */
 	endpoint?: Partial<EndpointInfo> | undefined;
 	/**
+	 * The longest life an authorize may ask its hold for (`AuthorizeParams.holdTtlMs`),
+	 * in ms: a request above it is clamped to it. An integer no less than
+	 * `LEDGER_HOLD_TIMEOUT_MS` (the life every hold has by default); anything else is a
+	 * `RangeError` at creation. Default `DEFAULT_MAX_HOLD_TTL_MS` (one hour). A longer
+	 * one keeps a hold whose call never reports back reserved for longer.
+	 */
+	maxHoldTtlMs?: number | undefined;
+	/**
 	 * How long destroy() waits for terminals still working (settles, and aborts and
 	 * releases in flight) before it sweeps. Default 5 000 ms. For tests: ignored outside a
 	 * test environment.
@@ -230,6 +243,7 @@ const TRUST_ONLY_OPTS: Readonly<Record<Exclude<keyof TrustOpts, keyof GovernorOp
 const { allowUngoverned: _trustOnly, ...GOVERNOR_TRUST_OPTS_KEYS } = TRUST_OPTS_KEYS;
 const GOVERNOR_OPTS_KEYS: Readonly<Record<keyof GovernorOpts, true>> = {
 	...GOVERNOR_TRUST_OPTS_KEYS,
+	maxHoldTtlMs: true,
 	_destroyDrainMs: true,
 };
 
@@ -408,6 +422,16 @@ export interface AuthorizeParams {
 	jobState?: "invalid" | undefined;
 	/** When the usage this hold covers began (ISO-8601 UTC); inherited by release and expiry records. */
 	usageFrom?: string | undefined;
+	/**
+	 * How long the hold should live, in ms: a call expected to run longer than the default
+	 * (`LEDGER_HOLD_TIMEOUT_MS`, five minutes) asks for its hold to outlive it, so its budget
+	 * stays reserved until it settles. It is the ledger's own pending timeout (TigerBeetle's
+	 * per-transfer `timeout`), clamped to [`LEDGER_HOLD_TIMEOUT_MS`, the governor's
+	 * `maxHoldTtlMs`] and rounded up to whole seconds; the handle's `holdTimeoutMs` says what
+	 * was used. Omitted → the default. A positive integer; anything else is a `TypeError`
+	 * before any I/O.
+	 */
+	holdTtlMs?: number | undefined;
 	/**
 	 * Per-call endpoint scope override — wins over the governor-wide default
 	 * (A3). The effective scope is captured on the Authorization and governs
@@ -1032,6 +1056,7 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 			amount: number;
 			debitAccountId?: bigint | undefined;
 			userData?: PrincipalLedgerTags | undefined;
+			timeoutSeconds?: number | undefined;
 		}): Promise<{ transferId: string }> {
 			// An ATTRIBUTED hold names its own debit account — the cost-center
 			// envelope the governor derived at authorize. Unattributed holds keep
@@ -1045,7 +1070,7 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 					code: XFER_SPEND,
 					// Named, not the client's default: the ledger expires the hold at this
 					// timeout, and a headless handle publishes it (`holdTimeoutMs`).
-					timeoutSeconds: LEDGER_HOLD_TIMEOUT_MS / 1000,
+					timeoutSeconds: params.timeoutSeconds ?? LEDGER_HOLD_TIMEOUT_MS / 1000,
 					// The principal's roll-up tags ride the hold; post/void inherit them.
 					...(params.userData !== undefined
 						? {
@@ -1200,6 +1225,19 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
  * An optional per-tier token estimate from `AuthorizeParams`: omitted is 0;
  * otherwise a non-negative safe integer, or a `TypeError` naming the field.
  */
+/**
+ * The ledger timeout, in ms, of a hold asked to live `requested` ms (`AuthorizeParams.holdTtlMs`):
+ * clamped to [`LEDGER_HOLD_TIMEOUT_MS`, `maxMs`], in whole seconds. Absent → the default.
+ */
+function holdLifeMs(requested: unknown, maxMs: number): number {
+	if (requested === undefined) return LEDGER_HOLD_TIMEOUT_MS;
+	if (typeof requested !== "number" || !Number.isSafeInteger(requested) || requested <= 0) {
+		throw new TypeError("holdTtlMs must be a positive integer");
+	}
+	const clamped = Math.min(Math.max(requested, LEDGER_HOLD_TIMEOUT_MS), maxMs);
+	return Math.ceil(clamped / 1000) * 1000;
+}
+
 function estimateTier(value: unknown, field: string): number {
 	if (value === undefined) return 0;
 	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
@@ -1247,6 +1285,12 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	const isDryRun = opts?.dryRun ?? process.env.USERTRUST_DRY_RUN === "true";
 	const isTestEnv = process.env.USERTRUST_TEST === "1" || process.env.NODE_ENV === "test";
 	const destroyDrainMs = (isTestEnv ? opts?._destroyDrainMs : undefined) ?? 5_000;
+	const maxHoldTtlMs = opts?.maxHoldTtlMs ?? DEFAULT_MAX_HOLD_TTL_MS;
+	if (!Number.isSafeInteger(maxHoldTtlMs) || maxHoldTtlMs < LEDGER_HOLD_TIMEOUT_MS) {
+		throw new RangeError(
+			`createGovernor(): maxHoldTtlMs must be an integer of at least ${LEDGER_HOLD_TIMEOUT_MS}`,
+		);
+	}
 
 	// 2. Initialize subsystems
 	const vaultPath = vaultBase;
@@ -1435,6 +1479,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				params.estimatedCacheWriteTokens,
 				"estimatedCacheWriteTokens",
 			);
+			// The hold's life, validated before any I/O like the tiers above.
+			const holdTimeoutMs = holdLifeMs(params.holdTtlMs, maxHoldTtlMs);
 			const messages = params.messages ?? [];
 
 			// Per-invocation denial evidence, filled by the throw sites and read by
@@ -1723,6 +1769,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 								// Roll-up tags only; an untagged call omits the key, so its hold
 								// is created exactly as before.
 								...(principal !== undefined ? { userData: principalLedgerTags(principal) } : {}),
+								timeoutSeconds: holdTimeoutMs / 1000,
 							});
 						} catch (holdErr) {
 							// P1-LEDGER-ENFORCE: an over-budget reservation is rejected
@@ -1746,7 +1793,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						// The hold landed. Record WHICH wallet it debited, for the session
 						// accounting below and for the release on settle/abort.
 						envelopeDebited = envelope !== undefined;
-						ledgerHoldTimeoutMs = LEDGER_HOLD_TIMEOUT_MS;
+						ledgerHoldTimeoutMs = holdTimeoutMs;
 					}
 
 					// SESSION accounting tracks SESSION-WALLET money only. An attributed hold

@@ -81,6 +81,7 @@ import {
 	guardMode,
 	HoldNameTaken,
 	holdOfCall,
+	holdTtlFor,
 	hookStartedAt,
 	isAlreadySettled,
 	isTransferId,
@@ -116,10 +117,10 @@ import {
 	prepareWindow,
 	reconcileAgent,
 	recordHoldOutcome,
-	STALE_SETTLING_MS,
 	safeName,
 	settlesAtEstimate,
 	settleTranscriptHold,
+	staleSettlingAfter,
 	stampFirstRun,
 } from "./transcript.mjs";
 
@@ -371,7 +372,7 @@ async function keepForRelease(entry, claim, outcome) {
 /**
  * End a `.settling` record made under ANOTHER server or key, or an unknown one,
  * without this tenant's journal ever deciding it. Only a STALE one
- * (`STALE_SETTLING_MS`) is ended: a fresh one's settle may still be in flight, so
+ * (`staleSettlingAfter`) is ended: a fresh one's settle may still be in flight, so
  * the call is refused instead. It is abandoned through its own name: claimed by an
  * exclusive rename, then deleted. Nothing about it is sent to this hook's server,
  * and nothing is parked for a retry. Any window it carried is accounted by the
@@ -382,7 +383,7 @@ async function keepForRelease(entry, claim, outcome) {
  * record is fresh, or another hook took it first.
  */
 async function abandonSettling(entry) {
-	if (!(Date.now() - entry.mtimeMs > STALE_SETTLING_MS)) return false;
+	if (!(Date.now() - entry.mtimeMs > staleSettlingAfter(entry))) return false;
 	const taken = `${entry.path}.abandoned.${process.pid}.${Math.random().toString(36).slice(2)}`;
 	try {
 		await rename(entry.path, taken);
@@ -615,6 +616,9 @@ async function reserve(input) {
 		// Never past the hook's own budget: a hook killed mid-call leaves the tool
 		// ungoverned and this agent's lock held.
 		const callTimeout = () => Math.min(5_000, timeLeft() - 500);
+		// How long this call's hold should live (lib.mjs `holdTtlFor`): a long Bash or a subagent
+		// asks for its hold to outlive it, so its budget stays reserved until it settles.
+		const holdTtlMs = await holdTtlFor(toolName, input.tool_input);
 		const authorizeOnce = () =>
 			serverRequest(
 				"/v1/authorize",
@@ -645,6 +649,7 @@ async function reserve(input) {
 					messages: [{ role: "user", content }],
 					...(window && keyed ? { idempotencyKey: prepared.key } : {}),
 					...(principal === undefined ? {} : { principal }),
+					...(holdTtlMs === undefined ? {} : { holdTtlMs }),
 					...authorizeLabels(holdAuthorizeLabels()),
 				},
 				// Past the server's own deadline, so its 503 is received (`AUTHORIZE_TIMEOUT_MS`).
@@ -691,6 +696,7 @@ async function reserve(input) {
 					transferId: json.transferId,
 					startedAt: new Date(callMs).toISOString(),
 					estimatedInputTokens,
+					...(holdTtlMs === undefined ? {} : { holdTtlMs }),
 					...(settlesAtEstimate
 						? {}
 						: {

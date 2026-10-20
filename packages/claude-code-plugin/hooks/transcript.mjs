@@ -204,9 +204,23 @@ const STALE_LOCK_MS = 60_000;
  * ledger's pending timeout (core's `LEDGER_HOLD_TIMEOUT_MS`, 5 min): the journal then
  * clears a stale record without giving its hold back, which strands nothing only
  * because the ledger has expired that hold by then. Pinned by
- * `tests/stale-settling.test.ts`.
+ * `tests/stale-settling.test.ts`. A hold asked to live longer (`holdTtlMs`) is stale
+ * that much later (`staleSettlingAfter`).
  */
 export const STALE_SETTLING_MS = 10 * 60_000;
+/** The ledger's default pending timeout (core's `LEDGER_HOLD_TIMEOUT_MS`), pinned to it by test. */
+export const DEFAULT_HOLD_LIFE_MS = 5 * 60_000;
+
+/**
+ * How long a `.settling` record of this hold must be left before it reads as a crashed hook's:
+ * `STALE_SETTLING_MS`, plus however much longer than the default its authorize asked the hold
+ * to live (`holdTtlMs`, lib.mjs `holdTtlFor`). The record's age counts from the settle's start,
+ * after the call ended, so its hold is past its life by then.
+ */
+export function staleSettlingAfter(record) {
+	const life = Number.isSafeInteger(record?.holdTtlMs) ? record.holdTtlMs : DEFAULT_HOLD_LIFE_MS;
+	return STALE_SETTLING_MS + Math.max(0, life - DEFAULT_HOLD_LIFE_MS);
+}
 const ID_HISTORY = 10_000;
 const MAX_ID_CHARS = 256;
 /** A transcript is read a chunk of this size at a time: a hook's memory stays bounded. */
@@ -551,7 +565,7 @@ async function inFlightSettles(sessionId, agentId) {
 			record.kind === "settling" &&
 			!record.estimate &&
 			record.ids.length > 0 &&
-			now - record.mtimeMs <= STALE_SETTLING_MS,
+			now - record.mtimeMs <= staleSettlingAfter(record),
 	);
 }
 
@@ -1162,6 +1176,7 @@ async function holdJournal(sessionId, agentId) {
 				mtimeMs,
 				estimate: body.usage !== "transcript",
 				agentId: sanitize(body.agentId ?? "main"),
+				...(Number.isSafeInteger(body.holdTtlMs) ? { holdTtlMs: body.holdTtlMs } : {}),
 				...jobHoldFields(body),
 				...(typeof body.startedAt === "string" ? { startedAt: body.startedAt } : {}),
 			});
@@ -1188,7 +1203,7 @@ async function reconcile(cursor, sessionId, agentId) {
 			else if (record.outcome === "unresolved") holdUnresolved(cursor, record);
 			else accountIds(cursor, record.ids);
 			finished.push(record.path);
-		} else if (record.kind === "settling" && now - record.mtimeMs > STALE_SETTLING_MS) {
+		} else if (record.kind === "settling" && now - record.mtimeMs > staleSettlingAfter(record)) {
 			// Its hook died mid-settle: the outcome is unknown. An ESTIMATE hold's
 			// .settling lands here too, with no ids: fresh, it adds nothing to `live`;
 			// stale, its hold is past the ledger's pending timeout (STALE_SETTLING_MS), so

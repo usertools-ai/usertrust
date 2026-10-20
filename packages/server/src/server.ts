@@ -15,7 +15,7 @@ import type {
 import { sanitizeReleaseReason } from "usertrust";
 import { sanitizeMapped, scrubForStderr } from "./cli/scrub.js";
 import type { ServerConfig, TenantConfig } from "./config.js";
-import { DEFAULT_LEDGER_TIMEOUT_MS, resolveTenant } from "./config.js";
+import { DEFAULT_LEDGER_TIMEOUT_MS, DEFAULT_MAX_PENDING_TTL_MS, resolveTenant } from "./config.js";
 import { EventBus } from "./events.js";
 import {
 	type HealthChildSpawner,
@@ -78,6 +78,11 @@ const SERVER_CAPABILITIES = Object.freeze([
 	// charges the estimate when any tier is flagged. Without it a client must not send zeroed counts for a refused tier: an
 	// older server strips the unknown key and would price the zeros at the floor.
 	"refused",
+	// `hold-ttl`: `POST /v1/authorize` accepts `holdTtlMs`, how long the hold should live, clamped to
+	// [`pendingTtlMs`, `maxPendingTtlMs`]: the ledger's pending timeout for that hold and the server's
+	// own sweep life for it alike. /v1/health also states `maxHoldTtlMs`, the ceiling. An older server
+	// strips the key, and the hold keeps the default life.
+	"hold-ttl",
 ]);
 /**
  * A dryRun server has no ledger, so it writes no `user_data` tags — but it records
@@ -140,6 +145,24 @@ interface PendingEntry {
 	 * floor of its `usageTo`. Never read from the handle, which is the caller's.
 	 */
 	labels: { job?: string; jobState?: "invalid"; usageFrom?: string };
+	/**
+	 * This hold's own sweep life, in ms (`holdLife`): what its authorize asked for (`holdTtlMs`),
+	 * clamped, else `pendingTtlMs`. `remainingLifeMs` reads it in place of `pendingTtlMs`.
+	 */
+	lifeMs: number;
+}
+
+/**
+ * The sweep life of a hold whose authorize asked for `requested` ms (`holdTtlMs`, capability
+ * `hold-ttl`): clamped to [`pendingTtlMs`, `maxPendingTtlMs`]. Absent, `pendingTtlMs`, as before.
+ */
+export function holdLife(
+	requested: number | undefined,
+	config: { pendingTtlMs: number; maxPendingTtlMs?: number | undefined },
+): number {
+	if (requested === undefined) return config.pendingTtlMs;
+	const max = Math.max(config.maxPendingTtlMs ?? DEFAULT_MAX_PENDING_TTL_MS, config.pendingTtlMs);
+	return Math.min(Math.max(requested, config.pendingTtlMs), max);
 }
 
 /**
@@ -1410,6 +1433,11 @@ export function createUsertrustServer(opts: {
 	 * process, a sleep and a forward wall-clock step look alike.
 	 */
 	const monoAge = (entry: PendingEntry): number => performance.now() - entry.startedMono;
+	/** `remainingLifeMs`'s config for one hold: its own sweep life (`lifeMs`) as `pendingTtlMs`. */
+	const entryLife = (entry: PendingEntry) => ({
+		pendingTtlMs: entry.lifeMs,
+		dryRun: config.dryRun,
+	});
 	/**
 	 * Late holds being given back (see `OwedEntry`), keyed `${tenantId}\0${transferId}`. An entry is
 	 * added BEFORE its `release()` starts, so a give-back waiting on the ledger is visible
@@ -1670,9 +1698,15 @@ export function createUsertrustServer(opts: {
 			const set = unsettled.get(tenant.id);
 			if (set?.delete(token) === true && set.size === 0) unsettled.delete(tenant.id);
 		};
+		// The hold's life, clamped once (`holdLife`): the governor reserves it for that long, and the
+		// sweep keeps it for that long. Unasked, the governor's own default, and `pendingTtlMs`.
+		const { holdTtlMs: requestedLife, ...request } = parsed.data;
+		const lifeMs = holdLife(requestedLife, config);
 		let auth: Authorization;
 		try {
-			auth = await governor.authorize(parsed.data);
+			auth = await governor.authorize(
+				requestedLife === undefined ? request : { ...request, holdTtlMs: lifeMs },
+			);
 		} catch (err) {
 			settle();
 			// A rejection after the request ended is consumed: no second write, no second event.
@@ -1703,6 +1737,7 @@ export function createUsertrustServer(opts: {
 				...(parsed.data.jobState === undefined ? {} : { jobState: parsed.data.jobState }),
 				...(parsed.data.usageFrom === undefined ? {} : { usageFrom: parsed.data.usageFrom }),
 			},
+			lifeMs,
 		};
 		// The answer is written, and the hold registered, in one synchronous step: no settle for this
 		// id can arrive between the two. A write that throws registers nothing: the hold is given back.
@@ -1712,7 +1747,7 @@ export function createUsertrustServer(opts: {
 				estimatedCost: auth.estimatedCost,
 				model: auth.model,
 				createdAt: auth.createdAt,
-				...expiresIn(remainingLifeMs(auth, config, monoAge(entry))),
+				...expiresIn(remainingLifeMs(auth, entryLife(entry), monoAge(entry))),
 			});
 		} catch {
 			state = "abandoned";
@@ -2134,6 +2169,8 @@ export function createUsertrustServer(opts: {
 				name: SERVER_NAME,
 				version: SERVER_VERSION,
 				capabilities: config.dryRun ? DRY_RUN_CAPABILITIES : SERVER_CAPABILITIES,
+				// The longest hold an authorize may ask for (`hold-ttl`).
+				maxHoldTtlMs: holdLife(Number.MAX_SAFE_INTEGER, config),
 				logLinesDropped,
 			});
 			return;
@@ -2265,8 +2302,8 @@ export function createUsertrustServer(opts: {
 		// The server's own sweep reads the monotonic age; an explicit `now` is epoch ms.
 		const due = (entry: PendingEntry): boolean => {
 			const age = now === undefined ? monoAge(entry) : now - entry.createdAt;
-			const left = remainingLifeMs(entry.auth, config, age);
-			return left === null ? age >= config.pendingTtlMs : left === 0;
+			const left = remainingLifeMs(entry.auth, entryLife(entry), age);
+			return left === null ? age >= entry.lifeMs : left === 0;
 		};
 		// A late hold whose void the ledger refused stays counted until the hold's own life, counted from
 		// the late reply (OwedEntry), has run out (the ledger's pending timeout has ended it by then), plus

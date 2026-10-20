@@ -2,11 +2,11 @@
 // Copyright 2026 Usertools, Inc.
 
 import { join, resolve, sep } from "node:path";
-import type { Governor, TrustOpts } from "usertrust";
+import type { Governor, GovernorOpts } from "usertrust";
 import { createGovernor, kernelVaultBase, securePrivateVault, VAULT_DIR } from "usertrust";
-import type { ServerConfig, TenantConfig } from "./config.js";
+import { DEFAULT_MAX_PENDING_TTL_MS, type ServerConfig, type TenantConfig } from "./config.js";
 
-export type GovernorFactory = (opts: TrustOpts) => Promise<Governor>;
+export type GovernorFactory = (opts: GovernorOpts) => Promise<Governor>;
 
 /** Trailing separators on `stateDir`: `/` on POSIX, either separator on Windows. */
 const TRAILING_SEPARATORS = process.platform === "win32" ? /[\\/]+$/ : /\/+$/;
@@ -77,9 +77,12 @@ export class GovernorPool {
 	get(tenant: TenantConfig): Promise<Governor> {
 		const existing = this.governors.get(tenant.id);
 		if (existing) return existing;
-		const opts: TrustOpts = {
+		const opts: GovernorOpts = {
 			vaultBase: tenantVaultBase(this.config, tenant),
 			dryRun: this.config.dryRun,
+			// The longest hold an authorize may ask for (`holdTtlMs`): the server's own ceiling, so
+			// a hold's ledger timeout and its sweep life agree.
+			maxHoldTtlMs: this.config.maxPendingTtlMs ?? DEFAULT_MAX_PENDING_TTL_MS,
 		};
 		if (tenant.budget !== undefined) opts.budget = tenant.budget;
 		if (tenant.tier !== undefined) opts.tier = tenant.tier;

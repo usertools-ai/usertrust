@@ -111,3 +111,60 @@ describe("a governor hold's ledger timeout is named, and published on the handle
 		await gov.abort(auth, new Error("done"));
 	});
 });
+
+describe("an authorize may ask its hold to live longer (`holdTtlMs`), clamped to the governor's ceiling", () => {
+	const ledgerVault = () =>
+		vault({ budget: 100_000, tigerbeetle: { addresses: ["3000"], clusterId: 0 } });
+	const heldTimeout = () =>
+		sent.transfers.filter((t) => (t.flags & PENDING) !== 0).map((t) => t.timeout);
+
+	it("the asked life is the ledger's timeout and the handle's, rounded up to whole seconds", async () => {
+		const gov = await createGovernor({ vaultBase: ledgerVault() });
+		cleanup.push(() => gov.destroy());
+		const auth = await gov.authorize({ model: "claude-sonnet-4-6", holdTtlMs: 900_500 });
+		expect(heldTimeout()).toEqual([901]);
+		expect(auth.holdTimeoutMs).toBe(901_000);
+		await gov.abort(auth, new Error("done"));
+	});
+
+	it("a life above maxHoldTtlMs is the ceiling; one below the default is the default", async () => {
+		const gov = await createGovernor({ vaultBase: ledgerVault(), maxHoldTtlMs: 1_200_000 });
+		cleanup.push(() => gov.destroy());
+		const long = await gov.authorize({ model: "claude-sonnet-4-6", holdTtlMs: 7_200_000 });
+		const short = await gov.authorize({ model: "claude-sonnet-4-6", holdTtlMs: 1_000 });
+		// The default here is the mocked LEDGER_HOLD_TIMEOUT_MS, 120 s.
+		expect(heldTimeout()).toEqual([1_200, 120]);
+		expect([long.holdTimeoutMs, short.holdTimeoutMs]).toEqual([1_200_000, LEDGER_HOLD_TIMEOUT_MS]);
+		await gov.abort(long, new Error("done"));
+		await gov.abort(short, new Error("done"));
+	});
+
+	it("the default ceiling is one hour", async () => {
+		const gov = await createGovernor({ vaultBase: ledgerVault() });
+		cleanup.push(() => gov.destroy());
+		const auth = await gov.authorize({ model: "claude-sonnet-4-6", holdTtlMs: 86_400_000 });
+		expect(heldTimeout()).toEqual([3_600]);
+		await gov.abort(auth, new Error("done"));
+	});
+
+	it.each([0, -1, 1.5, Number.NaN, "900000"])(
+		"holdTtlMs %s is a TypeError before any hold is reserved",
+		async (bad) => {
+			const gov = await createGovernor({ vaultBase: ledgerVault() });
+			cleanup.push(() => gov.destroy());
+			await expect(
+				gov.authorize({ model: "claude-sonnet-4-6", holdTtlMs: bad as number }),
+			).rejects.toThrow(TypeError);
+			expect(heldTimeout()).toEqual([]);
+		},
+	);
+
+	it.each([60_000, 1_000_000.5, Number.POSITIVE_INFINITY])(
+		"maxHoldTtlMs %s is a RangeError at creation",
+		async (bad) => {
+			await expect(createGovernor({ vaultBase: ledgerVault(), maxHoldTtlMs: bad })).rejects.toThrow(
+				RangeError,
+			);
+		},
+	);
+});

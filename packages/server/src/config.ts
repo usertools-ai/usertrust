@@ -22,6 +22,14 @@ const ServerConfigSchema = z.object({
 	stateDir: z.string().default(".usertrust-server"),
 	enforcement: z.enum(["enforce", "evaluate_only"]).default("enforce"),
 	pendingTtlMs: z.number().int().positive().default(300_000),
+	/**
+	 * The longest life an authorize may ask its hold for (`holdTtlMs`, capability `hold-ttl`), in ms:
+	 * a request is clamped to [`pendingTtlMs`, this]. Unset means DEFAULT_MAX_PENDING_TTL_MS (one
+	 * hour). At least core's default hold life (300 000), since every hold's ledger timeout is at
+	 * least that. A longer one keeps a hold whose client crashed reserved for longer before the
+	 * ledger voids it.
+	 */
+	maxPendingTtlMs: z.number().int().min(300_000).optional(),
 	dryRun: z.boolean().default(false),
 	/**
 	 * How long the start-up ledger probe waits for TigerBeetle to answer (ledger-probe.ts).
@@ -55,6 +63,9 @@ const ServerConfigSchema = z.object({
 
 /** `ledgerTimeoutMs` when the config leaves it unset. */
 export const DEFAULT_LEDGER_TIMEOUT_MS = 5_000;
+
+/** `maxPendingTtlMs` when the config leaves it unset: one hour. */
+export const DEFAULT_MAX_PENDING_TTL_MS = 3_600_000;
 
 export type TenantConfig = z.infer<typeof TenantSchema>;
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
