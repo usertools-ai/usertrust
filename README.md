@@ -76,7 +76,7 @@ The `receipt` returned from every governed call:
 }
 ```
 
-A model id written the way a gateway or cloud platform writes it (a Bedrock, Vertex or OpenRouter id, a `-latest` alias without a row of its own, or an id in another case) is priced at the fallback rate, the table's dearest, and some reports and the dashboard show its provider as `unknown`. See [LIMITATIONS.md](https://github.com/usertools-ai/usertrust/blob/master/LIMITATIONS.md) section 16 for how to price such an id.
+For an endpoint classified as cloud, a model id written the way a gateway or cloud platform writes it (a Bedrock, Vertex or OpenRouter id, a `-latest` alias without a row of its own, or an id in another case) is priced at the fallback rate, the table's dearest, and some reports and the dashboard show its provider as `unknown`. See [LIMITATIONS.md](https://github.com/usertools-ai/usertrust/blob/master/LIMITATIONS.md) section 16 for how to price such an id.
 
 ## Install
 
@@ -194,7 +194,7 @@ usertrust tb            # TigerBeetle process management
 usertrust completions   # Shell completions (bash, zsh, fish)
 ```
 
-`usertrust snapshot restore <name>` overwrites the live audit log, spend ledger, policies and config with no warning and no backup, and exits 0 even when it refuses. Read the `Snapshot restored:` line, or `"success": true` under `--json`, not the exit code. See [LIMITATIONS.md](https://github.com/usertools-ai/usertrust/blob/master/LIMITATIONS.md) section 15.
+`usertrust snapshot restore <name>` overwrites the live audit log, spend ledger, policies and config with no warning and no backup, and exits 0 even when it refuses. Read the `Snapshot restored:` line, or parse the `--json` output and test `.success === true`, not the exit code. See [LIMITATIONS.md](https://github.com/usertools-ai/usertrust/blob/master/LIMITATIONS.md) section 15.
 
 ### JSON output
 
