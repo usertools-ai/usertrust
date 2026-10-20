@@ -13,7 +13,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
@@ -21,6 +21,7 @@ import { GoogleGenAI } from "@google/genai";
 import OpenAI from "openai";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { type TrustEngine, trust } from "../../src/govern.js";
+import { AUDIT_DIR, VAULT_DIR } from "../../src/shared/constants.js";
 import { PolicyDeniedError } from "../../src/shared/errors.js";
 
 vi.mock("tigerbeetle-node", () => ({
@@ -74,6 +75,18 @@ async function recordingFetch(input: unknown, init?: RequestInit): Promise<Respo
 			stop_sequence: null,
 			usage: { input_tokens: 10, output_tokens: 5 },
 		});
+	}
+	if (path.endsWith("/chat/completions") && bodies.at(-1)?.stream === true) {
+		const chunk = (choice: unknown, usage?: unknown) =>
+			`data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", created: 0, model: "gpt-4o", choices: [choice], ...(usage === undefined ? {} : { usage }) })}\n\n`;
+		const sse =
+			chunk({ index: 0, delta: { role: "assistant", content: "ok" }, finish_reason: null }) +
+			chunk(
+				{ index: 0, delta: {}, finish_reason: "stop" },
+				{ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+			) +
+			"data: [DONE]\n\n";
+		return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
 	}
 	if (path.endsWith("/chat/completions")) {
 		return json({
@@ -584,4 +597,49 @@ describe.each([
 		expect(bodies).toHaveLength(1);
 		expect(sent(bodies[0])).toBe(value);
 	});
+});
+
+describe("the llm_call audit record under pii warn", () => {
+	/** The `llm_call` events the governor wrote to its vault's audit chain. */
+	const llmCalls = () =>
+		readFileSync(join(vault, VAULT_DIR, AUDIT_DIR, "events.jsonl"), "utf8")
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => JSON.parse(l) as { kind: string; data: Record<string, Loose> })
+			.filter((e) => e.kind === "llm_call");
+	const arguments_ = '{"to":"alice\\u0040example.com"}';
+	const messages = [
+		{ role: "user", content: "send it" },
+		{
+			role: "assistant",
+			content: null,
+			tool_calls: [
+				{ id: "call_1", type: "function", function: { name: "send", arguments: arguments_ } },
+			],
+		},
+		{ role: "tool", tool_call_id: "call_1", content: "sent" },
+	];
+
+	it.each([false, true])(
+		"stream %s: an address only the content scan sees (JSON-escaped in arguments) is sent and recorded",
+		async (stream) => {
+			const c = await openai("warn");
+			if (stream) {
+				const s = await c.chat.completions.create({ model: "gpt-4o", messages, stream: true });
+				for await (const _ of s.response) {
+				}
+			} else {
+				await c.chat.completions.create({ model: "gpt-4o", messages });
+			}
+			expect(bodies).toHaveLength(1);
+			expect(bodies[0]?.messages?.[1]?.tool_calls?.[0]?.function?.arguments).toBe(arguments_);
+			await c.destroy();
+			const events = llmCalls();
+			expect(events).toHaveLength(1);
+			expect(events[0]?.data.piiDetected).toEqual(["email"]);
+			expect(events[0]?.data.piiPaths).toEqual([
+				"messages[1].tool_calls[0].function.arguments(email)",
+			]);
+		},
+	);
 });

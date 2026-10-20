@@ -625,8 +625,11 @@ is checked as written (no decoding, no object keys, no non-string values).
 Redaction reads the content as the SDK sends it: it decodes a tool call's JSON
 `arguments` to find the string values it replaces, and reads a Google text part
 the caller hid from enumeration. `"block"` refuses what either read finds, so a
-value written with JSON escapes is refused too. The `llm_call` audit event's
-`piiDetected` and `piiPaths` come from the prompt-field scan. `createGovernor()` and
+value written with JSON escapes is refused too. Under `"warn"` and `"redact"`, the
+`llm_call` audit event's `piiDetected` and `piiPaths` record what either read finds:
+paths from the prompt-field scan start at the prompt fields (`[0].content(email)`),
+and paths only the content read adds start at the request root
+(`messages[1].tool_calls[0].function.arguments(email)`). `createGovernor()` and
 `usertrust-server` scan the `messages` the caller passes and can block, but never
 redact egress. The full scope, per provider, is on the
 [PII Detection](https://usertrust.ai/docs/policy/pii) page.

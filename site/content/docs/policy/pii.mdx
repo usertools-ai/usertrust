@@ -85,7 +85,7 @@ When the scan finds PII, usertrust forwards a copy of the request in which every
 
 ## What is recorded
 
-With `"warn"` or `"redact"`, the `llm_call` audit event carries `piiDetected` (the types) and `piiPaths` (where, for example `[0].content(email)`), computed by the same scan. The values themselves are never stored.
+With `"warn"` or `"redact"`, the `llm_call` audit event carries `piiDetected` (the types) and `piiPaths` (where) for what either read finds. A path from the scan starts at the prompt fields, for example `[0].content(email)`; a path only the content read adds (a value written with JSON escapes in a tool call's `arguments`, a hidden Google text part) starts at the request root, for example `messages[1].tool_calls[0].function.arguments(email)`. The values themselves are never stored.
 
 ## PIIDetection result
 

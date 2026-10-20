@@ -127,7 +127,7 @@ import {
 	sanitizePolicyContext,
 } from "./policy/gate.js";
 import { detectInjection } from "./policy/injection.js";
-import { builtInAborted, detectPII, redactPII } from "./policy/pii.js";
+import { builtInAborted, detectPII, type PIIDetection, redactPII } from "./policy/pii.js";
 import {
 	detectContentPII,
 	redactContent,
@@ -1983,6 +1983,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 			// Per-call audit degradation flag (not sticky across calls)
 			let callAuditDegraded = false;
+			// What the PII step's content scan found, for the `llm_call` audit record.
+			let contentPIIForAudit: PIIDetection | undefined;
 
 			// ── Denial evidence, per invocation ──
 			// The throw sites below fill this in; the flow BOUNDARIES read it and
@@ -2272,6 +2274,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						const piiResult = detectPII(promptParts);
 						const contentScan = scanContent(params, requestSchema(params, kind));
 						const contentPII = detectContentPII(contentScan);
+						contentPIIForAudit = contentPII;
 						if ((piiResult.found || contentPII.found) && config.pii === "block") {
 							// block mode: throw BEFORE any egress.
 							const types = [...new Set([...piiResult.types, ...contentPII.types])];
@@ -2751,10 +2754,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						...costCenterAudit,
 					};
 					if (config.pii === "warn" || config.pii === "redact") {
-						const piiResult = redactPII(promptParts);
-						if (piiResult.detection.found) {
-							auditEventData.piiDetected = piiResult.detection.types;
-							auditEventData.piiPaths = piiResult.detection.paths;
+						const pii = auditPII(redactPII(promptParts).detection, contentPIIForAudit);
+						if (pii !== undefined) {
+							auditEventData.piiDetected = pii.types;
+							auditEventData.piiPaths = pii.paths;
 						}
 					}
 					const auditEvent = await audit.appendEvent({
@@ -3477,10 +3480,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						...costCenterAudit,
 					};
 					if (config.pii === "warn" || config.pii === "redact") {
-						const piiResult = redactPII(promptParts);
-						if (piiResult.detection.found) {
-							auditData.piiDetected = piiResult.detection.types;
-							auditData.piiPaths = piiResult.detection.paths;
+						const pii = auditPII(redactPII(promptParts).detection, contentPIIForAudit);
+						if (pii !== undefined) {
+							auditData.piiDetected = pii.types;
+							auditData.piiPaths = pii.paths;
 						}
 					}
 					const auditEvent = await audit.appendEvent({
@@ -4714,6 +4717,26 @@ function graftParseHooks(
  * chat.completions or Anthropic call carries `messages` and skips it, so existing
  * extraction stays byte-unchanged.
  */
+/**
+ * The PII an `llm_call` audit event records: the prompt-field scan's types and paths (paths from
+ * the prompt parts), then those the content scan adds (paths from the request root), so a hit only
+ * the content scan sees (a value written with JSON escapes in a tool call's arguments, a Google
+ * text part hidden from enumeration) is recorded too. `undefined` when neither found any.
+ */
+function auditPII(
+	prompt: PIIDetection,
+	content: PIIDetection | undefined,
+): { types: string[]; paths: string[] } | undefined {
+	if (!prompt.found && content?.found !== true) return undefined;
+	const types = new Set(prompt.types);
+	const paths = new Set(prompt.paths);
+	if (content?.found === true) {
+		for (const type of content.types) types.add(type);
+		for (const path of content.paths) paths.add(path);
+	}
+	return { types: [...types], paths: [...paths] };
+}
+
 export function extractPromptParts(
 	params: Record<string, unknown>,
 	kind: LLMClientKind,
