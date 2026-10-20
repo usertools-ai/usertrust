@@ -44,6 +44,10 @@ let life: number | undefined;
 let capabilities: string[];
 /** How a release (or, on a server without one, an abort) is answered. */
 let giveBackAnswer: { status: number; json: unknown };
+/** How many of the next authorizes are refused for the budget (402 `budget_exceeded`). */
+let refuseAuthorizes: number;
+/** Extra milliseconds the fake holds its answer, by path: a slow server uses up the hook's budget. */
+let slowBy: Map<string, number>;
 let nextTransfer: number;
 
 function startFake(): Promise<number> {
@@ -65,20 +69,29 @@ function startFake(): Promise<number> {
 				}
 				const body = JSON.parse(raw || "{}") as Seen["body"];
 				seen.push({ path: req.url ?? "", body });
-				if (req.url === "/v1/authorize") {
-					const transferId = `tx_${nextTransfer++}`;
-					return reply(200, {
-						transferId,
-						estimatedCost: 1,
-						...(life === undefined ? {} : { expiresInMs: life }),
-					});
-				}
-				if (req.url === "/v1/settle")
-					return reply(200, { settled: true, transferId: body.transferId });
-				if (req.url === "/v1/release" || req.url === "/v1/abort") {
-					return reply(giveBackAnswer.status, giveBackAnswer.json);
-				}
-				return reply(404, { reason: "unknown route" });
+				const answer = () => {
+					if (req.url === "/v1/authorize" && refuseAuthorizes > 0) {
+						refuseAuthorizes -= 1;
+						return reply(402, { error: "budget_exceeded", reason: "over budget" });
+					}
+					if (req.url === "/v1/authorize") {
+						const transferId = `tx_${nextTransfer++}`;
+						return reply(200, {
+							transferId,
+							estimatedCost: 1,
+							...(life === undefined ? {} : { expiresInMs: life }),
+						});
+					}
+					if (req.url === "/v1/settle")
+						return reply(200, { settled: true, transferId: body.transferId });
+					if (req.url === "/v1/release" || req.url === "/v1/abort") {
+						return reply(giveBackAnswer.status, giveBackAnswer.json);
+					}
+					return reply(404, { reason: "unknown route" });
+				};
+				const delay = slowBy.get(req.url ?? "") ?? 0;
+				if (delay > 0) setTimeout(answer, delay);
+				else answer();
 			});
 		});
 		server.listen(0, "127.0.0.1", () => {
@@ -94,6 +107,8 @@ beforeEach(async () => {
 	life = 60_000;
 	capabilities = ["hold-expiry", "release"];
 	giveBackAnswer = { status: 200, json: { released: true } };
+	refuseAuthorizes = 0;
+	slowBy = new Map();
 	const port = await startFake();
 	env = {
 		UT_CC_STATE_DIR: stateDir,
@@ -212,6 +227,66 @@ describe("a hold's life, as the server states it", () => {
 			env,
 		);
 		expect(settled().map((s) => s.transferId)).not.toContain("tx_3");
+	});
+
+	describe("a replacement refused right after a `gone` give-back: the sweep may still be voiding the old hold", () => {
+		const GONE = { status: 404, json: { error: "not_found", reason: "unknown transferId" } };
+		const records = async () =>
+			(await readFile(join(stateDir, "watch.jsonl"), "utf-8").catch(() => ""))
+				.split("\n")
+				.filter((line) => line !== "")
+				.map((line) => JSON.parse(line) as { kind?: string; releaseClass?: string });
+		const callRanGaps = async () =>
+			(await records()).filter((r) => r.kind === "gap" && r.releaseClass === "call-ran");
+
+		it("402, then after the wait 200: the call is charged once, and no settle of the old hold", async () => {
+			life = 0;
+			await pre("tu_1", {}, ESTIMATE);
+			await outlive();
+			giveBackAnswer = GONE;
+			refuseAuthorizes = 1;
+			await post("tu_1", {}, ESTIMATE);
+			expect(authorizes()).toHaveLength(3);
+			expect(settled().map((s) => s.transferId)).toEqual(["tx_2"]);
+			expect(await callRanGaps()).toEqual([]);
+		}, 20_000);
+
+		it("402 twice: one call-ran gap, never a settle of the old hold, and never a second retry", async () => {
+			life = 0;
+			await pre("tu_1", {}, ESTIMATE);
+			await outlive();
+			giveBackAnswer = GONE;
+			refuseAuthorizes = 5;
+			await post("tu_1", {}, ESTIMATE);
+			expect(authorizes()).toHaveLength(3);
+			expect(settled()).toEqual([]);
+			expect(await callRanGaps()).toHaveLength(1);
+		}, 20_000);
+
+		it("a 402 after a `released` give-back is final: the hold was this release's to end, so no wait", async () => {
+			life = 0;
+			await pre("tu_1", {}, ESTIMATE);
+			await outlive();
+			refuseAuthorizes = 1;
+			await post("tu_1", {}, ESTIMATE);
+			expect(authorizes()).toHaveLength(2);
+			expect(await callRanGaps()).toHaveLength(1);
+		});
+
+		it("with no room left in the hook's budget for the wait, no retry: the call-ran gap", async () => {
+			life = 0;
+			await pre("tu_1", {}, ESTIMATE);
+			await outlive();
+			giveBackAnswer = GONE;
+			refuseAuthorizes = 1;
+			// A slow server uses up the hook's 10 s budget before the retry is weighed.
+			slowBy.set("/v1/release", 4_500);
+			slowBy.set("/v1/authorize", 4_500);
+			await post("tu_1", {}, ESTIMATE);
+			expect(authorizes()).toHaveLength(2);
+			expect(settled()).toEqual([]);
+			expect(await callRanGaps()).toHaveLength(1);
+		}, 20_000);
 	});
 
 	it("an estimate hold past its life whose give-back the server does not confirm is settled as before", async () => {

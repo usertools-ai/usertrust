@@ -1855,19 +1855,22 @@ export function holdExpired(entry, now = Date.now()) {
 }
 
 /**
- * End a hold past its life (`holdExpired`) before anything replaces it, and say whether the
- * server confirms it ended: released (200), or gone (404 `unknown transferId`). The server counts
- * a hold against the budget until its own sweep, which can run well after the hold's last moment,
- * so a replacement asked for beside it could be refused; and a clock that is wrong may leave it
- * live. Unconfirmed, the caller sends the settle as before. No release class: it proves nothing.
- * Never throws.
+ * End a hold past its life (`holdExpired`) before anything replaces it, and say how the server
+ * confirms it ended: `released` (200: this release ended it), `gone` (404 `unknown transferId`:
+ * the server no longer has it), or null when unconfirmed. The server counts a hold against the
+ * budget until its own sweep, which can run well after the hold's last moment, so a replacement
+ * asked for beside it could be refused; and a clock that is wrong may leave it live. `gone` is
+ * usually a hold the sweep ended long since, but can be one whose sweep is still voiding it, its
+ * funds not yet free (PostToolUse's replacement waits for that once). Unconfirmed, the caller sends
+ * the settle as before. No release class: it proves nothing. Never throws.
  */
 export async function endExpiredHold(transferId, timeoutMs) {
 	try {
 		const response = await releaseHold(transferId, "the hold is past its life", { timeoutMs });
-		return response.status === 200 || isUnknownTransfer(response);
+		if (response.status === 200) return "released";
+		return isUnknownTransfer(response) ? "gone" : null;
 	} catch {
-		return false;
+		return null;
 	}
 }
 

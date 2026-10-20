@@ -2187,7 +2187,7 @@ async function settleAt(transferId, counts, { keyed, labels = {}, expiresAt }) {
 	// timeout could land after the ledger's pending timeout.
 	if (
 		holdExpired({ expiresAt }, Date.now() + callTimeout()) &&
-		(await endExpiredHold(transferId, callTimeout()))
+		(await endExpiredHold(transferId, callTimeout())) !== null
 	) {
 		// Past its recorded life, and given back with the server's confirmation (lib.mjs
 		// `endExpiredHold`): no settle is sent, so nothing posted through it, under a key or not.

@@ -108,6 +108,17 @@ async function estimateUsageTo(sessionId, entry) {
 	return new Date(Math.max(end, from)).toISOString();
 }
 
+/**
+ * The longest a refused replacement waits for a sweep's void of the hold it replaces
+ * (`endExpiredHold`): usertrust-server's own bound on that void, its `RELEASE_WAIT_MAX_MS` (30 s),
+ * which a settle racing the sweep waits for too. The server does not state it, so it is copied here.
+ */
+const RELEASE_WAIT_MAX_MS = 30_000;
+/** What a replacement's retry keeps of the hook's budget past its wait: its authorize and settle. */
+const REPLACEMENT_RETRY_MIN_MS = 1_000;
+/** A wait shorter than this is no wait: the retry is skipped. */
+const RETRY_WAIT_FLOOR_MS = 50;
+
 /** One request of the expired-hold chain: 5 s at most, and never past the hook's budget. */
 function withinBudget() {
 	return { timeoutMs: Math.min(5000, timeLeft()) };
@@ -210,9 +221,10 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 	// server confirms it ended, no settle is sent, and it takes the path a gone answer takes,
 	// below. Sent, the settle could only fail, as a 410 the server records as spend it never
 	// charged, though the call is charged here, once. Unconfirmed, the settle is sent as before.
-	const expired =
-		holdExpired(entry, Date.now() + withinBudget().timeoutMs) &&
-		(await endExpiredHold(entry.transferId, withinBudget().timeoutMs));
+	const endedAs = holdExpired(entry, Date.now() + withinBudget().timeoutMs)
+		? await endExpiredHold(entry.transferId, withinBudget().timeoutMs)
+		: null;
+	const expired = endedAs !== null;
 	const response = expired
 		? null
 		: await settleOnce(at, { transferId: entry.transferId, ...usage });
@@ -250,9 +262,8 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 	const principal = principalCapable(capabilities)
 		? estimatePrincipalFor(sessionId, agentId, input.agent_type)
 		: undefined;
-	let auth;
-	try {
-		auth = await serverRequest(
+	const authorizeReplacement = () =>
+		serverRequest(
 			"/v1/authorize",
 			{
 				model: defaultModel(),
@@ -273,6 +284,24 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 			},
 			withinBudget(),
 		);
+	let auth;
+	try {
+		auth = await authorizeReplacement();
+		// A hold the server called `gone` may be one its sweep is still voiding, its funds still
+		// reserved: a replacement refused for the budget then waits for that void once, and asks
+		// again. The wait is the server's own bound on one (`RELEASE_WAIT_MAX_MS`), within what the
+		// hook has left past the retry's own requests; too little left, and no retry. A second
+		// refusal is final (below).
+		const wait = Math.min(RELEASE_WAIT_MAX_MS, timeLeft() - REPLACEMENT_RETRY_MIN_MS);
+		if (
+			endedAs === "gone" &&
+			auth.status === 402 &&
+			auth.json?.error === "budget_exceeded" &&
+			wait >= RETRY_WAIT_FLOOR_MS
+		) {
+			await new Promise((resolve) => setTimeout(resolve, wait));
+			auth = await authorizeReplacement();
+		}
 	} catch (err) {
 		// No answer. The call RAN and nothing will charge it, as when the fresh hold is refused (below):
 		// its gap is written now, before its settle-attempted marker goes (evidence first). A hold
