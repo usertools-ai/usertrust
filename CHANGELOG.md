@@ -22,9 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `maxPendingTtlMs`] (new config, default one hour). That life is both the ledger's timeout and the
     server's own sweep life for the hold, so `expiresInMs` and the sweep agree. A new capability,
     `hold-ttl`, and `/v1/health` states the ceiling as `maxHoldTtlMs`. An older server strips the key,
-    and its holds keep the default life.
+    and its holds keep the default life. Capability `release-waits`: a release for a hold another
+    terminal is ending (the sweep's void, a settle, an abort) waits for it before answering, so its
+    404 means the funds are free; past its bound it answers 409 `hold_active`.
   - **The trade:** a hold whose client crashes keeps its budget reserved for up to its life before the
     ledger voids it, so a longer ceiling holds a crashed client's reservation longer.
+
+### Fixed
+
+- **An audit writer released and then appended to took the vault's lock again and kept it.** `createAuditWriter()` accepted an append after `release()`: the event landed on the chain, but the append took the vault's writer lock again and nothing released it. Every later writer on that vault in the same process (the next `usertrust secret` writer, or another direct `createAuditWriter()` caller) was refused with `AuditWriterLockHeldError`, marked itself degraded and dead-lettered each event. An append after `release()`, including one already queued when `release()` was called, now takes the lock for that append only and gives it back when it finishes, as a `trust()` client or `createGovernor()` already did. If another writer holds the lock at that moment, the late append is refused and that writer's lock is left alone. A lock the late append cannot give back is reported as a `USERTRUST_AUDIT_LOCK_LEFT` warning, never thrown over the append's own result.
 
 ## [5.2.0] - 2026-10-19
 
