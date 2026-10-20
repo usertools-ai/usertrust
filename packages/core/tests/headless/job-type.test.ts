@@ -449,18 +449,235 @@ describe("headless records carry the authorize capture's jobType and typeSource"
 		});
 	});
 
-	it("an invalid job log records jobState and no type key, serialized as before", async () => {
-		for (const scenario of SCENARIOS.filter((x) => x.name === "settle" || x.name === "abort")) {
-			const run = await drive(scenario, { jobState: "invalid" });
-			for (const e of run.events) {
-				if (!scenario.kinds.includes(e.kind)) continue;
-				expect(e.data).toMatchObject({ jobState: "invalid" });
-				const text = serialize(e.data);
-				for (const key of TYPE_KEYS) expect(text, key).not.toContain(key);
-				expect(text).not.toContain('"job":');
-			}
-		}
+	/**
+	 * THE PRE-TYPED-JOBS SHAPE, as literals. Every expectation below was captured by running
+	 * these same scenarios on the code BEFORE `jobType`/`typeSource` existed, so a change that
+	 * touches an unlabelled, job-only or invalid-log record (an extra key, a lost key, a moved
+	 * value) fails here even when it also touches the typed path. Comparing the new code with
+	 * itself, as the test above does, cannot see that.
+	 *
+	 * Before typed jobs a job-only call recorded exactly the unlabelled record plus `job`, and an
+	 * invalid-log call exactly the unlabelled record plus `jobState`: both are applied below as
+	 * the one key each adds. What is masked is only what the pricing table or the error's hint
+	 * text decides, none of which this change may touch: `cost`-like amounts, the applied rates
+	 * and table version, and an error's text after its first line. The `transferId` and
+	 * `receiptId` are minted per run.
+	 */
+	const PRICED = "<priced>";
+	const MODEL_ID = "claude-sonnet-4-6";
+	const USAGE = { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 };
+	const llmCall = (extra: Record<string, unknown> = {}) => ({
+		kind: "llm_call",
+		actor: "local",
+		data: {
+			model: MODEL_ID,
+			cost: PRICED,
+			settled: true,
+			transferId: "T",
+			usageSource: "provider",
+			usage: USAGE,
+			appliedRates: PRICED,
+			pricingTableVersion: PRICED,
+			source: "headless",
+			costBasis: "usd-proxy",
+			endpointClass: "cloud",
+			ledgerPosted: true,
+			...extra,
+		},
 	});
+	interface PreTyped {
+		events: Array<{ kind: string; actor: string; data: Record<string, unknown> }>;
+		receipts: Array<Record<string, unknown>>;
+	}
+	const PRE_TYPED: Record<string, PreTyped> = {
+		settle: {
+			events: [llmCall()],
+			receipts: [{ receiptId: "R", model: MODEL_ID, cost: PRICED, settled: true, transferId: "T" }],
+		},
+		abort: {
+			events: [
+				{
+					kind: "llm_call_failed",
+					actor: "local",
+					data: { model: MODEL_ID, transferId: "T", error: "provider 500", source: "headless" },
+				},
+			],
+			receipts: [],
+		},
+		release: {
+			events: [
+				{
+					kind: "hold_released",
+					actor: "local",
+					data: { model: MODEL_ID, transferId: "T", reason: "no usage", source: "headless" },
+				},
+			],
+			receipts: [],
+		},
+		destroy: {
+			events: [
+				{
+					kind: "hold_released",
+					actor: "local",
+					data: { transferId: "T", reason: "governor destroyed", source: "headless" },
+				},
+			],
+			receipts: [],
+		},
+		settlement_ambiguous: {
+			events: [
+				{
+					kind: "settlement_ambiguous",
+					actor: "local",
+					data: { model: MODEL_ID, cost: PRICED, transferId: "T", error: "socket reset" },
+				},
+				(() => {
+					const { ledgerPosted: _l, ...rest } = llmCall({ settled: false }).data;
+					return { kind: "llm_call", actor: "local", data: rest };
+				})(),
+			],
+			receipts: [],
+		},
+		settlement_shortfall: {
+			events: [
+				llmCall({ postedAmount: 1 }),
+				{
+					kind: "settlement_shortfall",
+					actor: "local",
+					data: { model: MODEL_ID, actual: PRICED, posted: 1, shortfall: 4, transferId: "T" },
+				},
+			],
+			receipts: [],
+		},
+		usage_implausible: {
+			events: [
+				(() => {
+					const { usage: _u, ...rest } = llmCall({ usageSource: "estimated" }).data;
+					return { kind: "llm_call", actor: "local", data: rest };
+				})(),
+				{
+					kind: "usage_implausible",
+					actor: "local",
+					data: {
+						checks: { cacheReadTokens: "sum" },
+						model: MODEL_ID,
+						transferId: "T",
+						tiers: { cacheReadTokens: 1e15 },
+						ceilingTokensPerTier: 100_000_000,
+						charged: "estimate",
+					},
+				},
+			],
+			receipts: [],
+		},
+		"policy_denied (PII at the mutex boundary)": {
+			events: [
+				{
+					kind: "policy_denied",
+					actor: "local",
+					data: {
+						schemaVersion: 1,
+						decision: "deny",
+						denialClass: "pii",
+						model: MODEL_ID,
+						piiTypes: ["email"],
+						promptHash: "138855b29486e3cfda6d199fde1c565c5313a0d880c50c07ac88cf10614279fe",
+						promptHashAlg: "sha256-json-v1",
+						endpointClass: "cloud",
+						error: "Policy denied: PII detected: email",
+						transferId: "T",
+					},
+				},
+			],
+			receipts: [],
+		},
+		"policy_denied (unknown model, the pre-mutex site)": {
+			events: [
+				{
+					kind: "policy_denied",
+					actor: "local",
+					data: {
+						schemaVersion: 1,
+						decision: "deny",
+						denialClass: "unknown_model",
+						model: "no-such-model-xyz",
+						promptHash: "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+						promptHashAlg: "sha256-json-v1",
+						endpointClass: "cloud",
+						error: "Policy denied: unknown_model: no-such-model-xyz not in pricing table",
+					},
+				},
+			],
+			receipts: [],
+		},
+		ledger_rejected: {
+			events: [
+				{
+					kind: "ledger_rejected",
+					actor: "local",
+					data: {
+						schemaVersion: 1,
+						decision: "deny",
+						model: MODEL_ID,
+						transferId: "T",
+						estimatedCost: PRICED,
+						endpointClass: "cloud",
+						error: "Insufficient balance for user trust:hold: need 999, have 0",
+					},
+				},
+			],
+			receipts: [],
+		},
+	};
+
+	const MASKED = new Set([
+		"cost",
+		"actual",
+		"estimatedCost",
+		"appliedRates",
+		"pricingTableVersion",
+	]);
+	/** Deep copy with the per-run ids and the table-decided values masked, keys in sorted order. */
+	const masked = (value: unknown): unknown => {
+		if (Array.isArray(value)) return value.map(masked);
+		if (value === null || typeof value !== "object") return value;
+		const out: Record<string, unknown> = {};
+		for (const key of Object.keys(value).sort()) {
+			const v = (value as Record<string, unknown>)[key];
+			if (key === "transferId") out[key] = "T";
+			else if (key === "receiptId") out[key] = "R";
+			else if (MASKED.has(key)) out[key] = PRICED;
+			else if (key === "error" && typeof v === "string") out[key] = v.split("\n")[0];
+			else out[key] = masked(v);
+		}
+		return out;
+	};
+
+	describe.each(SCENARIOS)(
+		"$name: serialized payloads are the pre-typed-jobs shape",
+		(scenario) => {
+			it.each([
+				["an unlabelled call", {}, {}],
+				["a job-only call", { job: JOB }, { job: JOB }],
+				["an invalid-log call", { jobState: "invalid" }, { jobState: "invalid" }],
+			])("%s", async (_label, labels, added) => {
+				const pinned = PRE_TYPED[scenario.name];
+				if (pinned === undefined) throw new Error(`no pinned shape for ${scenario.name}`);
+				const run = await drive(scenario, labels);
+				const expected = {
+					events: pinned.events.map((e) => ({ ...e, data: { ...e.data, ...added } })),
+					receipts: pinned.receipts.map((r) => ({ ...r, ...added })),
+				};
+				const actual = {
+					events: run.events.map((e) => ({ kind: e.kind, actor: e.actor, data: e.data })),
+					receipts: run.receipts.map((r) => r.data),
+				};
+				expect(JSON.stringify(masked(actual), null, 1)).toBe(
+					JSON.stringify(masked(expected), null, 1),
+				);
+			});
+		},
+	);
 
 	// ── Refused before any I/O ──
 

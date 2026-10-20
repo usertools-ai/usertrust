@@ -837,7 +837,9 @@ a type needs a `job`, `typeSource` needs a `jobType`, `jobState: "invalid"` excl
 denial builders in `audit/denial-events.ts` list them by name (they select fields; they do not spread),
 so `DenialEventFields` carries them too. The keys are ABSENT when untyped: an untyped record serializes
 exactly as it did. `SettleParams` has NO job or type fields: a settle cannot relabel a hold, and
-`Authorization.jobType` / `.typeSource` are frozen reporting the governor never reads back. Over HTTP a
+`Authorization.jobType` / `.typeSource` (like `.job`) are ordinary writable properties on the handle:
+reporting copies of the frozen capture. Assigning to them changes only the handle, never any record,
+because the governor reads its own internal capture and never the handle. Over HTTP a
 settle may repeat `jobType` / `typeSource` (alone, without `job`) only to be CHECKED against the server's
 own authorize copy (`PendingEntry.labels`), refused 400 BEFORE the claim on a difference, and the echoes
 are taken out of the usage passed on, exactly as `job` / `jobState` are; a settle for an unknown hold

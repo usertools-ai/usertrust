@@ -282,9 +282,10 @@ export interface Authorization {
 	 */
 	costCenter?: string | undefined;
 	/**
-	 * The job this hold is labelled with, for REPORTING: frozen with the handle and never
-	 * read back by the governor, whose records come from the authorize capture. Absent
-	 * for an unlabelled call.
+	 * The job this hold is labelled with, for REPORTING: a copy of the frozen authorize
+	 * capture. The property is writable, but assigning to it changes only this handle: the
+	 * governor never reads it back, and its records come from its own capture. Absent for an
+	 * unlabelled call.
 	 */
 	job?: string | undefined;
 	/**
