@@ -772,6 +772,33 @@ describe("destroy() records a terminal still in flight with the hold's job", () 
 		voids.open();
 		await ending;
 	});
+
+	it("the record destroy() writes for a terminal in flight carries the hold's jobType and typeSource", async () => {
+		const voids = gate();
+		const { engine } = ledgerEngine({ void: voids.wait });
+		const gov = await governor(engine, BOUND_MS);
+		const auth = await gov.authorize({
+			...AUTHORIZE,
+			actor: "plugin",
+			principal: PRINCIPAL,
+			job: "job-a",
+			jobType: "bugfix",
+			typeSource: "agent",
+		});
+		const ending = end(gov, auth, "release");
+		await gov.destroy();
+		// mutant: this append builds its own job fields instead of spreading the capture
+		expect(recordsOf(auth.transferId).map((e) => e.data)).toEqual([
+			{
+				...destroyRecord(auth, "session", STILL_IN_FLIGHT).data,
+				job: "job-a",
+				jobType: "bugfix",
+				typeSource: "agent",
+			},
+		]);
+		voids.open();
+		await ending;
+	});
 });
 
 describe("destroy() records a release still in flight with the class the release stated", () => {

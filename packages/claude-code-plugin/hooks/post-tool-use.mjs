@@ -74,6 +74,7 @@ import {
 	takePendingEntry,
 	timeLeft,
 	usageMode,
+	withoutJobType,
 } from "./lib.mjs";
 import {
 	authorizeLabels,
@@ -238,6 +239,14 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 	const principal = principalCapable(capabilities)
 		? estimatePrincipalFor(sessionId, agentId, input.agent_type)
 		: undefined;
+	// The labels this replacement is sent with AND records: the expired hold's, minus a type when
+	// the server now answers that it does not list `job-type`. (A server that cannot be asked
+	// keeps what the hold was sent with: it is the same charge, and a server that strips a type
+	// strips it from the authorize and its settle alike.) One value, so a settle never echoes a
+	// type this authorize omitted.
+	const carried = jobHoldFields(
+		capabilities !== null && !capabilities.has("job-type") ? withoutJobType(entry) : entry,
+	);
 	let auth;
 	try {
 		auth = await serverRequest(
@@ -257,7 +266,7 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 				...(principal === undefined ? {} : { principal }),
 				// The replacement is the SAME call's charge: it carries the expired hold's job
 				// and usage start, not whatever job is open now.
-				...authorizeLabels(entry),
+				...authorizeLabels(carried),
 			},
 			withinBudget(),
 		);
@@ -317,7 +326,7 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 					: {}),
 				// The replacement is the SAME call's charge: it keeps the expired hold's job and usage
 				// start, so a Stop that finds it unanswered places its gap by when the call began.
-				...jobHoldFields(entry),
+				...carried,
 			},
 			{ settling: true },
 		);
@@ -346,7 +355,12 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 	say(
 		`usertrust: hold ${entry.transferId} expired before its settle (a long permission prompt?); charging this call once on ${transferId}`,
 	);
-	const settle = await settleOnce(at, { transferId, ...usage });
+	// The replacement's settle names the type its authorize SENT (`carried`), never the expired
+	// hold's when the authorize dropped it.
+	const settle = await settleOnce(at, {
+		transferId,
+		...(carried.jobType === undefined ? withoutJobType(usage) : usage),
+	});
 	if (settle.status === 200) {
 		await noteIfAmbiguous(at, settle, transferId);
 		await unlink(fresh).catch(() => {});

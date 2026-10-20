@@ -4,9 +4,11 @@
 import {
 	AnomalyError,
 	InsufficientBalanceError,
+	JOB_TYPES,
 	PolicyDeniedError,
 	principalFieldRefusal,
 	RELEASE_CLASSES,
+	TYPE_SOURCES,
 	UnheldSettlementRateLimitedError,
 	usageTimeRefusal,
 } from "usertrust";
@@ -67,9 +69,24 @@ export const AuthorizeRequestSchema = z
 		job: PrincipalField.optional(),
 		jobState: z.literal("invalid").optional(),
 		usageFrom: UsageTime.optional(),
+		// Capability `job-type`: which KIND of work the job was (the closed `JOB_TYPES` list)
+		// and who declared it. Validated here, explicitly: top-level keys are stripped, not
+		// refused, so an older server drops both in silence and a client sends them only to a
+		// server that lists `job-type`. Neither selects an account, enters the policy gate or
+		// prices anything.
+		jobType: z.enum(JOB_TYPES).optional(),
+		typeSource: z.enum(TYPE_SOURCES).optional(),
 	})
 	.refine((r) => r.job === undefined || r.jobState === undefined, {
 		message: "jobState cannot accompany a job",
+	})
+	// A type labels a JOB. Without one it would be a fact about work nobody can name, and with
+	// `jobState: "invalid"` (an untrustworthy log) it would read as a fact about that work.
+	.refine((r) => r.jobType === undefined || r.job !== undefined, {
+		message: "jobType requires a job",
+	})
+	.refine((r) => r.typeSource === undefined || r.jobType !== undefined, {
+		message: "typeSource requires a jobType",
 	});
 
 export const SettleRequestSchema = z.object({
@@ -125,6 +142,11 @@ export const SettleRequestSchema = z.object({
 	// can carry two different values. `usageTo` is the one genuine settle-side fact.
 	job: PrincipalField.optional(),
 	jobState: z.literal("invalid").optional(),
+	// Capability `job-type`. Echoed like `job`: accepted only to be CHECKED against the hold's
+	// authorize capture (a mismatch is a 400 before the claim), alone or together, without
+	// having to repeat `job`. They are never a settle-side fact.
+	jobType: z.enum(JOB_TYPES).optional(),
+	typeSource: z.enum(TYPE_SOURCES).optional(),
 	usageFrom: z.never().optional(),
 	usageTo: UsageTime.optional(),
 });

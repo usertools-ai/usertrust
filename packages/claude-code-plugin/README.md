@@ -164,6 +164,11 @@ directory `/`, and with nothing of the environment but Claude Code's own
   does not see `NODE_EXTRA_CA_CERTS`.
 - The child also checks its own environment: holding anything else, it refuses to
   run and sends nothing.
+- SessionStart's one request, the check for `"job-type"` that decides whether the agent is
+  asked to type its jobs, is made from that same kind of child (the banner and everything else
+  SessionStart prints stay with the parent). A child that cannot run or fails means no
+  instruction, and the banner as before. An environment-configured session makes the request
+  from the process itself, as it always sent.
 - **Configured sessions do not run on Windows yet.** Windows adds `SYSTEMROOT`,
   `SYSTEMDRIVE` and `TEMP` to a child's environment, with the parent's values, and
   `SYSTEMROOT` decides where system libraries are found. So on Windows a configured
@@ -519,6 +524,46 @@ are opaque: 1-128 characters of `[A-Za-z0-9._:-]`.
 - **Server.** Sent only to a usertrust-server that lists `"job"` in `/v1/health` `capabilities`
   (remembered per server URL, so one failed health probe does not drop it); an older server leaves every
   record as it was.
+- **A job TYPE: what kind of work it was.** `usertrust-job.mjs start [--type <type>] [--source
+  agent|explicit] <job-id>` also labels the job's spend with one of `feature`, `bugfix`, `review`,
+  `test`, `docs`, `ops`, `research`, `other` (a closed list: there is no free text, and nothing is
+  inferred from names, branches or paths). It lands on the same records as the job (`data.jobType`,
+  `data.typeSource`), so cost by kind of work is a query too. An unknown `--type` is refused (exit 2,
+  the list printed); `--source` alone is refused; `--source` is `explicit` when you give a type and no
+  source. Changing the type of the job you are on is a new `start`.
+
+  ```bash
+  usertrust-job.mjs start --type bugfix bug-1                 # you typed it: typeSource "explicit"
+  usertrust-job.mjs start --type research --source agent t-7  # what the instruction below tells the agent to run
+  ```
+
+  - **A type is a declaration, not evidence.** The command cannot tell a person from an agent:
+    `--source agent` is what the plugin's instruction tells the agent to pass, and an agent that leaves it
+    out records `explicit`. When the source is `agent` the type is the model's own call: it can be wrong,
+    or chosen by a prompt. It selects no account, enters no policy decision and prices nothing, so the
+    worst case is a wrong row in a report, but read a by-type total as the agent's labelling, not a
+    measurement.
+  - **Two ways it goes wrong, and neither is an error.** *No type:* an agent that ignores the instruction
+    leaves the job untyped (reported as untyped, never guessed). *A stale type:* the open job persists until
+    the next `start` or `stop`, so an agent that types task A and then ignores the instruction for task B
+    keeps billing B to A's job, with A's type.
+  - **The agent is asked to type its own jobs.** For a server that lists `"job-type"`, SessionStart adds a
+    fixed instruction (under 1,000 characters, nothing of yours interpolated) to the agent's context: at
+    the start of each distinct task run `usertrust-job.mjs start --type <type> --source agent <short-id>`,
+    run it again when the task changes, do not ask you, and after a resume or compact keep a job already
+    open for the same work. It is added on every start, resume, `/clear`, compact and fork. Claude Code
+    saves what a hook injects in the session transcript, so it is not hidden: it is simply not shown as a
+    chat message. The check for `"job-type"` is one health request of up to 1.5 s at session start; if it
+    fails, times out, answers something that is not a capability list, or the configuration is refused, no
+    instruction is added and the banner is shown exactly as before.
+  - **Allow the command** so the agent is not prompted for it each time: `Bash(usertrust-job.mjs:*)`
+    (see *A bare command* above).
+  - **Server.** The type is sent only to a usertrust-server that lists `"job-type"` in `/v1/health`
+    `capabilities`, and only on a job (remembered per server URL like `"job"`, so one failed probe does not
+    drop it). A server that lists `"job"` but not `"job-type"` is sent the job and no type. A hold records
+    the labels its authorize was SENT, and its settle names exactly those: a settle never names a type its
+    authorize omitted, and a hold file written by an older plugin reads as untyped. A job log with an
+    unknown type or source, or a type on a line that is not a `start`, is invalid, like any other bad line.
 - **What does the evidence not cover?**
   `usertrust-job.mjs coverage bug-1 --vault <project>/.usertrust` prints the job's tagged cost
   and a list of `knownGaps`, each a named reason the figure may be incomplete, with its evidence. **It is a

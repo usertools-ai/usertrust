@@ -828,6 +828,25 @@ expiry take no input of their own and inherit the hold's labels from the capture
 *Prevents:* a caller relabelling a spend between the two phases through its own object or handle,
 and a release or expiry record losing the job its hold was reserved for.
 
+*A job's TYPE is a second label with the same standing (capability `job-type`).* `jobType` is one of
+the CLOSED list `JOB_TYPES` (`feature | bugfix | review | test | docs | ops | research | other`) and
+`typeSource` is `explicit` or `agent` (`TYPE_SOURCES`); a new type is a deliberate change to that list
+with a CHANGELOG line, never free text and never inferred. `captureJob` captures both ONCE with `job`;
+a type needs a `job`, `typeSource` needs a `jobType`, `jobState: "invalid"` excludes both (a
+`TypeError` before any I/O). Every record that spreads `capture.jobAudit` carries them, and BOTH
+denial builders in `audit/denial-events.ts` list them by name (they select fields; they do not spread),
+so `DenialEventFields` carries them too. The keys are ABSENT when untyped: an untyped record serializes
+exactly as it did. `SettleParams` has NO job or type fields: a settle cannot relabel a hold, and
+`Authorization.jobType` / `.typeSource` (like `.job`) are ordinary writable properties on the handle:
+reporting copies of the frozen capture. Assigning to them changes only the handle, never any record,
+because the governor reads its own internal capture and never the handle. Over HTTP a
+settle may repeat `jobType` / `typeSource` (alone, without `job`) only to be CHECKED against the server's
+own authorize copy (`PendingEntry.labels`), refused 400 BEFORE the claim on a difference, and the echoes
+are taken out of the usage passed on, exactly as `job` / `jobState` are; a settle for an unknown hold
+ignores them. A type is a DECLARATION, not evidence: `agent` is a claim by whatever called the CLI.
+*Prevents:* a type read from the caller's handle or a later settle relabelling spend; a typed record
+that the denial builders silently dropped; and `explicit` being read as proof that a person chose it.
+
 *usertrust-server's rules (capability `job`).* `/v1/authorize` accepts `job`, `jobState` and
 `usageFrom`; `/v1/settle` accepts `usageTo`, and `job` / `jobState` only to CHECK them. The server
 keeps its own copy of the authorize labels and refuses (400, nothing written, the hold still
