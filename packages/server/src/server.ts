@@ -2127,7 +2127,12 @@ export function createUsertrustServer(opts: {
 		transferId: string,
 		landed: { state: "pending" | "not-ended"; entry: PendingEntry },
 	): void {
-		const life = remainingLifeMs(landed.entry.auth, entryLife(landed.entry), monoAge(landed.entry));
+		// The LEDGER's remaining hold, never the sweep's: the sweep's life may already be spent (its own
+		// void is the one that failed) while the ledger keeps the funds until its pending timeout. Unknown
+		// when the handle does not state that timeout: then no `expiresInMs`.
+		const timeout = landed.entry.auth.holdTimeoutMs;
+		const life =
+			timeout === undefined ? null : Math.max(0, Math.floor(timeout - monoAge(landed.entry)));
 		sendJson(res, 409, {
 			error: "hold_active",
 			reason:

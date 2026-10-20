@@ -220,7 +220,11 @@ describe("`release-waits`: a release that finds the hold taken by another termin
 	])(
 		"a racing terminal whose release ended in %s (%s): the waiting release's status",
 		async (_name, voidError, status) => {
-			const fake = createFakeGovernor({ releaseDelayMs: 200, release: { voidError } });
+			const fake = createFakeGovernor({
+				releaseDelayMs: 200,
+				release: { voidError },
+				holdTimeoutMs: 300_000,
+			});
 			server = createUsertrustServer({
 				config: config({ pendingTtlMs: 300_000 }),
 				factory: async () => fake.governor,
@@ -244,6 +248,34 @@ describe("`release-waits`: a release that finds the hold taken by another termin
 			await sweeping;
 		},
 	);
+
+	it("a 409 for the sweep's own failed void states the LEDGER's remaining hold, not the spent sweep life", async () => {
+		// The sweep ends a hold at its 10 s life; the ledger holds it 300 s. Its void fails, so the
+		// funds stay reserved until the ledger's timeout: that is what the client must be told.
+		const fake = createFakeGovernor({
+			releaseDelayMs: 200,
+			release: { voidError: "ledger_unavailable" },
+			holdTimeoutMs: 300_000,
+		});
+		server = createUsertrustServer({
+			config: config({ pendingTtlMs: 10_000 }),
+			factory: async () => fake.governor,
+		});
+		const { port } = await server.listen();
+		const base = `http://127.0.0.1:${port}`;
+		const { json } = await authorize(base);
+		const sweeping = server.sweepExpired(Date.now() + 20_000);
+		const res = await fetch(`${base}/v1/release`, {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: `Bearer ${KEY}` },
+			body: JSON.stringify({ transferId: String(json.transferId) }),
+		});
+		expect(res.status).toBe(409);
+		const { expiresInMs } = (await res.json()) as { expiresInMs: number };
+		expect(expiresInMs).toBeGreaterThan(250_000);
+		expect(expiresInMs).toBeLessThanOrEqual(300_000);
+		await sweeping;
+	});
 
 	it("a maxPendingTtlMs past the ledger's u32 seconds is refused at load", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "utsrv-ttl-cfg-"));
