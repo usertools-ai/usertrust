@@ -1873,21 +1873,49 @@ async function lastSwitch(sessionId) {
 	if (typeof sessionId !== "string" || sessionId === "") return null;
 	const dir = await privateDir(switchDir(sessionId), { create: false });
 	if (!dir.ok) return dir.reason.includes("ENOENT") ? null : SWITCH_UNREADABLE;
-	const records = [];
+	// A record listed and then gone was removed by a newer run (`recordModelSwitch`), whose own
+	// record the listing may have missed: never read as no switch, the directory is listed again.
+	for (let attempt = 0; attempt < SWITCH_READ_ATTEMPTS; attempt += 1) {
+		const read = await readSwitches(dir.dir);
+		if (read !== RECORD_GONE) return read;
+	}
+	return SWITCH_UNREADABLE;
+}
+
+/** `readSwitches`' answer when a record it listed is gone before it is read. */
+const RECORD_GONE = Symbol("record gone");
+
+/** How many times `lastSwitch` lists a directory whose records keep going. */
+const SWITCH_READ_ATTEMPTS = 3;
+
+/** One listing of a session's switch records, as `lastSwitch` answers, or `RECORD_GONE`. */
+async function readSwitches(dir) {
+	let names;
 	try {
-		const names = (await readdir(dir.dir)).filter((name) => !name.endsWith(".tmp"));
-		if (names.length > MAX_SWITCH_RECORDS) return SWITCH_UNREADABLE;
-		for (const name of names) {
-			const record = JSON.parse(await readRegular(join(dir.dir, name), READ_BOUND.small));
-			const id = modelId(record?.model);
-			if (id === null || id === UNKNOWN_MODEL || !Number.isSafeInteger(record.at)) {
-				return SWITCH_UNREADABLE;
-			}
-			records.push({ model: id, at: record.at });
+		names = (await readdir(dir)).filter((name) => !name.endsWith(".tmp"));
+	} catch {
+		return SWITCH_UNREADABLE;
+	}
+	if (names.length > MAX_SWITCH_RECORDS) return SWITCH_UNREADABLE;
+	const records = [];
+	for (const name of names) {
+		let text;
+		try {
+			text = await readRegular(join(dir, name), READ_BOUND.small);
+		} catch (err) {
+			return err?.code === "ENOENT" ? RECORD_GONE : SWITCH_UNREADABLE;
 		}
-	} catch (err) {
-		// The directory went between the check and the read: nothing recorded.
-		return err?.code === "ENOENT" && records.length === 0 ? null : SWITCH_UNREADABLE;
+		let record;
+		try {
+			record = JSON.parse(text);
+		} catch {
+			return SWITCH_UNREADABLE;
+		}
+		const id = modelId(record?.model);
+		if (id === null || id === UNKNOWN_MODEL || !Number.isSafeInteger(record.at)) {
+			return SWITCH_UNREADABLE;
+		}
+		records.push({ model: id, at: record.at });
 	}
 	if (records.length === 0) return null;
 	const at = Math.max(...records.map((record) => record.at));

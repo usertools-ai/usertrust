@@ -4,10 +4,12 @@
 // at the estimate), a transcript hold with no window, and PostToolUse's replacement of an expired
 // estimate hold. With no source at all a hold names `unknown`, which the server prices at the
 // dearest rate it publishes (core pricing.ts `FALLBACK_RATE`), and says so (`params.modelSource`).
+import { execFile } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runHook } from "./helpers/run-hook.js";
 
@@ -420,6 +422,67 @@ describe("the model a hold names is the session's own", () => {
 		// An unusable `to_model` leaves the earlier record as it is.
 		await recordModelSwitch("switch-start", "two words");
 		expect(await at("switch-start", {})).toEqual({ model: HAIKU, source: "session" });
+	});
+
+	it("a switch record pruned between its listing and its read is never read as no switch", async () => {
+		// A newer run (`recordModelSwitch`) removes an old record after this hold listed it, before it
+		// read it. The newer run's own record is missing from that listing: the directory is listed
+		// again, so the newer switch is seen. Made deterministic in a child process whose `readdir`
+		// lets the newer run land right after the first listing.
+		const sessionId = "switch-pruned";
+		const records = join(stateDir, "transcripts", "session-models", `${sessionId}.switches`);
+		await mkdir(records, { recursive: true, mode: 0o700 });
+		await chmod(join(stateDir, "transcripts"), 0o700);
+		await chmod(join(stateDir, "transcripts", "session-models"), 0o700);
+		const old = Date.now() - 60_000;
+		await writeFile(join(records, `${old}.1.a.json`), JSON.stringify({ model: HAIKU, at: old }));
+		// A Haiku response after the old switch, before the newer one.
+		const path = join(projectDir, `${sessionId}.jsonl`);
+		await writeFile(path, response("msg_h", HAIKU, 30_000));
+		const child = `
+			import fs from "node:fs/promises";
+			import { syncBuiltinESMExports } from "node:module";
+			import { join } from "node:path";
+			const { records, old, opus, transcript, sessionId, path } = JSON.parse(process.env.CASE);
+			const listing = fs.readdir;
+			let first = true;
+			fs.readdir = async (dir, ...rest) => {
+				const names = await listing(dir, ...rest);
+				if (first && String(dir) === records) {
+					first = false;
+					// The newer run: its own record, then the old one removed.
+					const now = Date.now();
+					await fs.writeFile(join(records, now + ".2.b.json"), JSON.stringify({ model: opus, at: now }));
+					await fs.unlink(join(records, old + ".1.a.json"));
+				}
+				return names;
+			};
+			syncBuiltinESMExports();
+			const { holdModelFor } = await import(transcript);
+			const result = await holdModelFor({ sessionId, agentId: "main", input: { transcript_path: path }, lastModel: null });
+			process.stdout.write(JSON.stringify(result));
+		`;
+		const { stdout } = await promisify(execFile)(
+			process.execPath,
+			["--input-type=module", "-e", child],
+			{
+				env: {
+					PATH: process.env.PATH ?? "",
+					HOME: stateDir,
+					UT_CC_STATE_DIR: stateDir,
+					CASE: JSON.stringify({
+						records,
+						old,
+						opus: OPUS,
+						transcript: TRANSCRIPT,
+						sessionId,
+						path,
+					}),
+				},
+			},
+		);
+		// The newer switch, to Opus, was seen: the Haiku response predates it, so `unknown`.
+		expect(JSON.parse(stdout)).toEqual({ model: "unknown", source: "unknown" });
 	});
 
 	it("the PostModelSwitch hook records the switch, prints nothing for Claude's context, and a hold reads it", async () => {
