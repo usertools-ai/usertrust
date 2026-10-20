@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.2.0] - 2026-10-19
+
 ### Read before upgrading
 
 - **An audit lock left in another PID namespace by 5.1.0 or earlier still needs one removal by hand.** Locks now carry a lease that lets a writer in a new PID namespace (WSL2 after every restart, or a container restarted after a crash) reclaim a lock whose writer is gone (see Fixed). A lock written by an earlier version carries no lease, so it is held as before. If a writer refuses with `in another PID namespace` and `carries no lease`, follow the recovery steps the message prints: confirm that no process still writes the vault, remove exactly `.usertrust/audit/.audit-writer.lock`, and run `usertrust verify`. Locks written from this version on recover by themselves.
@@ -31,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Only `RangeError` is caught. Any other error still throws, so a bug is never reported as an unscannable value.
   - The name is exported as `UNSCANNABLE`.
 
+### Changed
+
+- Every package's NOTICE now states that the usertrust name and logo are trademarks of Usertools, Inc., and that the logo, where a package includes it, is not licensed under Apache-2.0 (see TRADEMARKS.md).
+
 ### Fixed
 
 - **`usertrust-server` logged a very long error message as "(the error could not be read)".** Before writing an internal error to its log, the server redacts api-key values, and the pattern it used could not finish on an unclosed quoted value of about 10 million characters, so the line lost the error's reason. A regular expression now finds only where a value starts, and a loop finds where a quoted one ends: it reads a message of any length, and redacts exactly what the pattern did. If a pattern still cannot finish, the message is replaced by `[redacted: the message could not be scanned]`.
@@ -43,6 +49,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A writer in a new PID namespace never reclaimed the audit lock its previous run left behind.** WSL2 starts each boot in a new PID namespace with a new boot id, and shutting it down kills a running writer without releasing its lock. The next writer found a lock from "another PID namespace" and held it, deliberately: a PID cannot be probed across namespaces, and a differing boot id proves nothing there, because systemd-nspawn gives a container a private boot id beside a live writer on the host. So every audit append was refused and dead-lettered until someone removed the lock by hand, after every restart of WSL with the writer running. A writer on Linux now renews a lease on its lock: it declares `leaseRenewMs` in the lock and sets the lock file's modification time every 5 s, through a file descriptor proven to be its own lock. A writer whose renewals keep failing for 20 s stops writing under the lease: the append that finds it is refused and dead-lettered, and the lock is given up, before any other namespace could reclaim it (30 s at the earliest); the next append takes the lock afresh. A lock from another namespace is reclaimed only when its lease is more than 60 s old on the wall clock AND the process that finds it has seen it unrenewed for 30 s of its own monotonic clock. The second condition keeps a live holder's lock through a host suspend or a forward clock step, after which every lease reads as expired at once: the holder renews within that window. A writer that lost its lock while frozen is refused at its next append, which checks that it still holds the lock before it writes. A lock with no lease, from an earlier version, is held as before. Every refusal of another namespace's lock, or of one whose namespace cannot be compared, now prints the safe recovery steps, for Linux, WSL, macOS and Windows. See LIMITATIONS §5.
 
+### Known issues
+
+These remain open in this release:
+
+- A ledger-backed usertrust-server stopped by SIGINT or SIGTERM with a pending hold, or with an authorize still reserving, can exit before ending it: the hold or reservation may stay reserved until the ledger's 300 s timeout, and its release may not be recorded.
+
+- An eviction learned in the instant between a governor's shutdown request and the `destroy()` that follows it (no `await` between them) still aborts the process. The voids, audit flush and lock release have already run. What is lost is the exit status (134, which a supervisor reads as a crash) and anything the process does after `destroy()`.
+
+- `GET /v1/health` reports a ledger outage (`ledger: "unreachable"`, `ok: false`) only where a health child observes the ledger: the CLI's default. `createUsertrustServer()` answers `ledger: "unknown"` and `ok: true` through an outage unless `ledgerHealth` is `"child"`, and health also reads `unknown` while a tenant's governor is still being created, after a tenant's config changed since start (until a restart), and while an observer child that died waits out its cooldown. Where health reads `unknown`, read the `503 ledger_unavailable` answers on `POST /v1/authorize` instead.
+
+- `/v1/settle`, `/v1/abort` and `/v1/release` still wait for the ledger without a bound during an outage, and complete when it returns. `ledgerTimeoutMs` applies to `POST /v1/authorize` only.
+
+- An authorize that ends without a ledger reply (an evicted client session) may still have reserved, and that reservation expires at the hold timeout (300 seconds).
+
+- A tenant's authorizes are served one at a time, so a burst counts against `ledgerTimeoutMs` too. Measured on an Apple M4 Pro against a local single-node TigerBeetle, the default 5 s deadline was reached at roughly 350 concurrent authorizes for one tenant, and a slower or remote ledger reaches it sooner. A tenant that issues many concurrent authorizes should raise `ledgerTimeoutMs`.
+
+- A `TrustTBClient` whose session the cluster evicted while it was idle still aborts the process when `TrustTBClient.destroy()` is called directly on it, with no request since. Make one ledger request before `destroy()`, or end the process with `process.exit()` without calling `destroy()`.
+
+- A process that holds an evicted ledger client it has dropped does not exit on its own after `destroy()`. End such a process with `process.exit()` after `destroy()`.
+
+- A Google request field that only your client's `@google/genai` version reads is not sent. Keep the `@google/genai` that usertrust resolves at the same version as your client's.
+
+- In `trust()`, a provider count that is present but not a count (a string, NaN or a negative) still costs the estimate exactly, even when the call's other counts are usable.
+
+- An audit log whose newest events were removed can read as verified. Without anchors the chain is checked only against itself, so a vault whose newest events were cut, and whose `.meta` file was deleted or rewritten to match, passes `usertrust verify` and `usertrust-verify` (exit 0, `UNANCHORED`). The usertrust-ui dashboard does not check anchors (its Anchor file cell says only whether the file exists), so its Integrity reads `verified` for such a vault, and for an anchored vault rolled back below its anchor before the dashboard opened. To detect either, enable anchoring and run `usertrust verify` or `usertrust-verify` with `--anchors <file>` (the anchor history, fetched from your anchor sink) and `--pubkey <pem>` (your pinned genesis key): a rollback below an anchor then fails with `ANCHOR_MISMATCH`. Without `--pubkey` the anchors are not checked, and the vault still passes as `ANCHOR_UNVERIFIABLE`.
+
+- `usertrust snapshot restore <name>` writes the snapshot's audit log, spend ledger, policies and config over the live ones, so events written after the snapshot was taken are dropped, with no warning and no backup, and the command exits 0. A refused restore also exits 0, and `usertrust snapshot create <name>` with a name that already exists overwrites that snapshot. Before a restore, take a snapshot under a new name (or copy `.usertrust/` while no usertrust process is running); check `usertrust snapshot list` before creating one; and in a script, read the `Snapshot restored:` line, or `"success": true` under `--json`, not the exit code.
+
+- A model id written the way a gateway or cloud platform writes it is priced at the fallback rate, the table's dearest ($25 in and $125 out per million tokens), so its hold is larger too and a small budget can refuse the call. This covers Bedrock ids (`anthropic.claude-...-v1:0`), Vertex ids (`claude-...@<date>`, `publishers/google/models/...`), OpenRouter ids (`anthropic/claude-sonnet-4.5`), `-latest` aliases without a row of their own, and ids in another case (`GPT-4o`). Reports, exports, receipts and the dashboard also show the provider of Bedrock, OpenRouter, `publishers/` and other-case ids as `unknown`. To price such an id, set `pricing` to `"custom"` and add the exact id to `customRates`; this does not change the provider shown.
+
+This list is not complete. LIMITATIONS.md gives the full account: section 13, "A ledger-backed server refuses authorizes while its ledger is unreachable, health can read `unknown` rather than the outage, and a hold it releases on SIGINT or SIGTERM may not be audited", and section 14, "A ledger client the cluster evicted cannot be released, and keeps its process from exiting on its own".
 
 ## [5.1.0] - 2026-10-18
 
