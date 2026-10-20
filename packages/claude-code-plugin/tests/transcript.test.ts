@@ -2503,7 +2503,7 @@ describe("estimate holds", () => {
 			// Every answer but /v1/health takes 4.3 s. Uncapped (5 s each), the settle's
 			// 404, the fresh authorize and the fresh settle would all be answered, ~13 s
 			// in: past the 10 s budget, close to Claude Code's 15 s kill. Capped, the
-			// fresh settle gets only what is left of the budget, and is cut off.
+			// fresh authorize gets what is left less its settle's share, and is given up.
 			const pending = new Set<string>();
 			const charged: string[] = [];
 			await startServer((path, body) => {
@@ -2531,18 +2531,13 @@ describe("estimate holds", () => {
 			expect(post.code).toBe(0);
 			// The 10 s budget, plus node's start and exit.
 			expect(elapsed).toBeLessThan(11_750);
-			// The fresh hold tx_2 was authorized and its settle cut off by the budget...
-			expect(authorizes().map(transferOf)).toEqual(["tx_1", "tx_2"]);
-			expect(post.stderr).toContain("charging this call once on tx_2");
-			expect(post.stderr).toContain("settle failed (non-blocking)");
-			// ...so it was left settle-attempted, and Stop gave it back: at most one
-			// charge (the cut-off settle may still post), never two.
-			expect(
-				requests
-					.filter((r) => r.body.transferId === "tx_2" && r.path !== "/v1/settle")
-					.map((r) => r.path),
-			).toEqual([expect.stringMatching(/^\/v1\/(release|abort)$/)]);
-			expect(charged.length).toBeLessThanOrEqual(1);
+			// The fresh authorize is capped to leave its settle room (1.5 s of the budget), so with
+			// 4.3 s answers it is given up before it is granted: no fresh hold is ever left with no time
+			// to settle it. The call ran, and nothing charges it: the call-ran gap, said once.
+			expect(post.stderr).toContain("its fresh hold was not granted");
+			expect(post.stderr).not.toContain("charging this call once on");
+			expect(post.stderr).not.toContain("settle failed (non-blocking)");
+			expect(charged).toEqual([]);
 			expect(await holdStateFiles()).toEqual([]);
 		}, 30_000);
 
