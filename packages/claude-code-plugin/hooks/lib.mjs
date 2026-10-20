@@ -1842,11 +1842,13 @@ export function holdExpiresAt(sentAt, json) {
 }
 
 /**
- * Whether a hold is past its recorded life (`holdExpiresAt`). Then the ledger's pending timeout
- * has voided it, or is about to: a settle can only fail, as a 410 `settlement_unrecoverable` the
- * server records as spend it never charged, though this plugin charges that usage itself (a
- * fresh hold, or a later settle point). So no settle is sent (`endExpiredHold`), and the hold
- * takes the path a gone answer takes.
+ * Whether a hold is past its recorded life (`holdExpiresAt`) at `now`. A caller about to settle
+ * passes the moment its settle could ARRIVE (now plus that request's timeout), never the moment it
+ * leaves: with less life left than that, the settle can land after the ledger's pending timeout.
+ * Past it, the ledger has voided the hold, or will have: a settle can only fail, as a 410
+ * `settlement_unrecoverable` the server records as spend it never charged, though this plugin
+ * charges that usage itself (a fresh hold, or a later settle point). So no settle is sent
+ * (`endExpiredHold`), and the hold takes the path a gone answer takes.
  */
 export function holdExpired(entry, now = Date.now()) {
 	return Number.isSafeInteger(entry?.expiresAt) && now > entry.expiresAt;

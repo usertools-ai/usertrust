@@ -733,7 +733,8 @@ Code's permission prompt, or a long Bash command run, for longer than the server
 keeps a hold (five minutes). A server that states each hold's life (`hold-expiry`:
 the authorize answer's `expiresInMs`) lets PreToolUse record when it ends, counted
 from the clock read before the authorize, so never later than the hold's last
-moment. Past it, the hold is given back first: the server counts a hold against the
+moment. Once a settle sent now could arrive after it (the settle's own timeout is counted
+too), the hold is given back first: the server counts a hold against the
 budget until its own sweep, so a replacement asked for beside it could be refused.
 Once the server confirms it ended, no settle is sent: it could only fail, as a 410
 `settlement_unrecoverable` the server records as spend it never charged, though the

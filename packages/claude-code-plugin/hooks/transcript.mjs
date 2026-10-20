@@ -2183,7 +2183,12 @@ async function settleBody(transferId, counts, labels) {
 }
 
 async function settleAt(transferId, counts, { keyed, labels = {}, expiresAt }) {
-	if (holdExpired({ expiresAt }) && (await endExpiredHold(transferId, callTimeout()))) {
+	// Judged at the moment the settle could arrive: one sent with less life left than its own
+	// timeout could land after the ledger's pending timeout.
+	if (
+		holdExpired({ expiresAt }, Date.now() + callTimeout()) &&
+		(await endExpiredHold(transferId, callTimeout()))
+	) {
 		// Past its recorded life, and given back with the server's confirmation (lib.mjs
 		// `endExpiredHold`): no settle is sent, so nothing posted through it, under a key or not.
 		// Its window is released to a later settle point, as an unkeyed gone answer releases it,

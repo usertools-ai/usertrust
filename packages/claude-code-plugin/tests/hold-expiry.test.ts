@@ -193,6 +193,27 @@ describe("a hold's life, as the server states it", () => {
 		expect(await readdir(stateDir)).not.toContain(expect.stringContaining("tx_1"));
 	});
 
+	it("a hold with less life left than its settle's own timeout is given back, and never settled", async () => {
+		// The settle would leave in time and could land after the pending timeout: the very 410.
+		life = 2_000;
+		await pre("tu_1", {}, ESTIMATE);
+		await post("tu_1", {}, ESTIMATE);
+		expect(settled().map((s) => s.transferId)).toEqual(["tx_2"]);
+		expect(authorizes()[1]?.params?.replaces).toBe("tx_1");
+		// The same on the transcript path.
+		capabilities = ["hold-expiry", "release"];
+		await runHook(SESSION_START, { session_id: "sess-expiry-t", source: "startup" }, env);
+		const t = join(projectDir, "sess-expiry-t.jsonl");
+		await writeFile(t, response("msg_t"));
+		await runHook(PRE, { ...call("tu_t"), session_id: "sess-expiry-t", transcript_path: t }, env);
+		await runHook(
+			POST,
+			{ ...call("tu_t"), session_id: "sess-expiry-t", transcript_path: t, tool_response: "ok" },
+			env,
+		);
+		expect(settled().map((s) => s.transferId)).not.toContain("tx_3");
+	});
+
 	it("an estimate hold past its life whose give-back the server does not confirm is settled as before", async () => {
 		life = 0;
 		await pre("tu_1", {}, ESTIMATE);

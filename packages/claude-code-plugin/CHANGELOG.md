@@ -15,7 +15,7 @@ npm, and its version is its own: the `usertrust` packages and their
   the server records as spend it never charged, although the plugin then charged that usage
   itself. PreToolUse now records when each hold's life ends, from the authorize answer's
   `expiresInMs` (`hold-expiry`), counted from the clock read before the authorize was sent. Past
-  it, PostToolUse gives the hold back first (the server counts it against the budget until its
+  it, or once a settle could arrive after it, PostToolUse gives the hold back first (the server counts it against the budget until its
   own sweep, so a replacement beside it could be refused). Once the server confirms it ended, no
   settle is sent, and the hold takes the path a gone answer takes; unconfirmed, the settle is
   sent as before. An estimate

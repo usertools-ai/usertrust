@@ -211,7 +211,8 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 	// below. Sent, the settle could only fail, as a 410 the server records as spend it never
 	// charged, though the call is charged here, once. Unconfirmed, the settle is sent as before.
 	const expired =
-		holdExpired(entry) && (await endExpiredHold(entry.transferId, withinBudget().timeoutMs));
+		holdExpired(entry, Date.now() + withinBudget().timeoutMs) &&
+		(await endExpiredHold(entry.transferId, withinBudget().timeoutMs));
 	const response = expired
 		? null
 		: await settleOnce(at, { transferId: entry.transferId, ...usage });
