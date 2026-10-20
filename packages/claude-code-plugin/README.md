@@ -334,7 +334,9 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   transcript's to say. Each run of the hook keeps a record of its own, and switches
   recorded within 10 seconds of the newest are read together, since two runs that
   overlap can land out of order: when they name different models, the switch is
-  ambiguous, and a hold that depends on it means `unknown`. With no response to read, the hold names the model of the
+  ambiguous, and a hold that depends on it means `unknown`. A record counts only once its
+  write completed: a run whose write failed (a full disk, say) leaves a mark that means
+  `unknown`, never the previous record, until a later run's record completes. With no response to read, the hold names the model of the
   session's latest switch, else the one Claude Code reported at SessionStart (its
   `model`, which Claude Code may omit), but only for
   the main agent (it is the session's model, and a subagent may run a dearer one;

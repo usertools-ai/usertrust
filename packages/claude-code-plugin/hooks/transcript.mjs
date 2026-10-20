@@ -1838,25 +1838,66 @@ async function sessionModel(sessionId) {
  * fallback, a plan-mode setting, a resume. Each run writes a record of its own, so two runs that
  * overlap never replace each other's (`lastSwitch` reads them together); records too old to matter
  * are then removed. An unusable `to_model` records nothing. Local, bounded, and it never throws.
+ *
+ * A record is evidence only once its write COMPLETED: it is written whole and renamed into place
+ * (`writeAtomic`), and the run marks itself `.pending` first, removing the mark only after. A
+ * write that fails leaves the switch unrecorded, and the previous record would then read as the
+ * session's model: so a failed run leaves a `.failed` mark, or, when even that cannot be written
+ * (a full disk), renames the records there are to `.failed` (a rename needs no space). `lastSwitch`
+ * reads any mark as unreadable, `unknown`, until a later run's record completes and clears it.
  */
 export async function recordModelSwitch(sessionId, model) {
+	const id = modelId(model);
+	if (typeof sessionId !== "string" || sessionId === "") return;
+	if (id === null || id === SYNTHETIC_MODEL || id === UNKNOWN_MODEL) return;
+	let dir;
 	try {
-		const id = modelId(model);
-		if (typeof sessionId !== "string" || sessionId === "") return;
-		if (id === null || id === SYNTHETIC_MODEL || id === UNKNOWN_MODEL) return;
-		const dir = await privateDir(switchDir(sessionId));
-		if (!dir.ok) return;
-		const at = Date.now();
-		const name = `${at}.${process.pid}.${randomBytes(6).toString("hex")}.json`;
-		await writeAtomic(join(dir.dir, name), JSON.stringify({ model: id, at }));
+		dir = await privateDir(switchDir(sessionId));
+	} catch {
+		return;
+	}
+	if (!dir.ok) return;
+	const at = Date.now();
+	const base = `${at}.${process.pid}.${randomBytes(6).toString("hex")}`;
+	const pending = join(dir.dir, `${base}.pending`);
+	try {
+		await writeFile(pending, "", { flag: "wx", mode: 0o600 });
+		await writeAtomic(join(dir.dir, `${base}.json`), JSON.stringify({ model: id, at }));
+		await unlink(pending);
+	} catch {
+		await markSwitchFailed(dir.dir, base);
+		return;
+	}
+	try {
 		for (const other of await readdir(dir.dir)) {
 			const recorded = Number.parseInt(other, 10);
-			if (other.endsWith(".json") && recorded < at - SWITCH_OVERLAP_MS) {
-				await unlink(join(dir.dir, other)).catch(() => {});
+			// Superseded: a record too old to overlap this one, and any mark a run before this one left.
+			const stale = other.endsWith(".json")
+				? recorded < at - SWITCH_OVERLAP_MS
+				: (other.endsWith(".pending") || other.endsWith(".failed")) && recorded < at;
+			if (stale) await unlink(join(dir.dir, other)).catch(() => {});
+		}
+	} catch {
+		// Pruning is housekeeping: the record stands.
+	}
+}
+
+/** A switch run that could not record its switch: leave state that reads `unknown`. Never throws. */
+async function markSwitchFailed(dir, base) {
+	try {
+		await writeFile(join(dir, `${base}.failed`), "", { flag: "wx", mode: 0o600 });
+		return;
+	} catch {
+		// Not even an empty file could be written: rename what is there instead.
+	}
+	try {
+		for (const other of await readdir(dir)) {
+			if (other.endsWith(".json")) {
+				await rename(join(dir, other), join(dir, `${other}.failed`)).catch(() => {});
 			}
 		}
 	} catch {
-		// The next hold resolves without it.
+		// Nothing more can be done: the next hold resolves without the switch.
 	}
 }
 
@@ -1893,6 +1934,11 @@ async function readSwitches(dir) {
 	let names;
 	try {
 		names = (await readdir(dir)).filter((name) => !name.endsWith(".tmp"));
+		// A switch run in progress, or one whose write did not complete (`recordModelSwitch`): no
+		// record can be trusted as current, so `unknown`.
+		if (names.some((name) => name.endsWith(".pending") || name.endsWith(".failed"))) {
+			return SWITCH_UNREADABLE;
+		}
 	} catch {
 		return SWITCH_UNREADABLE;
 	}

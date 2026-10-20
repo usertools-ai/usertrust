@@ -500,6 +500,86 @@ describe("the model a hold names is the session's own", () => {
 		expect(JSON.parse(stdout)).toEqual({ model: "unknown", source: "unknown" });
 	});
 
+	it.each([
+		["the record's own write fails", "tmp"],
+		["no file can be written at all (a full disk)", "all"],
+	])(
+		"a switch run whose write did not complete leaves `unknown`, never the previous record: %s",
+		async (_name, failing) => {
+			// A cheaper switch recorded first, then a Haiku response after it: alone they say Haiku.
+			const sessionId = `switch-failed-${failing}`;
+			const path = join(projectDir, `${sessionId}.jsonl`);
+			const child = `
+			import fs from "node:fs/promises";
+			import { syncBuiltinESMExports } from "node:module";
+			const { transcript, sessionId, path, haiku, opus, failing, line } = JSON.parse(process.env.CASE);
+			const { holdModelFor, recordModelSwitch } = await import(transcript);
+			await recordModelSwitch(sessionId, haiku);
+			await new Promise((r) => setTimeout(r, 5));
+			await fs.writeFile(path, line);
+			const write = fs.writeFile;
+			fs.writeFile = async (file, ...rest) => {
+				if (String(file).includes(".switches") && (failing === "all" || String(file).endsWith(".tmp"))) {
+					throw Object.assign(new Error("no space"), { code: "ENOSPC" });
+				}
+				return write(file, ...rest);
+			};
+			syncBuiltinESMExports();
+			await recordModelSwitch(sessionId, opus);
+			const failed = await holdModelFor({ sessionId, agentId: "main", input: { transcript_path: path }, lastModel: null });
+			fs.writeFile = write;
+			syncBuiltinESMExports();
+			// A later run whose record completes is evidence again: the mark is cleared.
+			await recordModelSwitch(sessionId, opus);
+			process.stdout.write(JSON.stringify({ failed }));
+		`;
+			const line = JSON.stringify({
+				type: "assistant",
+				timestamp: "TS",
+				message: {
+					id: "msg_h",
+					model: HAIKU,
+					stop_reason: "tool_use",
+					usage: { input_tokens: 1, output_tokens: 1 },
+				},
+			});
+			const { stdout } = await promisify(execFile)(
+				process.execPath,
+				[
+					"--input-type=module",
+					"-e",
+					child.replace(
+						"await fs.writeFile(path, line);",
+						'await fs.writeFile(path, line.replace("TS", new Date().toISOString()) + "\\n");',
+					),
+				],
+				{
+					env: {
+						PATH: process.env.PATH ?? "",
+						HOME: stateDir,
+						UT_CC_STATE_DIR: stateDir,
+						CASE: JSON.stringify({
+							transcript: TRANSCRIPT,
+							sessionId,
+							path,
+							haiku: HAIKU,
+							opus: OPUS,
+							failing,
+							line,
+						}),
+					},
+				},
+			);
+			const { failed } = JSON.parse(stdout) as { failed: unknown };
+			expect(failed).toEqual({ model: "unknown", source: "unknown" });
+			// And no `.pending` or `.failed` mark is left once a run's record completes.
+			const records = await readdir(
+				join(stateDir, "transcripts", "session-models", `${sessionId}.switches`),
+			);
+			expect(records.filter((n) => n.endsWith(".pending") || n.endsWith(".failed"))).toEqual([]);
+		},
+	);
+
 	it("the PostModelSwitch hook records the switch, prints nothing for Claude's context, and a hold reads it", async () => {
 		await writeTranscript(mainTranscript(), response("msg_h", HAIKU, 10_000));
 		await pre("tu_1", { transcript_path: mainTranscript() });
