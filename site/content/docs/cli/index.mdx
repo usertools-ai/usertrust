@@ -79,10 +79,14 @@ Checks:
 Create and restore vault state checkpoints:
 
 ```bash
-npx usertrust snapshot           # create a snapshot
-npx usertrust snapshot --list    # list available snapshots
-npx usertrust snapshot --restore <name>  # restore from snapshot
+npx usertrust snapshot create <name>    # create a snapshot
+npx usertrust snapshot list             # list available snapshots
+npx usertrust snapshot restore <name>   # restore from snapshot
 ```
+
+<Callout type="warn">
+`snapshot restore` writes the snapshot's files over the live ones and deletes nothing, so events appended after the snapshot was taken are dropped, with no warning and no backup, and it exits 0 even when it refuses. `snapshot create` takes no writer lock and overwrites a snapshot that already has that name. Read the `Snapshot restored:` line, or parse the `--json` output and test `.success === true`, not the exit code. Stop every usertrust process that writes the vault before you create or restore a snapshot. See [LIMITATIONS.md](https://github.com/usertools-ai/usertrust/blob/master/LIMITATIONS.md) section 15.
+</Callout>
 
 ## usertrust tb
 
