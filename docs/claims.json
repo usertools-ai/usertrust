@@ -68,7 +68,8 @@
 		"\\bVERIFIED\\b",
 		"\\bprove[sn]?\\b",
 		"every (governed )?(LLM )?call",
-		"cannot (be )?rewrit",
+		"\\b(cannot|can ?not|can[\u2019']?t|could ?n[o\u2019']t|won[\u2019']?t|never|no(?: |-)?one can|nobody can|nothing can|no \\w+ (?:has|have|can|could|will))( ever)?( \\w+ly)?( be(en)?| have been| has been)?( \\w+ly)? (re-?writ|modif|alter|chang|edit|delet|eras|overwrit|forg|falsif|remov)",
+		"unalterab|unchangeab|unmodifiab|indelib|unforgeab|incorruptib|write-once|\\bpermanent|\\bforever\\b",
 		"\\bdetect(s|ed)?\\b",
 		"\\bguarantee"
 	],
@@ -1402,6 +1403,51 @@
 			"file": "site/content/docs/schemas.mdx",
 			"text": "| Trust Receipt v1 | [receipt.v1.schema.json](https://usertrust.ai/schemas/receipt.v1.schema.json) | The `TrustReceipt` returned by every governed call |",
 			"why": "names the receipt every governed call returns; a schema, not an audit claim"
+		},
+		{
+			"file": "LIMITATIONS.md",
+			"text": "Control values are never rewritten, because the provider needs them back unchanged:",
+			"why": "PII redaction leaves control fields as written; not an audit claim"
+		},
+		{
+			"file": "packages/claude-code-plugin/README.md",
+			"text": "is sent as `unknown`, never rewritten into another.",
+			"why": "how the plugin reports a session id it cannot use"
+		},
+		{
+			"file": "packages/claude-code-plugin/README.md",
+			"text": "Any other id is refused, never rewritten:",
+			"why": "how the plugin treats a malformed hold id"
+		},
+		{
+			"file": "packages/server/README.md",
+			"text": "A principal never changes which wallet pays.",
+			"why": "wallet attribution of a principal"
+		},
+		{
+			"file": "packages/server/README.md",
+			"text": "It is informational and never changes `ok`.",
+			"why": "a health counter that does not affect the health status"
+		},
+		{
+			"file": "site/content/docs/api/errors.mdx",
+			"text": "A failed denial-append never changes the error you receive.",
+			"why": "the error a caller sees when a denial event fails to append"
+		},
+		{
+			"file": "site/content/docs/concepts/local-models.mdx",
+			"text": "Renaming a local model (`ollama cp llama3.2 gpt-4o`) cannot change the regime in either direction.",
+			"why": "pricing regime of local models"
+		},
+		{
+			"file": "site/content/docs/concepts/two-phase-spend.mdx",
+			"text": "Hold becomes permanent spend",
+			"why": "the POST step of a ledger hold; not an audit claim"
+		},
+		{
+			"file": "site/content/docs/schemas.mdx",
+			"text": "Once published, a versioned schema never changes meaning.",
+			"why": "schema versioning policy"
 		}
 	],
 	"denied": [
