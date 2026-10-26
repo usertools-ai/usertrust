@@ -1932,19 +1932,29 @@ export async function recordModelSwitch(sessionId, model) {
  * is renamed to the session's failure mark (a rename needs no space), else the mark is written,
  * and it is dated now (`utimes` needs no space either). `lastSwitch` reads it as unreadable until a
  * switch is recorded after that date. Nothing removes it: a run that removed a mark it found older
- * could remove one a later failing run had just re-dated, the only evidence of that switch. With
- * no record to rename and no room for the mark, nothing records the switch. Never throws.
+ * could remove one a later failing run had just re-dated, the only evidence of that switch. When
+ * neither the rename nor the mark's write succeeds, SessionStart's record is removed, so the
+ * session reads as having no model. With no record to rename and no room for the mark, nothing
+ * records the switch. Never throws.
  */
 async function markSessionSwitchFailed(sessionId) {
 	try {
 		const dir = await privateDir(SESSION_MODEL_DIR, { create: false });
 		if (!dir.ok) return;
+		const record = join(dir.dir, sanitize(sessionId));
 		const mark = join(dir.dir, sessionSwitchFailed(sessionId));
 		try {
-			await rename(join(dir.dir, sanitize(sessionId)), mark);
-		} catch {
+			await rename(record, mark);
+		} catch (error) {
 			// No record to rename: the mark is written, or kept as an earlier run left it.
 			await writeFile(mark, "", { flag: "wx", mode: 0o600 }).catch(() => {});
+			// The rename itself can want space (the longer name may grow the directory). With no mark
+			// standing, SessionStart's record is removed (an unlink needs none), so it prices nothing.
+			const standing = await lstat(mark).then(
+				() => true,
+				() => false,
+			);
+			if (error?.code !== "ENOENT" && !standing) await unlink(record).catch(() => {});
 		}
 		const now = new Date();
 		await utimes(mark, now, now).catch(() => {});

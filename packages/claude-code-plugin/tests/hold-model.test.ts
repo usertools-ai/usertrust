@@ -681,6 +681,55 @@ describe("the model a hold names is the session's own", () => {
 		},
 	);
 
+	it("a switch whose session mark can be neither renamed to nor written removes SessionStart's record: `unknown`, never its model", async () => {
+		// The rename itself can want space (the longer name may grow the directory), and the mark's
+		// write fails too: no mark stands, so SessionStart's cheaper model must not price the hold.
+		const sessionId = "switch-first-no-mark";
+		const child = `
+			import fs from "node:fs/promises";
+			import { syncBuiltinESMExports } from "node:module";
+			const { transcript, sessionId, haiku, opus } = JSON.parse(process.env.CASE);
+			const { holdModelFor, recordModelSwitch, recordSessionModel } = await import(transcript);
+			await recordSessionModel(sessionId, haiku);
+			const noSpace = () => Object.assign(new Error("no space"), { code: "ENOSPC" });
+			const mkdir = fs.mkdir;
+			const rename = fs.rename;
+			const write = fs.writeFile;
+			fs.mkdir = async (dir, ...rest) => {
+				if (String(dir).endsWith(".switches")) throw noSpace();
+				return mkdir(dir, ...rest);
+			};
+			fs.rename = async (from, to, ...rest) => {
+				if (String(to).endsWith(".switch-failed")) throw noSpace();
+				return rename(from, to, ...rest);
+			};
+			fs.writeFile = async (file, ...rest) => {
+				if (String(file).endsWith(".switch-failed")) throw noSpace();
+				return write(file, ...rest);
+			};
+			syncBuiltinESMExports();
+			await recordModelSwitch(sessionId, opus);
+			const read = await holdModelFor({ sessionId, agentId: "main", input: {}, lastModel: null });
+			process.stdout.write(JSON.stringify(read));
+		`;
+		const { stdout } = await promisify(execFile)(
+			process.execPath,
+			["--input-type=module", "-e", child],
+			{
+				env: {
+					PATH: process.env.PATH ?? "",
+					HOME: stateDir,
+					UT_CC_STATE_DIR: stateDir,
+					CASE: JSON.stringify({ transcript: TRANSCRIPT, sessionId, haiku: HAIKU, opus: OPUS }),
+				},
+			},
+		);
+		expect(JSON.parse(stdout)).toEqual({ model: "unknown", source: "unknown" });
+		const models = await readdir(join(stateDir, "transcripts", "session-models"));
+		expect(models).not.toContain(sessionId);
+		expect(models).not.toContain(`${sessionId}.switch-failed`);
+	});
+
 	it("a switch that leaves no evidence in its directory reads `unknown` on the TRANSCRIPT path too, until a switch is recorded after it", async () => {
 		// The transcript's newest response predates the switch and names the cheaper model; with the
 		// switch unrecorded, it would read as the session's model.
