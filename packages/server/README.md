@@ -120,6 +120,14 @@ only.) A server that sends it lists `"hold-expiry"` in `capabilities`; an older 
 so does this one for a ledger hold whose timeout it cannot state. Without the field, treat the hold as
 one you cannot reuse.
 
+An authorize may ask its hold to live longer than the default, for a call expected to run past it:
+`holdTtlMs`, in milliseconds. The server clamps it to [`pendingTtlMs`, `maxPendingTtlMs`] (default one
+hour), and that life is both the ledger's pending timeout for the hold and the server's own sweep life
+for it; `expiresInMs` states it as usual. A server that honours it lists `"hold-ttl"` in `capabilities`
+and states the ceiling as `maxHoldTtlMs` on `/v1/health`; an older one strips the key, and the hold keeps
+the default life. The trade: a hold whose client crashes keeps its budget reserved for up to its life
+before the ledger voids it, so a longer ceiling holds a crashed client's reservation longer.
+
 ## Endpoints
 
 | Method | Path            | Auth   | Purpose                                               |
@@ -136,7 +144,7 @@ Errors: `403 policy_denied`, `402 budget_exceeded`, `429 anomaly`, `401 unauthor
 `404 not_found` (unknown transferId on `/v1/abort` and `/v1/release`; for `/v1/settle` see the three codes below), `413 too_large` (1 MiB body cap),
 `503 ledger_unavailable` (`/v1/authorize` and `/v1/budget`; see below).
 Pending holds are swept and released when their advertised life runs out: `pendingTtlMs` (default 5 min),
-or the ledger's pending timeout when that comes first. The sweep reads hold ages on a monotonic clock, so
+or the life its authorize asked for (`holdTtlMs`), or the ledger's pending timeout when that comes first. The sweep reads hold ages on a monotonic clock, so
 no wall-clock step moves it, and it never ends a hold before its advertised life. Declared: after the host
 sleeps, a hold that was pending across the sleep can keep counting against the budget for at most one hold
 life (T, 300 s by default) plus up to one sweep interval (30 s) after wake. In enforce mode that can mean
@@ -148,7 +156,7 @@ A TigerBeetle-state probe for this case is a follow-up (#241).
 Unauthenticated, and always HTTP `200`. It answers:
 
 ```json
-{ "ok": true, "ledger": "reachable", "name": "usertrust-server", "version": "…", "capabilities": ["…"], "logLinesDropped": 0 }
+{ "ok": true, "ledger": "reachable", "name": "usertrust-server", "version": "…", "capabilities": ["…"], "maxHoldTtlMs": 3600000, "logLinesDropped": 0 }
 ```
 
 - **`ledger`**: whether the server can reach its ledger (see "Ledger reachability" below for how
@@ -168,6 +176,9 @@ Unauthenticated, and always HTTP `200`. It answers:
   `"off"` (the default for `createUsertrustServer()`) answers `ledger: "unknown"` and `ok: true`
   through an outage.
 - **`name`, `version` and `capabilities`**: what this server is and honours.
+- **`maxHoldTtlMs`**: the longest life an authorize may ask its hold for (`holdTtlMs`, capability
+  `hold-ttl`): the config's `maxPendingTtlMs` (an integer of at least 300 000; default 3 600 000, one
+  hour), never less than `pendingTtlMs`.
 - **`logLinesDropped`**: the number of log lines this server could write nowhere, because its log
   sink failed and its write to stderr failed too (a stderr whose reader has gone, say). It is `0`
   normally. It is process-wide, counted across every tenant and route, and names no tenant, route

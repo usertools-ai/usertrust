@@ -374,9 +374,10 @@ describe("governed AFC conforms to the real @google/genai loop", () => {
 		await governed.destroy();
 	});
 
-	// In pii "redact" mode the governed call forwards a deep CLONE of the request, and the SDK asks the tool on that clone.
+	// A tool declaration is a CONTROL field of the request: pii "redact" replaces PII in the prompt only, and the
+	// declarations reach the model as the tool answered them, exactly as under pii "warn", which redacts nothing.
 	// (The PII detector matches a string that IS the value, so the email stands alone in each field.)
-	it('pii "redact": a declaration that answers from its own state reaches the model REDACTED, in every round', async () => {
+	it('pii "redact": a declaration that answers from its own state reaches the model as written, in every round, and the prompt is redacted', async () => {
 		const EMAIL = "alice@example.com";
 		const makeTool = () => ({
 			declaration: { functionDeclarations: [{ name: "lookup", description: EMAIL }] },
@@ -402,16 +403,19 @@ describe("governed AFC conforms to the real @google/genai loop", () => {
 				config: { tools: [makeTool()] } as never,
 			});
 			await governed.destroy();
-			return JSON.stringify([m.sent, m.sentTools]);
+			return { sent: JSON.stringify(m.sent), tools: JSON.stringify(m.sentTools) };
 		};
 		const redacted = await run("redact");
-		expect(redacted).not.toContain(EMAIL);
-		expect(redacted).toContain("REDACTED");
-		// CONTROL: without redaction the same value does reach the model, so the row can fail
-		expect(await run("warn")).toContain(EMAIL);
+		const warned = await run("warn");
+		expect(redacted.sent).not.toContain(EMAIL);
+		expect(redacted.sent).toContain("REDACTED");
+		expect(redacted.tools).toContain(EMAIL);
+		expect(redacted.tools).toBe(warned.tools);
+		// CONTROL: without redaction the prompt does reach the model, so the row can fail
+		expect(warned.sent).toContain(EMAIL);
 	});
 
-	it('pii "redact" + a PII prompt: a STATEFUL callable (tool() sets up what callTool needs) still works, and its declaration is redacted', async () => {
+	it('pii "redact" + a PII prompt: a STATEFUL callable (tool() sets up what callTool needs) still works, and its declaration is sent as written', async () => {
 		const EMAIL = "alice@example.com";
 		const makeStateful = () => {
 			const t = {
@@ -446,9 +450,9 @@ describe("governed AFC conforms to the real @google/genai loop", () => {
 			config: { tools: [makeStateful()] } as never,
 		})) as unknown as { receipts?: unknown[] };
 		expect(out.receipts).toHaveLength(3);
-		const wire = JSON.stringify([m.sent, m.sentTools]);
-		expect(wire).not.toContain(EMAIL);
-		expect(wire).toContain("REDACTED");
+		expect(JSON.stringify(m.sent)).not.toContain(EMAIL);
+		expect(JSON.stringify(m.sent)).toContain("REDACTED");
+		expect(JSON.stringify(m.sentTools)).toContain(EMAIL);
 		await governed.destroy();
 	});
 
@@ -484,36 +488,41 @@ describe("governed AFC conforms to the real @google/genai loop", () => {
 		await governed.destroy();
 	});
 
-	it('pii "redact": a callTool that later writes PII into the tool\'s own declaration object does not leak into later rounds', async () => {
+	it('pii "redact": the declaration is the tool\'s own, as natively: a later write by callTool reaches later rounds exactly as under pii "warn"', async () => {
 		const EMAIL = "alice@example.com";
-		const declaration = { functionDeclarations: [{ name: "lookup", description: "clean" }] };
-		const tool = {
-			// the SAME live object every time: a PII-free first answer is what redactPII hands back unchanged
-			tool: async () => declaration,
-			callTool: async () => {
-				declaration.functionDeclarations[0]!.description = EMAIL;
-				return [{ functionResponse: { name: "lookup", response: { ok: true } } }];
-			},
+		const run = async (pii: "redact" | "warn") => {
+			const declaration = { functionDeclarations: [{ name: "lookup", description: "clean" }] };
+			const tool = {
+				// the SAME live object every time
+				tool: async () => declaration,
+				callTool: async () => {
+					declaration.functionDeclarations[0]!.description = EMAIL;
+					return [{ functionResponse: { name: "lookup", response: { ok: true } } }];
+				},
+			};
+			const m = scriptedModel(ROUNDS);
+			const sdk = new GoogleGenAI({ apiKey: "test" });
+			(sdk.models as unknown as Loose)["generateContentInternal"] = m.respond;
+			mkdirSync(join(vault, ".usertrust"), { recursive: true });
+			writeFileSync(
+				join(vault, ".usertrust", "usertrust.config.json"),
+				JSON.stringify({ budget: 500_000, pii }),
+			);
+			const governed = await trust(sdk, { dryRun: true, budget: 500_000, vaultBase: vault });
+			await governed.models.generateContent({
+				model: "gemini-2.5-flash",
+				contents: EMAIL,
+				config: { tools: [tool] } as never,
+			});
+			await governed.destroy();
+			return m;
 		};
-		const m = scriptedModel(ROUNDS);
-		const sdk = new GoogleGenAI({ apiKey: "test" });
-		(sdk.models as unknown as Loose)["generateContentInternal"] = m.respond;
-		mkdirSync(join(vault, ".usertrust"), { recursive: true });
-		writeFileSync(
-			join(vault, ".usertrust", "usertrust.config.json"),
-			JSON.stringify({ budget: 500_000, pii: "redact" }),
-		);
-		const governed = await trust(sdk, { dryRun: true, budget: 500_000, vaultBase: vault });
-		await governed.models.generateContent({
-			model: "gemini-2.5-flash",
-			// the prompt holds PII, so the request is cloned and the SDK asks the tool through the clone
-			contents: EMAIL,
-			config: { tools: [tool] } as never,
-		});
-		expect(m.sentTools).toHaveLength(3);
-		// round 1 is clean, and the tool's later write never reaches round 2 or 3
-		expect(JSON.stringify(m.sentTools)).not.toContain(EMAIL);
-		await governed.destroy();
+		const redacted = await run("redact");
+		const warned = await run("warn");
+		expect(redacted.sentTools).toHaveLength(3);
+		expect(JSON.stringify(redacted.sentTools[0])).not.toContain(EMAIL);
+		expect(redacted.sentTools).toEqual(warned.sentTools);
+		expect(JSON.stringify(redacted.sent)).not.toContain(EMAIL);
 	});
 
 	it("a class-instance request whose contents and config.tools are PROTOTYPE getters runs its rounds", async () => {
@@ -1825,7 +1834,8 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 			});
 		}
 
-		// pii "redact": what is sent from functionCallingConfig is either redacted or not sent at all.
+		// pii "redact": functionCallingConfig is a control field, so it is sent as the SDK sends it natively, and only the
+		// prompt is redacted.
 		for (const [shape, make] of HIDDEN_CALLING_FIELDS) {
 			const params = (contents: string, names: string[]) => () => ({
 				model: "gemini-2.5-flash",
@@ -1838,7 +1848,7 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 				},
 			});
 
-			it(`${method} on Vertex AI, pii "redact", an e-mail address in allowedFunctionNames held as ${shape} and in the prompt: no raw PII is sent, and the body is native Vertex's after redaction`, async () => {
+			it(`${method} on Vertex AI, pii "redact", an e-mail address in allowedFunctionNames held as ${shape} and in the prompt: the body is native Vertex's with the prompt redacted`, async () => {
 				const { raw, rawResult, gov, govResult, auditKinds } = await nativeThenGoverned(
 					method,
 					{
@@ -1851,6 +1861,7 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 				expect(rawResult).toBe("ok");
 				expect(govResult).toBe("ok");
 				expect(gov.requests).toHaveLength(1);
+				// natively Vertex AI never sends it: JSON.stringify skips an inherited or non-enumerable field
 				expect(JSON.stringify(gov.requests)).not.toContain(EMAIL);
 				expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
 				expect(auditKinds).not.toContain("policy_denied");
@@ -1874,11 +1885,11 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 				expect(auditKinds).not.toContain("policy_denied");
 			});
 
-			it(`${method} on the Gemini API, pii "redact", an e-mail address in allowedFunctionNames held as ${shape} and in the prompt: it is sent REDACTED, as the SDK reads it by name`, async () => {
+			it(`${method} on the Gemini API, pii "redact", an e-mail address in allowedFunctionNames held as ${shape} and in the prompt: it is sent as written, as the SDK reads it by name, and the prompt is redacted`, async () => {
 				const { raw, rawResult, gov, govResult, auditKinds } = await nativeThenGoverned(
 					method,
 					{
-						native: params("[REDACTED:email]", ["[REDACTED:email]"]),
+						native: params("[REDACTED:email]", [EMAIL]),
 						governed: params(`write to ${EMAIL}`, [EMAIL]),
 					},
 					{ pii: "redact" },
@@ -1887,9 +1898,9 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 				expect(rawResult).toBe("ok");
 				expect(govResult).toBe("ok");
 				expect(gov.requests).toHaveLength(1);
-				expect(JSON.stringify(gov.requests)).not.toContain(EMAIL);
+				expect(JSON.stringify(gov.requests[0]?.body["contents"])).not.toContain(EMAIL);
 				expect(gov.requests[0]?.body["toolConfig"]).toEqual({
-					functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["[REDACTED:email]"] },
+					functionCallingConfig: { mode: "ANY", allowedFunctionNames: [EMAIL] },
 				});
 				expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
 				expect(auditKinds).not.toContain("policy_denied");
@@ -1958,12 +1969,12 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 				}
 			}
 
-			it(`${method} on Vertex AI, pii "redact", ${shape} whose output holds an e-mail address: it is sent REDACTED, never raw`, async () => {
+			it(`${method} on Vertex AI, pii "redact", ${shape} whose output holds an e-mail address: it is sent as the SDK sends it, and the prompt is redacted`, async () => {
 				const withEmail = (name: string) => () => ({ mode: "ANY", allowedFunctionNames: [name] });
 				const { raw, rawResult, gov, govResult } = await nativeThenGoverned(
 					method,
 					{
-						native: hooked("[REDACTED:email]", withEmail("[REDACTED:email]"), {}),
+						native: hooked("[REDACTED:email]", withEmail(EMAIL), {}),
 						governed: hooked(`write to ${EMAIL}`, withEmail(EMAIL), {}),
 					},
 					{ vertex: true, pii: "redact" },
@@ -1972,9 +1983,9 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 				expect(rawResult).toBe("ok");
 				expect(govResult).toBe("ok");
 				expect(gov.requests).toHaveLength(1);
-				expect(JSON.stringify(gov.requests)).not.toContain(EMAIL);
+				expect(JSON.stringify(gov.requests[0]?.body["contents"])).not.toContain(EMAIL);
 				expect(gov.requests[0]?.body["toolConfig"]).toEqual({
-					functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["[REDACTED:email]"] },
+					functionCallingConfig: { mode: "ANY", allowedFunctionNames: [EMAIL] },
 				});
 				expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
 			});
@@ -2114,7 +2125,7 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 			}
 		}
 
-		it(`${method} on Vertex AI, pii "redact": a functionCallingConfig toJSON read after the tools still runs once, and its output is sent redacted`, async () => {
+		it(`${method} on Vertex AI, pii "redact": a functionCallingConfig toJSON read after the tools still runs once, and its output is sent as written`, async () => {
 			const rawReads: Reads = {};
 			const govReads: Reads = {};
 			const params = (reads: Reads, prompt: string, name: string) => () => ({
@@ -2136,7 +2147,7 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 			const { raw, rawResult, gov, govResult } = await nativeThenGoverned(
 				method,
 				{
-					native: params(rawReads, "[REDACTED:email]", "[REDACTED:email]"),
+					native: params(rawReads, "[REDACTED:email]", EMAIL),
 					governed: params(govReads, `write to ${EMAIL}`, EMAIL),
 				},
 				{ vertex: true, pii: "redact" },
@@ -2145,7 +2156,8 @@ describe("the AFC snapshot reads a tool in the SDK's order, and sends on Vertex 
 			expect(rawResult).toBe("ok");
 			expect(govResult).toBe("ok");
 			expect(gov.requests).toHaveLength(1);
-			expect(JSON.stringify(gov.requests)).not.toContain(EMAIL);
+			expect(JSON.stringify(gov.requests[0]?.body["contents"])).not.toContain(EMAIL);
+			expect(JSON.stringify(gov.requests[0]?.body["toolConfig"])).toContain(EMAIL);
 			expect(gov.requests[0]?.body).toEqual(raw.requests[0]?.body);
 			expect(rawReads).toEqual({ toJSON: 1 });
 			expect(govReads).toEqual(rawReads);

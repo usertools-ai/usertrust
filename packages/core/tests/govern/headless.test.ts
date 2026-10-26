@@ -805,7 +805,7 @@ describe("headless governor", () => {
 		);
 		const accepts = /accepts only: (.*)\.$/.exec((err as Error).message)?.[1];
 		expect(accepts).toBe(
-			"budget, configPath, dryRun, endpoint, parentUserId, pii, scope, vaultBase",
+			"budget, configPath, dryRun, endpoint, maxHoldTtlMs, parentUserId, pii, scope, vaultBase",
 		);
 	});
 

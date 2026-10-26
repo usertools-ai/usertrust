@@ -2503,7 +2503,7 @@ describe("estimate holds", () => {
 			// Every answer but /v1/health takes 4.3 s. Uncapped (5 s each), the settle's
 			// 404, the fresh authorize and the fresh settle would all be answered, ~13 s
 			// in: past the 10 s budget, close to Claude Code's 15 s kill. Capped, the
-			// fresh settle gets only what is left of the budget, and is cut off.
+			// fresh authorize gets what is left less its settle's share, and is given up.
 			const pending = new Set<string>();
 			const charged: string[] = [];
 			await startServer((path, body) => {
@@ -2531,18 +2531,13 @@ describe("estimate holds", () => {
 			expect(post.code).toBe(0);
 			// The 10 s budget, plus node's start and exit.
 			expect(elapsed).toBeLessThan(11_750);
-			// The fresh hold tx_2 was authorized and its settle cut off by the budget...
-			expect(authorizes().map(transferOf)).toEqual(["tx_1", "tx_2"]);
-			expect(post.stderr).toContain("charging this call once on tx_2");
-			expect(post.stderr).toContain("settle failed (non-blocking)");
-			// ...so it was left settle-attempted, and Stop gave it back: at most one
-			// charge (the cut-off settle may still post), never two.
-			expect(
-				requests
-					.filter((r) => r.body.transferId === "tx_2" && r.path !== "/v1/settle")
-					.map((r) => r.path),
-			).toEqual([expect.stringMatching(/^\/v1\/(release|abort)$/)]);
-			expect(charged.length).toBeLessThanOrEqual(1);
+			// The fresh authorize is capped to leave its settle room (1.5 s of the budget), so with
+			// 4.3 s answers it is given up before it is granted: no fresh hold is ever left with no time
+			// to settle it. The call ran, and nothing charges it: the call-ran gap, said once.
+			expect(post.stderr).toContain("its fresh hold was not granted");
+			expect(post.stderr).not.toContain("charging this call once on");
+			expect(post.stderr).not.toContain("settle failed (non-blocking)");
+			expect(charged).toEqual([]);
 			expect(await holdStateFiles()).toEqual([]);
 		}, 30_000);
 
@@ -3911,8 +3906,9 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 	/**
 	 * A server that holds what it authorizes, forgets what `expire` names, logs
 	 * charges, and refuses every authorize after `refuse` (a budget 402). Each answer
-	 * states a fresh 300 s life (`expiresInMs`, `hold-expiry`), which the plugin does
-	 * not consult: it never reuses a hold however much life one has left.
+	 * states a fresh 300 s life (`expiresInMs`, `hold-expiry`). The plugin never reuses a
+	 * hold however much life one has left; it records only when that life ends, and
+	 * sends no settle past it (hold-expiry.test.ts).
 	 */
 	function holdingServer() {
 		const pending = new Set<string>();
@@ -5649,10 +5645,11 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			const { port: realPort } = await real.listen();
 			await startServer({ forwardTo: `http://127.0.0.1:${realPort}`, key: KEY });
 			await run("pre-tool-use.mjs", preInput("tu_1"), env);
-			// The server states the hold's life (#239), and the plugin does not keep it: it
-			// never reuses a hold, so it has no use for one.
+			// The server states the hold's life (#239). The plugin never reuses a hold, so it
+			// keeps only when that life ends (`expiresAt`), past which it sends no settle.
 			expect(authorizes()[0]?.response).toHaveProperty("expiresInMs");
 			expect(Object.hasOwn(await record(), "expiresInMs")).toBe(false);
+			expect(typeof (await record()).expiresAt).toBe("number");
 			const again = await run("pre-tool-use.mjs", preInput("tu_1"), env);
 			expect(again.stderr).toContain("earlier hold");
 			expect(authorizes()).toHaveLength(2);

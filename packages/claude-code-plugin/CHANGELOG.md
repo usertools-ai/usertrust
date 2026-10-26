@@ -7,6 +7,33 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ## [Unreleased]
 
+### Added
+
+- **A long tool call's hold is asked to outlive it.** A hold lived five minutes, so a Bash command or
+  a subagent that ran longer lost its reservation partway through, and in enforce mode concurrent
+  calls could spend into that budget. Against a server that honours `hold-ttl`, PreToolUse now asks
+  for a longer life (`holdTtlMs`), never above the server's stated ceiling: a Bash or PowerShell call
+  its own `timeout` (else `BASH_DEFAULT_TIMEOUT_MS`) plus a grace, and an Agent or Task call the
+  ceiling. A new setting, `holdGraceMs` (`UT_CC_HOLD_GRACE_MS`, default 60 000 ms), sets the grace.
+  An older server is sent nothing new. The hold records what it asked for, so a crashed hook's
+  `.settling` record of it is read as abandoned only once that life has passed too.
+
+### Fixed
+
+- **A hold past its life is never settled.** A tool call that outlives its hold (a Bash command
+  or a permission prompt longer than the server's five minutes) found the hold voided by the
+  ledger's pending timeout. Its settle could only fail, as a 410 `settlement_unrecoverable`, which
+  the server records as spend it never charged, although the plugin then charged that usage
+  itself. PreToolUse now records when each hold's life ends, from the authorize answer's
+  `expiresInMs` (`hold-expiry`), counted from the clock read before the authorize was sent. Past
+  it, or once a settle could arrive after it, PostToolUse gives the hold back first (the server counts it against the budget until its
+  own sweep, so a replacement beside it could be refused). Once the server confirms it ended, no
+  settle is sent, and the hold takes the path a gone answer takes; unconfirmed, the settle is
+  sent as before. An estimate
+  hold's call is charged once on a fresh hold. A transcript hold's window goes back to a later
+  settle point, or, under a key, is retried under it. An older server states no life, and nothing
+  changes.
+
 ## [3.0.3] - 2026-10-17
 
 ### Fixed

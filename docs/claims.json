@@ -25,7 +25,9 @@
 				"ext": ".mdx"
 			}
 		],
-		"exclude": ["site/content/docs/policy/pii.mdx"],
+		"exclude": [
+			"site/content/docs/policy/pii.mdx"
+		],
 		"denied": [
 			{
 				"file": "CHANGELOG.md",
@@ -1048,6 +1050,27 @@
 				{
 					"file": "packages/core/tests/cli/verify-completeness.test.ts",
 					"test": "a receipt is audited only if its auditHash is an event on the chain naming its transfer"
+				}
+			]
+		},
+		{
+			"id": "redact-never-sends-detected",
+			"kind": "guarantee",
+			"claim": "Under pii \"redact\", PII the scan finds in a value redaction leaves as written refuses the call with PolicyDeniedError before anything is sent.",
+			"statements": [
+				{
+					"file": "LIMITATIONS.md",
+					"text": "`\"redact\"` never sends a value the scan detects."
+				},
+				{
+					"file": "site/content/docs/api/config.mdx",
+					"text": "PII the scan finds in a value it cannot rewrite (a name, an id, an object key or a number in tool-call `arguments`, replayed reasoning) throws a `PolicyDeniedError`, as `block` does |"
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/harden/pii-redact-control-fields.test.ts",
+					"test": "Anthropic: PII in a replayed thinking block, which redaction cannot rewrite, refuses the call and sends nothing"
 				}
 			]
 		}
