@@ -503,6 +503,7 @@ describe("the model a hold names is the session's own", () => {
 	it.each([
 		["the record's own write fails", "tmp"],
 		["no file can be written at all (a full disk)", "all"],
+		["the record and its failure mark fail, so the earlier record is renamed", "tmp-failed"],
 	])(
 		"a switch run whose write did not complete leaves `unknown`, never the previous record: %s",
 		async (_name, failing) => {
@@ -519,7 +520,9 @@ describe("the model a hold names is the session's own", () => {
 			await fs.writeFile(path, line);
 			const write = fs.writeFile;
 			fs.writeFile = async (file, ...rest) => {
-				if (String(file).includes(".switches") && (failing === "all" || String(file).endsWith(".tmp"))) {
+				const name = String(file);
+				const fails = failing === "all" || name.endsWith(".tmp") || (failing === "tmp-failed" && name.endsWith(".failed"));
+				if (name.includes(".switches") && fails) {
 					throw Object.assign(new Error("no space"), { code: "ENOSPC" });
 				}
 				return write(file, ...rest);
@@ -579,6 +582,49 @@ describe("the model a hold names is the session's own", () => {
 			expect(records.filter((n) => n.endsWith(".pending") || n.endsWith(".failed"))).toEqual([]);
 		},
 	);
+
+	it("a FIRST switch whose record and failure mark both fail keeps its `.pending`: `unknown`, never SessionStart's model", async () => {
+		// SessionStart reported the cheaper model; the switch away from it is the session's first,
+		// so there is no record to rename, and the disk takes no new file but the `.pending` mark.
+		const sessionId = "switch-first-failed";
+		const child = `
+			import fs from "node:fs/promises";
+			import { syncBuiltinESMExports } from "node:module";
+			const { transcript, sessionId, haiku, opus } = JSON.parse(process.env.CASE);
+			const { holdModelFor, recordModelSwitch, recordSessionModel } = await import(transcript);
+			await recordSessionModel(sessionId, haiku);
+			const write = fs.writeFile;
+			fs.writeFile = async (file, ...rest) => {
+				const name = String(file);
+				if (name.includes(".switches") && (name.endsWith(".tmp") || name.endsWith(".failed"))) {
+					throw Object.assign(new Error("no space"), { code: "ENOSPC" });
+				}
+				return write(file, ...rest);
+			};
+			syncBuiltinESMExports();
+			await recordModelSwitch(sessionId, opus);
+			const read = await holdModelFor({ sessionId, agentId: "main", input: {}, lastModel: null });
+			process.stdout.write(JSON.stringify(read));
+		`;
+		const { stdout } = await promisify(execFile)(
+			process.execPath,
+			["--input-type=module", "-e", child],
+			{
+				env: {
+					PATH: process.env.PATH ?? "",
+					HOME: stateDir,
+					UT_CC_STATE_DIR: stateDir,
+					CASE: JSON.stringify({ transcript: TRANSCRIPT, sessionId, haiku: HAIKU, opus: OPUS }),
+				},
+			},
+		);
+		expect(JSON.parse(stdout)).toEqual({ model: "unknown", source: "unknown" });
+		const names = await readdir(
+			join(stateDir, "transcripts", "session-models", `${sessionId}.switches`),
+		);
+		expect(names.filter((n) => n.endsWith(".pending"))).toHaveLength(1);
+		expect(names.filter((n) => n.endsWith(".json") || n.endsWith(".failed"))).toEqual([]);
+	});
 
 	it("a run whose own `.pending` a newer run already cleared records its switch, and leaves no failure mark", async () => {
 		const sessionId = "switch-mark-cleared";

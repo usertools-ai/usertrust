@@ -1843,8 +1843,9 @@ async function sessionModel(sessionId) {
  * (`writeAtomic`), and the run marks itself `.pending` first, removing the mark only after. A
  * write that fails leaves the switch unrecorded, and the previous record would then read as the
  * session's model: so a failed run leaves a `.failed` mark, or, when even that cannot be written
- * (a full disk), renames the records there are to `.failed` (a rename needs no space). `lastSwitch`
- * reads any mark as unreadable, `unknown`, until a later run's record completes and clears it.
+ * (a full disk), renames the records there are to `.failed` (a rename needs no space). With neither
+ * (no record yet to rename), its `.pending` mark is kept as the evidence. `lastSwitch` reads any
+ * mark as unreadable, `unknown`, until a later run's record completes and clears it.
  */
 export async function recordModelSwitch(sessionId, model) {
 	const id = modelId(model);
@@ -1864,9 +1865,10 @@ export async function recordModelSwitch(sessionId, model) {
 		await writeFile(pending, "", { flag: "wx", mode: 0o600 });
 		await writeAtomic(join(dir.dir, `${base}.json`), JSON.stringify({ model: id, at }));
 	} catch {
-		await markSwitchFailed(dir.dir, base);
-		// Its failure mark stands in for it: a `.pending` left behind would read as a live writer.
-		await unlink(pending).catch(() => {});
+		// A failure mark stands in for the `.pending` one, which would read as a live writer. With
+		// none recorded (a full disk, no record to rename), the `.pending` mark is the only evidence
+		// of the switch: kept, it reads `unknown` until a later run prunes it.
+		if (await markSwitchFailed(dir.dir, base)) await unlink(pending).catch(() => {});
 		return;
 	}
 	// The record is complete. A mark already gone was cleared by a newer run, never a failure.
@@ -1889,23 +1891,33 @@ export async function recordModelSwitch(sessionId, model) {
 	}
 }
 
-/** A switch run that could not record its switch: leave state that reads `unknown`. Never throws. */
+/**
+ * A switch run that could not record its switch: leave state that reads `unknown`. True when a
+ * failure mark was written or a record renamed to one, false when nothing was. Never throws.
+ */
 async function markSwitchFailed(dir, base) {
 	try {
 		await writeFile(join(dir, `${base}.failed`), "", { flag: "wx", mode: 0o600 });
-		return;
+		return true;
 	} catch {
 		// Not even an empty file could be written: rename what is there instead.
 	}
+	let marked = false;
 	try {
 		for (const other of await readdir(dir)) {
 			if (other.endsWith(".json")) {
-				await rename(join(dir, other), join(dir, `${other}.failed`)).catch(() => {});
+				try {
+					await rename(join(dir, other), join(dir, `${other}.failed`));
+					marked = true;
+				} catch {
+					// That record stays as it is; any other renamed still marks the failure.
+				}
 			}
 		}
 	} catch {
-		// Nothing more can be done: the next hold resolves without the switch.
+		// Nothing more can be done here: the caller keeps its `.pending` mark.
 	}
+	return marked;
 }
 
 /**
