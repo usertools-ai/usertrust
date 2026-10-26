@@ -1954,6 +1954,15 @@ async function markSessionSwitchFailed(sessionId) {
 }
 
 /**
+ * How much later than a session's mark (`markSessionSwitchFailed`) a switch must be recorded to
+ * supersede it. A filesystem may store an mtime coarsely, rounded down (HFS+ to the second, FAT to
+ * two), so the failure may have come up to this long after the date its mark reads: a record inside
+ * that window may predate the failure, and the tie goes to the mark (fail dearest). Both sides are
+ * the wall clock in epoch ms: a record's `at` is `Date.now()`, and the mark is dated `new Date()`.
+ */
+const MARK_RESOLUTION_MS = 2_000;
+
+/**
  * When the session was last marked (`markSessionSwitchFailed`), in epoch ms; null when it never
  * was; `SWITCH_UNREADABLE` when that cannot be told, since then no switch state can be trusted.
  */
@@ -2012,7 +2021,10 @@ async function lastSwitch(sessionId) {
 	if (marked === SWITCH_UNREADABLE) return marked;
 	const read = await readSwitchDir(sessionId);
 	// A switch the session's mark records, unless a switch recorded after it supersedes it.
-	if (marked !== null && (read === null || (typeof read === "object" && marked >= read.at))) {
+	if (
+		marked !== null &&
+		(read === null || (typeof read === "object" && read.at < marked + MARK_RESOLUTION_MS))
+	) {
 		return SWITCH_UNREADABLE;
 	}
 	return read;

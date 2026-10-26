@@ -718,7 +718,10 @@ describe("the model a hold names is the session's own", () => {
 			Date.now = now;
 			const late = await at({ transcript_path: path });
 			// A switch recorded after the mark supersedes it: a response after that reads as itself.
-			await new Promise((resolve) => setTimeout(resolve, 5));
+			// The mark is dated 3 s back, so this switch comes past the mark's 2 s resolution.
+			const mark = \`\${record}.switch-failed\`;
+			const before = new Date(Date.now() - 3_000);
+			await fs.utimes(mark, before, before);
 			await recordModelSwitch(sessionId, opus);
 			await new Promise((resolve) => setTimeout(resolve, 5));
 			await fs.appendFile(path, fresh);
@@ -771,6 +774,98 @@ describe("the model a hold names is the session's own", () => {
 			recorded: { model: OPUS, source: "transcript" },
 			refailed: { model: "unknown", source: "unknown" },
 		});
+	});
+
+	it("a switch recorded before a failure never outranks its mark on a filesystem that rounds mtimes down to the second", async () => {
+		const sessionId = "switch-none-coarse-mtime";
+		const child = `
+			import fs from "node:fs/promises";
+			import { syncBuiltinESMExports } from "node:module";
+			const { transcript, sessionId, haiku, opus } = JSON.parse(process.env.CASE);
+			const { holdModelFor, recordModelSwitch, recordSessionModel } = await import(transcript);
+			await recordSessionModel(sessionId, haiku);
+			// A whole second 10 s back. A switch is recorded 400 ms into it, and a run that records
+			// nothing fails 700 ms into it, on a filesystem that stores that mtime as the whole second.
+			const second = Math.floor(Date.now() / 1_000) * 1_000 - 10_000;
+			const now = Date.now;
+			Date.now = () => second + 400;
+			await recordModelSwitch(sessionId, haiku);
+			Date.now = now;
+			const write = fs.writeFile;
+			const rename = fs.rename;
+			fs.writeFile = async (file, ...rest) => {
+				if (String(file).includes(".switches")) {
+					throw Object.assign(new Error("no space"), { code: "ENOSPC" });
+				}
+				return write(file, ...rest);
+			};
+			fs.rename = async (from, ...rest) => {
+				if (String(from).includes(".switches")) {
+					throw Object.assign(new Error("read-only"), { code: "EROFS" });
+				}
+				return rename(from, ...rest);
+			};
+			syncBuiltinESMExports();
+			await recordModelSwitch(sessionId, opus);
+			fs.writeFile = write;
+			fs.rename = rename;
+			syncBuiltinESMExports();
+			const mark = \`\${process.env.UT_CC_STATE_DIR}/transcripts/session-models/\${sessionId}.switch-failed\`;
+			const floored = new Date(second);
+			await fs.utimes(mark, floored, floored);
+			const read = await holdModelFor({ sessionId, agentId: "main", input: {}, lastModel: null });
+			process.stdout.write(JSON.stringify(read));
+		`;
+		const { stdout } = await promisify(execFile)(
+			process.execPath,
+			["--input-type=module", "-e", child],
+			{
+				env: {
+					PATH: process.env.PATH ?? "",
+					HOME: stateDir,
+					UT_CC_STATE_DIR: stateDir,
+					CASE: JSON.stringify({ transcript: TRANSCRIPT, sessionId, haiku: HAIKU, opus: OPUS }),
+				},
+			},
+		);
+		// The switch to the dearer model failed after the cheaper one was recorded: never the cheaper.
+		expect(JSON.parse(stdout)).toEqual({ model: "unknown", source: "unknown" });
+	});
+
+	it("a session mark that cannot be read (EACCES) reads `unknown`, never the switch recorded beside it", async () => {
+		const sessionId = "switch-mark-unreadable";
+		const child = `
+			import fs from "node:fs/promises";
+			import { syncBuiltinESMExports } from "node:module";
+			const { transcript, sessionId, haiku } = JSON.parse(process.env.CASE);
+			const { holdModelFor, recordModelSwitch, recordSessionModel } = await import(transcript);
+			await recordSessionModel(sessionId, haiku);
+			await recordModelSwitch(sessionId, haiku);
+			const lstat = fs.lstat;
+			fs.lstat = async (file, ...rest) => {
+				if (String(file).endsWith(".switch-failed")) {
+					throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+				}
+				return lstat(file, ...rest);
+			};
+			syncBuiltinESMExports();
+			const read = await holdModelFor({ sessionId, agentId: "main", input: {}, lastModel: null });
+			process.stdout.write(JSON.stringify(read));
+		`;
+		const { stdout } = await promisify(execFile)(
+			process.execPath,
+			["--input-type=module", "-e", child],
+			{
+				env: {
+					PATH: process.env.PATH ?? "",
+					HOME: stateDir,
+					UT_CC_STATE_DIR: stateDir,
+					CASE: JSON.stringify({ transcript: TRANSCRIPT, sessionId, haiku: HAIKU }),
+				},
+			},
+		);
+		// A mark that may be there and newer than the switch cannot be ruled out: fail dearest.
+		expect(JSON.parse(stdout)).toEqual({ model: "unknown", source: "unknown" });
 	});
 
 	it("a switch directory with no record in it reads `unknown`, never SessionStart's model", async () => {
