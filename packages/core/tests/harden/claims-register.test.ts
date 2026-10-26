@@ -378,6 +378,28 @@ describe("the register's checkers report a failure when there is one (positive c
 		expect(uncoveredHits(doc, v, ["The log is tamper"]).length).toBe(1);
 	});
 
+	it("the vocabulary catches each family of wording an overclaim takes, not only the words already seen", () => {
+		const overclaims = [
+			"The audit log can never be rewritten.",
+			"Records cannot be modified.",
+			"No one can alter an entry.",
+			"Events can't be deleted or erased.",
+			"An entry won't ever be changed.",
+			"Receipts could not be forged.",
+			"The trail is unalterable.",
+			"Every record is permanent.",
+			"Entries are kept forever.",
+			"The log is write-once and indelible.",
+			"The chain is tamper-proof and immutable.",
+		];
+		const caught = (s: string) => new RegExp(vocabulary.source, "i").test(normalize(s));
+		expect(overclaims.filter((s) => !caught(s))).toEqual([]);
+		// Control: wording that only resembles one, with no integrity claim in it.
+		expect(
+			["Policies can be changed at any time.", "The rewrite is optional."].filter(caught),
+		).toEqual([]);
+	});
+
 	it("literal titles are found in every quoting style, and skipped or todo rows are not", () => {
 		const src = [
 			'it("double", () => {});',
