@@ -2636,13 +2636,20 @@ async function noteNoTranscriptAgent({ where, sessionId, agentId, input, hook })
 /**
  * PostToolUse's ruling on a hold PreToolUse made while the subagent's transcript was not written
  * yet (the hold's `awaitingTranscript`, `notWrittenYet`), taken under the agent's lock, so no
- * read of the transcript can run between the check and what follows it:
- *  - `transcript`: the transcript exists now, or some of it was read. The call's usage is in it,
- *    and the first settle point that reads it posts that usage: the hold carries none (`unused`).
- *  - `estimate`: still missing, and nothing of it read. The agent's estimate mode is recorded
- *    (`stickToEstimate`) before the hold settles at the estimate, so a transcript that appears
- *    later is never read: its lines are skipped, and a gap names them (`noteLateTranscript`).
- *    An agent recorded at the estimate already by another hook settles at it too.
+ * read of the transcript can run between the check and what follows it. In this order:
+ *  - `transcript`, when some of the transcript was read already: that read took the call's
+ *    usage, and posts it, whatever was recorded since (a sibling's estimate mode inherited, the
+ *    agent's own marker). The hold carries none (`unused`). Settled at the estimate, it would be
+ *    charged twice.
+ *  - `estimate`, when nothing of it was read and the agent settles at the estimate already:
+ *    its own marker, or a sibling's estimate mode it inherits (`inheritedEstimate`), recorded
+ *    now (`stickToEstimate`). Its transcript will never be read, so given back, the call would
+ *    go uncharged.
+ *  - `transcript`, when the transcript exists now: the first settle point that reads it posts
+ *    the call's usage.
+ *  - `estimate`, when it is still missing: the agent's estimate mode is recorded before the hold
+ *    settles at the estimate, so a transcript that appears later is never read: its lines are
+ *    skipped, and a gap names them (`noteLateTranscript`).
  *  - `unknown`: neither could be established (the lock, the state, the transcript's stat). The
  *    hold can neither carry the usage nor be left to the transcript, so it is given back as a call
  *    that ran uncharged: a gap.
@@ -2655,11 +2662,16 @@ export async function resolveAwaitingHold({ sessionId, agentId, input, waitMs = 
 	const release = await acquireLock(where.cursorPath, { waitMs });
 	if (release === null) return { kind: "unknown", reason: "another hook holds the agent's lock" };
 	try {
-		const marked = await estimateMarker(where.estimatePath);
-		if (marked !== null) return { kind: "estimate", reason: marked };
 		const read = await readCursor(where.cursorPath);
 		if (!read.ok) return { kind: "unknown", reason: read.reason };
 		if (read.cursor.byteOffset > 0) return { kind: "transcript" };
+		const marked = await estimateMarker(where.estimatePath);
+		if (marked !== null) return { kind: "estimate", reason: marked };
+		const inherited = await inheritedEstimate(where, agentId, hintFor(input, agentId));
+		if (inherited !== null) {
+			const sticky = await stickToEstimate(where, inherited, true);
+			return sticky.kind === "estimate" ? sticky : { kind: "unknown", reason: sticky.reason };
+		}
 		const missing = await stat(where.transcriptPath).then(
 			() => false,
 			(err) => (err?.code === "ENOENT" ? true : (err?.code ?? "error")),

@@ -4016,6 +4016,46 @@ describe("estimate mode is inherited by a fork only; a subagent's missing transc
 		expect((await watchRecords()).filter((r) => r.kind === "gap")).toEqual([]);
 	});
 
+	it("a fork's awaiting hold whose transcript appears, and whose sibling sticks, before its PostToolUse: the call settles at the inherited estimate, never given back uncharged", async () => {
+		await startServer(okResponder);
+		await writeMain([]);
+		const fork = { agent_id: "f1", agent_type: "fork" };
+		await run("pre-tool-use.mjs", preInput("tu_1", fork));
+		await writeSubagent("f1", "fork", responseEntries("msg_f", SONNET, u(1200, 300), sub("f1")));
+		await stuckSibling();
+		await run("post-tool-use.mjs", postInput("tu_1", fork));
+		// The fork inherits, so its transcript is never read: the estimate is this call's only charge.
+		expect(sources()).toEqual(["estimated"]);
+		expect(givenBack()).toEqual([]);
+		expect(await readFile(markerOf("f1"), "utf-8")).toContain(
+			"a0 of this session settles at the estimate",
+		);
+		await run("subagent-stop.mjs", { ...stopInput(), ...fork });
+		expect(sources()).toEqual(["estimated"]);
+	});
+
+	it("an awaiting hold whose transcript a parallel call read before the agent inherited: the hold is given back, and the call is never charged twice", async () => {
+		await startServer(okResponder);
+		await writeMain([]);
+		const fork = { agent_id: "f1", agent_type: "fork" };
+		await run("pre-tool-use.mjs", preInput("tu_1", fork));
+		await writeSubagent("f1", "fork", responseEntries("msg_f", SONNET, u(1200, 300), sub("f1")));
+		// A parallel call reads the transcript: the response that made tu_1 is posted at its counts.
+		await run("pre-tool-use.mjs", preInput("tu_2", fork));
+		await run("post-tool-use.mjs", postInput("tu_2", fork));
+		expect(sources()).toEqual(["provider"]);
+		// Then a sibling sticks, and a third call inherits it: the agent's marker is written.
+		await stuckSibling();
+		await run("pre-tool-use.mjs", preInput("tu_3", fork));
+		await expect(readFile(markerOf("f1"), "utf-8")).resolves.toContain("a0 of this session");
+		const post = await run("post-tool-use.mjs", postInput("tu_1", fork));
+		expect(post.stderr).toContain("the transcript exists now");
+		expect(sources()).toEqual(["provider"]);
+		expect(givenBack()).toHaveLength(1);
+		await run("post-tool-use.mjs", postInput("tu_3", fork));
+		expect(sources()).toEqual(["provider", "estimated"]);
+	});
+
 	it("a session-wide Stop does not lend the parent's agent_type to a subagent: a fork with no meta file still inherits", async () => {
 		await startServer(okResponder);
 		await stuckSibling();
