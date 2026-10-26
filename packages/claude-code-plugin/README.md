@@ -445,8 +445,10 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   responses and reads its own transcript. One exception to "cannot be read": a
   SUBAGENT's transcript that does not exist yet, before any of it was read, is not
   written yet (Claude Code can run a subagent's first hooks before it creates the
-  file). The call's PostToolUse decides: if the transcript exists by then, the hold
-  is given back and the transcript posts the usage; if it is still missing, the
+  file). The call's PostToolUse decides: if the transcript exists by then, a named
+  subagent's hold is given back and the transcript posts the usage (a fork, or a
+  subagent of no stated type, switches to the estimate there instead: a sibling that
+  switched before its next read would be inherited, and that read never made); if it is still missing, the
   subagent switches to the estimate there, and the call is charged at it. A call
   that never reaches its PostToolUse is decided at the subagent's SubagentStop. A
   transcript that appears only after the switch is never read, since its calls were
@@ -973,7 +975,9 @@ PreToolUse, when it settles a repeated or resumed call's earlier hold. Its `"pha
   it is retried.
 
 One more `gap` record has `"phase":"late-transcript"`, written once per agent: a subagent
-switched to the estimate because its transcript did not exist, and the transcript exists now.
+switched to the estimate because its transcript did not exist, or (a fork, or a subagent of
+no stated type) because it appeared only after the subagent's first hook, and the transcript
+exists now.
 Its lines are never posted, since the calls they cover were charged at the estimate, so what
 they hold reaches the ledger only as that estimate.
 

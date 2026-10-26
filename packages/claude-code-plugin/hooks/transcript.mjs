@@ -298,6 +298,9 @@ const NO_TRANSCRIPT_DIR = "no-transcript";
 const LATE_TRANSCRIPT_DIR = "late-transcript";
 /** Why an agent whose transcript did not exist settles at the estimate (`ingest`'s ENOENT reason). */
 const MISSING_TRANSCRIPT = "transcript unreadable (ENOENT)";
+/** Why a fork, or an agent of no stated type, whose transcript appeared only after its first hook settles at the estimate (`resolveAwaitingHold`). */
+const LATE_ANCESTOR_TRANSCRIPT =
+	"its transcript, which may begin with an ancestor's, appeared after its first hook";
 
 /**
  * Untrusted strings in a path or an actor string (agent type/id) →
@@ -2645,8 +2648,14 @@ async function noteNoTranscriptAgent({ where, sessionId, agentId, input, hook })
  *    its own marker, or a sibling's estimate mode it inherits (`inheritedEstimate`), recorded
  *    now (`stickToEstimate`). Its transcript will never be read, so given back, the call would
  *    go uncharged.
- *  - `transcript`, when the transcript exists now: the first settle point that reads it posts
- *    the call's usage.
+ *  - `transcript`, when the transcript exists now and the agent is a NAMED one: the first
+ *    settle point that reads it posts the call's usage. A named agent never inherits, so no
+ *    sibling's estimate mode can cancel that read.
+ *  - `estimate`, when the transcript exists now and the agent may copy an ancestor (a fork, or
+ *    no stated type: `mayCopyAncestor`): a sibling that sticks before the next read would be
+ *    inherited, and the read never made, so given back, the call would go uncharged. The
+ *    agent's estimate mode is recorded (`LATE_ANCESTOR_TRANSCRIPT`), and its skipped lines are
+ *    named by the late-transcript gap.
  *  - `estimate`, when it is still missing: the agent's estimate mode is recorded before the hold
  *    settles at the estimate, so a transcript that appears later is never read: its lines are
  *    skipped, and a gap names them (`noteLateTranscript`).
@@ -2676,10 +2685,28 @@ export async function resolveAwaitingHold({ sessionId, agentId, input, waitMs = 
 			() => false,
 			(err) => (err?.code === "ENOENT" ? true : (err?.code ?? "error")),
 		);
-		if (missing === false) return { kind: "transcript" };
-		if (missing !== true) return { kind: "unknown", reason: `transcript unreadable (${missing})` };
-		const sticky = await stickToEstimate(where, MISSING_TRANSCRIPT, true);
-		return sticky.kind === "estimate" ? sticky : { kind: "unknown", reason: sticky.reason };
+		if (missing !== true && missing !== false) {
+			return { kind: "unknown", reason: `transcript unreadable (${missing})` };
+		}
+		if (
+			missing === false &&
+			!(await mayCopyAncestor(where.transcriptPath, hintFor(input, agentId)))
+		) {
+			return { kind: "transcript" };
+		}
+		const reason = missing ? MISSING_TRANSCRIPT : LATE_ANCESTOR_TRANSCRIPT;
+		const sticky = await stickToEstimate(where, reason, true);
+		if (sticky.kind !== "estimate") return { kind: "unknown", reason: sticky.reason };
+		if (!missing) {
+			await noteLateTranscript({
+				where,
+				sessionId,
+				agentId,
+				recorded: reason,
+				hook: "PostToolUse",
+			});
+		}
+		return sticky;
 	} catch (err) {
 		return { kind: "unknown", reason: `transcript state unreadable (${err?.code ?? "error"})` };
 	} finally {
@@ -2689,14 +2716,16 @@ export async function resolveAwaitingHold({ sessionId, agentId, input, waitMs = 
 
 /**
  * The once-per-agent gap record of an agent recorded at the estimate because its transcript did
- * not exist (`MISSING_TRANSCRIPT`), whose transcript exists now. Its lines are never posted: the
+ * not exist (`MISSING_TRANSCRIPT`), or appeared only after its first hook when it may copy an
+ * ancestor (`LATE_ANCESTOR_TRANSCRIPT`), whose transcript exists now. Its lines are never posted: the
  * calls it covers were charged at the estimate, and posting them would charge them twice. So
  * what they hold reaches the ledger only as that estimate, which this record says. Once: a
  * marker under <state>/transcripts/late-transcript/, removed if the record could not be written.
  * Never throws.
  */
 async function noteLateTranscript({ where, sessionId, agentId, recorded, hook }) {
-	if (recorded !== MISSING_TRANSCRIPT || where.transcriptPath === undefined) return;
+	if (recorded !== MISSING_TRANSCRIPT && recorded !== LATE_ANCESTOR_TRANSCRIPT) return;
+	if (where.transcriptPath === undefined) return;
 	try {
 		await stat(where.transcriptPath);
 		const marker = join(
@@ -2714,7 +2743,9 @@ async function noteLateTranscript({ where, sessionId, agentId, recorded, hook })
 			agent: agentId,
 			hook: typeof hook === "string" ? hook : "unknown",
 			reason:
-				"its transcript appeared after the agent was settled at the estimate; its lines are not posted, so nothing is charged twice",
+				recorded === MISSING_TRANSCRIPT
+					? "its transcript appeared after the agent was settled at the estimate; its lines are not posted, so nothing is charged twice"
+					: "its transcript, which may begin with an ancestor's, appeared after its first hook, so the agent was settled at the estimate; its lines are not posted, so nothing is charged twice",
 			started: null,
 		});
 		if (!written) await unlink(marker).catch(() => {});

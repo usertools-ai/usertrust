@@ -31,7 +31,9 @@ npm, and its version is its own: the `usertrust` packages and their
   named subagent (`general-purpose`, `Explore`, a custom agent) reads its own transcript.
   And a subagent's transcript that does not exist yet at its first hook, before any of it was
   read, no longer switches it to the estimate for good: that call's PostToolUse decides. If the
-  transcript exists by then, the hold is given back and the transcript posts the usage; if it
+  transcript exists by then, a named subagent's hold is given back and the transcript posts the
+  usage; a fork, or a subagent of no stated type, switches there instead, since a sibling that
+  switched before its next read would be inherited, and that read never made. If it
   is still missing, the subagent switches there and the call is charged at the estimate, so no
   call goes uncharged for want of a transcript. A call that never reaches its PostToolUse is
   decided at the subagent's SubagentStop. A transcript that appears only after the switch is

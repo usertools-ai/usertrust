@@ -4034,6 +4034,61 @@ describe("estimate mode is inherited by a fork only; a subagent's missing transc
 		expect(sources()).toEqual(["estimated"]);
 	});
 
+	it("a fork's transcript present at its PostToolUse, a sibling sticking only after: the call settles at the estimate, never given back uncharged", async () => {
+		await startServer(okResponder);
+		await writeMain([]);
+		const fork = { agent_id: "f1", agent_type: "fork" };
+		await run("pre-tool-use.mjs", preInput("tu_1", fork));
+		await writeSubagent("f1", "fork", responseEntries("msg_f", SONNET, u(1200, 300), sub("f1")));
+		const post = await run("post-tool-use.mjs", postInput("tu_1", fork));
+		// A later read could be cancelled by a sibling's estimate mode: the fork sticks here.
+		expect(post.stderr).toContain("settling at the ESTIMATE");
+		expect(sources()).toEqual(["estimated"]);
+		expect(givenBack()).toEqual([]);
+		expect(await readFile(markerOf("f1"), "utf-8")).toContain("appeared after its first hook");
+		// Named at once, though no later hook of the agent may open it again.
+		expect((await watchRecords()).filter((r) => r.phase === "late-transcript")).toHaveLength(1);
+		await stuckSibling();
+		await run("subagent-stop.mjs", { ...stopInput(), ...fork });
+		expect(sources()).toEqual(["estimated"]);
+		expect(settles().some((s) => Number(s.body.inputTokens) === 1200)).toBe(false);
+		const late = (await watchRecords()).filter((r) => r.phase === "late-transcript");
+		expect(late).toHaveLength(1);
+		expect(late[0]).toMatchObject({ kind: "gap", session: SESSION, agent: "f1", started: null });
+	});
+
+	it("an agent of no stated type in the same shape settles at the estimate too: it may be a fork", async () => {
+		await startServer(okResponder);
+		await writeMain([]);
+		await run("pre-tool-use.mjs", preInput("tu_1", { agent_id: "x1" }));
+		await writeSubagent("x1", null, responseEntries("msg_x", SONNET, u(1200, 300), sub("x1")));
+		await run("post-tool-use.mjs", postInput("tu_1", { agent_id: "x1" }));
+		expect(sources()).toEqual(["estimated"]);
+		expect(givenBack()).toEqual([]);
+		expect(await readFile(markerOf("x1"), "utf-8")).toContain("appeared after its first hook");
+	});
+
+	it("control: a NAMED agent in the same shape is given back, and charged from its transcript, a sibling sticking after or not", async () => {
+		await startServer(okResponder);
+		await writeMain([]);
+		const named = { agent_id: "g1", agent_type: "general-purpose" };
+		await run("pre-tool-use.mjs", preInput("tu_1", named));
+		await writeSubagent(
+			"g1",
+			"general-purpose",
+			responseEntries("msg_g", SONNET, u(1200, 300), sub("g1")),
+		);
+		const post = await run("post-tool-use.mjs", postInput("tu_1", named));
+		expect(post.stderr).toContain("the transcript exists now");
+		expect(givenBack()).toHaveLength(1);
+		await stuckSibling();
+		await run("subagent-stop.mjs", { ...stopInput(), ...named });
+		expect(sources()).toEqual(["provider"]);
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([1200]);
+		await expect(stat(markerOf("g1"))).rejects.toMatchObject({ code: "ENOENT" });
+		expect((await watchRecords()).filter((r) => r.kind === "gap")).toEqual([]);
+	});
+
 	it("an awaiting hold whose transcript a parallel call read before the agent inherited: the hold is given back, and the call is never charged twice", async () => {
 		await startServer(okResponder);
 		await writeMain([]);
