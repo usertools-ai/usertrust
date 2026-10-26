@@ -122,7 +122,7 @@ repository or mint an OIDC token for provenance:
       commit and tag (`git bundle`), and uploads both as an artifact named after the leg. These
       tarballs are never published: the publish job reads them as data (below).
 3. **publish**, in the `npm-publish` environment, so it waits for the approval (token:
-   `contents: write`, `id-token: write`, `actions: read`; `NPM_TOKEN` in one step). It installs
+   `contents: write`, `id-token: write`, `actions: read`; `NPM_TOKEN` in two steps: the token check and the publish). It installs
    nothing and runs no dependency code: only git, gh, jq, python3, node, the npm that ships
    with node, and GitHub's own checkout, setup-node and download-artifact actions. **It builds
    nothing**: every byte it publishes was built by the build job, on Node 22 (the runtime CI
@@ -206,6 +206,19 @@ repository or mint an OIDC token for provenance:
       alone it could stop a release part-way; the check above runs for all six first.
       Versions are major.minor.patch only: this workflow does not support prereleases (one
       would publish under `backfill`).
+      **Then it proves the npm token, before anything is pushed** (`release.sh preflight-token`,
+      the step "Prove the npm token before anything is pushed", in every mode: a dry run
+      included). `npm whoami` must answer, and for each of the six packages `npm access list
+      collaborators <name> --json` must list that user as `read-write`. It only reads. Why: a
+      dead `NPM_TOKEN` fails the publish step with E404 *after* the push, and the repository
+      would then record a version the registry lacks (see "Recovering a failed release"); a
+      token that fails here fails the run with `master` untouched, so **a dry-run dispatch is
+      how to learn, without risk, that the token still works**. The token reaches npm by
+      reference in the user config, as in the publish step, and whatever npm prints is filtered
+      for its value. Not proven: that the token is scoped to publish these packages (the list
+      shows the user's access, not the token's scope) or that provenance will be accepted. A
+      user whose access is only through a team is not listed by name and fails; add the user
+      directly. A package not yet on npm has no list and fails too.
    4. **Pushes the release commit and tag** to `master`, atomically, and only while `master`
       is still the dispatched commit (see "Why the commit and tag are pushed before
       publishing"). The tag is annotated in this job, on the verified commit, with the version
