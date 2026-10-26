@@ -103,5 +103,6 @@ describe("a test never runs as the host's configured session", () => {
 		expect(run.code, run.out.slice(-2_000)).toBe(0);
 		expect(await readdir(sentinel).catch(() => [])).toEqual([]);
 		expect(requests).toEqual([]);
+		// timing: 120 s budget for a child vitest run; it took 1.7 s, and 1.3 s under coverage, in its pull request's CI test job
 	}, 120_000);
 });
