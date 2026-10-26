@@ -7,14 +7,20 @@ permissions:
 
 on:
   push:
-    branches: [master]
+    # candidate/**: a merge tool's TRUE merge commits of master and a pull request (or of a stack of them),
+    # tested before the merge so the tree that lands is a tree whose CI run passed. Graded like a pull request's
+    # merge commit; see the `tested-tree` job.
+    branches: [master, 'candidate/**']
   pull_request:
     branches: [master]
     types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Only a pull request's superseded run is cancelled. A push to master is never cancelled by the next one:
+  # that would leave the earlier master commit untested, and two merges that each pass can fail
+  # together. Each candidate/** branch is its own group, so candidates never cancel each other.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   agent-config:
@@ -58,9 +64,13 @@ jobs:
           EVENT: ${{ github.event_name }}
           SHA: ${{ github.sha }}
           BEFORE: ${{ github.event.before }}
+          REF: ${{ github.ref }}
         run: |
           launcher=$(mktemp)
           git cat-file blob "$SHA:.github/agent-config.sh" > "$launcher"
+          # A candidate/** branch is new (its `before` is all zeros) and holds a TRUE merge commit of master and a
+          # pull request: it is graded exactly as that pull request's merge commit, against its first parent.
+          case "$REF" in refs/heads/candidate/*) EVENT=pull_request ;; esac
           if [ "$EVENT" = pull_request ]; then
             bash "$launcher" pull_request "$SHA"
           else
@@ -96,6 +106,8 @@ jobs:
         run: |
           ./node_modules/.bin/biome check --write .
           git diff --exit-code
+      # The tested-tree stamp's verdict and ci.yml's wiring of it (scripts/tested-tree.test.mjs).
+      - run: node --test scripts/tested-tree.test.mjs
 
   typecheck:
     name: typecheck
@@ -133,9 +145,10 @@ jobs:
       # stating its bound and the headroom measured on CI.
       - run: npm run timing-thresholds
       # On a pull request, the baseline itself may not grow from the base's (the merge commit's
-      # first parent): a check of the baseline against itself would pass an --update.
+      # first parent): a check of the baseline against itself would pass an --update. A candidate/**
+      # merge commit is checked the same way.
       - name: The timing baseline only shrinks
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/candidate/')
         run: npm run timing-thresholds -- --base HEAD^1
       - run: npm run timing-thresholds:test
 
@@ -392,3 +405,28 @@ jobs:
       - name: Build (runs the prebuild check-facts gate)
         run: npm run build
         working-directory: site
+
+  # The stamp. A STABLE name, so a re-run supersedes a failure for anything that reads it by name. When every
+  # other job of this run passed, it emits ONE annotation, `tested-tree <github.sha>`: the commit this run
+  # tested (the merge commit on a pull request, the pushed commit on a push, a candidate/** merge commit
+  # included). A merge tool trusts only that annotation, on this check run, from GitHub Actions, in the same
+  # check suite as the jobs it judges, and resolves the commit's tree itself. It needs no permission and
+  # checks out nothing but the default ref. Skipped for drafts, whose jobs all skip.
+  # scripts/tested-tree.test.mjs pins this job, the candidate trigger and folds, and the cancel rule.
+  tested-tree:
+    name: tested-tree
+    needs: [agent-config, lint, typecheck, test, scan-linear, openclaw-contract, tb-integration, site-build]
+    if: always() && !cancelled() && !(github.event_name == 'pull_request' && github.event.pull_request.draft)
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2204' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Every job of this run passed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          TESTED_SHA: ${{ github.sha }}
+          REQUIRED: agent-config lint typecheck test scan-linear openclaw-contract tb-integration site-build
+        run: node scripts/tested-tree-verdict.mjs
