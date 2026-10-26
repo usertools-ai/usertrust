@@ -54,6 +54,7 @@ import {
 	giveBack,
 	giveBackInvalid,
 	holdExpired,
+	holdExpiresAt,
 	holdUsageStart,
 	isGated,
 	isSettleGone,
@@ -273,8 +274,12 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 	// Every replacement authorize, first or retried, leaves the fresh hold's settle its share of the
 	// hook's budget: a hold granted with no time left to settle it would leave the call uncharged.
 	const replacementTimeout = () => Math.min(5000, timeLeft() - RETRY_SETTLE_RESERVE_MS);
-	const authorizeReplacement = (request = { timeoutMs: replacementTimeout() }) =>
-		serverRequest(
+	// The clock just before the replacement authorize whose answer is used: the fresh hold's life
+	// counts from no earlier (lib.mjs `holdExpiresAt`).
+	let replacementSentAt;
+	const authorizeReplacement = (request = { timeoutMs: replacementTimeout() }) => {
+		replacementSentAt = Date.now();
+		return serverRequest(
 			"/v1/authorize",
 			{
 				model,
@@ -296,6 +301,7 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 			},
 			request,
 		);
+	};
 	if (replacementTimeout() < RETRY_WAIT_FLOOR_MS) {
 		// No room for an authorize and its settle: the call RAN and nothing will charge it, a gap,
 		// written before its settle-attempted marker goes (evidence first).
@@ -368,6 +374,26 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 		);
 		return;
 	}
+	// The fresh hold's own life, as its authorize states it: a server with a short pending timeout
+	// can grant one that ends before its settle could arrive. Settled, it could only fail, as a 410
+	// the server records as spend it never charged (lib.mjs `holdExpired`). So no settle is sent:
+	// the call RAN and nothing will charge it, a gap, written first (evidence first), and the fresh
+	// hold is given back, never recorded.
+	const freshExpiresAt = holdExpiresAt(replacementSentAt, auth.json);
+	if (holdExpired({ expiresAt: freshExpiresAt }, Date.now() + withinBudget().timeoutMs)) {
+		await recordUnconfirmedCall(sessionId, { ...entry, agentId }, "call-ran");
+		const givenBack = await giveBack(
+			transferId,
+			"replacement hold's life ends before its settle could arrive",
+			Math.max(250, Math.min(5000, timeLeft())),
+			"call-ran",
+		);
+		await unlink(claimed).catch(() => {});
+		say(
+			`usertrust: hold ${entry.transferId} expired before its settle, and its fresh hold ${transferId}'s own life ends before a settle could reach it; ${givenBack ? `${transferId} was given back` : `${transferId} is left to the server's TTL sweep`}, and this call's estimate is not recorded`,
+		);
+		return;
+	}
 	// The fresh hold is settle-attempted from birth: it replaces the expired one's
 	// marker, so a settle of it that goes unanswered leaves it to Stop, never to a
 	// second settle.
@@ -383,6 +409,7 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 				...(typeof entry.estimatedInputTokens === "number"
 					? { estimatedInputTokens: entry.estimatedInputTokens }
 					: {}),
+				...(freshExpiresAt === undefined ? {} : { expiresAt: freshExpiresAt }),
 				// The replacement is the SAME call's charge: it keeps the expired hold's job and usage
 				// start, so a Stop that finds it unanswered places its gap by when the call began.
 				...jobHoldFields(entry),
