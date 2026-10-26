@@ -567,8 +567,15 @@ The workflow names these; it cannot create or configure them.
   unless its first successful publish happens within 2 days**; an expired one cannot be used
   or edited, only deleted and made again. So add it shortly before a release is dispatched.
   After the first release that publishes through OIDC, set each package's publishing access to "Require two-factor
-  authentication and disallow tokens", which npm recommends once trusted publishing works, and
-  delete the `NPM_TOKEN` secret. Source: <https://docs.npmjs.com/trusted-publishers>.
+  authentication and disallow tokens", which npm recommends once trusted publishing works. **First
+  set the repository variable `NPM_PUBLISH_AUTH` to `oidc`, as a step of this setup; only then
+  delete the `NPM_TOKEN` secret, never before.** The step that proves the npm token before the
+  push (step 3) refuses an empty token, so deleting the secret first would fail every release at
+  it, dry runs included. `oidc` skips the check with a warning that neither a token nor who may
+  publish each package is proven (npm lists a package's collaborators only to an authenticated
+  token, so there is nothing tokenless to read): trusted publishing can then only be shown to work
+  by the publish step itself, after the push. Unset, or `token`, is the default and proves the
+  token. Source: <https://docs.npmjs.com/trusted-publishers>.
 - **Branch protection on `master`**: requiring the CI checks on `master` would also apply to
   the workflow's own push of the release commit, which never gets a CI run, so that push
   would be refused (safely: before anything is published). Before requiring checks, give the

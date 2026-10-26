@@ -452,6 +452,9 @@ jobs:
       - name: Prove the npm token before anything is pushed
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # The repository variable NPM_PUBLISH_AUTH: unset or "token" proves the token; "oidc" is
+          # for a repository that has deleted NPM_TOKEN (docs/releasing.md) and skips the check.
+          NPM_PUBLISH_AUTH: ${{ vars.NPM_PUBLISH_AUTH }}
         run: bash scripts/release.sh preflight-token
 
       # ── Push the release commit and tag ──

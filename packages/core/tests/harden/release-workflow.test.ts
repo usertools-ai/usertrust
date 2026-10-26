@@ -52,7 +52,7 @@
  *   carries them too, at the version it records.
  */
 
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	chmodSync,
@@ -465,7 +465,10 @@ describe("publish.yml", () => {
 		expect(pre).not.toHaveProperty("continue-on-error");
 		// Exactly the token, handed as NODE_AUTH_TOKEN, to exactly the script's subcommand: no
 		// other env, no inline shell that could print it.
-		expect(pre.env).toEqual({ NODE_AUTH_TOKEN: "${{ secrets.NPM_TOKEN }}" });
+		expect(pre.env).toEqual({
+			NODE_AUTH_TOKEN: "${{ secrets.NPM_TOKEN }}",
+			NPM_PUBLISH_AUTH: "${{ vars.NPM_PUBLISH_AUTH }}",
+		});
 		expect(pre.run?.trim()).toBe("bash scripts/release.sh preflight-token");
 		// It reads only: no push, publish, release or tag in it.
 		expect(pre.run).not.toMatch(/\bgit push\b|\bnpm publish\b|\bgh release\b|tag-release/);
@@ -639,7 +642,7 @@ const FAKE_NPM = `#!/usr/bin/env bash
 #   "<name>@<v> dist error|raw:<text>"; none = E404.
 # whoami: appends "whoami|<userconfig text>|<globalconfig bytes>" to $FAKE_LOG and answers from a
 #   "whoami <user>" line in $FAKE_REGISTRY, or "whoami error" (E401, quoting $NODE_AUTH_TOKEN when
-#   $FAKE_LEAK is set, as a careless npm might) or "whoami raw:<text>".
+#   $FAKE_LEAK is set, as a careless npm might), "whoami hang" (sleeps 30 s) or "whoami raw:<text>".
 # access list collaborators <name> --json: appends "access|<name>" to $FAKE_LOG and answers from a
 #   "<name> collaborators <json>" line ("error" = E403, quoting the token when $FAKE_LEAK is set;
 #   "raw:<text>" printed as is); none = E404.
@@ -744,6 +747,7 @@ whoami)
 	echo "whoami|$(tr '\n' ';' < "$cfg")|$(wc -c < "$gcfg" | tr -d ' ')|cache=\${npm_config_cache:+set}" >> "$FAKE_LOG"
 	answer=$(awk '$1 == "whoami" { $1 = ""; sub(/^ /, ""); print; exit }' "$FAKE_REGISTRY")
 	case "$answer" in
+	hang) sleep 30 ;;
 	error)
 		echo "npm error code E401" >&2
 		echo "npm error 401 Unauthorized - GET https://registry.npmjs.org/-/whoami" >&2
@@ -988,26 +992,31 @@ function distOf(version: string, d: string, bytes?: Buffer): string {
 	return `${NAMES[d]}@${version} dist sha512-${sha512} ${sha1}`;
 }
 
+/** The environment release.sh runs in under the fake npm and gh. */
+function releaseEnv(env: Record<string, string> = {}): NodeJS.ProcessEnv {
+	return {
+		...gitEnv(),
+		PATH: `${join(dir, "bin")}:${process.env.PATH}`,
+		FAKE_REGISTRY: join(dir, "registry"),
+		FAKE_RUNS: join(dir, "runs.json"),
+		FAKE_JOBS: join(dir, "jobs.json"),
+		FAKE_LOG: join(dir, "log"),
+		FAKE_CALLS: join(dir, "calls"),
+		FAKE_ARTIFACTS: join(dir, "tarballs"),
+		FAKE_ENV: join(dir, "env.json"),
+		GITHUB_REPOSITORY: "owner/repo",
+		REQUIRED_CI_JOBS: publish.env?.REQUIRED_CI_JOBS ?? "",
+		REPUBLISH: "false",
+		...env,
+	};
+}
+
 function run(args: string[], env: Record<string, string> = {}) {
 	const r = spawnSync("bash", [join(repo, "scripts/release.sh"), ...args], {
 		cwd: repo,
 		encoding: "utf8",
 		timeout: 20_000,
-		env: {
-			...gitEnv(),
-			PATH: `${join(dir, "bin")}:${process.env.PATH}`,
-			FAKE_REGISTRY: join(dir, "registry"),
-			FAKE_RUNS: join(dir, "runs.json"),
-			FAKE_JOBS: join(dir, "jobs.json"),
-			FAKE_LOG: join(dir, "log"),
-			FAKE_CALLS: join(dir, "calls"),
-			FAKE_ARTIFACTS: join(dir, "tarballs"),
-			FAKE_ENV: join(dir, "env.json"),
-			GITHUB_REPOSITORY: "owner/repo",
-			REQUIRED_CI_JOBS: publish.env?.REQUIRED_CI_JOBS ?? "",
-			REPUBLISH: "false",
-			...env,
-		},
+		env: releaseEnv(env),
 	});
 	return { status: r.status, out: r.stdout, err: r.stderr };
 }
@@ -1588,6 +1597,8 @@ describe("release.sh publish: the npm dist-tag", { timeout: 30_000 }, () => {
 	});
 });
 
+// timing: 30 s budget per row; the slowest of the 26 rows took 0.86 s on an 8-core test host (3 runs, otherwise
+// idle), nearly all under 0.5 s: each row is two or three bash and fake-npm processes
 describe("release.sh preflight-token", { timeout: 30_000 }, () => {
 	// Not shaped like any provider's token: a public repository must not hold a lookalike secret.
 	const TOKEN = "fake-test-credential-0123456789abcdef";
@@ -1627,6 +1638,36 @@ describe("release.sh preflight-token", { timeout: 30_000 }, () => {
 			`whoami|//registry.npmjs.org/:_authToken=$${"{"}NODE_AUTH_TOKEN};|0|cache=set`,
 		);
 		expect(who).not.toContain(TOKEN);
+	});
+
+	it("NPM_PUBLISH_AUTH=oidc is the tokenless path: it passes with a warning and calls npm not at all", () => {
+		setRegistry([]);
+		for (const env of [{ NODE_AUTH_TOKEN: "" }, { NODE_AUTH_TOKEN: TOKEN }]) {
+			const r = run(["preflight-token"], { NPM_PUBLISH_AUTH: "oidc", ...env });
+			expect(r.status, r.err).toBe(0);
+			expect(r.out).toContain("::warning::NPM_PUBLISH_AUTH is oidc: no npm token is proven");
+		}
+		expect(log()).toEqual([]);
+	});
+
+	it("an unset or empty NPM_PUBLISH_AUTH is token mode, which still refuses an empty token", () => {
+		setRegistry(allWritable());
+		for (const env of [{ NPM_PUBLISH_AUTH: "" }, { NPM_PUBLISH_AUTH: "token" }]) {
+			const bad = run(["preflight-token"], { NODE_AUTH_TOKEN: "", ...env });
+			expect(bad.status).not.toBe(0);
+			expect(bad.err).toContain("NODE_AUTH_TOKEN is empty");
+			expect(run(["preflight-token"], { NODE_AUTH_TOKEN: TOKEN, ...env }).status).toBe(0);
+		}
+	});
+
+	it("any other NPM_PUBLISH_AUTH is refused, never read as oidc", () => {
+		setRegistry(allWritable());
+		for (const v of ["OIDC", "none", "false", "oidc ", "skip"]) {
+			const r = run(["preflight-token"], { NPM_PUBLISH_AUTH: v, NODE_AUTH_TOKEN: TOKEN });
+			expect(r.status, v).not.toBe(0);
+			expect(r.err, v).toContain("not token or oidc");
+		}
+		expect(log()).toEqual([]);
 	});
 
 	it("refuses an empty token before calling npm at all", () => {
@@ -1762,6 +1803,31 @@ describe("release.sh preflight-token", { timeout: 30_000 }, () => {
 			runPre({ TMPDIR: tmp });
 			expect(readdirSync(tmp)).toEqual([]);
 		}
+	});
+
+	it("a SIGTERM while npm runs ends the script (143), removes its temp directory, and calls npm no more", async () => {
+		const tmp = join(dir, "tmpdir");
+		mkdirSync(tmp);
+		setRegistry(["whoami hang", ...allWritable().slice(1)]);
+		const child = spawn("bash", [join(repo, "scripts/release.sh"), "preflight-token"], {
+			cwd: repo,
+			detached: true,
+			stdio: "ignore",
+			env: releaseEnv({ NODE_AUTH_TOKEN: TOKEN, TMPDIR: tmp }),
+		});
+		const closed = new Promise<number | null>((done) => child.on("close", (code) => done(code)));
+		// timing: waits up to 10 s (400 steps of 25 ms) for the fake npm to have started (it logs on
+		// entry); on an 8-core test host it started within 0.3 s in 20 of 20 runs
+		for (let i = 0; i < 400 && !log().some((l) => l.startsWith("whoami|")); i++) {
+			// timing: the 25 ms step of the wait above, 400 steps at most
+			await new Promise((r) => setTimeout(r, 25));
+		}
+		expect(log().some((l) => l.startsWith("whoami|"))).toBe(true);
+		// The whole process group: bash and the sleeping fake npm, as a CI cancel would.
+		process.kill(-(child.pid as number), "SIGTERM");
+		expect(await closed).toBe(143);
+		expect(readdirSync(tmp)).toEqual([]);
+		expect(log().filter((l) => l.startsWith("access|"))).toEqual([]);
 	});
 
 	it("a user name equal to the token is refused, never printed", () => {

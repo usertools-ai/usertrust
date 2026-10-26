@@ -949,6 +949,11 @@ publish() {
 # and nothing npm answers (the user name, a permission) is printed unless it has the shape of
 # a user name or a permission word.
 #
+# NPM_PUBLISH_AUTH (a repository variable, default token) is the one switch: oidc skips this
+# check with a warning, for a repository that has deleted NPM_TOKEN and publishes through
+# trusted publishing. An empty NODE_AUTH_TOKEN in token mode is still an error: a missing
+# secret must not pass silently.
+#
 # What it does NOT prove, stated: that the token is scoped to publish (a granular token may be
 # limited to other packages: the access list shows the USER's access, not the token's scope), or
 # that npm will accept the provenance. A user whose access is only through a team is not listed
@@ -963,6 +968,20 @@ redact() {
 
 preflight_token() {
 	local cfg empty cache user out errf rc name perm bad="" shown
+	case "${NPM_PUBLISH_AUTH:-token}" in
+	token) ;;
+	oidc)
+		# The tokenless path (docs/releasing.md, Owner setup): the NPM_TOKEN secret has been deleted
+		# and npm exchanges the job's OIDC token (trusted publishing). There is no token to prove,
+		# and nothing here can prove the OIDC exchange short of publishing. Said plainly, never silent.
+		echo "::warning::NPM_PUBLISH_AUTH is oidc: no npm token is proven before the push, and neither is who may publish each package: npm lists a package's collaborators only to an authenticated token, and offers nothing tokenless to read it with. Trusted publishing is untested until the publish step runs, after the push."
+		return 0
+		;;
+	*)
+		err "NPM_PUBLISH_AUTH is '${NPM_PUBLISH_AUTH}', not token or oidc. Refusing; nothing was pushed."
+		return 1
+		;;
+	esac
 	if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
 		err "NODE_AUTH_TOKEN is empty: the NPM_TOKEN secret is not set, or this job cannot read it. Nothing was pushed. Setting it is the package owner's act (docs/releasing.md, Owner setup)."
 		return 1
@@ -970,8 +989,12 @@ preflight_token() {
 	export -n NODE_AUTH_TOKEN
 	umask 077
 	PREFLIGHT_TMP=$(mktemp -d) || return 1
-	# A global, not a local: a local would be gone when the trap runs.
-	trap 'rm -rf "$PREFLIGHT_TMP"' EXIT HUP INT TERM
+	# A global, not a local: a local would be gone when the trap runs. A signal ends the script
+	# (the EXIT trap then cleans up), instead of running on into the next npm call.
+	trap 'rm -rf "$PREFLIGHT_TMP"' EXIT
+	trap 'exit 129' HUP
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
 	cfg="${PREFLIGHT_TMP}/npmrc"
 	empty="${PREFLIGHT_TMP}/empty-npmrc"
 	cache="${PREFLIGHT_TMP}/cache"
