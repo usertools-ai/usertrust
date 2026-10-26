@@ -38,8 +38,11 @@ let seen: Seen[];
 let stateDir: string;
 let projectDir: string;
 let env: Record<string, string>;
-/** The life each authorize answer states, in ms; undefined for an older server that states none. */
-let life: number | undefined;
+/**
+ * The life each authorize answer states, in ms; undefined for an older server that states none. A
+ * list states one per authorize in turn, then 60 s.
+ */
+let life: number | number[] | undefined;
 /** The capabilities /v1/health publishes. */
 let capabilities: string[];
 /** How a release (or, on a server without one, an abort) is answered. */
@@ -76,10 +79,11 @@ function startFake(): Promise<number> {
 					}
 					if (req.url === "/v1/authorize") {
 						const transferId = `tx_${nextTransfer++}`;
+						const stated = Array.isArray(life) ? (life.shift() ?? 60_000) : life;
 						return reply(200, {
 							transferId,
 							estimatedCost: 1,
-							...(life === undefined ? {} : { expiresInMs: life }),
+							...(stated === undefined ? {} : { expiresInMs: stated }),
 						});
 					}
 					if (req.url === "/v1/settle")
@@ -192,7 +196,7 @@ describe("a hold's life, as the server states it", () => {
 	});
 
 	it("an estimate hold past its life is never settled: the call is charged once, on a fresh hold", async () => {
-		life = 0;
+		life = [0];
 		await pre("tu_1", {}, ESTIMATE);
 		await outlive();
 		const result = await post("tu_1", {}, ESTIMATE);
@@ -212,7 +216,8 @@ describe("a hold's life, as the server states it", () => {
 
 	it("a hold with less life left than its settle's own timeout is given back, and never settled", async () => {
 		// The settle would leave in time and could land after the pending timeout: the very 410.
-		life = 2_000;
+		// Only this hold is short; its replacement lives long enough for its settle.
+		life = [2_000];
 		await pre("tu_1", {}, ESTIMATE);
 		await post("tu_1", {}, ESTIMATE);
 		expect(settled().map((s) => s.transferId)).toEqual(["tx_2"]);
@@ -222,6 +227,7 @@ describe("a hold's life, as the server states it", () => {
 		await runHook(SESSION_START, { session_id: "sess-expiry-t", source: "startup" }, env);
 		const t = join(projectDir, "sess-expiry-t.jsonl");
 		await writeFile(t, response("msg_t"));
+		life = [2_000];
 		await runHook(PRE, { ...call("tu_t"), session_id: "sess-expiry-t", transcript_path: t }, env);
 		await runHook(
 			POST,
@@ -242,7 +248,7 @@ describe("a hold's life, as the server states it", () => {
 			(await records()).filter((r) => r.kind === "gap" && r.releaseClass === "call-ran");
 
 		it("402, then after the wait 200: the call is charged once, and no settle of the old hold", async () => {
-			life = 0;
+			life = [0];
 			await pre("tu_1", {}, ESTIMATE);
 			await outlive();
 			giveBackAnswer = GONE;
@@ -254,7 +260,7 @@ describe("a hold's life, as the server states it", () => {
 		}, 20_000);
 
 		it("402 twice: one call-ran gap, never a settle of the old hold, and never a second retry", async () => {
-			life = 0;
+			life = [0];
 			await pre("tu_1", {}, ESTIMATE);
 			await outlive();
 			giveBackAnswer = GONE;
@@ -266,7 +272,7 @@ describe("a hold's life, as the server states it", () => {
 		}, 20_000);
 
 		it("a 402 after a `released` give-back is final: the hold was this release's to end, so no wait", async () => {
-			life = 0;
+			life = [0];
 			await pre("tu_1", {}, ESTIMATE);
 			await outlive();
 			refuseAuthorizes = 1;
@@ -276,7 +282,7 @@ describe("a hold's life, as the server states it", () => {
 		});
 
 		it("a retry late in the budget still leaves its fresh hold's settle the time to land", async () => {
-			life = 0;
+			life = [0];
 			await pre("tu_1", {}, ESTIMATE);
 			await outlive();
 			giveBackAnswer = GONE;
@@ -293,7 +299,7 @@ describe("a hold's life, as the server states it", () => {
 		}, 20_000);
 
 		it("a slow give-back, then a FIRST authorize too late to settle: never a fresh hold left unsettled", async () => {
-			life = 0;
+			life = [0];
 			await pre("tu_1", {}, ESTIMATE);
 			await outlive();
 			// The give-back takes most of the budget, and the first replacement answers only after the
@@ -313,7 +319,7 @@ describe("a hold's life, as the server states it", () => {
 		}, 20_000);
 
 		it("with no room left in the hook's budget for the wait, no retry: the call-ran gap", async () => {
-			life = 0;
+			life = [0];
 			await pre("tu_1", {}, ESTIMATE);
 			await outlive();
 			giveBackAnswer = GONE;
@@ -329,7 +335,7 @@ describe("a hold's life, as the server states it", () => {
 	});
 
 	it("an estimate hold past its life whose give-back the server does not confirm is settled as before", async () => {
-		life = 0;
+		life = [0];
 		await pre("tu_1", {}, ESTIMATE);
 		await outlive();
 		giveBackAnswer = { status: 503, json: { error: "unavailable" } };
@@ -342,7 +348,7 @@ describe("a hold's life, as the server states it", () => {
 	it("a transcript hold past its life whose give-back the server does not confirm is settled as before", async () => {
 		await runHook(SESSION_START, { session_id: SESSION, source: "startup" }, env);
 		await writeFile(mainTranscript(), response("msg_a"));
-		life = 0;
+		life = [0];
 		await pre("tu_1", { transcript_path: mainTranscript() });
 		await outlive();
 		giveBackAnswer = { status: 503, json: { error: "unavailable" } };
@@ -355,7 +361,7 @@ describe("a hold's life, as the server states it", () => {
 		capabilities = ["hold-expiry", "release"];
 		await runHook(SESSION_START, { session_id: SESSION, source: "startup" }, env);
 		await writeFile(mainTranscript(), response("msg_a"));
-		life = 0;
+		life = [0];
 		await pre("tu_1", { transcript_path: mainTranscript() });
 		await outlive();
 		await post("tu_1", { transcript_path: mainTranscript() });
@@ -376,7 +382,7 @@ describe("a hold's life, as the server states it", () => {
 		capabilities = ["hold-expiry", "release", "idempotency-key"];
 		await runHook(SESSION_START, { session_id: SESSION, source: "startup" }, env);
 		await writeFile(mainTranscript(), response("msg_a"));
-		life = 0;
+		life = [0];
 		await pre("tu_1", { transcript_path: mainTranscript() });
 		const key = authorizes()[0]?.idempotencyKey;
 		expect(typeof key).toBe("string");
@@ -404,10 +410,59 @@ describe("a hold's life, as the server states it", () => {
 		await mkdir(projectDir, { recursive: true });
 		await writeFile(mainTranscript(), response("msg_old", 3_600_000));
 		await runHook(SESSION_START, { session_id: SESSION, source: "startup" }, env);
-		life = 0;
+		life = [0];
 		await pre("tu_1", { transcript_path: mainTranscript() });
 		await outlive();
 		await post("tu_1", { transcript_path: mainTranscript() });
 		expect(settled()).toEqual([]);
+	});
+	it("a fresh hold whose own life ends before its settle could arrive is given back, never settled: the call-ran gap", async () => {
+		life = [0];
+		await pre("tu_1", {}, ESTIMATE);
+		await outlive();
+		// The server's pending timeout is shorter than the fresh hold's settle could take to arrive.
+		life = [1_000];
+		await post("tu_1", {}, ESTIMATE);
+		expect(authorizes()).toHaveLength(2);
+		expect(settled()).toEqual([]);
+		expect(seen.filter((s) => s.path === "/v1/release").map((s) => s.body.transferId)).toContain(
+			"tx_2",
+		);
+		const gaps = (await readFile(join(stateDir, "watch.jsonl"), "utf-8"))
+			.split("\n")
+			.filter((line) => line !== "")
+			.map((line) => JSON.parse(line) as { kind?: string; releaseClass?: string })
+			.filter((r) => r.kind === "gap" && r.releaseClass === "call-ran");
+		expect(gaps).toHaveLength(1);
+	});
+
+	it("a window's hold whose life ends before its settle could arrive is given back, never settled: the window waits", async () => {
+		capabilities = ["hold-expiry", "release"];
+		await runHook(SESSION_START, { session_id: SESSION, source: "startup" }, env);
+		await writeFile(mainTranscript(), response("msg_a"));
+		life = [0];
+		await pre("tu_1", { transcript_path: mainTranscript() });
+		await outlive();
+		await post("tu_1", { transcript_path: mainTranscript() });
+		// The window goes to Stop, whose hold for it lives too briefly for its settle to arrive.
+		life = [1_000];
+		await runHook(
+			STOP,
+			{ session_id: SESSION, transcript_path: mainTranscript(), stop_hook_active: false },
+			env,
+		);
+		expect(settled().filter((s) => s.inputTokens === 10)).toEqual([]);
+		const windowHold = `tx_${nextTransfer - 1}`;
+		expect(seen.filter((s) => s.path === "/v1/release").map((s) => s.body.transferId)).toContain(
+			windowHold,
+		);
+		// A later settle point, on a hold that lives long enough, posts it once.
+		life = 60_000;
+		await runHook(
+			STOP,
+			{ session_id: SESSION, transcript_path: mainTranscript(), stop_hook_active: false },
+			env,
+		);
+		expect(settled().filter((s) => s.inputTokens === 10)).toHaveLength(1);
 	});
 });

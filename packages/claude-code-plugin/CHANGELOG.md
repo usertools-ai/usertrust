@@ -33,6 +33,13 @@ npm, and its version is its own: the `usertrust` packages and their
   hold's call is charged once on a fresh hold. A transcript hold's window goes back to a later
   settle point, or, under a key, is retried under it. An older server states no life, and nothing
   changes.
+- **A fresh hold too short for its own settle is never settled either.** The hold that replaces
+  one past its life, and the hold a transcript window is authorized on, were settled without
+  reading the life the server stated for them. On a server whose pending timeout is shorter than
+  a settle's own wait, that settle could arrive after the ledger had voided the hold, as a 410,
+  and the call went uncharged. Each is now judged the same way: if its life could end before its
+  settle arrives, it is given back, never settled. The estimate call is recorded as one that ran
+  without a charge; the window goes back to a later settle point.
 
 ## [3.0.3] - 2026-10-17
 

@@ -140,6 +140,7 @@ import {
 	failureOutcome,
 	guardMode,
 	holdExpired,
+	holdExpiresAt,
 	holdUsageStart,
 	isAlreadySettled,
 	isSettleGone,
@@ -2999,6 +3000,9 @@ async function postGroup({
 		);
 	}
 	let auth;
+	// The clock just before the authorize: its hold's life counts from no earlier (lib.mjs
+	// `holdExpiresAt`).
+	const sentAt = Date.now();
 	try {
 		auth = await serverRequest(
 			"/v1/authorize",
@@ -3040,6 +3044,14 @@ async function postGroup({
 				? "shadow mode (not recorded)"
 				: `authorize returned ${auth.status}`,
 		);
+	}
+	// A server with a short pending timeout can grant a hold whose life ends before its settle could
+	// arrive. Settled, it could only fail, as a 410 the server records as spend it never charged
+	// (lib.mjs `holdExpired`): the hold is given back instead, and the group left for a later settle
+	// point.
+	if (holdExpired({ expiresAt: holdExpiresAt(sentAt, auth.json) }, Date.now() + timeoutMs)) {
+		await hygieneRelease(transferId, "hold's life ends before its settle could arrive");
+		return unsettled("the hold's life ends before its settle could arrive, so it was given back");
 	}
 	let settle;
 	try {
