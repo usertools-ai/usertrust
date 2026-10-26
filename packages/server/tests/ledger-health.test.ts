@@ -18,6 +18,17 @@ import { createFakeGovernor } from "./helpers/fake-governor.js";
 
 const KEY = "ut_health_key";
 const DEADLINE_MS = 600;
+/**
+ * The ready deadline for a row whose point is how the child's EXIT is classified (child_exited, panic,
+ * evicted). The observer reads whichever it sees first, the exit or the "not ready in ledgerTimeoutMs"
+ * deadline, and a fake child that aborts "at once" still needs a node boot (and, for an abort, a
+ * crash report) before the parent hears of it: under a loaded coverage run that exceeded the 600 ms
+ * DEADLINE_MS and the row read `not_ready` instead (seen twice in 21 minutes on unrelated
+ * PRs). The classification is right: a child that cannot say ready or exit in time IS not ready. So a
+ * row that tests the exit's classification takes a deadline the exit always beats; the row that pins
+ * the other side (a child still booting past a deadline reads not_ready) is below.
+ */
+const EXIT_FIRST_MS = 30_000;
 const FAKE_CHILD = join(import.meta.dirname, "helpers", "fake-health-child.mjs");
 const PRELOAD = join(import.meta.dirname, "helpers", "source-preload.mjs");
 const HEALTH_PARENT = join(import.meta.dirname, "helpers", "health-parent.ts");
@@ -472,7 +483,10 @@ describe("an observer that cannot run reads unknown, never unreachable", () => {
 	it("a child that exits at once on every spawn: 4 spawns over 3 cooldowns, unknown throughout, each failure counted", async () => {
 		const cooldown = 400;
 		const spawner = fakeSpawner("exit");
-		const { base } = await start({ spawner, overrides: { healthRespawnCooldownMs: cooldown } });
+		const { base } = await start({
+			spawner,
+			overrides: { healthRespawnCooldownMs: cooldown, ledgerTimeoutMs: EXIT_FIRST_MS },
+		});
 		const readings = new Set<unknown>();
 		const observer = await until(
 			async () => {
@@ -501,7 +515,7 @@ describe("an observer that cannot run reads unknown, never unreachable", () => {
 	it("a child that aborts reads unknown, as a panic, and the server lives on", async () => {
 		const { base } = await start({
 			spawner: fakeSpawner("abort"),
-			overrides: { healthRespawnCooldownMs: 60_000 },
+			overrides: { healthRespawnCooldownMs: 60_000, ledgerTimeoutMs: EXIT_FIRST_MS },
 		});
 		const observer = await until(
 			async () => (await budget(base)).body.ledgerObserver as { failures: number },
@@ -513,9 +527,36 @@ describe("an observer that cannot run reads unknown, never unreachable", () => {
 		expect(h.body).toMatchObject({ ok: true, ledger: "unknown" });
 	});
 
+	it("a child still booting when the ready deadline passes reads not_ready, even one that would have aborted a moment later: the classification follows which the observer sees first", async () => {
+		// The deadline is 1 ms: no node child can boot, let alone abort, inside it, so this is deterministic.
+		// This is the production behaviour the flaky row hit by accident under load, pinned on purpose: such a
+		// child was not ready in time, so it reads not_ready (it is killed, and its later exit is ignored).
+		const spawner = fakeSpawner("abort");
+		const health = new LedgerHealth([TARGET], {
+			ledgerTimeoutMs: 1,
+			respawnCooldownMs: 60_000,
+			spawnChild: spawner.spawnChild,
+			log: () => {},
+		});
+		const key = targetKey(TARGET);
+		try {
+			health.start();
+			await until(
+				() => health.observer(key).failures,
+				(n) => n >= 1,
+			);
+			expect(health.observer(key)).toEqual({ failures: 1, lastFailure: "not_ready" });
+		} finally {
+			health.stop();
+		}
+	});
+
 	it("an evicted child reads unknown, counts as evicted, and is started again after the cooldown", async () => {
 		const spawner = fakeSpawner("evict");
-		const { base } = await start({ spawner, overrides: { healthRespawnCooldownMs: 300 } });
+		const { base } = await start({
+			spawner,
+			overrides: { healthRespawnCooldownMs: 300, ledgerTimeoutMs: EXIT_FIRST_MS },
+		});
 		const observer = await until(
 			async () => (await budget(base)).body.ledgerObserver as { failures: number },
 			(o) => o.failures >= 1,
@@ -669,8 +710,10 @@ describe("a child that never says ready is the observer failing, not the ledger"
 
 	it("a child that exits before it is ready clears the deadline: only the exit is counted", async () => {
 		const spawner = fakeSpawner("exit");
+		// A deadline the exit always beats (see EXIT_FIRST_MS), still short enough to wait out below.
+		const deadline = 2_500;
 		const health = new LedgerHealth([TARGET], {
-			ledgerTimeoutMs: DEADLINE_MS,
+			ledgerTimeoutMs: deadline,
 			respawnCooldownMs: 60_000,
 			spawnChild: spawner.spawnChild,
 			log: () => {},
@@ -682,7 +725,7 @@ describe("a child that never says ready is the observer failing, not the ledger"
 				() => health.observer(key).failures,
 				(n) => n >= 1,
 			);
-			await sleep(DEADLINE_MS + 300);
+			await sleep(deadline + 300);
 			expect(health.observer(key)).toEqual({ failures: 1, lastFailure: "child_exited" });
 			expect(spawner.spawned()).toBe(1);
 		} finally {
