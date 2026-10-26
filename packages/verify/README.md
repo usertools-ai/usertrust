@@ -7,7 +7,7 @@ npx usertrust-verify .usertrust
 ```
 
 ```
-Vault integrity: VERIFIED
+Vault integrity: VERIFIED (UNANCHORED — internal consistency only)
 Chain length: 847 events
 Merkle root: a3f8c1...d92b
 Hash algorithm: SHA-256
@@ -18,8 +18,8 @@ All hashes: valid (847/847)
 
 ## What it checks
 
-- **Hash chain** — every event links to the previous event's SHA-256 hash; any mutated, reordered, or inserted event breaks verification.
-- **Head anchor** — the fsync'd `events.jsonl.meta` sidecar records the last hash and the total event count. The verifier fails if the log has been **truncated or deleted** (a shorter-but-internally-consistent chain no longer passes).
+- **Hash chain** — every event links to the previous event's SHA-256 hash; editing an event, or inserting or removing one inside the chain, breaks verification. Events are verified in `sequence` order, so moving lines around in the file without changing any event is not reported, and an event added after the last one, with `.meta` rewritten to match, verifies like any other (see **Head anchor**).
+- **Head anchor** — the fsync'd `events.jsonl.meta` sidecar records the last hash and the total event count. While the sidecar still records the longer head and count, the verifier fails a log that has been **truncated or deleted**. The sidecar lives in the vault beside the log, so it is not independent evidence: a vault whose newest events were cut, and whose `.meta` was then deleted or rewritten to match, passes (exit 0, `UNANCHORED`). Only evidence held outside the vault catches that: an external anchor (`--anchors <file>` with `--pubkey <pem>`, below) or receipts you kept (`usertrust verify --receipts <file>` in the `usertrust` CLI fails with `INCOMPLETE` when a kept receipt names an event the log no longer holds). See [LIMITATIONS.md](https://github.com/usertools-ai/usertrust/blob/master/LIMITATIONS.md#8-no-third-party-certification) section 8.
 - **Segment continuity** — a rotated vault (multiple `*.jsonl` segments) is verified as one continuous chain by sequence number; a missing whole segment is detected as a sequence gap.
 - **Merkle root** — recomputes the RFC 6962 root over the event hashes.
 - **External anchors** (optional) — binds the vault to Ed25519-signed checkpoints held in an append-only store the vault operator cannot rewrite. This upgrades the guarantee from *tamper-evident if you trust the operator's files* to **independently verifiable**: even a fully re-hashed, internally-consistent rewrite fails against the externally-held root.
