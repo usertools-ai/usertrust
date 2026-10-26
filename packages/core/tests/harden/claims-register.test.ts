@@ -62,7 +62,7 @@ interface Denied {
 	pattern: string;
 	why: string;
 	contradictedBy: Located;
-	pendingCam?: Located[];
+	pendingCopy?: Located[];
 }
 interface ScopeEntry {
 	file?: string;
@@ -266,7 +266,7 @@ describe("the integrity claims register", () => {
 		const located = [
 			...register.claims.flatMap((c) => c.statements.map((s) => ({ ...s, owner: c.id }))),
 			...register.nonclaims.map((n) => ({ ...n, owner: "non-claim" })),
-			...register.denied.flatMap((d) => (d.pendingCam ?? []).map((s) => ({ ...s, owner: d.id }))),
+			...register.denied.flatMap((d) => (d.pendingCopy ?? []).map((s) => ({ ...s, owner: d.id }))),
 		];
 		for (const s of located) {
 			if (!normalize(read(s.file)).includes(normalize(s.text)))
@@ -306,7 +306,7 @@ describe("the integrity claims register", () => {
 				),
 				...register.nonclaims.filter((n) => n.file === file).map((n) => n.text),
 				...register.denied.flatMap((d) =>
-					(d.pendingCam ?? []).filter((p) => p.file === file).map((p) => p.text),
+					(d.pendingCopy ?? []).filter((p) => p.file === file).map((p) => p.text),
 				),
 			].map(normalize);
 			for (const h of uncoveredHits(text, vocabulary, covered)) {
@@ -339,7 +339,7 @@ describe("the integrity claims register", () => {
 			const pattern = new RegExp(d.pattern, "gim");
 			for (const { file, section } of files) {
 				const text = normalize(scannedText(read(file), section));
-				const allowed = (d.pendingCam ?? [])
+				const allowed = (d.pendingCopy ?? [])
 					.filter((p) => p.file === file)
 					.map((p) => normalize(p.text));
 				for (const m of text.matchAll(pattern)) {

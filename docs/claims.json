@@ -25,9 +25,7 @@
 				"ext": ".mdx"
 			}
 		],
-		"exclude": [
-			"site/content/docs/policy/pii.mdx"
-		],
+		"exclude": ["site/content/docs/policy/pii.mdx"],
 		"denied": [
 			{
 				"file": "CHANGELOG.md",
@@ -1415,7 +1413,7 @@
 				"file": "LIMITATIONS.md",
 				"text": "Anyone who can rewrite both the vault file and its sidecar can produce a chain that verifies on its own."
 			},
-			"pendingCam": [
+			"pendingCopy": [
 				{
 					"file": "packages/core/README.md",
 					"text": "Every LLM call becomes an immutable, auditable transaction."
@@ -1484,7 +1482,7 @@
 				"file": "LIMITATIONS.md",
 				"text": "Anyone who can rewrite both the vault file and its sidecar can produce a chain that verifies on its own."
 			},
-			"pendingCam": [
+			"pendingCopy": [
 				{
 					"file": "site/content/docs/compare/agent-governance-toolkit.mdx",
 					"text": "nothing to trust but the math"

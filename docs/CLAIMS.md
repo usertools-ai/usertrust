@@ -6,7 +6,7 @@ The register exists because sentences about the chain kept saying more than veri
 
 ## What the test checks
 
-- **(a) Every integrity sentence is registered.** The test scans the documentation in `scope.scan` for the words in `vocabulary` (case-insensitive regular expressions: tamper, immutable, append-only, truncate, detected, VERIFIED, proves, every call and the rest). Each hit must sit inside a registered statement, inside a registered non-claim, or inside a `pendingCam` span of a denied phrase. For `CHANGELOG.md`, only the `[Unreleased]` section is scanned, because released entries are a dated record.
+- **(a) Every integrity sentence is registered.** The test scans the documentation in `scope.scan` for the words in `vocabulary` (case-insensitive regular expressions: tamper, immutable, append-only, truncate, detected, VERIFIED, proves, every call and the rest). Each hit must sit inside a registered statement, inside a registered non-claim, or inside a `pendingCopy` span of a denied phrase. For `CHANGELOG.md`, only the `[Unreleased]` section is scanned, because released entries are a dated record.
 - **(b) Every entry still points at something real.** Each statement and non-claim must appear in its file word for word (whitespace is collapsed, so a line wrap does not matter). Each cited test must exist in its file as a literal `it(...)` or `test(...)` title that is not skipped or todo, and the file must not hold a `.skip`, `.todo` or `.only` that could stop it from running.
 - **(c) No documentation states a denied phrase.** Each entry in `denied` is a regular expression for wording that is false, tied by `contradictedBy` to the sentence or test title that contradicts it. That contradicting text must still exist. If it is removed, the denial fails and gets reviewed rather than lapsing. `scope.denied` also covers the site's page components.
 - **(d) Unproven claims are counted.** A claim with no proof carries a `pending` reason. The test prints every pending claim, and fails if their number rises above `pendingCeiling`.
@@ -23,4 +23,4 @@ The test does not judge whether a sentence is true. That is the cited test's job
 
 ## Entries awaiting a ruling
 
-A denied phrase can list `pendingCam` spans: places that still use the wording while the product copy is being decided. Those spans pass, and the test prints them. When the copy changes, delete the span. Once no span is left, the phrase is denied everywhere.
+A denied phrase can list `pendingCopy` spans: places that still use the wording while the product copy is being decided. Those spans pass, and the test prints them. When the copy changes, delete the span. Once no span is left, the phrase is denied everywhere.
