@@ -70,6 +70,7 @@ env:
     openclaw-contract
     tb-integration
     site-build
+    tested-tree
   REPUBLISH: ${{ inputs.republish }}
 
 jobs:
