@@ -21,4 +21,15 @@ describe("the journal reads a settle as abandoned only after the ledger has expi
 		]);
 		expect(Number(stdout)).toBeGreaterThan(LEDGER_HOLD_TIMEOUT_MS);
 	});
+
+	// A hold asked to live longer (`holdTtlMs`) is stale that much later (`staleSettlingAfter`),
+	// counted from the plugin's own copy of the default life: it must be core's.
+	it("DEFAULT_HOLD_LIFE_MS (hooks/transcript.mjs) is LEDGER_HOLD_TIMEOUT_MS (core)", async () => {
+		const { stdout } = await promisify(execFile)(process.execPath, [
+			"--input-type=module",
+			"-e",
+			`const m = await import(${JSON.stringify(pathToFileURL(TRANSCRIPT).href)}); process.stdout.write(String(m.DEFAULT_HOLD_LIFE_MS));`,
+		]);
+		expect(Number(stdout)).toBe(LEDGER_HOLD_TIMEOUT_MS);
+	});
 });

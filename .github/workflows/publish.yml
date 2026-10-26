@@ -66,6 +66,7 @@ env:
     lint
     typecheck
     test
+    scan-linear
     openclaw-contract
     tb-integration
     site-build

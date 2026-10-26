@@ -23,7 +23,6 @@
  */
 
 import { types as utilTypes } from "node:util";
-import { redactPII } from "./policy/pii.js";
 
 type Loose = Record<string, unknown>;
 
@@ -51,19 +50,6 @@ function isCallableTool(tool: unknown): tool is CallableTool {
 	);
 }
 
-/** A deep copy of a declaration (plain data); one that cannot be copied is used as it is rather than failing the call. */
-function detach(value: unknown): unknown {
-	try {
-		return structuredClone(value);
-	} catch {
-		try {
-			return JSON.parse(JSON.stringify(value)) as unknown;
-		} catch {
-			return value;
-		}
-	}
-}
-
 /**
  * A callable tool whose `tool()` is asked ONCE per call, LAZILY, and answers every later round from that one answer.
  *
@@ -75,12 +61,10 @@ function detach(value: unknown): unknown {
  * `tool()` that throws goes through the governed lifecycle (hold voided, failure audited), and the SDK itself starts all the
  * tools' `tool()` calls together, as it does natively.
  *
- * REDACTION. In `pii: "redact"` mode the governed call forwards a deep CLONE of the request, and the SDK asks the tool on that
- * clone. `tool()` always runs on the REAL tool, so the state it sets up (a ready flag, a dispatch table, an MCP session)
- * lives where `callTool` finds it; when the SDK asked through the clone, the ANSWER is redacted, so the declaration the model
- * sees has passed the same redaction as the rest of the request, whether the tool held it as state or in a closure. When it
- * asked through the wrapper itself (nothing was cloned) the answer is given as it is, as natively. The memo lives in the
- * closure, so every later round reuses that one answer.
+ * `tool()` always runs on the REAL tool, so the state it sets up (a ready flag, a dispatch table, an MCP session) lives where
+ * `callTool` finds it, and its answer is given as it is, as natively: a tool declaration is a control field of the request,
+ * which `pii: "redact"` never rewrites (policy/pii-content.ts). The memo lives in the closure, so every later round reuses
+ * that one answer.
  *
  * The wrapper is a fresh object, never a Proxy: a frozen tool (`Object.freeze({ tool, callTool })`) cannot be proxied with
  * replacement functions without breaking the Proxy invariant. It keeps the tool's prototype, so `instanceof` checks such as
@@ -105,7 +89,7 @@ function snapshotTool(tool: CallableTool): CallableTool {
 		Object.defineProperty(wrapper, key, copy);
 	}
 	Object.defineProperty(wrapper, "tool", {
-		value: lazyTool(tool, wrapper),
+		value: lazyTool(tool),
 		writable: true,
 		enumerable: true,
 		configurable: true,
@@ -119,21 +103,15 @@ function snapshotTool(tool: CallableTool): CallableTool {
 	return wrapper;
 }
 
-/** `wrapper`'s `tool()`: the real tool's, asked once, lazily, its answer redacted when asked through a clone (see snapshotTool). */
-function lazyTool(tool: CallableTool, wrapper: object): (this: unknown) => Promise<unknown> {
+/** A wrapper's `tool()`: the real tool's, asked once, lazily (see snapshotTool). */
+function lazyTool(tool: CallableTool): () => Promise<unknown> {
 	let memo: Promise<unknown> | undefined;
-	return function (this: unknown): Promise<unknown> {
+	return (): Promise<unknown> => {
 		// Called synchronously on first use, like the SDK's own `await callableTool.tool()` inside its map.
 		memo ??= (async () => {
 			// ALWAYS on the real tool: the state `tool()` sets up (a ready flag, a dispatch table, a session) must live
 			// where `callTool` finds it, which is also the real tool. The accessor is read here, at use, never at wrap time.
-			const declaration = await (Reflect.get(tool, "tool") as () => Promise<unknown>).call(tool);
-			// Asked through the redacted request CLONE (pii "redact" with PII in the prompt): redact the answer itself, so
-			// the declaration the model sees has passed the same redaction as the rest of the request, whether it was held
-			// as state or in a closure. Asked through the wrapper (nothing was cloned): the answer as it is, as natively.
-			// redactPII hands its input back UNCHANGED when it detects nothing, so redact a DETACHED copy: the memo must never
-			// alias the real tool's live object, or a later callTool() that writes PII into it would leak in later rounds.
-			return this === wrapper ? declaration : redactPII(detach(declaration)).data;
+			return await (Reflect.get(tool, "tool") as () => Promise<unknown>).call(tool);
 		})();
 		return memo;
 	};
@@ -151,7 +129,7 @@ export function governedCallable(tool: object, proto: object | null): object {
 	const callable = tool as CallableTool;
 	const wrapper = Object.create(proto) as CallableTool;
 	Object.defineProperty(wrapper, "tool", {
-		value: lazyTool(callable, wrapper),
+		value: lazyTool(callable),
 		writable: true,
 		enumerable: true,
 		configurable: true,

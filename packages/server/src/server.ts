@@ -15,7 +15,7 @@ import type {
 import { sanitizeReleaseReason } from "usertrust";
 import { sanitizeMapped, scrubForStderr } from "./cli/scrub.js";
 import type { ServerConfig, TenantConfig } from "./config.js";
-import { DEFAULT_LEDGER_TIMEOUT_MS, resolveTenant } from "./config.js";
+import { DEFAULT_LEDGER_TIMEOUT_MS, maxHoldLife, resolveTenant } from "./config.js";
 import { EventBus } from "./events.js";
 import {
 	type HealthChildSpawner,
@@ -78,6 +78,11 @@ const SERVER_CAPABILITIES = Object.freeze([
 	// charges the estimate when any tier is flagged. Without it a client must not send zeroed counts for a refused tier: an
 	// older server strips the unknown key and would price the zeros at the floor.
 	"refused",
+	// `hold-ttl`: `POST /v1/authorize` accepts `holdTtlMs`, how long the hold should live, clamped to
+	// [`pendingTtlMs`, `maxPendingTtlMs`]: the ledger's pending timeout for that hold and the server's
+	// own sweep life for it alike. /v1/health also states `maxHoldTtlMs`, the ceiling. An older server
+	// strips the key, and the hold keeps the default life.
+	"hold-ttl",
 ]);
 /**
  * A dryRun server has no ledger, so it writes no `user_data` tags — but it records
@@ -140,6 +145,23 @@ interface PendingEntry {
 	 * floor of its `usageTo`. Never read from the handle, which is the caller's.
 	 */
 	labels: { job?: string; jobState?: "invalid"; usageFrom?: string };
+	/**
+	 * This hold's own sweep life, in ms (`holdLife`): what its authorize asked for (`holdTtlMs`),
+	 * clamped, else `pendingTtlMs`. `remainingLifeMs` reads it in place of `pendingTtlMs`.
+	 */
+	lifeMs: number;
+}
+
+/**
+ * The sweep life of a hold whose authorize asked for `requested` ms (`holdTtlMs`, capability
+ * `hold-ttl`): clamped to [`pendingTtlMs`, `maxPendingTtlMs`]. Absent, `pendingTtlMs`, as before.
+ */
+export function holdLife(
+	requested: number | undefined,
+	config: { pendingTtlMs: number; maxPendingTtlMs?: number | undefined },
+): number {
+	if (requested === undefined) return config.pendingTtlMs;
+	return Math.min(Math.max(requested, config.pendingTtlMs), maxHoldLife(config));
 }
 
 /**
@@ -214,8 +236,8 @@ function routeOf(req: IncomingMessage): RouteName | "unrouted" {
 	return (ROUTES as readonly string[]).includes(named) ? (named as RouteName) : "unrouted";
 }
 
-/** A bearer token wherever a message quotes one: `Bearer <token>`. */
-const BEARER_TOKEN = /\b(Bearer)\s+[^\s"',;]+/gi;
+/** A bearer token wherever a message quotes one: `Bearer <token>`, or `Bearer` and no token. */
+const BEARER_TOKEN = /\b(Bearer)\s+([^\s"',;]*)/gi;
 /** The start of an api-key style value: its name, the separator, and its opening quote, if any. */
 const API_KEY_START = /\b(x-api-key|api[-_]key)(["']?\s*[:=]\s*)(["']?)/gi;
 /** `BEARER_TOKEN` and `API_KEY_START` at one place, with no word boundary asked for there. */
@@ -255,9 +277,33 @@ interface Redaction {
 	rest?: RegExp;
 	/** For a quoted api-key value: the quote that closes it. */
 	quote?: string;
+	/**
+	 * A marker with no credential after it (what follows ends one): replaced only with a match of the
+	 * caller's key that joins it, and the credential then runs on past that match.
+	 */
+	bare?: true;
 }
 
 const REDACTED = "[redacted]";
+
+/** The index of the first item of `list` (in order) that is greater than `at`. */
+function after(list: readonly number[], at: number): number {
+	let lo = 0;
+	let hi = list.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if ((list[mid] ?? 0) <= at) lo = mid + 1;
+		else hi = mid;
+	}
+	return lo;
+}
+
+/** `at` put into `list`, kept in order: at its end, but for a source whose parts' ends step back. */
+function insert(list: number[], at: number): void {
+	let i = list.length;
+	while (i > 0 && (list[i - 1] ?? 0) > at) i--;
+	list.splice(i, 0, at);
+}
 
 /**
  * `text` with each part that `sources` name replaced. Each source yields its parts in order of
@@ -265,21 +311,40 @@ const REDACTED = "[redacted]";
  * the furthest end, by the replacement of the part that starts first (on a tie, of the earlier
  * source). Text outside every part is kept as it is.
  *
- * A credential that such a part ends past runs on from that part's end, and what starts inside
- * that joins too, until the end stops growing: a token through what it can still hold there, a
- * quoted value through its next closing quote. With the caller's key `tenant key`,
- * `Bearer tenant keyUPSTREAM` has the token `tenant`, which ends at the key's space, and the key's
- * match, which ends before `UPSTREAM`: replaced as one, they would print `Bearer [redacted]UPSTREAM`.
- * And with the key `k"z`, `api_key="xk"zUPSTREAM"` has the value `xk"`, closed by the key's
- * quote. A quoted value runs on too where a key's match ends exactly where it does, since that match
- * took its closing quote: with the key `TENANT"`, `api_key="xTENANT"UPSTREAM`. And a key's match
- * that starts exactly where a token ends joins it, since that match took what ended the token: with
- * the key `'tenant`, `Bearer x'tenantUPSTREAM`. (5.1.0 replaced the key first, and its patterns then
- * read `[redacted]` and what followed as the credential: a token holds `[` and `]`.) Linear: each
- * run on starts where the part ends and reads only what the part has not covered, a credential runs
- * on again only once a part has taken the end past it, and each part is taken once.
+ * A credential runs on only where a match of the caller's key taken with it holds what ended it:
+ * a token's delimiter, or a quoted value's closing quote. (5.1.0 replaced the key first, and its
+ * patterns then read `[redacted]` and what followed as the credential: a token holds `[` and `]`.)
+ * A token then runs on from the end of what is taken (`runOn`), and a quoted value through its next
+ * closing quote; what starts inside joins too, and it runs on again only once a key's match taken
+ * since holds what ended it there, until the end stops growing. With the key `tenant key`,
+ * `Bearer tenant keyUPSTREAM` has the token `tenant`, which ends at the key's space: replaced
+ * without running on, it would print `Bearer [redacted]UPSTREAM`. With the key `k"z`,
+ * `api_key="xk"zUPSTREAM"` is one value, and so is `api_key="xTENANT"UPSTREAM` with the key
+ * `TENANT"`. Nothing else runs on: in `api_key="x-api-key: 's'" tail`, the inner value ends at its
+ * own closing quote, and no key holds it. A token inside a quoted value ends at that value's closing
+ * quote, unless a key's match holds it: with the key `&k`, `x-api-key="a.api-key=T&k"tail` keeps
+ * `tail`.
+ *
+ * A key's match that starts exactly where a token ends joins it, since that match took what ended
+ * the token: with the key `'tenant`, `Bearer x'tenantUPSTREAM`. A marker with no credential after it
+ * (a bare part) is replaced only with a key's match that joins it, and its credential, which the
+ * key's match ended, runs on past that match: with the key `"key,`, `Bearer "key,UPSTREAM` is
+ * printed as `Bearer [redacted]`. A group of bare parts alone is kept as it is (`Bearer ,x`).
+ *
+ * Linear: each run on starts where the taken parts end and reads only what they have not covered,
+ * and each part is taken once. What ended each credential taken is kept by kind and by source, in
+ * order, and so are a key's matches, each in order of start and of end: whether a key's match holds
+ * one of them is a binary search.
  */
-function applyRedactions(text: string, sources: readonly Iterator<Redaction>[]): string {
+function applyRedactions(
+	text: string,
+	sources: readonly Iterator<Redaction>[],
+	runOn: (rest: RegExp, from: number) => number = (rest, from) => {
+		rest.lastIndex = from;
+		rest.test(text);
+		return rest.lastIndex;
+	},
+): string {
 	const heads = sources.map((source) => source.next());
 	let out = "";
 	let kept = 0;
@@ -295,23 +360,63 @@ function applyRedactions(text: string, sources: readonly Iterator<Redaction>[]):
 		if (first === undefined) return out + text.slice(kept);
 		const start = first.start;
 		let end = first.end;
-		// The shortest credential end of each kind, to run on from the part's end.
-		const runs: { through: RegExp | string; end: number }[] = [];
-		// Where a match of the caller's key (a part with neither) ends: one that ends where a quoted
-		// value does took its closing quote.
-		const keyEnds = new Set<number>();
-		const take = (part: Redaction): void => {
+		let bare = true;
+		// For each kind of credential, where what ended each one taken stands (a token's delimiter, a
+		// quoted value's closing quote), by source, and whether a key's match holds one of them.
+		const runs: { through: RegExp | string; enders: Map<number, number[]>; held: boolean }[] = [];
+		// Where each token taken ends, to join a key's match that starts there.
+		const tokenEnds = new Set<number>();
+		// Where each quoted value taken ends, just past its closing quote.
+		const quotedEnds = new Set<number>();
+		// The matches of the caller's key (parts with neither) taken, by source.
+		const keys = new Map<number, { starts: number[]; ends: number[] }>();
+		// Whether a key's match taken holds the character at `at`: of a source's matches that start at
+		// or before it, the last ends furthest.
+		const holds = (at: number): boolean => {
+			for (const { starts, ends } of keys.values()) {
+				const i = after(starts, at);
+				if (i > 0 && (ends[i - 1] ?? 0) > at) return true;
+			}
+			return false;
+		};
+		const take = (part: Redaction, s: number): void => {
 			end = Math.max(end, part.end);
+			if (part.bare === undefined) bare = false;
 			const through = part.rest ?? part.quote;
 			if (through === undefined) {
-				keyEnds.add(part.end);
+				let source = keys.get(s);
+				if (source === undefined) {
+					source = { starts: [], ends: [] };
+					keys.set(s, source);
+				}
+				source.starts.push(part.start);
+				source.ends.push(part.end);
+				for (const run of runs) {
+					if (run.held) continue;
+					for (const enders of run.enders.values()) {
+						const i = after(enders, part.start - 1);
+						if ((enders[i] ?? end) < part.end) run.held = true;
+					}
+				}
 				return;
 			}
-			const run = runs.find((r) => r.through === through);
-			if (run === undefined) runs.push({ through, end: part.end });
-			else run.end = Math.min(run.end, part.end);
+			let run = runs.find((r) => r.through === through);
+			if (run === undefined) {
+				run = { through, enders: new Map(), held: false };
+				runs.push(run);
+			}
+			const ender = typeof through === "string" ? part.end - 1 : part.end;
+			if (typeof through !== "string") tokenEnds.add(part.end);
+			else quotedEnds.add(part.end);
+			let enders = run.enders.get(s);
+			if (enders === undefined) {
+				enders = [];
+				run.enders.set(s, enders);
+			}
+			insert(enders, ender);
+			if (holds(ender)) run.held = true;
 		};
-		take(first);
+		take(first, from);
 		heads[from] = sources[from]?.next() ?? { done: true, value: undefined };
 		for (let grown = true; grown; ) {
 			// Every part that starts inside this one, or where it starts, joins it, which can take it
@@ -319,18 +424,18 @@ function applyRedactions(text: string, sources: readonly Iterator<Redaction>[]):
 			// a key's match that starts where a token ends.
 			for (let joined = true; joined; ) {
 				joined = false;
-				const tokenEnds = runs.some((r) => typeof r.through !== "string" && r.end === end);
+				const atToken = tokenEnds.has(end);
 				heads.forEach((head, s) => {
 					if (
 						!head.done &&
 						(head.value.start < end ||
 							head.value.start === start ||
-							(tokenEnds &&
+							(atToken &&
 								head.value.start === end &&
 								head.value.rest === undefined &&
 								head.value.quote === undefined))
 					) {
-						take(head.value);
+						take(head.value, s);
 						heads[s] = sources[s]?.next() ?? { done: true, value: undefined };
 						joined = true;
 					}
@@ -338,22 +443,30 @@ function applyRedactions(text: string, sources: readonly Iterator<Redaction>[]):
 			}
 			grown = false;
 			for (const run of runs) {
-				const unclosed = typeof run.through === "string" && keyEnds.delete(run.end);
-				if (run.end >= end && !unclosed) continue;
-				let reach: number;
-				if (typeof run.through === "string") reach = quotedEnd(text, end, run.through);
-				else {
-					run.through.lastIndex = end;
-					run.through.test(text);
-					reach = run.through.lastIndex;
+				if (!run.held) continue;
+				run.held = false;
+				// A token inside a quoted value ends at its closing quote, unless a key's match holds it.
+				if (typeof run.through !== "string" && quotedEnds.has(end) && !holds(end - 1)) continue;
+				const reach =
+					typeof run.through === "string"
+						? quotedEnd(text, end, run.through)
+						: runOn(run.through, end);
+				// The credential now ends there: it runs on again only if a key's match taken since holds
+				// what ends it. And another pass looks for a key's match that starts there.
+				const ender = typeof run.through === "string" ? reach - 1 : reach;
+				if (typeof run.through !== "string") tokenEnds.add(reach);
+				else quotedEnds.add(reach);
+				let enders = run.enders.get(-1);
+				if (enders === undefined) {
+					enders = [];
+					run.enders.set(-1, enders);
 				}
-				// The credential now ends there: it runs on again only if a part takes the end further. And
-				// another pass looks for a key's match that starts there.
-				run.end = reach;
+				insert(enders, ender);
 				end = Math.max(end, reach);
 				grown = true;
 			}
 		}
+		if (bare) continue;
 		out += text.slice(kept, first.start) + first.replacement;
 		kept = end;
 	}
@@ -362,18 +475,21 @@ function applyRedactions(text: string, sources: readonly Iterator<Redaction>[]):
 /**
  * Each `Bearer <token>`: the whitespace and the token, replaced by one space and `[redacted]`. The
  * search goes on from inside each match, so a token cannot hide a `Bearer` that ends it
- * (`Bearer a.Bearer <token>`). Linear: a `Bearer` inside a token needs whitespace after it, so it
- * ends the token, and no character is read more than twice.
+ * (`Bearer a.Bearer <token>`). A `Bearer` with no token (a quote, `,` or `;` after the whitespace)
+ * is a bare part: replaced only with a match of the caller's key that starts there (see
+ * `applyRedactions`). Linear: a `Bearer` inside a token needs whitespace after it, so it ends the
+ * token, and no character is read more than twice.
  */
 function* bearerSpans(text: string): Generator<Redaction> {
 	const bearer = new RegExp(BEARER_TOKEN);
 	for (let m = bearer.exec(text); m !== null; m = bearer.exec(text)) {
-		const [whole, word] = m as unknown as [string, string];
+		const [whole, word, token] = m as unknown as [string, string, string];
 		yield {
 			start: m.index + word.length,
 			end: m.index + whole.length,
 			replacement: ` ${REDACTED}`,
 			rest: BEARER_REST,
+			...(token === "" ? { bare: true as const } : {}),
 		};
 		bearer.lastIndex = m.index + word.length;
 	}
@@ -414,9 +530,22 @@ function* apiKeySpans(text: string, overlapping = false): Generator<Redaction> {
 			continue;
 		}
 		const value = apiKeyValue(text, quote, valueAt, unquoted);
-		// No value here. The old pattern looked again from the next character, but the only start
-		// inside this one (`api-key` in `x-api-key`) meets the same separator and fails too.
-		if (value === undefined) continue;
+		// No value here (`,`, `;` or `&` follows, or nothing). The old pattern looked again from the
+		// next character, but the only start inside this one (`api-key` in `x-api-key`) meets the same
+		// separator and fails too. Overlapping, it is a bare part, where a match of the caller's key
+		// can start the value (see `applyRedactions`).
+		if (value === undefined) {
+			if (overlapping) {
+				yield {
+					start: valueAt,
+					end: valueAt,
+					replacement: REDACTED,
+					rest: UNQUOTED_REST,
+					bare: true,
+				};
+			}
+			continue;
+		}
 		if (quote === "") {
 			unquotedFrom = valueAt;
 			unquotedEnd = value.end;
@@ -640,29 +769,32 @@ function sanitizedIndex(at: Int32Array, i: number): number {
 /**
  * `spans`, found in the original text, at the same characters of the sanitized one: a part keeps
  * those of its characters sanitizing kept. One whose characters were all removed is dropped (there
- * is nothing of it to print); an empty one (an unclosed quote at the end) stays, in its place.
+ * is nothing of it to print); an empty one (an unclosed quote at the end) stays, in its place, and
+ * so does a bare one (`Bearer\t"key`: a key's match can still start where it ends).
  */
 function* inSanitized(spans: Generator<Redaction>, at: Int32Array): Generator<Redaction> {
 	for (const part of spans) {
 		const start = sanitizedIndex(at, part.start);
 		const end = sanitizedIndex(at, part.end);
-		if (end > start || part.end === part.start) yield { ...part, start, end };
+		if (end > start || part.end === part.start || part.bare) yield { ...part, start, end };
 	}
 }
 
 /**
  * The sanitized text with one space where sanitizing removed a run between two characters it kept
  * (`Bearer\t\x1b[31m\t<token>` reads `Bearer <token>`), and, for each unit, the unit of the
- * sanitized text it stands at: a space, at the character after its run, and marked in `gap`.
+ * sanitized text it stands at: a space, at the character after its run, and marked in `gap`. And,
+ * for each unit of the sanitized text, its unit in this one (`of`).
  */
 function withGaps(
 	clean: string,
 	at: Int32Array,
-): { text: string; to: Int32Array; gap: Uint8Array } {
+): { text: string; to: Int32Array; gap: Uint8Array; of: Int32Array } {
 	let gaps = 0;
 	for (let j = 1; j < clean.length; j++) if ((at[j] ?? 0) !== (at[j - 1] ?? 0) + 1) gaps++;
 	const to = new Int32Array(clean.length + gaps);
 	const gap = new Uint8Array(clean.length + gaps);
+	const of = new Int32Array(clean.length);
 	let text = "";
 	let n = 0;
 	let from = 0;
@@ -673,15 +805,16 @@ function withGaps(
 			gap[n] = 1;
 			to[n++] = j;
 		}
+		of[j] = n;
 		to[n++] = j;
 	}
-	return { text: text + clean.slice(from), to, gap };
+	return { text: text + clean.slice(from), to, gap, of };
 }
 
 /**
  * `spans`, found in the text `withGaps` made, at the same characters of the sanitized text. A
  * part's spaces stand for nothing there: one that holds only spaces is dropped; an empty one (an
- * unclosed quote at the end) stays, in its place.
+ * unclosed quote at the end) stays, in its place, and so does a bare one.
  */
 function* fromGaps(
 	spans: Generator<Redaction>,
@@ -697,7 +830,7 @@ function* fromGaps(
 				: gap[last] === 1
 					? (to[last] ?? length)
 					: (to[last] ?? length) + 1;
-		if (end > start || part.end === part.start) yield { ...part, start, end };
+		if (end > start || part.end === part.start || part.bare) yield { ...part, start, end };
 	}
 }
 
@@ -717,13 +850,27 @@ function* fromGaps(
  * to the next marker (`Bearer <a>\tBearer <b>\tBea\0rer <c>`). Linear: a source's tokens of one
  * kind end in order, so the reach of the last one is reused for an end inside it; and the markers
  * are read as `markersAt` reads them.
+ *
+ * A marker glued to the end of a match of the caller's key is read there too, and its credential is
+ * a part of its own, after the key's: with the key `SECRET`, in `ESC SECRETBea\0rer <token>` the
+ * escape sequence `ESC S` takes the key's first character, so only the original text finds the key,
+ * and only the sanitized text reads the marker whole (`ECRETBearer`). The key's matches end in order,
+ * so their markers' credentials start in order, and each is yielded before the first part that
+ * starts after it.
  */
 function* throughTokens(spans: Iterable<Redaction>, clean: string): Generator<Redaction> {
 	const reached = new Map<RegExp, { from: number; reach: number }>();
-	const markerEnd = markersAt(clean);
+	const markerAt = markersAt(clean);
+	const after: Redaction[] = [];
+	let next = 0;
 	for (const part of spans) {
+		for (; next < after.length && (after[next]?.start ?? 0) <= part.start; next++) {
+			yield after[next] as Redaction;
+		}
 		const rest = part.rest;
 		if (rest === undefined) {
+			const marker = part.quote === undefined ? markerAt(part.end) : undefined;
+			if (marker !== undefined) after.push(marker);
 			yield part;
 			continue;
 		}
@@ -734,52 +881,62 @@ function* throughTokens(spans: Iterable<Redaction>, clean: string): Generator<Re
 			run = { from: part.end, reach: rest.lastIndex };
 			reached.set(rest, run);
 		}
-		run.reach = Math.max(run.reach, markerEnd(part.end));
+		run.reach = Math.max(run.reach, markerAt(part.end)?.end ?? -1);
 		yield { ...part, end: run.reach };
 	}
+	for (; next < after.length; next++) yield after[next] as Redaction;
 }
 
 /**
- * A reader of `clean` that gives, for a place in it, where the credential ends whose `Bearer` or
- * api-key marker starts exactly there, with no word boundary asked for; -1 if none does. (A match in
- * `clean` ends at a delimiter, so there is nothing to run on.) Linear over any places, as
- * `markersAfterKeys` is: an unquoted value that starts inside the last one ends where it does, so
- * that end is reused; a quoted value cannot start inside one with the same quote; and a `Bearer`
- * token ends at whitespace, so the next token starts past it.
+ * A reader of `clean` that gives, for a place in it, the credential whose `Bearer` or api-key marker
+ * starts exactly there, with no word boundary asked for, as `markersAfterKeys` yields it; none if no
+ * marker does. (A match in `clean` ends at a delimiter, so there is nothing to run on.) Linear over
+ * any places, as `markersAfterKeys` is: an unquoted value that starts inside the last one ends where
+ * it does, so that end is reused; a quoted value cannot start inside one with the same quote; and a
+ * `Bearer` token ends at whitespace, so the next token starts past it.
  */
-function markersAt(clean: string): (at: number) => number {
+function markersAt(clean: string): (at: number) => Redaction | undefined {
 	const bearer = new RegExp(BEARER_AT);
 	const apiKey = new RegExp(API_KEY_AT);
 	const unquoted = new RegExp(UNQUOTED_VALUE);
 	let last = -1;
-	let lastEnd = -1;
+	let lastFound: Redaction | undefined;
 	let unquotedFrom = -1;
 	let unquotedEnd = -1;
-	const find = (at: number): number => {
-		if (!startsMarker(clean.charCodeAt(at))) return -1;
+	const find = (at: number): Redaction | undefined => {
+		if (!startsMarker(clean.charCodeAt(at))) return undefined;
 		bearer.lastIndex = at;
 		const token = bearer.exec(clean);
-		if (token !== null) return at + token[0].length;
+		if (token !== null) {
+			return {
+				start: at + (token[1] ?? "").length,
+				end: at + token[0].length,
+				replacement: ` ${REDACTED}`,
+				rest: BEARER_REST,
+			};
+		}
 		apiKey.lastIndex = at;
 		const name = apiKey.exec(clean);
-		if (name === null) return -1;
+		if (name === null) return undefined;
 		const quote = name[3] ?? "";
 		const valueAt = apiKey.lastIndex;
-		if (quote === "" && valueAt >= unquotedFrom && valueAt < unquotedEnd) return unquotedEnd;
+		if (quote === "" && valueAt >= unquotedFrom && valueAt < unquotedEnd) {
+			return { start: valueAt, end: unquotedEnd, replacement: REDACTED, rest: UNQUOTED_REST };
+		}
 		const value = apiKeyValue(clean, quote, valueAt, unquoted);
-		if (value === undefined) return -1;
+		if (value === undefined) return undefined;
 		if (quote === "") {
 			unquotedFrom = valueAt;
 			unquotedEnd = value.end;
 		}
-		return value.end;
+		return value;
 	};
 	return (at) => {
 		if (at !== last) {
 			last = at;
-			lastEnd = find(at);
+			lastFound = find(at);
 		}
-		return lastEnd;
+		return lastFound;
 	};
 }
 
@@ -793,18 +950,37 @@ function markersAt(clean: string): (at: number) => number {
  * there. In the sanitized text with one space for each run it removed, a separator made of removed
  * characters still separates: `Bearer\t\x1b[31m\t<token>` is one word once sanitized, and in the
  * original the pattern takes the escape sequence for the token. A token from any view runs on
- * through what sanitizing joined to its end (`throughTokens`). The replacement is made in the
- * sanitized text itself, and nothing removes a character after it: every character the result
- * holds outside a placeholder stands next to the ones it stood next to in the sanitized text,
- * which was read. (Redacting the original and sanitizing after could join what was apart: an OSC
- * sequence whose terminator a redaction took runs further, and the characters on either side of
- * it meet.) No match is ever looked for in redacted text. On `RangeError`, the whole text is
- * replaced, as `redactSecrets` does.
+ * through what sanitizing joined to its end (`throughTokens`), and so does one that runs on past a
+ * key's match (`runOn`): where it stops in the original text or the spaced view, a marker sanitizing
+ * glued there is read, as at a token's end. With the key `k x`, in `api_key=Ak xB\tBea\0rer <token>`
+ * the value runs on past the key's match to `B`, and the sanitized text glues `Bearer` to it.
+ *
+ * The replacement is made in the sanitized text itself, and nothing removes a character after it:
+ * every character the result holds outside a placeholder stands next to the ones it stood next to
+ * in the sanitized text, which was read. (Redacting the original and sanitizing after could join
+ * what was apart: an OSC sequence whose terminator a redaction took runs further, and the
+ * characters on either side of it meet.) No match is ever looked for in redacted text. On
+ * `RangeError`, the whole text is replaced, as `redactSecrets` does.
  */
 export function redactSanitized(text: string, secrets: readonly string[] = []): string {
 	try {
 		const { clean, at } = sanitizeMapped(text);
 		const spaced = withGaps(clean, at);
+		const markerAt = markersAt(clean);
+		const runOn = (rest: RegExp, from: number): number => {
+			rest.lastIndex = from;
+			rest.test(clean);
+			let reach = rest.lastIndex;
+			// From just after the sanitized text's character before `from`, in each view.
+			rest.lastIndex = (at[from - 1] ?? -1) + 1;
+			rest.test(text);
+			const original = sanitizedIndex(at, rest.lastIndex);
+			rest.lastIndex = (spaced.of[from - 1] ?? -1) + 1;
+			rest.test(spaced.text);
+			const inSpaced = spaced.to[rest.lastIndex] ?? clean.length;
+			for (const stop of [original, inSpaced]) reach = Math.max(reach, markerAt(stop)?.end ?? -1);
+			return reach;
+		};
 		return applyRedactions(
 			clean,
 			[
@@ -812,6 +988,7 @@ export function redactSanitized(text: string, secrets: readonly string[] = []): 
 				...spansIn(clean, secrets),
 				...spansIn(spaced.text, secrets).map((spans) => fromGaps(spans, spaced, clean.length)),
 			].map((spans) => throughTokens(spans, clean)),
+			runOn,
 		);
 	} catch (err) {
 		if (err instanceof RangeError) return UNREADABLE;
@@ -1255,6 +1432,11 @@ export function createUsertrustServer(opts: {
 	 * process, a sleep and a forward wall-clock step look alike.
 	 */
 	const monoAge = (entry: PendingEntry): number => performance.now() - entry.startedMono;
+	/** `remainingLifeMs`'s config for one hold: its own sweep life (`lifeMs`) as `pendingTtlMs`. */
+	const entryLife = (entry: PendingEntry) => ({
+		pendingTtlMs: entry.lifeMs,
+		dryRun: config.dryRun,
+	});
 	/**
 	 * Late holds being given back (see `OwedEntry`), keyed `${tenantId}\0${transferId}`. An entry is
 	 * added BEFORE its `release()` starts, so a give-back waiting on the ledger is visible
@@ -1515,9 +1697,15 @@ export function createUsertrustServer(opts: {
 			const set = unsettled.get(tenant.id);
 			if (set?.delete(token) === true && set.size === 0) unsettled.delete(tenant.id);
 		};
+		// The hold's life, clamped once (`holdLife`): the governor reserves it for that long, and the
+		// sweep keeps it for that long. Unasked, the governor's own default, and `pendingTtlMs`.
+		const { holdTtlMs: requestedLife, ...request } = parsed.data;
+		const lifeMs = holdLife(requestedLife, config);
 		let auth: Authorization;
 		try {
-			auth = await governor.authorize(parsed.data);
+			auth = await governor.authorize(
+				requestedLife === undefined ? request : { ...request, holdTtlMs: lifeMs },
+			);
 		} catch (err) {
 			settle();
 			// A rejection after the request ended is consumed: no second write, no second event.
@@ -1548,6 +1736,7 @@ export function createUsertrustServer(opts: {
 				...(parsed.data.jobState === undefined ? {} : { jobState: parsed.data.jobState }),
 				...(parsed.data.usageFrom === undefined ? {} : { usageFrom: parsed.data.usageFrom }),
 			},
+			lifeMs,
 		};
 		// The answer is written, and the hold registered, in one synchronous step: no settle for this
 		// id can arrive between the two. A write that throws registers nothing: the hold is given back.
@@ -1557,7 +1746,7 @@ export function createUsertrustServer(opts: {
 				estimatedCost: auth.estimatedCost,
 				model: auth.model,
 				createdAt: auth.createdAt,
-				...expiresIn(remainingLifeMs(auth, config, monoAge(entry))),
+				...expiresIn(remainingLifeMs(auth, entryLife(entry), monoAge(entry))),
 			});
 		} catch {
 			state = "abandoned";
@@ -1979,6 +2168,8 @@ export function createUsertrustServer(opts: {
 				name: SERVER_NAME,
 				version: SERVER_VERSION,
 				capabilities: config.dryRun ? DRY_RUN_CAPABILITIES : SERVER_CAPABILITIES,
+				// The longest hold an authorize may ask for (`hold-ttl`).
+				maxHoldTtlMs: maxHoldLife(config),
 				logLinesDropped,
 			});
 			return;
@@ -2110,8 +2301,8 @@ export function createUsertrustServer(opts: {
 		// The server's own sweep reads the monotonic age; an explicit `now` is epoch ms.
 		const due = (entry: PendingEntry): boolean => {
 			const age = now === undefined ? monoAge(entry) : now - entry.createdAt;
-			const left = remainingLifeMs(entry.auth, config, age);
-			return left === null ? age >= config.pendingTtlMs : left === 0;
+			const left = remainingLifeMs(entry.auth, entryLife(entry), age);
+			return left === null ? age >= entry.lifeMs : left === 0;
 		};
 		// A late hold whose void the ledger refused stays counted until the hold's own life, counted from
 		// the late reply (OwedEntry), has run out (the ledger's pending timeout has ended it by then), plus

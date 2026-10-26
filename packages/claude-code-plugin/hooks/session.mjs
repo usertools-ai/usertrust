@@ -59,8 +59,10 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import {
+	DEFAULT_HOLD_GRACE_MS,
 	environment,
 	environmentKey,
+	isHoldGrace,
 	keyHash,
 	namesConfig,
 	refusedSettings,
@@ -140,6 +142,8 @@ function parsePin(text) {
 		typeof s.sendContent === "boolean" &&
 		optionalString(s.unit) &&
 		optionalString(s.role) &&
+		// A pin made before the setting existed has none: the default.
+		(s.holdGraceMs === undefined || isHoldGrace(s.holdGraceMs)) &&
 		optionalString(s.unrecognizedMode);
 	if (!valid) return null;
 	if (value.kind === "configured" && typeof s.key === "string" && s.keyHash === undefined) {
@@ -202,6 +206,7 @@ function pinOf(resolved, kind, now) {
 		sendContent,
 		unit: resolved.unit,
 		role: resolved.role,
+		holdGraceMs: resolved.holdGraceMs,
 		unrecognizedMode,
 	};
 	return {
@@ -221,7 +226,13 @@ function pinOf(resolved, kind, now) {
 export function pinnedSettings(pin, env, passwdHome) {
 	// An older pin's `model` is dropped: the model a hold names is never a setting (config.mjs).
 	const { key, keyHash: pinned, model: _model, ...rest } = pin.settings;
-	const base = { refused: null, unrecognizedMode: undefined, unit: undefined, role: undefined };
+	const base = {
+		refused: null,
+		unrecognizedMode: undefined,
+		unit: undefined,
+		role: undefined,
+		holdGraceMs: DEFAULT_HOLD_GRACE_MS,
+	};
 	if (pin.kind === "configured") return { ...base, ...rest, configured: true, key };
 	const current = environmentKey(env);
 	if (keyHash(current) !== pinned) {

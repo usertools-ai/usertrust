@@ -48,10 +48,12 @@ import {
 	breakerOpen,
 	callStart,
 	claimForSettle,
+	endExpiredHold,
 	estimateTokens,
 	failureOutcome,
 	giveBack,
 	giveBackInvalid,
+	holdExpired,
 	holdUsageStart,
 	isGated,
 	isSettleGone,
@@ -105,6 +107,19 @@ async function estimateUsageTo(sessionId, entry) {
 	}
 	return new Date(Math.max(end, from)).toISOString();
 }
+
+/**
+ * The longest a refused replacement waits for a sweep's void of the hold it replaces
+ * (`endExpiredHold`): usertrust-server's own bound on that void, its `RELEASE_WAIT_MAX_MS` (30 s),
+ * which a settle racing the sweep waits for too. The server does not state it, so it is copied here.
+ */
+const RELEASE_WAIT_MAX_MS = 30_000;
+/** What a replacement's retry keeps of the hook's budget past its wait, for its own authorize. */
+const RETRY_AUTHORIZE_RESERVE_MS = 1_500;
+/** ...and for the fresh hold's settle, which no replacement authorize can take (`replacementTimeout`). */
+const RETRY_SETTLE_RESERVE_MS = 1_500;
+/** A wait shorter than this is no wait: the retry is skipped. */
+const RETRY_WAIT_FLOOR_MS = 50;
 
 /** One request of the expired-hold chain: 5 s at most, and never past the hook's budget. */
 function withinBudget() {
@@ -204,13 +219,23 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 		return;
 	}
 	const at = { sessionId, agentId, entry };
-	const response = await settleOnce(at, { transferId: entry.transferId, ...usage });
-	if (response.status === 200) {
+	// Past its recorded life the hold is given back first (lib.mjs `endExpiredHold`). Once the
+	// server confirms it ended, no settle is sent, and it takes the path a gone answer takes,
+	// below. Sent, the settle could only fail, as a 410 the server records as spend it never
+	// charged, though the call is charged here, once. Unconfirmed, the settle is sent as before.
+	const endedAs = holdExpired(entry, Date.now() + withinBudget().timeoutMs)
+		? await endExpiredHold(entry.transferId, withinBudget().timeoutMs)
+		: null;
+	const expired = endedAs !== null;
+	const response = expired
+		? null
+		: await settleOnce(at, { transferId: entry.transferId, ...usage });
+	if (response?.status === 200) {
 		await noteIfAmbiguous(at, response, entry.transferId);
 		await unlink(claimed).catch(() => {});
 		return;
 	}
-	if (!holdIsGone(response)) {
+	if (!expired && !holdIsGone(response)) {
 		say(
 			`usertrust: settle ${entry.transferId} returned ${response.status}; hold kept for Stop cleanup`,
 		);
@@ -223,14 +248,15 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 		return;
 	}
 	if (!isGated(entry)) {
+		const answer = expired ? "is past its life" : "returned 404";
 		say(
-			`usertrust: settle ${entry.transferId} returned 404, but the hold was not recorded under the settle-attempt gate, so it may have been charged already; hold kept for Stop cleanup`,
+			`usertrust: settle ${entry.transferId} ${answer}, but the hold was not recorded under the settle-attempt gate, so it may have been charged already; hold kept for Stop cleanup`,
 		);
 		await settleGap({
 			...at,
 			transferId: entry.transferId,
 			outcome: "failed",
-			reason: "settle returned 404 for a hold recorded without the settle-attempt gate",
+			reason: `settle ${answer} for a hold recorded without the settle-attempt gate`,
 		});
 		return;
 	}
@@ -244,9 +270,11 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 		typeof entry.holdModel === "string" && entry.holdModel !== ""
 			? { model: entry.holdModel, source: entry.holdModel === "unknown" ? "unknown" : "hold" }
 			: await holdModelFor({ sessionId, agentId, input });
-	let auth;
-	try {
-		auth = await serverRequest(
+	// Every replacement authorize, first or retried, leaves the fresh hold's settle its share of the
+	// hook's budget: a hold granted with no time left to settle it would leave the call uncharged.
+	const replacementTimeout = () => Math.min(5000, timeLeft() - RETRY_SETTLE_RESERVE_MS);
+	const authorizeReplacement = (request = { timeoutMs: replacementTimeout() }) =>
+		serverRequest(
 			"/v1/authorize",
 			{
 				model,
@@ -266,8 +294,41 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 				// and usage start, not whatever job is open now.
 				...authorizeLabels(entry),
 			},
-			withinBudget(),
+			request,
 		);
+	if (replacementTimeout() < RETRY_WAIT_FLOOR_MS) {
+		// No room for an authorize and its settle: the call RAN and nothing will charge it, a gap,
+		// written before its settle-attempted marker goes (evidence first).
+		await recordUnconfirmedCall(sessionId, { ...entry, agentId }, "call-ran");
+		await unlink(claimed).catch(() => {});
+		say(
+			`usertrust: hold ${entry.transferId} expired before its settle, and no time is left to charge this call on a fresh hold; this call's estimate is not recorded`,
+		);
+		return;
+	}
+	let auth;
+	try {
+		auth = await authorizeReplacement();
+		// A hold the server called `gone` may be one its sweep is still voiding, its funds still
+		// reserved: a replacement refused for the budget then waits for that void once, and asks
+		// again. The wait is the server's own bound on one (`RELEASE_WAIT_MAX_MS`), within what the
+		// hook has left past the retry's authorize AND the fresh hold's settle; too little left, and no
+		// retry. The retried authorize is capped so the settle's share stays out of its reach: a hold
+		// granted with no time left to settle it would leave the call uncharged. A second refusal is
+		// final (below).
+		const wait = Math.min(
+			RELEASE_WAIT_MAX_MS,
+			timeLeft() - RETRY_AUTHORIZE_RESERVE_MS - RETRY_SETTLE_RESERVE_MS,
+		);
+		if (
+			endedAs === "gone" &&
+			auth.status === 402 &&
+			auth.json?.error === "budget_exceeded" &&
+			wait >= RETRY_WAIT_FLOOR_MS
+		) {
+			await new Promise((resolve) => setTimeout(resolve, wait));
+			auth = await authorizeReplacement();
+		}
 	} catch (err) {
 		// No answer. The call RAN and nothing will charge it, as when the fresh hold is refused (below):
 		// its gap is written now, before its settle-attempted marker goes (evidence first). A hold

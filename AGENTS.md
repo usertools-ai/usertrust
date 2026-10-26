@@ -50,8 +50,14 @@ are not. Each of the six names any other it depends on at exactly its own versio
 such as `"*"`: the release sets and checks those pins (docs/releasing.md, "Sibling dependencies
 are pinned").
 
-**No brand asset is committed to this repository**: no font file of any kind (Usertools Sans and
-every other face, first-party or OFL), no logo or mark, no lattice code. `site/` loads them at
+**No brand asset is committed to this repository**, with ONE settled exception: no font file of any
+kind (Usertools Sans and every other face, first-party or OFL), no logo or mark, no lattice code.
+The exception is `packages/ui/brand/usertrust-mark.svg`, the logo `usertrust-ui` bundles into its
+header so the dashboard shows it offline, and `packages/ui/brand/LICENSE` beside it. It is NOT
+Apache-2.0 (the LICENSE there and `TRADEMARKS.md` say so). `site/scripts/no-brand-assets.test.mts`
+allows those two paths by exact name (`BRAND_EXCEPTIONS`); a third file in that folder, or a second
+mark anywhere, fails it, and `packages/ui/tests/brand-mark.test.ts` pins the mark's sha256 so a
+modified mark fails too. A fork that modifies the mark must remove it (`TRADEMARKS.md`). `site/` loads them at
 runtime from the brand kit, `https://usertrust.ai/kit/`, served with `access-control-allow-origin: *`:
 `site/app/globals.css` and `site/app/r/brand.css` point `@font-face` at `kit/fonts/` with
 `font-display: swap` and system fallback stacks, and server-rendered images (`/og`, the receipt
@@ -70,7 +76,7 @@ the kit first, never committed here.
 | Ledger | `ledger/{client,engine,pricing}.ts` |
 | Audit | `audit/{chain,canonical,merkle,verify,read,dead-letters,rotation,entropy,quarantine}.ts` |
 | Anchoring | `audit/{anchor,anchor-verify,anchor-doctor,rekor,rekor-verify,sigv4}.ts` |
-| Policy | `policy/{gate,default-rules,pii,injection,canary,decay}.ts` |
+| Policy | `policy/{gate,default-rules,pii,pii-content,injection,canary,decay}.ts` |
 | Board | `board/{board,director,concerns}.ts` |
 | Budget | `budget/{allocation,attribution,context,runway}.ts` |
 | Runtime | `resilience/{circuit,scope}.ts`, `memory/patterns.ts`, `snapshot/checkpoint.ts` |
@@ -895,11 +901,15 @@ log, which reads as none (job tagging is off for that session; it fails honest, 
 at once can lose one bit, which yields untagged calls and so gaps, never a false clean.
 
 **A hold's life is published, as a duration on one clock.** Both `createTBEngine` factories pass
-`LEDGER_HOLD_TIMEOUT_MS` as the pending transfer's `timeout` explicitly, and a headless
-`Authorization` publishes the same value as `holdTimeoutMs` (absent in dry run).
+the pending transfer's `timeout` explicitly: the life the authorize asked for (`holdTtlMs`, clamped to
+[`LEDGER_HOLD_TIMEOUT_MS`, the governor's `maxHoldTtlMs`] and rounded up to whole seconds, never past
+the ceiling, which is itself in whole seconds), else `LEDGER_HOLD_TIMEOUT_MS`. A headless
+`Authorization` publishes the value used as `holdTimeoutMs` (absent in dry run).
 `usertrust-server` answers every authorize with `expiresInMs` (capability `hold-expiry`): the longest
-the hold can still be pending, the shorter of its `pendingTtlMs` sweep and that timeout, minus the
-hold's age (`remainingLifeMs`). A settle, a void or a restart can end the hold sooner; no expiry can.
+the hold can still be pending, the shorter of its own sweep life (`pendingTtlMs`, or the life its
+authorize asked for, capability `hold-ttl`, clamped to the server's ceiling) and that timeout, minus
+the hold's age (`remainingLifeMs`). The server's clamp, its `/v1/health` `maxHoldTtlMs` and each
+tenant's governor share one ceiling (`maxHoldLife`), so the ledger and the sweep agree. A settle, a void or a restart can end the hold sooner; no expiry can.
 - The sweep ends a hold when that life reaches 0, so the sweep and the answer are one rule.
 - A ledger hold whose handle does not state its timeout gets NO `expiresInMs` (an absence is never read
   as "no limit"), and the sweep falls back to `pendingTtlMs` for it.
@@ -1157,9 +1167,84 @@ process's lock. The lock records `bootId` (Linux `/proc/sys/kernel/random/boot_i
 1. The same PID in the same namespace (or a lock that names none) is a crashed earlier instance of
    this PID, and is reclaimed.
 2. A lock from another namespace, or one whose namespace cannot be compared, is HELD, whatever its
-   boot id.
+   boot id — with ONE exception: another namespace's lock whose LEASE has expired (below) is
+   reclaimed.
 3. A lock whose boot id and this boot's are both known and differ EXACTLY is reclaimed.
 4. Otherwise `kill(pid, 0)` decides, as before.
+
+**The lease is the only proof of a dead holder that crosses PID namespaces.** A writer that records
+its `pidNs` also declares `leaseRenewMs` (5 s) in its lock, and renews the lock file's mtime on that
+interval with `futimes`, through an fd proven to be its own lock (create-time inode AND writerId,
+read through that fd) — never by path, so a holder that lost its lock can never renew the lock that
+replaced it. It declares the lease only if `futimes` succeeded on the lock's own inode at create;
+a filesystem that cannot set an mtime gets a lock with no lease. Another namespace's lock with a
+lease is reclaimed only when BOTH hold:
+- its mtime is more than `max(60 s, 6 × leaseRenewMs)` behind `Date.now()` — the lease's own wall
+  time; a monotonic clock restarts at every boot and cannot be compared with a file's timestamp. An
+  mtime ahead of the clock is fresh.
+- THIS process has seen that same file at that same mtime for at least `max(30 s, 3 × leaseRenewMs)`
+  of its own monotonic clock (`performance.now()`). The first look at a lease starts the window; a
+  renewal, or another file, starts it over; the acquire that completes it reclaims.
+
+The second condition is what makes the first safe. One kernel has one monotonic clock, and it stops
+during a suspend; Node's timers run on it. After a host suspend, or a wall-clock step forward (WSL
+corrects its clock after a resume), every lease reads as expired at once, but a LIVE holder is awake
+whenever the observer is, and renews within one interval of the observer's window. The wall-clock
+margin makes an observer wait well past a brief stall of the holder's renewals (a long GC pause); a
+holder stalled past its own 20 s bound gives the lock up itself (below). A lock with no lease, or a
+malformed one, is held as before.
+
+*Split brain.* A lease cannot be atomic with the append, and Node has no kernel lock to fence with,
+so the residual window is stated rather than hidden. A holder loses its lock only after it has not
+renewed for 60 s of wall time AND 30 s of the taker's awake time: frozen (SIGSTOP, a paused
+container, a debugger) or blocked. Every append re-verifies the lock (one read: inode AND writerId)
+before it writes, and everything from that check to the fsync is synchronous, so a holder that was
+frozen anywhere else finds the taker's lock at its next append and is refused (the taker's lease is
+fresh). Only a holder frozen INSIDE that synchronous span, between its check and its write, can land
+one more event after the taker has appended — one event, chained from a stale tail, which `verify`
+reports as a broken chain; its next append is refused. The renewal timer is `unref()`d and runs only
+while a leased lock is held.
+
+**A holder whose renewals FAIL stops writing before anyone can reclaim.** A live, active holder whose
+`futimes` keeps failing (EMFILE on the open, EIO) would otherwise keep appending while its lease
+expired, and an append in flight across the takeover forks the chain. Each held lease keeps
+`renewedAt`, the monotonic time read BEFORE the call that set the mtime others see (the create's
+write, a successful renewal's `futimes`); a failed renewal never moves it. Past
+`LEASE_HOLDER_BOUND_MS` (20 s) without a success, the lease has LAPSED: the timer gives the lock up
+instead of renewing it, and the append's own check (in the same synchronous span as its ownership
+check, before the write) does the same if the timer has not run. Either way the append that meets it
+is refused with `AuditLeaseLapsedError` — degraded and dead-lettered like any failed append — and
+the lock is unlinked if it is still this lock. The next append takes the vault afresh: a new lock
+(leased only if `futimes` works then), and the tail re-read from the log. A renewal that succeeds
+after the bound never revives the lapsed lease. Two edges: a lapsed lock whose file cannot be
+removed STAYS registered, marked lapsed, as the cleanup record (never renewed, never an owner, never
+a write; each append retries the removal and the first that succeeds goes on, and `release()`
+reports it if it still cannot); and a lapse is reported as that ACQUISITION's, not the writer's: an
+acquire that finds a healthy newer acquisition of this writer at the vault (the writer lost the old
+one while stalled and took the vault again) drops the report, so it never refuses an append under
+the newer one. An acquisition whose file is not at the path last seen (lost, superseded, or moved
+with a renamed vault) keeps its entry, marked lapsed, so `release()` still finds a lock that moved
+with its vault through the caller's current spelling.
+*The margin.* An observer reclaims only after its OWN monotonic observation of an unchanged mtime for
+`max(30 s, 3 × leaseRenewMs)`, and it cannot see an mtime before it is set, so no observer reclaims
+earlier than `renewedAt + 30 s`. Its wall-clock condition gives the holder nothing (a clock step makes
+it true at once), so the bound is set against the 30 s, never the 60 s. 20 s leaves 10 s for the
+append's synchronous span, and at a 5 s interval three renewals in a row may fail (or run late) before
+the bound. The tests pin `holderBound < confirm` (and so `< stale`).
+
+Two rules keep that bound true:
+- **Only a holder whose every write goes through `appendEvent` leases.** `withAuditWriterLock` (a
+  snapshot restore renames files under it, across awaits) and the torn-tail quarantine
+  (`createUnleasedAuditWriter`: it cuts the log) never declare a lease. Paused past the threshold,
+  either would otherwise resume and overwrite or cut the events a new holder appended meanwhile. Their
+  locks are held from another namespace, as before.
+- **`lockOwner()` re-reads the lock file, and names the ACQUISITION, not the writer.** The registry
+  keeps a lost lock's entry until release, so "registered" is not "holds it now"; a former holder that
+  still answered `lockOwner()` would publish `effective-budget.json` over the new holder's record. And
+  a holder that lost its lock and took it back keeps its writerId: had `lockOwner()` returned that,
+  the budget registration would read "already published under this owner" and leave the interim
+  holder's record standing. Every acquisition gets a fresh random id. A read that fails answers "not
+  the owner".
 
 *Prevents:*
 - A previous boot's lock whose PID a live, unrelated process now carries reading as held forever.
@@ -1168,19 +1253,29 @@ process's lock. The lock records `bootId` (Linux `/proc/sys/kernel/random/boot_i
 - A host and a systemd-nspawn container (or two of them) reclaiming each other's LIVE locks: nspawn
   gives each container a PRIVATE boot id on the host's kernel. That is why step 2 comes before step
   3; do not reorder them.
+- A writer in a PID namespace that is new at every boot (WSL2 gives each boot a new one, and its
+  shutdown kills the writer without a release) finding its own previous boot's lock held forever:
+  its lease stops being renewed, and it is reclaimed.
+- A live holder's lock being reclaimed after a host suspend or a clock step: the monotonic
+  confirmation window. Do not reclaim on the wall-clock age alone.
 
 Rules:
 - An unknown boot id on either side is never stale.
-- Never reclaim on a time estimate; an uptime-derived boot time moves with the wall clock.
+- Never reclaim on a time estimate; an uptime-derived boot time moves with the wall clock. A lease is
+  not an estimate: it is the holder's own renewal, observed unrenewed by this process on its
+  monotonic clock.
 - Cache only a SUCCESSFUL identity read.
 - A lock file's fields are untrusted text. Print them only through `describeLockPid` (a non-negative
   safe integer, else `<invalid>`) or `describeLockField` (the value when it has its shape, else
   `<invalid>`) — never `String(pid)` or a raw `${pid}`: a restored vault's lock can carry a `pid`
   string full of terminal controls.
 
-A crashed container restarted into a new PID namespace therefore finds its old lock held, even
-after a reboot, until it is removed by hand (LIMITATIONS §5). That is the price of never reclaiming a live sibling's lock. A
-vault shared between kernels is outside the model.
+A crashed container restarted into a new PID namespace therefore finds its old lock held until its
+lease has expired and been confirmed (about a minute after its last renewal); a lock with no lease
+(written before leases, or on a filesystem that cannot set an mtime) stays held until it is removed
+by hand (LIMITATIONS §5). Every refusal of another namespace's lock prints the safe recovery steps.
+That is the price of never reclaiming a live sibling's lock. A vault shared between kernels is
+outside the model: its processes share neither a monotonic clock nor a suspend.
 
 **The lock's threat model: accidental concurrent writers, not an adversary.** The lock stops two
 processes, or two writers in one process, from appending to one vault at once. It does not defend
@@ -1243,7 +1338,7 @@ a reader shows no remaining figure for them. Wherever a budget is SHOWN, its pro
 record that outlived a failed removal reads as old, never as current); a config budget says "not confirmed as
 enforced". The ledger UI, `inspect`, `health` and `report` all read it; never add a reader that parses the config file
 alone, or a surface that shows the figure without its provenance.
-The governor registers LAST in both constructors, once it has fully started (a failed start enforces nothing), and every step of the record's failure path is non-throwing. The record is PUBLISHED only while this process holds the vault's audit writer lock, which a governor takes lazily at its first append (`AuditWriter.lockOwner`, `openSharedAuditWriter`'s `onAppended`): before the first successful append nothing is published (`unpublished`), and a second process, whose appends fail on the lock, never overwrites the holder's record. Several live governors on one vault are aggregated in-process (`registerEnforcedBudget`): the record is the agreed budget, or `budget: null` with the governor count when they differ, which every reader shows as unknown (`source: "several"`); it is rewritten on every start and every destroy while the lock is held, and again when a new writer takes the lock, never stored as a flag. Readers stat the record before opening it (a FIFO would block them). The ledger UI re-reads it when it or the vault config changes. Snapshots do not capture the record: it is derived, and a restore must not bring back an older run's budget.
+The governor registers LAST in both constructors, once it has fully started (a failed start enforces nothing), and every step of the record's failure path is non-throwing. An existing record is REPLACED only while this process holds the vault's audit writer lock, which a governor takes lazily at its first append (`AuditWriter.lockOwner`, `openSharedAuditWriter`'s `onAppended`), so a second process, whose appends fail on the lock, never overwrites the holder's record. Before its first append a governor publishes WITHOUT the lock, at its start, but only into an EMPTY slot (no record at all: a new vault, or one only 5.0.0 wrote, which never published one), and only while NO writer lock file (`audit/.audit-writer.lock`) exists: a lock this process does not hold is another writer's, possibly a 5.0.0 process enforcing a budget of its own that it never publishes, so nothing is published beside it and readers stay `unpublished` (a stale lock counts too; the first append sorts it out). The lock is checked last, right before the link; declared residual: a writer that takes the lock after that check, which includes an older-release process already running but not yet appended (it takes the lock lazily), is not seen. That publish stages the record whole and LINKS it into place (a hard link fails if a record appeared meanwhile; never a rename, which would replace one), never moves, replaces or removes anything at the path, even this process's own record, and never warns. An existing record (an earlier run's, a lock holder's, or an unlocked one) stands, read "as of" its `writtenAt`, until the lock holder's first append replaces it. So a vault reads `unpublished` only while no governor of a release that writes the record has started on it. Several live governors on one vault are aggregated in-process (`registerEnforcedBudget`): the record is the agreed budget, or `budget: null` with the governor count when they differ, which every reader shows as unknown (`source: "several"`); it is rewritten on every start and every destroy while the lock is held, and again when a new writer takes the lock, never stored as a flag. Readers stat the record before opening it (a FIFO would block them). The ledger UI re-reads it when it or the vault config changes. Snapshots do not capture the record: it is derived, and a restore must not bring back an older run's budget.
 
 **`vaultPath` means two different directories.** `createAuditWriter(vaultPath)` joins
 `vaultPath/.usertrust/audit` — it takes the **project root**. `verifyVault`, `readLedgerEvents`,
@@ -1438,10 +1533,20 @@ audit payload, because the proof must not become a channel for credentials or pr
 invariant is only as strong as the event shapes themselves: the DLQ persists whatever an event
 carried, verbatim (see the DLQ note above).
 
-**`redactPII` is pure.** It deep-clones and never mutates the caller's object. That is what makes
-`pii: "redact"` safe: PII the prompt scan finds never egresses: the outbound request is a redacted
-clone (fields the scan does not read are not redacted unless the prompt scan fired; see LIMITATIONS §11). `"block"`
-throws before any egress; `"warn"` forwards verbatim and redacts only the audit copy.
+**Redaction never mutates the caller's object, and it rewrites content only.** `redactPII` deep-clones;
+`redactContent` (`policy/pii-content.ts`) copies only the containers on the way to a replaced value and
+passes everything else by reference. `"block"` decides on BOTH scans: `detectPII` over every string in the
+prompt fields, control values included (`extractPromptParts`), and the content scan, which reads
+what the SDK sends (decoded JSON `arguments`, hidden Google text parts); never drop either, or
+`"block"` lets out what one of them refuses. A closed per-provider schema in
+`policy/pii-content.ts` names the content fields `"redact"` rewrites; every control field
+(credentials, headers, ids, `metadata`, tool declarations, replayed reasoning) is sent as written,
+and a field the schema does not name is not rewritten and is reported once per governor under
+`USERTRUST_PII_UNLISTED_FIELD`. That is what makes `pii: "redact"` safe: the copy is scanned again,
+and PII the scan still finds in it (a value redaction leaves as written) refuses the call as
+`"block"` does, so PII the scan finds never egresses (see LIMITATIONS.md, section 11). A field added to a provider's request type
+belongs in that schema, and `tests/policy/pii-content-sdk-types.test-d.ts` fails until it is there.
+`"block"` throws before any egress; `"warn"` forwards verbatim and redacts only the audit copy.
 
 **Signature trust is anchored by the operator's publisher→key registry, never by the embedded key.**
 A key embedded in a skill manifest is accepted only if it is in `config.supplyChain.publisherKeys`
@@ -1458,7 +1563,7 @@ first, clip second.
 repaint the terminal of the auditor running the command — forging a passing verdict, which is the
 entire product for a verification tool.
 
-There are **nineteen** sanitizers, in two variants: **thirteen** neutralise C1 and **six** do not. Do
+There are **twenty** sanitizers, in two variants: **fourteen** neutralise C1 and **six** do not. Do
 not consolidate them onto the weaker one — and note that the two counts are pinned SEPARATELY,
 because swapping a stronger sanitizer for a weaker one moves both by one and leaves the total
 untouched. A total is not an inventory.
@@ -1589,6 +1694,13 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   branch does not append the character back. It missed it at first, because an `if` was a
   residual the guard argued was safe (removing one would make the total read low) and that is
   true only of one already counted.
+- The stronger variant in the PII scan: `scrubForWarning` in `core/src/policy/pii-content.ts`
+  (a local function of the same name as the audit writer's), applied to the field path in the
+  `USERTRUST_PII_UNLISTED_FIELD` warning, which goes to `console.warn` and `process.emitWarning`.
+  The path is built from the caller's request, so it substitutes `?` for C0, DEL and C1, and does
+  not clip. A key or type tag in the path is shown only when it is identifier-shaped (at most 64
+  characters) and holds no PII, and is otherwise replaced by `<not shown>`, so the scrub is a
+  second line behind that rule rather than the only one.
 
 **THE INVENTORY'S SCOPE IS DECLARED HERE, and the guard matches this sentence.** It covers
 `packages/*/src` — the TypeScript build inputs, which are what `files: ["dist"]` publishes — plus
@@ -1896,12 +2008,14 @@ this.
 
 There is no root `build` script; each package builds itself (`npm run build -w usertrust`, etc.).
 
-**CI** (`.github/workflows/ci.yml`) runs seven jobs on Node 22, on every push to `master` and every
+**CI** (`.github/workflows/ci.yml`) runs eight jobs on Node 22, on every push to `master` and every
 **non-draft** PR: `agent-config` (the agent-config check, described below), `lint`, `typecheck`,
-`test` (coverage, with the thresholds above), `openclaw-contract` (the host contract, described
-below), `tb-integration` (a real single-node TigerBeetle cluster, sha256-pinned binary), and
-`site-build` (the site's own install, tests and production build). There is **no path filter** —
-every non-draft PR runs all seven regardless of what changed. A draft PR runs `agent-config` alone.
+`test` (coverage, with the thresholds above), `scan-linear` (the detectors' linearity timings in
+`packages/core/tests/harden/scan-linear.test.ts`, run alone and without coverage; `test` excludes
+that file), `openclaw-contract` (the host contract, described below), `tb-integration` (a real
+single-node TigerBeetle cluster, sha256-pinned binary), and `site-build` (the site's own install,
+tests and production build). There is **no path filter**: every non-draft PR runs all eight
+regardless of what changed. A draft PR runs `agent-config` alone.
 
 The TigerBeetle server version in CI is pinned to match `tigerbeetle-node` in `packages/core` and
 must be bumped in lockstep — **never `latest`**. The client must never be newer than the server. The

@@ -414,10 +414,12 @@ warning (at the first failure, and with the count when the client is destroyed),
 `audit.failClosed: true` refuses such calls instead; `createGovernor()` and
 `usertrust-server` do not enforce `audit.failClosed`. Such a process's budget is
 not visible to vault readers either: the enforced-budget record
-(`effective-budget.json`) is published only by the process that holds the lock, so
-the ledger UI, `inspect`, `health` and `report` show the lock holder's budget, or
-"not yet published" before its first append, while the degraded process goes on
-enforcing its own.
+(`effective-budget.json`) is replaced only by the process that holds the lock, so
+the ledger UI, `inspect`, `health` and `report` show the lock holder's budget while
+the degraded process goes on enforcing its own. The exception is a vault with no
+record: a governor publishes its budget when it starts if none stands, so until the
+lock holder's first append they show the budget of whichever process started
+first.
 
 **Load ONE copy of usertrust per process, and use a vault from one thread.** The
 shared writer, and the registry that tells a live writer in this process from a
@@ -437,17 +439,43 @@ The lock's liveness check works on one kernel, and it fails toward "held":
 - **A vault shared between kernels is unsupported.** A lock is judged by its
   PID, which means nothing on another host or VM, and by its boot id, which
   differs there. Share a vault only between processes on one machine.
-- **A lock from another PID namespace is never reclaimed automatically.** One
-  container cannot probe another container's processes, so a lock written in a
-  different PID namespace on the same kernel is treated as held, even when that
-  writer is gone, and whatever its boot id says: systemd-nspawn gives a
-  container a private boot id on the host's kernel, so a differing boot id does
-  not prove a previous boot across namespaces. A container that crashed without
-  releasing its lock and was restarted into a NEW PID namespace therefore finds
-  that lock held, even after a reboot. Remove
-  `.usertrust/audit/.audit-writer.lock` by hand once you know that writer is
-  gone, or run the writer in a PID namespace that survives its restarts (for
-  example the host's).
+- **A lock from another PID namespace is reclaimed only once its lease has
+  expired.** One container cannot probe another container's processes, and a
+  differing boot id proves nothing across namespaces (systemd-nspawn gives a
+  container a private boot id on the host's kernel). So a lock written in a
+  different PID namespace on the same kernel is held while its writer renews
+  its lease: a writer on Linux renews the lock file's modification time every
+  5 seconds. Once a lease has gone unrenewed for more than 60 seconds, and the
+  process that finds it has itself seen it unrenewed for 30 seconds, the lock
+  is reclaimed. So a writer that restarts into a NEW PID namespace (a container
+  restarted after a crash, or WSL2 after every restart) recovers its vault on
+  its own, about a minute after the old writer's last renewal. The appends it
+  makes until then are refused and dead-lettered, as for a second process.
+  A writer whose renewals fail for 20 seconds (a full file-descriptor table,
+  an I/O error) stops writing under its lease: the append that finds it is
+  refused and dead-lettered, and the lock is given up. That is before any
+  writer in another namespace could reclaim it (30 seconds at the earliest),
+  so the chain cannot fork under a write. The next append takes the lock
+  again, and re-reads the chain's tail.
+  Three cases still need a hand:
+  - A lock written by a usertrust version that does not renew a lease (5.1.0
+    and earlier) is never reclaimed from another namespace. Such a lock left
+    behind by an upgrade needs one removal by hand.
+  - A writer whose filesystem cannot set a file's modification time writes a
+    lock with no lease. So do a snapshot restore and `usertrust audit
+    quarantine-tail`, which change the audit files in ways an append's own
+    check does not guard: a lock either leaves behind after a crash is removed
+    by hand.
+  - A writer that is frozen (SIGSTOP, a paused container) or blocked for more
+    than a minute loses its lock to a writer in another namespace. Its next
+    append is refused. Only a writer frozen in the middle of an append can add
+    one more event, and `usertrust verify` then reports the chain broken there.
+
+  Every refusal prints the safe recovery steps: confirm that no process can
+  still be writing the vault, from every host, WSL distribution and container
+  that can reach it; then remove exactly `.usertrust/audit/.audit-writer.lock`;
+  then run `usertrust verify`. To avoid the wait entirely, run the writer in a
+  PID namespace that survives its restarts (for example the host's).
 - **Off Linux, and without a readable boot id,** a lock left by a crash before a
   reboot is reclaimed only if its PID is free now. (On Linux, a lock from this
   PID namespace, or one that names none, is reclaimed when its boot id differs.) If an unrelated live process
@@ -552,24 +580,59 @@ Windows ACLs.
 
 ## 11. PII detection is a pattern scan of the prompt, not data-loss prevention
 
-`pii: "block"`, `"redact"` and `"warn"` act on what a pattern scan finds in the
-request's **prompt text**: `messages` (and a string `system`) for Anthropic,
+`pii: "block"`, `"redact"` and `"warn"` act on a pattern scan of the request's
+**prompt fields**: `messages` (and a string `system`) for Anthropic,
 `messages` for OpenAI chat, `input` and a string `instructions` for OpenAI
-Responses, `contents` for Google. Everything else in the request is not read:
-tool and function definitions (including Google's callable tool declarations),
-an array-form `system` prompt, Google's `config` (including `systemInstruction`),
-`metadata`, and every other field. The model's response is never scanned. A secret
-in one of those fields goes to the provider as written, and when the prompt scan
-finds nothing, `"redact"` changes nothing.
+Responses, `contents` for Google. Every string inside them is checked, at any
+depth: message text and tool results, and also the control values beside them
+(names, ids, URLs, media data, the model's replayed reasoning, and a tool call's
+`arguments` text as a whole, keys and numbers included). Nothing outside the
+prompt fields is read: tool and function definitions (including Google's
+callable tool declarations), an array-form `system` prompt, Google's `config`
+(including `systemInstruction`), `metadata`, cache keys, safety identifiers, MCP
+server credentials and headers, and every other field. The model's response is
+never scanned. A secret in a field the scan does not read goes to the provider
+as written.
+
+`"redact"` rewrites less than the scan reads: only the **content**, the text the
+model reads (message text, tool results, and the arguments and inputs of earlier
+tool calls). Each content string that matches is replaced in full, not only the
+matched characters, in a copy of the request, and every other value is sent as
+the caller wrote it. A tool call's JSON `arguments` string keeps its text: only
+the string values in it that match are replaced, in place, so it stays valid JSON
+and every other character (keys, numbers of any size, whitespace) is kept; one
+that is not JSON is replaced in full. Control values are never rewritten, because
+the provider needs them back unchanged: ids, names, URLs, media and file data,
+citations, and the model's own replayed reasoning (Anthropic thinking, redacted
+thinking and compaction blocks, OpenAI reasoning and compaction items, Google
+parts marked as thoughts or carrying a thought signature). The content fields
+are a closed list per provider, written from the provider SDKs' request types. A
+field the list does not name (one a newer SDK adds, or a content block type it
+does not know) is not rewritten, and each governor reports it once, by its path
+and never its value, as a `USERTRUST_PII_UNLISTED_FIELD` process warning.
+
+When the scan finds PII that redaction leaves as written (an address in a
+message's `name` or in replayed reasoning, an object key or a number in a tool
+call's `arguments`, a value in a field inside the prompt fields that the list
+does not name), `"redact"` refuses the call as `"block"` does, with a
+`PolicyDeniedError`, before anything is sent. `"redact"` never sends a value the
+scan detects.
 
 The patterns cover email, phone, US SSN, credit card (Luhn), IPv4 and seven
 secret and token formats. They do not cover names, postal addresses, dates of
 birth, IPv6, non-US identifiers, bank account numbers or health data, and a string
-is checked as written (no decoding, no object keys, no non-string values). When
-`"redact"` does fire, it replaces every matching string in the whole request body
-in full, not only the matched characters. `createGovernor()` and `usertrust-server`
-scan the `messages` the caller passes and can block, but never redact egress.
-The full scope, per provider, is on the [PII Detection](https://usertrust.ai/docs/policy/pii) page.
+is checked as written (no decoding, no object keys, no non-string values).
+Redaction reads the content as the SDK sends it: it decodes a tool call's JSON
+`arguments` to find the string values it replaces, and reads a Google text part
+the caller hid from enumeration. `"block"` refuses what either read finds, so a
+value written with JSON escapes is refused too. Under `"warn"` and `"redact"`, the
+`llm_call` audit event's `piiDetected` and `piiPaths` record what either read finds:
+paths from the prompt-field scan start at the prompt fields (`[0].content(email)`),
+and paths only the content read adds start at the request root
+(`messages[1].tool_calls[0].function.arguments(email)`). `createGovernor()` and
+`usertrust-server` scan the `messages` the caller passes and can block, but never
+redact egress. The full scope, per provider, is on the
+[PII Detection](https://usertrust.ai/docs/policy/pii) page.
 
 ## 12. A stream aborted by the caller's own signal is not charged for what it consumed
 

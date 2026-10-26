@@ -508,6 +508,11 @@ describe("remote settings", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
+	// The server notices a config file written after it started by stat-polling it once a second
+	// (`BUDGET_POLL_MS`), so this row takes about 1.0 s whatever the machine: measured median 1.01 s, longest
+	// 1.04 s in 34 runs on an idle 14-core host, plain and under coverage. The wait and the test used to share
+	// one 5 s allowance, so a slow runner failed on whichever fired first. The wait gets ten poll intervals and
+	// the test a further five seconds on top, so a late poll fails the assertion with its own message.
 	it("turning the kit mark on in the vault config reaches the client without a restart", async () => {
 		ui = await createUiServer(tempDir, { port: 0 });
 		const before = (await (await fetch(`http://127.0.0.1:${ui.port}/api/summary`)).json()) as {
@@ -523,9 +528,10 @@ describe("remote settings", () => {
 					JSON.stringify({ remote: { kit: true } }),
 				);
 			},
+			10_000,
 		);
 		expect(JSON.parse(data).remote).toEqual({ kit: true });
-	});
+	}, 15_000);
 });
 
 // A log of malformed lines only fails verification with ZERO parsed events: a guard that counted parsed events read its
