@@ -69,6 +69,7 @@ const HOOKS = new Set([
 	"stop",
 	"subagent-stop",
 	"session-end",
+	"post-model-switch",
 ]);
 const CHILD = "--ut-child";
 /** A child's exit when it will not run: its environment or its pin is not what it was given. */
@@ -242,7 +243,8 @@ async function parent(hook) {
 	known.settings = session.settings;
 	if (session.path !== null) touchPin(session.path);
 	if (hook === "session-start") sweep({ passwdHome: home, uid });
-	const sends = hook !== "session-start";
+	// Neither sends anything: each only records, locally.
+	const sends = hook !== "session-start" && hook !== "post-model-switch";
 	if (session.kind === "configured" && session.settings.refused === null && sends) {
 		const unsupported = childUnsupported();
 		if (unsupported !== null) await childFailed(hook, session.settings, input, unsupported);

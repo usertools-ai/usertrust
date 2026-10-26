@@ -136,7 +136,9 @@ function parsePin(text) {
 		typeof s.stateDir === "string" &&
 		s.stateDir !== "" &&
 		USAGES.includes(s.usage) &&
-		typeof s.model === "string" &&
+		// A pin made before the model stopped being a setting holds one (`pinnedSettings` drops it).
+		(s.model === undefined || typeof s.model === "string") &&
+		(s.ignoredModel === undefined || typeof s.ignoredModel === "boolean") &&
 		typeof s.sendContent === "boolean" &&
 		optionalString(s.unit) &&
 		optionalString(s.role) &&
@@ -193,15 +195,14 @@ export function readPin(path, { uid, fs = REAL_FS }) {
  * hash, never the key.
  */
 function pinOf(resolved, kind, now) {
-	const { url, key, mode, unrecognizedMode, failOpen, stateDir, usage, model, sendContent } =
-		resolved;
+	const { url, key, mode, unrecognizedMode, failOpen, stateDir, usage, sendContent } = resolved;
 	const shared = {
 		url,
 		mode,
 		failOpen,
 		stateDir,
 		usage,
-		model,
+		ignoredModel: resolved.ignoredModel === true,
 		sendContent,
 		unit: resolved.unit,
 		role: resolved.role,
@@ -223,7 +224,8 @@ function pinOf(resolved, kind, now) {
  * an enforce session blocks rather than stop enforcing.
  */
 export function pinnedSettings(pin, env, passwdHome) {
-	const { key, keyHash: pinned, ...rest } = pin.settings;
+	// An older pin's `model` is dropped: the model a hold names is never a setting (config.mjs).
+	const { key, keyHash: pinned, model: _model, ...rest } = pin.settings;
 	const base = {
 		refused: null,
 		unrecognizedMode: undefined,
