@@ -1073,6 +1073,35 @@
 					"test": "Anthropic: PII in a replayed thinking block, which redaction cannot rewrite, refuses the call and sends nothing"
 				}
 			]
+		},
+		{
+			"id": "budget-refused-before-egress",
+			"kind": "guarantee",
+			"claim": "With a live TigerBeetle ledger (not dryRun), a governed call whose PENDING hold does not fit the remaining budget is refused by the ledger before the provider is called, and the ledger never posts more than a call's hold. A call's real cost can still exceed its hold; that excess is recorded (shortfall-recorded), not prevented.",
+			"statements": [
+				{
+					"file": "README.md",
+					"text": "PENDING holds reserve the budget atomically."
+				},
+				{
+					"file": "LIMITATIONS.md",
+					"text": "Every claim about atomic budget enforcement (an over-budget PENDING hold rejected by the ledger before the provider is called) applies to full mode with a live TigerBeetle instance."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/harden/ledger-enforce-deny.test.ts",
+					"test": "re-throws InsufficientBalanceError unwrapped and never forwards to the provider"
+				},
+				{
+					"file": "packages/core/tests/harden/ledger-funded-wallet.test.ts",
+					"test": "creates a debits_must_not_exceed_credits wallet funded with the seed, and rejects over-budget holds"
+				},
+				{
+					"file": "packages/core/tests/integration/tigerbeetle.tb.test.ts",
+					"test": "hard-refuses a sequential over-budget call pre-spend and keeps the real ledger consistent"
+				}
+			]
 		}
 	],
 	"nonclaims": [
@@ -1469,6 +1498,15 @@
 			"contradictedBy": {
 				"file": "LIMITATIONS.md",
 				"text": "Anyone who can rewrite both the vault file and its sidecar can produce a chain that verifies on its own."
+			}
+		},
+		{
+			"id": "denied-spends-only-what-granted",
+			"pattern": "\\b(didn'?t|did not|never) grant(ed)?\\b",
+			"why": "A call that does not fit its budget is refused before egress (budget-refused-before-egress), but a call's real cost can exceed its hold: content passed by reference, tool declarations resolved after authorization, an uncapped output above 4096 tokens, and an estimate not calibrated to any tokenizer. The excess is recorded as a settlement_shortfall event, not prevented, and dryRun and allowUngoverned calls hold nothing. So no agent STARTS a call its budget cannot cover; it can still spend past what its hold reserved.",
+			"contradictedBy": {
+				"file": "LIMITATIONS.md",
+				"text": "A call whose real cost turns out above its hold is posted capped at the hold, and the truncation is recorded as a `settlement_shortfall` event: visible, never silent."
 			}
 		}
 	]
