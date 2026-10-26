@@ -390,7 +390,15 @@ async function stampSessionSeen(session, at) {
 export const PRE_METERING = "pre-metering";
 
 /**
- * Append one watch record (`would_block`, `gap`, `deferred` or `pre-metering`) as a JSON line, with the time,
+ * The watch record of a subagent id that names no agent type and has no transcript
+ * (transcript.mjs `noteNoTranscriptAgent`): once per agent, the hook and tool it arrived
+ * with, no content. Nothing of such an agent's usage can be read, and what it is cannot be
+ * told from the plugin's side; the record is what a measurement can count. Never a gap.
+ */
+export const NO_TRANSCRIPT_AGENT = "no-transcript-agent";
+
+/**
+ * Append one watch record (`would_block`, `gap`, `deferred`, `pre-metering` or `no-transcript-agent`) as a JSON line, with the time,
  * session, agent and tool. Never throws: a record that cannot be written is said
  * on stderr, and the tool call proceeds either way. Returns whether the record was
  * written, so no note claims a record that is not there.

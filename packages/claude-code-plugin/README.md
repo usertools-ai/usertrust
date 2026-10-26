@@ -436,11 +436,18 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   reads the transcript tail for the model id only (the model a hold names, above);
   usage is always estimated. `UT_CC_USAGE=estimate` uses
   the estimate for every agent, and records that the same way, so a session
-  resumed without it posts nothing it already settled at the estimate. A subagent
-  inherits the estimate mode of any agent of its session: a forked subagent's
-  transcript begins with a copy of its ancestor's responses, which an agent in
-  estimate mode never claims, and which agent a fork copied is recorded nowhere. A
-  hold is settled at the estimate ONLY in these cases: when the plugin's own state
+  resumed without it posts nothing it already settled at the estimate. A FORKED
+  subagent inherits the estimate mode of any agent of its session: its transcript
+  begins with a copy of its ancestor's responses, which an agent in estimate mode
+  never claims, and which agent a fork copied is recorded nowhere. So does a subagent
+  whose type neither its meta file nor the hook states, since it may be a fork. A
+  named subagent (`general-purpose`, `Explore`, a custom agent) copies no one's
+  responses and reads its own transcript. One exception to "cannot be read": a
+  SUBAGENT's transcript that does not exist yet, before any of it was read, is not
+  written yet (Claude Code can run a subagent's first hooks before it creates the
+  file). Its holds are given back, and the first settle point that reads the
+  transcript posts the usage; only if the file is still missing at the subagent's
+  SubagentStop does it switch to the estimate. A hold is settled at the estimate ONLY in these cases: when the plugin's own state
   is unusable for now, the hold is given back, because the transcript still holds
   that usage.
 - **Private, durable state.** Cursors, claims and estimate-mode records live in
@@ -822,7 +829,14 @@ trimmed:
 {"at":"2026-10-06T10:00:00.000Z","kind":"would_block","session":"<session id>","agent":"main","tool":"Bash","status":402,"error":"budget_exceeded","reason":"<the server's reason>"}
 {"at":"2026-10-06T10:00:05.000Z","kind":"gap","mode":"watch","session":"<session id>","agent":"main","tool":"Bash","reason":"fetch failed"}
 {"at":"2026-10-06T10:00:09.000Z","kind":"pre-metering","mode":"watch","session":"<session id>","agent":"main","responses":3,"reason":"written before this session was metered; not billed","started":null}
+{"at":"2026-10-06T10:00:12.000Z","kind":"no-transcript-agent","mode":"watch","session":"<session id>","agent":"<agent id>","hook":"PreToolUse","tool":"Bash","reason":"a subagent id with no stated agent type and no transcript; none of its usage can be read","started":null}
 ```
+
+A `no-transcript-agent` record is written once per agent: a hook arrived with a subagent id
+whose type nothing states (no `agent_type`, no meta file) and whose transcript does not
+exist. It names the hook and the tool, nothing of the call's content. None of such an agent's
+usage can be read, so what it is cannot be told from the plugin's side; the record is what a
+measurement can count. Like `pre-metering`, **it is never a gap**.
 
 A `pre-metering` record counts the responses a session's transcript held from before that
 session was metered (see the first-run time above): `responses` is how many, by message id,

@@ -20,6 +20,23 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ### Fixed
 
+- **A named subagent is charged from its own transcript, not at an estimate.** Once any agent
+  of a session settled at the per-call estimate, every subagent of that session did too, for
+  the rest of the session: the rule exists because a FORK's transcript begins with a copy of
+  its ancestor's responses, but it caught every subagent. The first such agent was usually
+  one whose transcript did not exist yet. In one measured lab, subagents settled this way were
+  charged about 9% of what their own transcripts held, at the ledger's own rates, while the
+  parent sessions, priced the same way, came to 104%. Now only a fork inherits the
+  estimate mode, and so does a subagent whose type nothing states, since it may be a fork; a
+  named subagent (`general-purpose`, `Explore`, a custom agent) reads its own transcript.
+  And a subagent's transcript that does not exist yet, before any of it was read, no longer
+  switches it to the estimate for good: its holds are given back, the first settle point
+  that reads the transcript posts the usage, and only a transcript still missing at the
+  subagent's SubagentStop switches it. The parent's missing transcript switches it at once,
+  as before. An agent that already recorded its estimate mode keeps it, so nothing it settled
+  at the estimate is posted again. A subagent id that names no type and has no transcript is
+  now written down once, as a `no-transcript-agent` watch record (hook and tool, no content),
+  so such agents can be counted; it is never a gap.
 - **A hold names the session's own model, never `claude-sonnet-4-6`.** A hold with no
   transcript window named `UT_CC_MODEL`, else a built-in `claude-sonnet-4-6`, whatever the
   session ran. An Opus session's estimate holds, and the holds of a tool call with nothing new

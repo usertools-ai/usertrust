@@ -72,9 +72,11 @@
 //     period settled at an estimate never has its real usage posted as well:
 //     with an agent id unsafe in a path (no transcript of it is ever read), or
 //     once the agent's estimate mode is RECORDED — UT_CC_USAGE=estimate, its
-//     transcript could not be read, a hook named none, or (for a subagent)
-//     another agent of its session is in estimate mode, since a fork copies its
-//     ancestor's responses — by a marker outside its cursor (`stickToEstimate`),
+//     transcript could not be read (a subagent's still missing at its last
+//     settle point: before that it is not written yet, `notWrittenYet`), a hook
+//     named none, or (for a fork, or a subagent of no stated type) another agent
+//     of its session is in estimate mode, since a fork copies its ancestor's
+//     responses — by a marker outside its cursor (`stickToEstimate`),
 //     written before any estimate is settled, so losing the cursor cannot undo
 //     it. While the transcript state cannot be used (the state dir, a corrupt
 //     cursor) or the marker cannot be written, a hold is given back instead: the
@@ -102,7 +104,9 @@
 // Shared by every agent of every session: <state>/transcripts/claims, one file
 // per claimed message id (named by its SHA-256), naming the agent that owns it.
 // Per (session, agent), OUTSIDE the cursor: <state>/transcripts/estimate/
-// <session>__<agent>, the agent's recorded estimate mode. And once:
+// <session>__<agent>, the agent's recorded estimate mode, and
+// <state>/transcripts/no-transcript/<session>__<agent>, that its
+// `no-transcript-agent` watch record is written (`noteNoTranscriptAgent`). And once:
 // <state>/transcripts/since, when this state was first made — a transcript entry
 // written before it is never posted (see `firstRun`). And per session:
 // <state>/transcripts/since-session/<session>, when that session was first metered
@@ -150,6 +154,7 @@ import {
 	jobHoldFields,
 	LINKLESS,
 	listPending,
+	NO_TRANSCRIPT_AGENT,
 	openRegular,
 	PRE_METERING,
 	principalCapable,
@@ -286,6 +291,8 @@ const VEHICLE_KEY = /^cc:[0-9a-f]{48}$/;
 const CLAIMS_DIR = "claims";
 /** Where an agent's estimate mode is recorded, outside its cursor (see `stickToEstimate`). */
 const ESTIMATE_DIR = "estimate";
+/** Per (session, agent) under <state>/transcripts: its `no-transcript-agent` record is written. */
+const NO_TRANSCRIPT_DIR = "no-transcript";
 
 /**
  * Untrusted strings in a path or an actor string (agent type/id) →
@@ -754,20 +761,41 @@ export async function subagentIds(input) {
  */
 async function agentTypeFor(transcriptPath, agentId, hinted) {
 	if (agentId === "main") return { name: "main", raw: "main" };
-	try {
-		const meta = JSON.parse(
-			await readRegular(transcriptPath.replace(/\.jsonl$/, ".meta.json"), READ_BOUND.record),
-		);
-		if (typeof meta?.agentType === "string" && meta.agentType !== "") {
-			return { name: safeName(meta.agentType, "subagent"), raw: meta.agentType.slice(0, 128) };
+	const type = await statedAgentType(transcriptPath, hinted);
+	return type === null
+		? { name: "subagent", raw: "subagent" }
+		: { name: safeName(type, "subagent"), raw: type.slice(0, 128) };
+}
+
+/**
+ * A subagent's type as something states it: its meta file's `agentType`, else the hook's
+ * `agent_type`; null when neither names one (no transcript path, no meta file, no hint).
+ */
+async function statedAgentType(transcriptPath, hinted) {
+	if (transcriptPath !== undefined) {
+		try {
+			const meta = JSON.parse(
+				await readRegular(transcriptPath.replace(/\.jsonl$/, ".meta.json"), READ_BOUND.record),
+			);
+			if (typeof meta?.agentType === "string" && meta.agentType !== "") return meta.agentType;
+		} catch {
+			// No meta file — use the hint.
 		}
-	} catch {
-		// No meta file — use the hint.
 	}
-	return {
-		name: safeName(hinted, "subagent"),
-		raw: typeof hinted === "string" && hinted !== "" ? hinted.slice(0, 128) : "subagent",
-	};
+	return typeof hinted === "string" && hinted !== "" ? hinted : null;
+}
+
+/** The agent type Claude Code gives a FORKED subagent, whose transcript begins with its ancestor's. */
+const FORK_AGENT_TYPE = "fork";
+
+/**
+ * Whether a subagent's transcript may begin with a copy of an ancestor's responses: a fork's
+ * does, and so may one whose type nothing states. A NAMED subagent (general-purpose, Explore,
+ * a custom agent) starts from its own prompt, and copies no one's responses.
+ */
+async function mayCopyAncestor(transcriptPath, hinted) {
+	const type = await statedAgentType(transcriptPath, hinted);
+	return type === null || type === FORK_AGENT_TYPE;
 }
 
 /**
@@ -1314,7 +1342,11 @@ async function ingest(cursor, path, since) {
 	try {
 		({ handle } = await openRegular(path));
 	} catch (err) {
-		return { ok: false, reason: `transcript unreadable (${err?.code ?? "error"})` };
+		return {
+			ok: false,
+			code: err?.code,
+			reason: `transcript unreadable (${err?.code ?? "error"})`,
+		};
 	}
 	const result = { ok: true, badLines: 0, longLines: 0, metered: false, atEnd: false };
 	const seen = { metered: false };
@@ -1677,15 +1709,20 @@ async function locate({ sessionId, agentId, input, mayEstimate }) {
 }
 
 /**
- * A SUBAGENT inherits the estimate mode of any agent of its session: a forked
+ * A FORK inherits the estimate mode of any agent of its session: a forked
  * subagent's transcript begins with a copy of its ancestor's responses, and an
  * agent in estimate mode never claims its responses, so the fork would post them
  * — usage its ancestor already settled at the estimate. Which agent a fork copied
- * is not recorded anywhere, so every subagent of such a session settles at the
- * estimate too. The parent ("main") copies no one: it inherits nothing. Returns why,
- * or null; a marker dir that cannot be read throws.
+ * is not recorded anywhere, so every fork of such a session settles at the
+ * estimate too, and so does a subagent whose type nothing states
+ * (`mayCopyAncestor`). A NAMED subagent copies no one: it reads its own
+ * transcript, like the parent ("main"), which inherits nothing. Inheriting
+ * further settled every subagent of a session at its tool-I/O estimate once one
+ * agent's transcript was missing, about a tenth of what their transcripts held.
+ * `hinted`: the hook's `agent_type`. Returns why, or null; a marker dir that
+ * cannot be read throws.
  */
-async function inheritedEstimate(where, agentId) {
+async function inheritedEstimate(where, agentId, hinted) {
 	if (agentId === "main") return null;
 	const dir = dirname(where.estimatePath);
 	const own = basename(where.estimatePath);
@@ -1698,9 +1735,8 @@ async function inheritedEstimate(where, agentId) {
 		throw err;
 	}
 	const other = names.find((name) => name !== own && name.startsWith(prefix));
-	return other === undefined
-		? null
-		: `${other.slice(prefix.length)} of this session settles at the estimate (a fork copies its ancestor's responses)`;
+	if (other === undefined || !(await mayCopyAncestor(where.transcriptPath, hinted))) return null;
+	return `${other.slice(prefix.length)} of this session settles at the estimate (a fork copies its ancestor's responses)`;
 }
 
 /** The agent's cursor, its estimate marker and the message claims, in the private state dir. */
@@ -2342,8 +2378,9 @@ export async function estimateReasonFor({ sessionId, agentId, input }) {
  * Whether this agent's usage is settled at the ESTIMATE, read without the agent's lock and
  * without writing anything (the breaker's skip, pre-tool-use.mjs, must touch no state):
  * UT_CC_USAGE=estimate (or the config file's), an agent id unsafe in a path, no transcript
- * path, or a recorded estimate mode, the agent's own or, for a subagent, another agent's of
- * its session (`inheritedEstimate`). A marker directory that cannot be read answers yes: an
+ * path, or a recorded estimate mode, the agent's own or, for a fork (or a subagent of no
+ * stated type), another agent's of its session (`inheritedEstimate`). A marker directory
+ * that cannot be read answers yes: an
  * answer this cannot give is never "no".
  */
 export async function settlesAtEstimate({ sessionId, agentId, input }) {
@@ -2358,7 +2395,10 @@ export async function settlesAtEstimate({ sessionId, agentId, input }) {
 	}
 	if (names.includes(own)) return true;
 	const prefix = `${sanitize(sessionId)}__`;
-	return agentId !== "main" && names.some((name) => name !== own && name.startsWith(prefix));
+	if (agentId === "main" || !names.some((name) => name !== own && name.startsWith(prefix))) {
+		return false;
+	}
+	return mayCopyAncestor(transcriptPathFor(input, agentId), input.agent_type);
 }
 
 /**
@@ -2374,8 +2414,19 @@ export async function settlesAtEstimate({ sessionId, agentId, input }) {
  *    may be settled at the estimate either: the transcript still holds that
  *    usage, and the first settle point that can use the state posts it;
  *  - `{ kind: "busy", lastModel }`, or `{ kind: "ready", ... }` holding the lock.
+ * `hook` names the hook, for a watch record; `lastChance`: no later settle point of this agent
+ * reads its transcript (its SubagentStop, or SessionEnd), so a transcript still missing there
+ * is the agent's settled state (`notWrittenYet`).
  */
-async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = false }) {
+async function openAgent({
+	sessionId,
+	agentId,
+	input,
+	hook,
+	waitMs = 0,
+	mayEstimate = false,
+	lastChance = false,
+}) {
 	const where = await locate({ sessionId, agentId, input, mayEstimate });
 	if (!where.ok) {
 		return { kind: where.unavailable ? "unavailable" : "estimate", reason: where.reason };
@@ -2389,7 +2440,7 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 	if (recorded !== null) return { kind: "estimate", reason: recorded };
 	let inherited;
 	try {
-		inherited = await inheritedEstimate(where, agentId);
+		inherited = await inheritedEstimate(where, agentId, input?.agent_type);
 	} catch (err) {
 		return { kind: "unavailable", reason: `estimate markers unreadable (${err?.code ?? "error"})` };
 	}
@@ -2400,6 +2451,7 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 	// usage for real.
 	if (transcriptPath === undefined || inherited !== null) {
 		const reason = inherited ?? where.unread;
+		if (inherited !== null) await noteNoTranscriptAgent({ where, sessionId, agentId, input, hook });
 		const held = await acquireLock(cursorPath, { waitMs: Math.max(waitMs, NO_PATH_LOCK_WAIT_MS) });
 		if (held === null) {
 			return { kind: "unavailable", reason: `${reason}, and another hook holds the agent's lock` };
@@ -2434,7 +2486,7 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 			await release();
 			return { kind: "estimate", reason: marked };
 		}
-		const inheritedNow = await inheritedEstimate(where, agentId);
+		const inheritedNow = await inheritedEstimate(where, agentId, input?.agent_type);
 		if (inheritedNow !== null) {
 			const sticky = await stickToEstimate(where, inheritedNow, true);
 			await release();
@@ -2453,6 +2505,19 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 		}
 		const { live, finished, inFlight } = await reconcile(cursor, sessionId, agentId);
 		const ingested = await ingest(cursor, transcriptPath, where.since);
+		if (!ingested.ok && notWrittenYet(ingested, agentId, cursor, lastChance)) {
+			// A subagent's first hooks can run before Claude Code creates its transcript: what it
+			// will hold is still to be posted, so nothing is settled at the estimate. The hold is
+			// given back, and the first settle point that reads the transcript posts the usage.
+			await noteNoTranscriptAgent({ where, sessionId, agentId, input, hook });
+			await writeCursor(cursorPath, cursor);
+			await removeFiles(finished);
+			await release();
+			return {
+				kind: "unavailable",
+				reason: `${ingested.reason}: not written yet, left for a later settle point`,
+			};
+		}
 		if (!ingested.ok) {
 			const sticky = await stickToEstimate(where, ingested.reason, true);
 			if (sticky.kind === "estimate") {
@@ -2490,6 +2555,60 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 	} catch (err) {
 		await release();
 		return { kind: "unavailable", reason: `transcript state unavailable (${errText(err)})` };
+	}
+}
+
+/**
+ * Whether a failed first read is a SUBAGENT's transcript not written yet: missing (ENOENT)
+ * before any of it was read, at a hook a later settle point of the agent follows. Claude Code
+ * can run a subagent's first hooks before it creates the transcript, and settling such an agent
+ * at the estimate for good settled what its transcript would hold at a tool-I/O estimate. Still
+ * missing at its last chance (`lastChance`), the estimate is the agent's only record: it sticks.
+ * The parent's, a transcript read before, and any other failure stick at once, as before.
+ */
+function notWrittenYet(ingested, agentId, cursor, lastChance) {
+	return ingested.code === "ENOENT" && agentId !== "main" && cursor.byteOffset === 0 && !lastChance;
+}
+
+/**
+ * The once-per-agent watch record (lib.mjs `NO_TRANSCRIPT_AGENT`) of a subagent id that no
+ * type is stated for (no meta file, no hook `agent_type`) and whose transcript does not exist:
+ * the hook and tool it arrived with, never content. An agent with a stated type writes none
+ * (its transcript is merely late). Once: a marker beside the estimate markers
+ * (<state>/transcripts/no-transcript/<session>__<agent>), made before the record and removed
+ * if the record could not be written. Best-effort evidence: it never throws.
+ */
+async function noteNoTranscriptAgent({ where, sessionId, agentId, input, hook }) {
+	const { transcriptPath } = where;
+	if (agentId === "main" || transcriptPath === undefined) return;
+	try {
+		if ((await statedAgentType(transcriptPath, input?.agent_type)) !== null) return;
+		const missing = await stat(transcriptPath).then(
+			() => false,
+			(err) => err?.code === "ENOENT",
+		);
+		if (!missing) return;
+		const marker = join(
+			dirname(dirname(where.estimatePath)),
+			NO_TRANSCRIPT_DIR,
+			basename(where.estimatePath),
+		);
+		await mkdir(dirname(marker), { recursive: true, mode: 0o700 });
+		await writeFile(marker, "", { flag: "wx", mode: 0o600 });
+		const written = await recordWatchEvent({
+			kind: NO_TRANSCRIPT_AGENT,
+			mode: guardMode(),
+			session: sessionId,
+			agent: agentId,
+			hook: typeof hook === "string" ? hook : "unknown",
+			tool: typeof input?.tool_name === "string" ? input.tool_name.slice(0, 128) : null,
+			reason:
+				"a subagent id with no stated agent type and no transcript; none of its usage can be read",
+			started: null,
+		});
+		if (!written) await unlink(marker).catch(() => {});
+	} catch {
+		// EEXIST: recorded already. Anything else: not this time.
 	}
 }
 
@@ -2539,7 +2658,13 @@ export async function prepareWindow({
 	jobs = null,
 	holdKey = "none",
 }) {
-	const opened = await openAgent({ sessionId, agentId, input, mayEstimate: true });
+	const opened = await openAgent({
+		sessionId,
+		agentId,
+		input,
+		hook: "PreToolUse",
+		mayEstimate: true,
+	});
 	if (opened.kind === "estimate" || opened.kind === "unavailable") {
 		return { mode: opened.kind, reason: opened.reason, becameSticky: opened.becameSticky === true };
 	}
@@ -3226,7 +3351,14 @@ async function remainderOf(
 		left.agent = "the server stopped answering, so this agent's usage was not posted";
 		return { skipped: "the server stopped answering" };
 	}
-	const opened = await openAgent({ sessionId, agentId, input, waitMs: lockWaitMs });
+	const opened = await openAgent({
+		sessionId,
+		agentId,
+		input,
+		hook,
+		waitMs: lockWaitMs,
+		lastChance: hook === "SubagentStop" || hook === "SessionEnd",
+	});
 	if (opened.kind === "estimate") return { skipped: opened.reason };
 	if (opened.kind === "unavailable") {
 		left.agent = `transcript state unavailable (${opened.reason}), so this agent's usage was not posted`;
