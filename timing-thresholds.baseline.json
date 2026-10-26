@@ -85,7 +85,7 @@
 	"packages/core/tests/harden/release-tarball.test.ts timeout": 10,
 	"packages/core/tests/harden/release-workflow.test.ts timeout": 22,
 	"packages/core/tests/harden/scan-linear.test.ts clock": 4,
-	"packages/core/tests/harden/scan-linear.test.ts timeout": 8,
+	"packages/core/tests/harden/scan-linear.test.ts timeout": 7,
 	"packages/core/tests/harden/snapshot-restore-lock.test.ts sleep": 1,
 	"packages/core/tests/harden/stream-early-break.test.ts sleep": 1,
 	"packages/core/tests/harden/stream-receipt-unhandled.test.ts sleep": 1,
