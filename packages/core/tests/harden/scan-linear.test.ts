@@ -225,7 +225,7 @@ const WORST: ReadonlyArray<[string, (n: number) => string, number?]> = [
 	["generic secret: repeated whsec_ starts", run(".whsec_")],
 	// The normalized view (format characters removed, fullwidth forms read): built once per string,
 	// then scanned.
-	["normalized view: zero-width spaces", run(String.fromCodePoint(0x200b))],
+	["normalized view: zero-width spaces", run(String.fromCodePoint(0x200b)), 2_000_000],
 	// detectInjection drops format characters with one global replace, and V8's time per character
 	// for it steps up between 1M and 1.25M characters of these two inputs, then stays about level. A
 	// measurement across the step reads about 3.1 for a linear scan, so these two start past it.
@@ -239,16 +239,30 @@ const WORST: ReadonlyArray<[string, (n: number) => string, number?]> = [
 		run(`a${String.fromCodePoint(0x200d)}`),
 		2_000_000,
 	],
-	["normalized view: fullwidth digits", run(String.fromCodePoint(0xff11))],
-	["normalized view: fullwidth digits and spaces", run(`${String.fromCodePoint(0xff14)} `)],
-	["normalized view: U+FDFA, which NFKC expands to 18", run(String.fromCodePoint(0xfdfa))],
+	// detectPII's time per character for a run of fullwidth digits steps up between 500k and 1M
+	// characters, then stays about level. A measurement across the step reads about 2.8 for a linear
+	// scan on a fast machine and over 3 on a slower one, where the doubling stops at 500k; this row
+	// starts past it.
+	["normalized view: fullwidth digits", run(String.fromCodePoint(0xff11)), 2_000_000],
+	[
+		"normalized view: fullwidth digits and spaces",
+		run(`${String.fromCodePoint(0xff14)} `),
+		2_000_000,
+	],
+	[
+		"normalized view: U+FDFA, which NFKC expands to 18",
+		run(String.fromCodePoint(0xfdfa)),
+		2_000_000,
+	],
 	[
 		"normalized view: a key prefix, then zero-width spaces",
 		after("sk-", String.fromCodePoint(0x200b)),
+		2_000_000,
 	],
 	[
 		"normalized view: fullwidth letters and an at sign",
 		run(`${String.fromCodePoint(0xff41)}${String.fromCodePoint(0xff20)}`),
+		2_000_000,
 	],
 	["aws key: repeated temporary placeholders", run(`ASIA${"X".repeat(16)} `)],
 	["github token: repeated user-token placeholders", run(`ghu_${"X".repeat(36)} `)],
