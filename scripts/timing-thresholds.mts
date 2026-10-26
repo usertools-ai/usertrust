@@ -22,7 +22,8 @@
  *  - the file fakes the timer it uses: `vi.useFakeTimers` called at the top level of the file, or in
  *    a top-level `beforeEach`/`beforeAll`, with no `toFake` or a `toFake` that names the hit's
  *    API (`setTimeout` or `setInterval` for a sleep, `Date` for `Date.now()`). A fake inside one
- *    test or `describe` accepts nothing, and neither does a `toFake` that is not a literal list:
+ *    test or `describe` accepts nothing, and neither does a `toFake` that is not a literal list,
+ *    nor any fake in a file that calls `useRealTimers` anywhere but a top-level `afterEach`/`afterAll`:
  *    the scan does not follow which tests a fake covers, so it counts those hits. `performance.now`,
  *    `process.hrtime` and timeouts are never accepted by a fake; or
  *  - a `timing:` comment on its line, or in the comment lines directly above it, states the
@@ -147,20 +148,32 @@ function enclosingFunctions(node: ts.Node): ts.Node[] {
 	return out;
 }
 
+/** Whether a call sits directly in the callback of a top-level hook named in `hooks`. */
+function inTopLevelHook(call: ts.CallExpression, hooks: string[]): boolean {
+	const fns = enclosingFunctions(call);
+	// One function, the callback of a hook that is itself in no function: a top-level hook.
+	if (fns.length !== 1) return false;
+	const hook = (fns[0] as ts.Node).parent;
+	if (hook === undefined || !ts.isCallExpression(hook)) return false;
+	const name = dotted(hook.expression);
+	return name !== undefined && hooks.includes(name);
+}
+
 /**
  * Whether a fake-timer call covers the whole file: at its top level, or directly in the callback of
  * a top-level `beforeEach`/`beforeAll`. Anywhere else (one test, one `describe`, a helper) it may
  * cover only some of the file's tests.
  */
 function fileLevel(call: ts.CallExpression): boolean {
-	const fns = enclosingFunctions(call);
-	if (fns.length === 0) return true;
-	// One function, the callback of a hook that is itself in no function: a top-level hook.
-	if (fns.length > 1) return false;
-	const hook = (fns[0] as ts.Node).parent;
-	if (hook === undefined || !ts.isCallExpression(hook)) return false;
-	const name = dotted(hook.expression);
-	return name === "beforeEach" || name === "beforeAll";
+	return enclosingFunctions(call).length === 0 || inTopLevelHook(call, ["beforeEach", "beforeAll"]);
+}
+
+/**
+ * Whether a real-timer call only undoes the fake after the tests: directly in a top-level
+ * `afterEach`/`afterAll`. Anywhere else it may give some tests real timers again.
+ */
+function restoresAfter(call: ts.CallExpression): boolean {
+	return inTopLevelHook(call, ["afterEach", "afterAll"]);
 }
 
 /**
@@ -243,6 +256,8 @@ export function scan(file: string, source: string): Hit[] {
 	// What every file-level fake covers (null: everything), or undefined with no file-level fake.
 	// Two file-level fakes cover what both do.
 	let fakes: Set<string> | null | undefined;
+	// Real timers again anywhere but after the tests: no fake covers the whole file.
+	let realAgain = false;
 	const visit = (node: ts.Node): void => {
 		if (ts.isCallExpression(node)) {
 			const name = dotted(node.expression);
@@ -251,6 +266,8 @@ export function scan(file: string, source: string): Hit[] {
 				if (fakes === undefined || fakes === null) fakes = these;
 				else if (these !== null) fakes = new Set([...fakes].filter((n) => these.has(n)));
 			}
+			if ((name === "vi.useRealTimers" || name === "jest.useRealTimers") && !restoresAfter(node))
+				realAgain = true;
 			const timer = sleeps(node);
 			if (timer !== undefined) found.push({ node, shape: "sleep", api: timer });
 			if (
@@ -282,7 +299,7 @@ export function scan(file: string, source: string): Hit[] {
 	};
 	visit(sf);
 	const covers = (api: string | undefined): boolean =>
-		api !== undefined && fakes !== undefined && (fakes === null || fakes.has(api));
+		api !== undefined && !realAgain && fakes !== undefined && (fakes === null || fakes.has(api));
 	return found.map(({ node, shape, api }) => {
 		const line = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line;
 		const byFakeClock = covers(api);

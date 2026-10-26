@@ -125,6 +125,52 @@ test("a partial toFake accepts only what it fakes", () => {
 		"Date.now() - t0;",
 	];
 	assert.deepEqual(shapes(both.join("\n")), ["3:sleep+", "4:clock"]);
+	// In either order, and after a fake of everything: the later, narrower fake narrows the file's.
+	const narrower = [
+		'vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });',
+		'beforeEach(() => vi.useFakeTimers({ toFake: ["setTimeout"] }));',
+		"setTimeout(r, 20);",
+		"Date.now() - t0;",
+	];
+	assert.deepEqual(shapes(narrower.join("\n")), ["3:sleep+", "4:clock"]);
+	const afterAll = [
+		"vi.useFakeTimers();",
+		'beforeEach(() => vi.useFakeTimers({ toFake: ["Date"] }));',
+		"setTimeout(r, 20);",
+		"Date.now() - t0;",
+	];
+	assert.deepEqual(shapes(afterAll.join("\n")), ["3:sleep", "4:clock+"]);
+});
+
+test("options the scan cannot read in full fake nothing", () => {
+	const unreadable = [
+		"vi.useFakeTimers(options);",
+		"vi.useFakeTimers({ ...options });",
+		'vi.useFakeTimers({ toFake: ["setTimeout", TIMER] });',
+		"vi.useFakeTimers({ toFake });",
+	];
+	for (const fake of unreadable)
+		assert.deepEqual(shapes(`${fake}\nsetTimeout(r, 20);`), ["2:sleep"], fake);
+});
+
+test("useRealTimers anywhere but a top-level afterEach or afterAll: the file's fakes accept nothing", () => {
+	const fake = "beforeEach(() => vi.useFakeTimers());";
+	const sleep = 'it("x", async () => { await new Promise((r) => setTimeout(r, 25)); });';
+	for (const hook of ["afterEach", "afterAll"])
+		assert.deepEqual(shapes([fake, `${hook}(() => vi.useRealTimers());`, sleep].join("\n")), [
+			"3:sleep+",
+		]);
+	const inTest =
+		'it("x", async () => { vi.useRealTimers(); await new Promise((r) => setTimeout(r, 25)); });';
+	assert.deepEqual(shapes([fake, inTest].join("\n")), ["2:sleep"]);
+	const elsewhere = [
+		'it("x", () => vi.useRealTimers());',
+		"vi.useRealTimers();",
+		'describe("d", () => { afterEach(() => vi.useRealTimers()); });',
+		"function real() { vi.useRealTimers(); }",
+	];
+	for (const line of elsewhere)
+		assert.deepEqual(shapes([fake, line, "setTimeout(r, 20);"].join("\n")), ["3:sleep"], line);
 });
 
 test("a fake inside one test, a describe or a helper accepts nothing", () => {
