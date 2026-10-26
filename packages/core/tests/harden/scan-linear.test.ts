@@ -242,7 +242,12 @@ const WORST: ReadonlyArray<[string, (n: number) => string, number?]> = [
 	["normalized view: a letter, then a zero-width joiner", run(`a${String.fromCodePoint(0x200d)}`)],
 	["normalized view: fullwidth digits", run(String.fromCodePoint(0xff11))],
 	["normalized view: fullwidth digits and spaces", run(`${String.fromCodePoint(0xff14)} `)],
-	["normalized view: U+FDFA, which NFKC expands to 18", run(String.fromCodePoint(0xfdfa))],
+	// detectInjection takes NFKC of the whole string, so this row's input grows 18 times. From 15,625,
+	// the size search stops by 64 times that, and the largest input, `SPAN` times the size, is at most
+	// 8 x 15,625 x 64 = 8,000,000 characters: 144,000,000 after NFKC, against V8's string limit of
+	// 536,870,888. From 62,500 it would be 576,000,000, which throws a RangeError on a runner fast
+	// enough to reach it.
+	["normalized view: U+FDFA, which NFKC expands to 18", run(String.fromCodePoint(0xfdfa)), 15_625],
 	[
 		"normalized view: a key prefix, then zero-width spaces",
 		after("sk-", String.fromCodePoint(0x200b)),
@@ -286,16 +291,19 @@ describe("PII and injection scanning is linear in the message", () => {
 		}, 60_000);
 	}
 
-	it("the harness sees a quadratic scan: the old patterns fail the bound", () => {
-		const OLD_EMAIL = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
-		const OLD_JWT = /\beyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b/;
-		const OLD_BACKTICK = /```[\s\S]*?(?:system|instruction|admin)/i;
-		const controls: Array<[RegExp, (n: number) => string]> = [
-			[OLD_EMAIL, run("x")],
-			[OLD_JWT, run("-eyJ")],
-			[OLD_BACKTICK, run("`")],
-		];
-		for (const [re, make] of controls) {
+	// Three patterns that were quadratic, one row each: at 64 times the cost, one read of a control's
+	// larger input takes 2 to 3.6 s on CI.
+	const QUADRATIC: Array<[string, RegExp, (n: number) => string]> = [
+		["the old email pattern", /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/, run("x")],
+		[
+			"the old JWT pattern",
+			/\beyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b/,
+			run("-eyJ"),
+		],
+		["the old backtick-fence pattern", /```[\s\S]*?(?:system|instruction|admin)/i, run("`")],
+	];
+	for (const [label, re, make] of QUADRATIC) {
+		it(`the harness sees a quadratic scan: ${label} fails the bound`, () => {
 			// Both measurements are taken, and one over the bound shows the harness can see the
 			// scan; a burst of load can pull one of them under.
 			const { first, again } = linearRatio(
@@ -307,8 +315,10 @@ describe("PII and injection scanning is linear in the message", () => {
 			expect(Math.max(first[0], second), `${re}: ${first[1]}, then ${times}`).toBeGreaterThan(
 				BOUND,
 			);
-		}
-	}, 120_000);
+			// timing: 120 s for one control. In five CI runs, one control's samples added up to 24 to 36 s,
+			// and all three controls, then in one row, took 80 to 110 s: about 40 s each at most.
+		}, 120_000);
+	}
 });
 
 /** A seeded generator, so a failure names the same strings on every run. */
