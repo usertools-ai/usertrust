@@ -33,7 +33,8 @@ describe("a test never runs as the host's configured session", () => {
 	it("no plugin variable reaches a test, and the default state dir is a temporary one", () => {
 		expect(Object.keys(process.env).filter((name) => PLUGIN_VARIABLE.test(name))).toEqual([]);
 		assertTestStateDir(join(process.env.CLAUDE_CONFIG_DIR ?? "", "usertrust-cc"), "the default");
-		expect(() => assertTestStateDir(join(ROOT, "state"), "a live dir")).toThrow(
+		// A fixed path outside any temporary directory, wherever the checkout lies.
+		expect(() => assertTestStateDir("/dev/null/state", "a live dir")).toThrow(
 			/outside the temporary directory/,
 		);
 	});
