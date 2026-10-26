@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { count, type Hit, scan, TEST_FILE } from "./timing-thresholds.mts";
+import { count, grewFrom, type Hit, scan, TEST_FILE, totals } from "./timing-thresholds.mts";
 import { compare, failed } from "./typecheck-tests.mts";
 
 const F = "packages/a/tests/x.test.ts";
@@ -136,4 +136,16 @@ test("positive control: a removed threshold fails until the baseline is tightene
 	const c = compare(baseline, count(scan(F, "setTimeout(r, 20);")));
 	assert.deepEqual(c.shrunk, [{ key: `${F} sleep`, baseline: 2, now: 1 }]);
 	assert.equal(failed(c), true);
+});
+
+test("totals and grewFrom: the baseline may not grow from the base's, but a renamed file may move", () => {
+	const base = { "a.test.ts sleep": 2, "a.test.ts timeout": 1 };
+	const t = totals(base);
+	assert.deepEqual([t.sleep, t.clock, t.timeout], [2, 0, 1]);
+	assert.deepEqual(grewFrom(base, base), []);
+	assert.deepEqual(grewFrom(base, { "b.test.ts sleep": 2, "b.test.ts timeout": 1 }), []);
+	assert.deepEqual(grewFrom(base, { "a.test.ts sleep": 1 }), []);
+	assert.deepEqual(grewFrom(base, { ...base, "c.test.ts sleep": 1 }), [
+		{ shape: "sleep", base: 2, now: 3 },
+	]);
 });

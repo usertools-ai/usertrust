@@ -25,10 +25,14 @@
  *    `// timing: 30 s budget; CI's slowest of 20 runs took 9 s`.
  * Every other hit is counted in `timing-thresholds.baseline.json`, keyed by file and shape
  * (never by line), which only ever shrinks: a new key or a count that grew fails, and a count
- * that fell fails until the baseline is tightened, as in `typecheck-tests.mts`.
+ * that fell fails until the baseline is tightened, as in `typecheck-tests.mts`. A baseline checked
+ * only against itself is not shrink-only (a change can add a threshold and `--update` together),
+ * so `--base <rev>` also fails when a shape's total in the baseline grew from that revision's:
+ * totals, so that renaming a test file, which moves its keys, does not fail.
  *
- *   tsx scripts/timing-thresholds.mts            # check against the baseline
- *   tsx scripts/timing-thresholds.mts --update   # rewrite the baseline to the current hits
+ *   tsx scripts/timing-thresholds.mts               # check against the baseline
+ *   tsx scripts/timing-thresholds.mts --base HEAD^1 # and the baseline against the base's
+ *   tsx scripts/timing-thresholds.mts --update      # rewrite the baseline to the current hits
  */
 
 import { spawnSync } from "node:child_process";
@@ -214,6 +218,28 @@ export function count(hits: Hit[]): Counts {
 	return counts;
 }
 
+/** A baseline's hits per shape. */
+export function totals(c: Counts): Record<Shape, number> {
+	const t: Record<Shape, number> = { sleep: 0, clock: 0, timeout: 0 };
+	for (const [key, n] of Object.entries(c)) {
+		const shape = key.slice(key.lastIndexOf(" ") + 1) as Shape;
+		if (shape in t) t[shape] += n;
+	}
+	return t;
+}
+
+/** The shapes whose baseline total grew from the base revision's. */
+export function grewFrom(
+	base: Counts,
+	head: Counts,
+): Array<{ shape: Shape; base: number; now: number }> {
+	const b = totals(base);
+	const h = totals(head);
+	return (Object.keys(h) as Shape[])
+		.filter((shape) => h[shape] > b[shape])
+		.map((shape) => ({ shape, base: b[shape], now: h[shape] }));
+}
+
 function sorted(c: Counts): Counts {
 	return Object.fromEntries(Object.entries(c).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 }
@@ -243,6 +269,31 @@ function main(): number {
 		return 0;
 	}
 	const baseline = JSON.parse(readFileSync(baselinePath, "utf-8")) as Counts;
+	const baseAt = process.argv.indexOf("--base");
+	if (baseAt >= 0) {
+		const rev = process.argv[baseAt + 1];
+		if (rev === undefined) {
+			console.error("timing-thresholds: --base needs a revision");
+			return 2;
+		}
+		const atBase = spawnSync("git", ["show", `${rev}:timing-thresholds.baseline.json`], {
+			cwd: root,
+			encoding: "utf-8",
+		});
+		if (atBase.status !== 0) {
+			console.log(`timing-thresholds: ${rev} has no baseline yet; nothing to compare it with`);
+		} else {
+			const grew = grewFrom(JSON.parse(atBase.stdout) as Counts, baseline);
+			for (const g of grew)
+				console.error(`  baseline grew from ${rev}: ${g.shape} ${g.base} -> ${g.now}`);
+			if (grew.length > 0) {
+				console.error(
+					"timing-thresholds: the baseline only shrinks. A new threshold needs fake timers or a `// timing:` comment, not an --update.",
+				);
+				return 1;
+			}
+		}
+	}
 	const c = compare(baseline, counts);
 	if (!failed(c)) {
 		console.log(
