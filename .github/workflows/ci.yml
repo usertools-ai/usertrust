@@ -175,7 +175,6 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npx tsx packages/core/tests/harden/scan-linear-probe.mts
       - run: npx vitest run packages/core/tests/harden/scan-linear.test.ts
 
   openclaw-contract:
