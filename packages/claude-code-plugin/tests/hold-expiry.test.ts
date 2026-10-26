@@ -472,6 +472,8 @@ describe("a hold's life, as the server states it", () => {
 		expect(record.transferId).toBe("tx_2");
 		expect(record.expiresAt as number).toBeGreaterThanOrEqual(before + 30_000);
 		expect(record.expiresAt as number).toBeLessThanOrEqual(after + 30_000);
+		// timing: 20 s budget for a row bounded by the hook's 5 s settle wait; it took 5.2 s in each
+		// of 3 local runs.
 	}, 20_000);
 
 	it("a window's hold whose life ends before its settle could arrive is given back, never settled: the window waits", async () => {
