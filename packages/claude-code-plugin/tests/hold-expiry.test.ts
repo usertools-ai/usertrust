@@ -49,12 +49,20 @@ let refuseAuthorizes: number;
 /** Extra milliseconds the fake holds its answer, by path: a slow server uses up the hook's budget. */
 let slowBy: Map<string, number | number[]>;
 let nextTransfer: number;
+/**
+ * The fake's delayed answers still to fire. A row whose hook gives up on a slow answer ends before
+ * it fires, and it would then run against the NEXT row's state (its transfer ids, lives and
+ * refusals): `stopFake` cancels them.
+ */
+const delayedAnswers = new Set<ReturnType<typeof setTimeout>>();
+/** How many delayed answers fired after their server stopped: none, since `stopFake` cancels them. */
+let lateAnswers = 0;
 
 function startFake(): Promise<number> {
 	seen = [];
 	nextTransfer = 1;
 	return new Promise((resolve) => {
-		server = createServer((req, res) => {
+		const self = createServer((req, res) => {
 			let raw = "";
 			req.on("data", (c) => {
 				raw += c;
@@ -70,6 +78,8 @@ function startFake(): Promise<number> {
 				const body = JSON.parse(raw || "{}") as Seen["body"];
 				seen.push({ path: req.url ?? "", body });
 				const answer = () => {
+					// A server already stopped answers nothing: its row is over.
+					if (server !== self) return;
 					if (req.url === "/v1/authorize" && refuseAuthorizes > 0) {
 						refuseAuthorizes -= 1;
 						return reply(402, { error: "budget_exceeded", reason: "over budget" });
@@ -92,10 +102,17 @@ function startFake(): Promise<number> {
 				// A number delays every request to the path; a list, each in turn (then none).
 				const slow = slowBy.get(req.url ?? "");
 				const delay = Array.isArray(slow) ? (slow.shift() ?? 0) : (slow ?? 0);
-				if (delay > 0) setTimeout(answer, delay);
-				else answer();
+				if (delay > 0) {
+					const timer = setTimeout(() => {
+						delayedAnswers.delete(timer);
+						if (server !== self) lateAnswers += 1;
+						answer();
+					}, delay);
+					delayedAnswers.add(timer);
+				} else answer();
 			});
 		});
+		server = self;
 		server.listen(0, "127.0.0.1", () => {
 			const address = server?.address();
 			resolve(typeof address === "object" && address !== null ? address.port : 0);
@@ -118,10 +135,15 @@ beforeEach(async () => {
 		UT_SERVER_URL: `http://127.0.0.1:${port}`,
 	};
 });
-afterEach(() => {
+function stopFake() {
+	for (const timer of delayedAnswers) clearTimeout(timer);
+	delayedAnswers.clear();
+	server?.closeAllConnections();
 	server?.close();
 	server = undefined;
-});
+}
+
+afterEach(stopFake);
 
 const settled = () => seen.filter((s) => s.path === "/v1/settle").map((s) => s.body);
 const authorizes = () => seen.filter((s) => s.path === "/v1/authorize").map((s) => s.body);
@@ -409,5 +431,27 @@ describe("a hold's life, as the server states it", () => {
 		await outlive();
 		await post("tu_1", { transcript_path: mainTranscript() });
 		expect(settled()).toEqual([]);
+	});
+});
+
+describe("the fake server", () => {
+	it("a slow answer whose caller gave up never fires into the next row", async () => {
+		slowBy.set("/v1/authorize", 300);
+		// A hook that gives up on a slow answer, as the budget rows' hooks do.
+		await fetch(`${env.UT_SERVER_URL}/v1/authorize`, {
+			method: "POST",
+			body: "{}",
+			signal: AbortSignal.timeout(50),
+		}).catch(() => {});
+		// The row ends, and the next one starts its own fake.
+		lateAnswers = 0;
+		stopFake();
+		await startFake();
+		refuseAuthorizes = 1;
+		await new Promise((resolve) => setTimeout(resolve, 500));
+		// The abandoned answer never fired, and took none of the next row's transfer ids or refusals.
+		expect(lateAnswers).toBe(0);
+		expect(nextTransfer).toBe(1);
+		expect(refuseAuthorizes).toBe(1);
 	});
 });
