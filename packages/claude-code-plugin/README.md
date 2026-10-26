@@ -445,9 +445,13 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   responses and reads its own transcript. One exception to "cannot be read": a
   SUBAGENT's transcript that does not exist yet, before any of it was read, is not
   written yet (Claude Code can run a subagent's first hooks before it creates the
-  file). Its holds are given back, and the first settle point that reads the
-  transcript posts the usage; only if the file is still missing at the subagent's
-  SubagentStop does it switch to the estimate. A hold is settled at the estimate ONLY in these cases: when the plugin's own state
+  file). The call's PostToolUse decides: if the transcript exists by then, the hold
+  is given back and the transcript posts the usage; if it is still missing, the
+  subagent switches to the estimate there, and the call is charged at it. A call
+  that never reaches its PostToolUse is decided at the subagent's SubagentStop. A
+  transcript that appears only after the switch is never read, since its calls were
+  charged at the estimate, and posting them would charge them twice: one `gap`
+  record (`"phase":"late-transcript"`) says so. A hold is settled at the estimate ONLY in these cases: when the plugin's own state
   is unusable for now, the hold is given back, because the transcript still holds
   that usage.
 - **Private, durable state.** Cursors, claims and estimate-mode records live in
@@ -967,6 +971,11 @@ PreToolUse, when it settles a repeated or resumed call's earlier hold. Its `"pha
   connection dropped after sending, and the server may still act on it. A transcript hold's
   settle that ends this way is `claimed`, or `unresolved` under a key, which also say whether
   it is retried.
+
+One more `gap` record has `"phase":"late-transcript"`, written once per agent: a subagent
+switched to the estimate because its transcript did not exist, and the transcript exists now.
+Its lines are never posted, since the calls they cover were charged at the estimate, so what
+they hold reaches the ledger only as that estimate.
 
 A transcript settle that cannot be built once its hold is claimed (the server's capabilities
 read as unknown only then) sends nothing and hands the hold back for a later settle point:

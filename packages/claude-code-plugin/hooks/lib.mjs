@@ -1243,12 +1243,17 @@ function refusedOf(value) {
 
 /**
  * An estimate hold's model, as it was authorized: what PostToolUse authorizes a replacement of
- * the expired hold at (post-tool-use.mjs `settleEstimateHold`). Absent on an older record.
+ * the expired hold at (post-tool-use.mjs `settleEstimateHold`). Absent on an older record. And
+ * `awaitingTranscript`, on a hold made while its subagent's transcript was not written yet: its
+ * PostToolUse rules whether it settles at the estimate (transcript.mjs `resolveAwaitingHold`).
  */
 function estimateHoldModel(entry) {
-	return typeof entry.holdModel === "string" && entry.holdModel !== ""
-		? { holdModel: entry.holdModel }
-		: {};
+	return {
+		...(typeof entry.holdModel === "string" && entry.holdModel !== ""
+			? { holdModel: entry.holdModel }
+			: {}),
+		...(entry.awaitingTranscript === true ? { awaitingTranscript: true } : {}),
+	};
 }
 
 function transcriptHoldFields(entry) {

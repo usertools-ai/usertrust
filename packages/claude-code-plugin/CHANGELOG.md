@@ -29,11 +29,15 @@ npm, and its version is its own: the `usertrust` packages and their
   parent sessions, priced the same way, came to 104%. Now only a fork inherits the
   estimate mode, and so does a subagent whose type nothing states, since it may be a fork; a
   named subagent (`general-purpose`, `Explore`, a custom agent) reads its own transcript.
-  And a subagent's transcript that does not exist yet, before any of it was read, no longer
-  switches it to the estimate for good: its holds are given back, the first settle point
-  that reads the transcript posts the usage, and only a transcript still missing at the
-  subagent's SubagentStop switches it. The parent's missing transcript switches it at once,
-  as before. An agent that already recorded its estimate mode keeps it, so nothing it settled
+  And a subagent's transcript that does not exist yet at its first hook, before any of it was
+  read, no longer switches it to the estimate for good: that call's PostToolUse decides. If the
+  transcript exists by then, the hold is given back and the transcript posts the usage; if it
+  is still missing, the subagent switches there and the call is charged at the estimate, so no
+  call goes uncharged for want of a transcript. A call that never reaches its PostToolUse is
+  decided at the subagent's SubagentStop. A transcript that appears only after the switch is
+  never read (its calls were charged at the estimate): one gap record says so. The parent's
+  missing transcript switches it at once, as before. The parent's own `agent_type`, which a
+  session-wide Stop carries, is never taken as a subagent's type. An agent that already recorded its estimate mode keeps it, so nothing it settled
   at the estimate is posted again. A subagent id that names no type and has no transcript is
   now written down once, as a `no-transcript-agent` watch record (hook and tool, no content),
   so such agents can be counted; it is never a gap.
