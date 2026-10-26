@@ -43,6 +43,19 @@ test("a skipped job passes only when it is not required", () => {
 	assert.equal(run({ a: { result: "success" }, b: { result: "skipped" } }, "a b").rc, 1);
 });
 
+test("a short or non-hex TESTED_SHA is exit 2, never a stamp", () => {
+	for (const sha of ["abc1234", "a".repeat(39), "A".repeat(40), `${"a".repeat(40)}0`]) {
+		assert.equal(
+			main(
+				{ RESULTS: '{"a":{"result":"success"}}', TESTED_SHA: sha, REQUIRED: "a" },
+				() => {},
+				() => {},
+			),
+			2,
+		);
+	}
+});
+
 test("unusable input is exit 2, never a stamp", () => {
 	assert.equal(
 		main(
@@ -84,6 +97,13 @@ function wiringProblems(text) {
 		)
 	) {
 		problems.push("push.branches lacks candidate/**");
+	}
+	if (
+		!text.includes(
+			`group: ci-\${{ github.event_name == 'pull_request' && github.ref || github.run_id }}`,
+		)
+	) {
+		problems.push("push runs share a concurrency group (a queued run cancels the pending one)");
 	}
 	if (!text.includes(`cancel-in-progress: \${{ github.event_name == 'pull_request' }}`)) {
 		problems.push("a push can be cancelled by the next one");
@@ -140,6 +160,11 @@ test("ci.yml wires the stamp, the candidate trigger and folds, and the cancel ru
 });
 
 const MUTANTS = [
+	[
+		"push runs share one group per ref",
+		`group: ci-\${{ github.event_name == 'pull_request' && github.ref || github.run_id }}`,
+		`group: ci-\${{ github.ref }}`,
+	],
 	["no candidate trigger", "    branches: [master, 'candidate/**']", "    branches: [master]"],
 	[
 		"pushes cancel each other",

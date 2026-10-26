@@ -2008,13 +2008,18 @@ this.
 
 There is no root `build` script; each package builds itself (`npm run build -w usertrust`, etc.).
 
-**CI** (`.github/workflows/ci.yml`) runs eight jobs on Node 22, on every push to `master` and every
-**non-draft** PR: `agent-config` (the agent-config check, described below), `lint`, `typecheck`,
+**CI** (`.github/workflows/ci.yml`) runs nine jobs on Node 22, on every push to `master`, every push to a
+`candidate/**` branch and every **non-draft** PR: `agent-config` (the agent-config check, described below), `lint`, `typecheck`,
 `test` (coverage, with the thresholds above), `scan-linear` (the detectors' linearity timings in
 `packages/core/tests/harden/scan-linear.test.ts`, run alone and without coverage; `test` excludes
 that file), `openclaw-contract` (the host contract, described below), `tb-integration` (a real
 single-node TigerBeetle cluster, sha256-pinned binary), and `site-build` (the site's own install,
-tests and production build). There is **no path filter**: every non-draft PR runs all eight
+tests and production build), then `tested-tree`, which needs the other eight and, only when all of them
+passed, stamps the run with one annotation, `tested-tree <the commit it tested>`
+(`scripts/tested-tree-verdict.mjs`). A `candidate/**` branch holds a merge commit of master and a pull
+request (or a stack of them) that a merge tool tests before merging, so the tree that lands is a tree
+whose run passed; it is graded like that pull request's merge commit. A pull request's superseded run is
+cancelled; a push run never is. There is **no path filter**: every non-draft PR runs all nine
 regardless of what changed. A draft PR runs `agent-config` alone.
 
 The TigerBeetle server version in CI is pinned to match `tigerbeetle-node` in `packages/core` and

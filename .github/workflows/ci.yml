@@ -16,10 +16,11 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
-  group: ci-${{ github.ref }}
-  # Only a pull request's superseded run is cancelled. A push to master is never cancelled by the next one:
-  # that would leave the earlier master commit untested, and two merges that each pass can fail
-  # together. Each candidate/** branch is its own group, so candidates never cancel each other.
+  # A pull request's runs share a group, so its superseded run is cancelled. Every PUSH run (master or a
+  # candidate/** branch) is a group of its own: a group holds one running and ONE pending run, and a newly
+  # queued run cancels the pending one whatever cancel-in-progress says, so a shared group for pushes would
+  # drop a middle master commit untested whenever three land close together.
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
