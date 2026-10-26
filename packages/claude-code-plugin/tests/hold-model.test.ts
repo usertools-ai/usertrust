@@ -340,6 +340,8 @@ describe("the model a hold names is the session's own", () => {
 			response("msg_h", HAIKU) + response("msg_o", OPUS, 0, "x".repeat(17 << 20)),
 		);
 		expect(await at(s.sessionId, { transcript_path: s.path })).toEqual(unknown);
+		// timing: 30 s, for a 17 MiB transcript line. On CI this test took 327 ms, and under 300 ms
+		// in the run with coverage.
 	}, 30_000);
 
 	it("the session's latest model switch, directly: a newest response from before it that names another model is `unknown`", async () => {
