@@ -125,6 +125,11 @@ jobs:
       - run: npm run typecheck
       # The ratchet's own comparison logic (scripts/typecheck-tests.test.mts).
       - run: npm run typecheck-tests:test
+      # Wall-clock thresholds in tests (sleeps, elapsed-time checks, timeouts) are frozen in
+      # timing-thresholds.baseline.json: a new one needs fake timers or a `// timing:` comment
+      # stating its bound and the headroom measured on CI.
+      - run: npm run timing-thresholds
+      - run: npm run timing-thresholds:test
 
   test:
     name: test
