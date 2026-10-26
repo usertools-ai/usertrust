@@ -105,6 +105,9 @@ jobs:
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The merge commit and its first parent, for the timing baseline's check.
+          fetch-depth: 2
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -125,6 +128,16 @@ jobs:
       - run: npm run typecheck
       # The ratchet's own comparison logic (scripts/typecheck-tests.test.mts).
       - run: npm run typecheck-tests:test
+      # Wall-clock thresholds in tests (sleeps, elapsed-time checks, timeouts) are frozen in
+      # timing-thresholds.baseline.json: a new one needs fake timers or a `// timing:` comment
+      # stating its bound and the headroom measured on CI.
+      - run: npm run timing-thresholds
+      # On a pull request, the baseline itself may not grow from the base's (the merge commit's
+      # first parent): a check of the baseline against itself would pass an --update.
+      - name: The timing baseline only shrinks
+        if: github.event_name == 'pull_request'
+        run: npm run timing-thresholds -- --base HEAD^1
+      - run: npm run timing-thresholds:test
 
   test:
     name: test

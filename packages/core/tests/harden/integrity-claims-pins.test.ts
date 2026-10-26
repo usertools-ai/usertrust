@@ -291,5 +291,7 @@ describe("the documented sample output is what the CLI prints", () => {
 			samples.push(...found.map((l) => `${rel}: ${l}`));
 		}
 		for (const s of samples) expect(s.slice(s.indexOf(": ") + 2), s).toBe(printed);
+		// timing: 60 s for one CLI run and four file reads; CI's test job took 307 ms, and 433 ms
+		// under coverage, in #452.
 	}, 60_000);
 });

@@ -521,6 +521,8 @@ describe("the fake server", () => {
 		stopFake();
 		await startFake();
 		refuseAuthorizes = 1;
+		// timing: 500 ms, 200 ms past the slow answer's 300 ms. On CI this test took 555 and 558 ms of
+		// its 5 s timeout. A runner that held the answer past 500 ms would let a regression pass here.
 		await new Promise((resolve) => setTimeout(resolve, 500));
 		// The abandoned answer never fired, and took none of the next row's transfer ids or refusals.
 		expect(lateAnswers).toBe(0);
