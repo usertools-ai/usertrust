@@ -36,11 +36,16 @@ All contributions are made under the [Apache License 2.0](./LICENSE). By submitt
 Don't add a wall-clock threshold to a test without its headroom. A real sleep, an elapsed-time
 check or deadline, or a test's own timeout passes where it was written and fails on a slower or
 busier runner. `npm run timing-thresholds` finds them in every test file. A new one fails CI
-unless the file uses `vi.useFakeTimers` (sleeps and `Date.now()` only), or a `// timing:` comment
-on its line or directly above it states the bound and the headroom measured on CI, for example
+unless the whole file fakes what it uses, or a `// timing:` comment on its line or directly above
+it states the bound and the headroom measured on CI, for example
 `// timing: 30 s budget; slowest of 20 CI runs took 9 s`. The ones already there are counted in
 `timing-thresholds.baseline.json`, which only shrinks: when you remove one, run
 `npm run timing-thresholds -- --update`.
+
+Fake timers accept a sleep or a `Date.now()` check only when `vi.useFakeTimers` is called at the
+top level of the file, or in a top-level `beforeEach` or `beforeAll`, and its `toFake` (if any) lists
+the API: `setTimeout` or `setInterval` for a sleep, `Date` for `Date.now()`. A fake inside one
+test or `describe` accepts nothing, because the check does not follow which tests it covers.
 
 Don't commit agent config. A pull request that adds, edits or removes Claude Code's `.claude/`,
 an `.mcp.json`, or `.grok/` or `.codex/`, at any depth, fails the `agent-config` check: it would

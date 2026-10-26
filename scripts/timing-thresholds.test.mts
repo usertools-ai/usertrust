@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -7,6 +8,7 @@ import { count, grewFrom, type Hit, scan, TEST_FILE, totals } from "./timing-thr
 import { compare, failed } from "./typecheck-tests.mts";
 
 const F = "packages/a/tests/x.test.ts";
+const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
 const shapes = (source: string): string[] =>
 	scan(F, source).map((h: Hit) => `${h.line}:${h.shape}${h.accepted ? "+" : ""}`);
 
@@ -92,6 +94,72 @@ test("fake timers accept sleeps and Date.now, never performance.now or a timeout
 		'it("x", () => {}, 9000);',
 	].join("\n");
 	assert.deepEqual(shapes(source), ["2:sleep+", "3:clock+", "4:clock", "5:timeout"]);
+	// A top-level beforeEach or beforeAll covers the whole file too.
+	for (const hook of ["beforeEach", "beforeAll"]) {
+		const hooked = [`${hook}(() => {`, "\tvi.useFakeTimers();", "});", "setTimeout(r, 20);"];
+		assert.deepEqual(shapes(hooked.join("\n")), ["4:sleep+"]);
+	}
+});
+
+test("a partial toFake accepts only what it fakes", () => {
+	const source = [
+		'vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });',
+		"setTimeout(r, 20);",
+		"setInterval(tick, 20);",
+		"while (Date.now() < deadline) {}",
+	].join("\n");
+	assert.deepEqual(shapes(source), ["2:sleep+", "3:sleep", "4:clock"]);
+	const dateOnly = [
+		'vi.useFakeTimers({ toFake: ["Date"] });',
+		"setTimeout(r, 20);",
+		"Date.now() - t0;",
+	];
+	assert.deepEqual(shapes(dateOnly.join("\n")), ["2:sleep", "3:clock+"]);
+	// A toFake the scan cannot read, and two fakes, which cover only what both do.
+	const unread = ["vi.useFakeTimers({ toFake: FAKED });", "setTimeout(r, 20);"];
+	assert.deepEqual(shapes(unread.join("\n")), ["2:sleep"]);
+	const both = [
+		'vi.useFakeTimers({ toFake: ["setTimeout"] });',
+		'beforeEach(() => vi.useFakeTimers({ toFake: ["setTimeout", "Date"] }));',
+		"setTimeout(r, 20);",
+		"Date.now() - t0;",
+	];
+	assert.deepEqual(shapes(both.join("\n")), ["3:sleep+", "4:clock"]);
+});
+
+test("a fake inside one test, a describe or a helper accepts nothing", () => {
+	const inTest = ['it("a", () => {', "\tvi.useFakeTimers();", "});", "setTimeout(r, 20);"];
+	assert.deepEqual(shapes(inTest.join("\n")), ["4:sleep"]);
+	const sameTest = ['it("a", () => {', "\tvi.useFakeTimers();", "\tsetTimeout(r, 20);", "});"];
+	assert.deepEqual(shapes(sameTest.join("\n")), ["3:sleep"]);
+	const inDescribe = [
+		'describe("d", () => {',
+		"\tbeforeEach(() => vi.useFakeTimers());",
+		'\tit("a", () => setTimeout(r, 20));',
+		"});",
+	];
+	assert.deepEqual(shapes(inDescribe.join("\n")), ["3:sleep"]);
+	const helper = ["function fake() {", "\tvi.useFakeTimers();", "}", "setTimeout(r, 20);"];
+	assert.deepEqual(shapes(helper.join("\n")), ["4:sleep"]);
+});
+
+test("positive control: a real sleep and a Date.now bound added to a file that fakes some timers in some tests count", () => {
+	// unrecoverable.test.ts fakes setTimeout and clearTimeout inside a few tests only.
+	const file = "packages/server/tests/unrecoverable.test.ts";
+	const source = readFileSync(join(repo, file), "utf-8");
+	assert.match(source, /vi\.useFakeTimers\(\{ toFake: \["setTimeout", "clearTimeout"\] \}\)/);
+	const appended = `${source}
+it("x", async () => {
+	await new Promise((r) => setTimeout(r, 25));
+	const t0 = Date.now();
+	if (Date.now() - t0 > 5) throw new Error("slow");
+});
+`;
+	const c = compare(count(scan(file, source)), count(scan(file, appended)));
+	assert.deepEqual(
+		c.grown.map((g) => g.key),
+		[`${file} clock`, `${file} sleep`],
+	);
 });
 
 test("a `timing:` comment with a number accepts the hit on its line or below its comment block", () => {

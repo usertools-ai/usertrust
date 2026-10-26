@@ -19,7 +19,12 @@
  *  - timeout: a numeric `timeout`/`testTimeout`/`hookTimeout`, or a number as the last argument
  *             of `it`/`test`/`describe` or a hook (a time budget).
  * A hit is accepted when:
- *  - the file calls `vi.useFakeTimers` (sleep and `Date.now()` only: they run on the fake clock), or
+ *  - the file fakes the timer it uses: `vi.useFakeTimers` called at the top level of the file, or in
+ *    a top-level `beforeEach`/`beforeAll`, with no `toFake` or a `toFake` that names the hit's
+ *    API (`setTimeout` or `setInterval` for a sleep, `Date` for `Date.now()`). A fake inside one
+ *    test or `describe` accepts nothing, and neither does a `toFake` that is not a literal list:
+ *    the scan does not follow which tests a fake covers, so it counts those hits. `performance.now`,
+ *    `process.hrtime` and timeouts are never accepted by a fake; or
  *  - a `timing:` comment on its line, or in the comment lines directly above it, states the
  *    bound and the headroom measured on CI (it must contain a number), e.g.
  *    `// timing: 30 s budget; CI's slowest of 20 runs took 9 s`.
@@ -104,18 +109,87 @@ function isZero(e: ts.Expression): boolean {
 	return ts.isNumericLiteral(e) && Number(e.text.replaceAll("_", "")) === 0;
 }
 
-/** A sleep: a timer call with a delay other than 0, including `timers/promises`' `setTimeout(ms)`. */
-function sleeps(call: ts.CallExpression): boolean {
+/**
+ * A sleep: a timer call with a delay other than 0, including `timers/promises`' `setTimeout(ms)`.
+ * The timer's name, or undefined for anything else.
+ */
+function sleeps(call: ts.CallExpression): "setTimeout" | "setInterval" | undefined {
 	const name = dotted(call.expression);
-	if (name === undefined) return false;
+	if (name === undefined) return undefined;
 	const timer = name.replace(/^(globalThis|global|window)\./, "");
-	if (timer !== "setTimeout" && timer !== "setInterval") return false;
+	if (timer !== "setTimeout" && timer !== "setInterval") return undefined;
 	const [first, delay] = call.arguments;
-	if (delay !== undefined) return !isZero(delay);
-	// One argument: the global timer's callback (delay 0), or `timers/promises`' delay.
-	if (first === undefined) return false;
-	if (numeric(first)) return !isZero(first);
-	return ts.isIdentifier(first) && /ms$|millis|delay|wait|timeout|duration/i.test(first.text);
+	const waits = (): boolean => {
+		if (delay !== undefined) return !isZero(delay);
+		// One argument: the global timer's callback (delay 0), or `timers/promises`' delay.
+		if (first === undefined) return false;
+		if (numeric(first)) return !isZero(first);
+		return ts.isIdentifier(first) && /ms$|millis|delay|wait|timeout|duration/i.test(first.text);
+	};
+	return waits() ? timer : undefined;
+}
+
+const FUNCTION_KINDS = new Set([
+	ts.SyntaxKind.ArrowFunction,
+	ts.SyntaxKind.FunctionExpression,
+	ts.SyntaxKind.FunctionDeclaration,
+	ts.SyntaxKind.MethodDeclaration,
+	ts.SyntaxKind.Constructor,
+	ts.SyntaxKind.GetAccessor,
+	ts.SyntaxKind.SetAccessor,
+]);
+
+/** The functions a node sits inside, innermost first. */
+function enclosingFunctions(node: ts.Node): ts.Node[] {
+	const out: ts.Node[] = [];
+	for (let p = node.parent; p !== undefined; p = p.parent)
+		if (FUNCTION_KINDS.has(p.kind)) out.push(p);
+	return out;
+}
+
+/**
+ * Whether a fake-timer call covers the whole file: at its top level, or directly in the callback of
+ * a top-level `beforeEach`/`beforeAll`. Anywhere else (one test, one `describe`, a helper) it may
+ * cover only some of the file's tests.
+ */
+function fileLevel(call: ts.CallExpression): boolean {
+	const fns = enclosingFunctions(call);
+	if (fns.length === 0) return true;
+	// One function, the callback of a hook that is itself in no function: a top-level hook.
+	if (fns.length > 1) return false;
+	const hook = (fns[0] as ts.Node).parent;
+	if (hook === undefined || !ts.isCallExpression(hook)) return false;
+	const name = dotted(hook.expression);
+	return name === "beforeEach" || name === "beforeAll";
+}
+
+/**
+ * What a fake-timer call fakes: null for everything (no options, or no `toFake`), else the names in
+ * its literal `toFake` list. Options that are not literal fake nothing here, so their hits count.
+ */
+function faked(call: ts.CallExpression): Set<string> | null {
+	const [options] = call.arguments;
+	if (options === undefined) return null;
+	if (!ts.isObjectLiteralExpression(options)) return new Set();
+	let list: ts.Expression | undefined;
+	for (const p of options.properties) {
+		if (ts.isSpreadAssignment(p)) return new Set();
+		if (
+			ts.isPropertyAssignment(p) &&
+			(ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) &&
+			p.name.text === "toFake"
+		)
+			list = p.initializer;
+		else if (ts.isShorthandPropertyAssignment(p) && p.name.text === "toFake") return new Set();
+	}
+	if (list === undefined) return null;
+	if (!ts.isArrayLiteralExpression(list)) return new Set();
+	const names = new Set<string>();
+	for (const e of list.elements) {
+		if (!ts.isStringLiteralLike(e)) return new Set();
+		names.add(e.text);
+	}
+	return names;
 }
 
 /**
@@ -164,21 +238,28 @@ export function scan(file: string, source: string): Hit[] {
 		);
 	}
 	const lines = source.split("\n");
-	const found: Array<{ node: ts.Node; shape: Shape; clockDate?: boolean }> = [];
-	let fake = false;
+	// `api` is what a fake must cover to accept the hit: the timer for a sleep, `Date` for Date.now.
+	const found: Array<{ node: ts.Node; shape: Shape; api?: string }> = [];
+	// What every file-level fake covers (null: everything), or undefined with no file-level fake.
+	// Two file-level fakes cover what both do.
+	let fakes: Set<string> | null | undefined;
 	const visit = (node: ts.Node): void => {
 		if (ts.isCallExpression(node)) {
 			const name = dotted(node.expression);
-			if (name === "vi.useFakeTimers" || name === "jest.useFakeTimers") fake = true;
-			if (sleeps(node)) found.push({ node, shape: "sleep" });
+			if ((name === "vi.useFakeTimers" || name === "jest.useFakeTimers") && fileLevel(node)) {
+				const these = faked(node);
+				if (fakes === undefined || fakes === null) fakes = these;
+				else if (these !== null) fakes = new Set([...fakes].filter((n) => these.has(n)));
+			}
+			const timer = sleeps(node);
+			if (timer !== undefined) found.push({ node, shape: "sleep", api: timer });
 			if (
 				name === "performance.now" ||
 				name === "process.hrtime" ||
 				name === "process.hrtime.bigint"
 			)
 				found.push({ node, shape: "clock" });
-			if (name === "Date.now" && measures(node))
-				found.push({ node, shape: "clock", clockDate: true });
+			if (name === "Date.now" && measures(node)) found.push({ node, shape: "clock", api: "Date" });
 			const callee = root(node.expression);
 			const last = node.arguments[node.arguments.length - 1];
 			if (
@@ -200,9 +281,11 @@ export function scan(file: string, source: string): Hit[] {
 		ts.forEachChild(node, visit);
 	};
 	visit(sf);
-	return found.map(({ node, shape, clockDate }) => {
+	const covers = (api: string | undefined): boolean =>
+		api !== undefined && fakes !== undefined && (fakes === null || fakes.has(api));
+	return found.map(({ node, shape, api }) => {
 		const line = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line;
-		const byFakeClock = fake && (shape === "sleep" || clockDate === true);
+		const byFakeClock = covers(api);
 		return { file, line: line + 1, shape, accepted: byFakeClock || annotated(lines, line) };
 	});
 }
