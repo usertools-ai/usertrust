@@ -62,6 +62,24 @@ test("text in a string or a comment is not code", () => {
 	assert.deepEqual(shapes("// setTimeout(r, 20)\n/* it('x', f, 9000) */"), []);
 });
 
+test("a .ts file is parsed as TypeScript: a generic arrow does not hide what follows it", () => {
+	const source = "const pick = <T>(st: T) => st;\nawait vi.waitFor(check, { timeout: 500 });";
+	assert.deepEqual(shapes(source), ["2:timeout"]);
+	assert.deepEqual(
+		scan("packages/a/tests/x.test.tsx", "const el = <div>{n}</div>;\nsetTimeout(r, 20);").map(
+			(h) => `${h.line}:${h.shape}`,
+		),
+		["2:sleep"],
+	);
+});
+
+test("a file that does not parse throws, naming it, rather than reporting nothing", () => {
+	assert.throws(
+		() => scan(F, "it('x', () => {\nsetTimeout(r, 20);"),
+		/x\.test\.ts:\d+: does not parse/,
+	);
+});
+
 test("fake timers accept sleeps and Date.now, never performance.now or a timeout", () => {
 	const source = [
 		"vi.useFakeTimers();",

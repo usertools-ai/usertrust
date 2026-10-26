@@ -144,9 +144,21 @@ function annotated(lines: string[], line: number): boolean {
 	return false;
 }
 
-/** Every wall-clock threshold in one file's source. Lines are 1-based. */
+/**
+ * Every wall-clock threshold in one file's source. Lines are 1-based. The parser follows the
+ * file's extension (a `.ts` file read as TSX takes `<T>(x: T) =>` for JSX and loses what
+ * follows), and a file that does not parse throws rather than reporting nothing.
+ */
 export function scan(file: string, source: string): Hit[] {
-	const sf = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+	const sf = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
+	const errors = (sf as unknown as { parseDiagnostics: ts.Diagnostic[] }).parseDiagnostics;
+	if (errors.length > 0) {
+		const first = errors[0] as ts.Diagnostic;
+		const line = sf.getLineAndCharacterOfPosition(first.start ?? 0).line + 1;
+		throw new Error(
+			`${file}:${line}: does not parse (${ts.flattenDiagnosticMessageText(first.messageText, " ")})`,
+		);
+	}
 	const lines = source.split("\n");
 	const found: Array<{ node: ts.Node; shape: Shape; clockDate?: boolean }> = [];
 	let fake = false;
