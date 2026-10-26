@@ -1045,6 +1045,28 @@ describe("the model a hold names is the session's own", () => {
 		]);
 	});
 
+	it("a session's switches are read only from a directory no one else can write, beside a private session-models", async () => {
+		await sessionStart(HAIKU);
+		const recorded = await runHook(
+			SWITCH,
+			{
+				session_id: SESSION,
+				hook_event_name: "PostModelSwitch",
+				from_model: HAIKU,
+				to_model: OPUS,
+				source: "command",
+			},
+			env,
+		);
+		expect(recorded.code).toBe(0);
+		// Only the switch directory is writable by the group: the session's own records stay
+		// readable, and a switch read from there could have been planted, nor can its absence be
+		// trusted (it may hide a switch to a dearer model), so never SessionStart's cheaper model.
+		await chmod(join(stateDir, "transcripts", "session-models", `${SESSION}.switches`), 0o770);
+		await pre("tu_1");
+		expect(authorizes()).toMatchObject([{ model: "unknown", params: { modelSource: "unknown" } }]);
+	});
+
 	it("SessionStart's model as an object is read by its id, and an omitted one leaves the earlier record", async () => {
 		await sessionStart({ id: OPUS, display_name: "Opus" });
 		await sessionStart();
