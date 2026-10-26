@@ -775,9 +775,24 @@ async function agentTypeFor(transcriptPath, agentId, hinted) {
  * makes transcript accounting unavailable for this run.
  */
 async function privateStateDir() {
-	const dir = join(stateRoot(), "transcripts");
+	return privateDir("transcripts");
+}
+
+/**
+ * <state>/<name>, made and checked as `privateStateDir` is. With `create: false` (a read) it is
+ * only checked, and a missing one is unavailable: a read never makes a directory. A nested name
+ * (`transcripts/session-models`) is checked level by level, its parent first: nothing is made in,
+ * or trusted from, a directory that fails the checks itself.
+ */
+async function privateDir(name, { create = true } = {}) {
+	const parent = dirname(name);
+	if (parent !== ".") {
+		const above = await privateDir(parent, { create });
+		if (!above.ok) return above;
+	}
+	const dir = join(stateRoot(), name);
 	try {
-		await mkdir(dir, { recursive: true, mode: 0o700 });
+		if (create) await mkdir(dir, { recursive: true, mode: 0o700 });
 		const info = await lstat(dir);
 		if (!info.isDirectory()) return { ok: false, reason: "state dir is not a directory" };
 		if (typeof process.getuid === "function" && info.uid !== process.getuid()) {
@@ -1394,6 +1409,16 @@ function foldLine(cursor, bytes, since, seen) {
 	} catch {
 		return false;
 	}
+	// Which model the agent runs, from EVERY response read, before anything decides whether its
+	// usage is posted: one from before metering, or one already accounted, is never billed again,
+	// but a hold names its model (`holdModelFor`). Lines are read in file order, so a read that
+	// reaches the end, a reread from zero after a truncation included, ends on the newest. A
+	// response whose model is missing or unusable makes it `unknown`, never an older response's
+	// (which may be cheaper); the `<synthetic>` placeholder names no model, and changes nothing.
+	if (isObject(entry?.message?.usage)) {
+		const responseModel = modelId(entry.message.model);
+		if (responseModel !== SYNTHETIC_MODEL) cursor.lastModel = responseModel ?? UNKNOWN_MODEL;
+	}
 	// Written before this session was first metered: never posted (`sessionFirstRun`), and
 	// counted once per response, to be declared (`recordPreMetering`).
 	if (Date.parse(entry?.timestamp) < since) {
@@ -1484,7 +1509,6 @@ function foldLine(cursor, bytes, since, seen) {
 		m.cacheWriteTokens,
 	);
 	if (message.stop_reason != null) m.complete = true;
-	if (named) cursor.lastModel = model;
 	return true;
 }
 
@@ -1759,6 +1783,504 @@ export async function stampFirstRun(sessionId) {
 }
 
 /**
+ * Under the state dir, beside the other per-session transcript state: the model Claude Code
+ * reported for each session (`recordSessionModel`), its latest switch (`recordModelSwitch`), and
+ * which agents have read a response (`markSeen`).
+ */
+const SESSION_MODEL_DIR = join("transcripts", "session-models");
+
+/** `lastSwitch`'s answer when a switch may be recorded but cannot be read. */
+const SWITCH_UNREADABLE = Symbol("switch unreadable");
+
+/** A session's model switches (`recordModelSwitch`): one record per hook run, never overwritten. */
+const switchDir = (sessionId) => join(SESSION_MODEL_DIR, `${sanitize(sessionId)}.switches`);
+
+/**
+ * A session's switch run that left no evidence in its directory (`markSessionSwitchFailed`): beside
+ * SessionStart's record, which it replaces. A sanitized session id holds no dot, so it names no
+ * other session's file.
+ */
+const sessionSwitchFailed = (sessionId) => `${sanitize(sessionId)}.switch-failed`;
+
+/**
+ * How far apart two switch records can be and still have landed out of order. A hook writes its
+ * record within its own timeout (5 s, hooks/model-switch.json), so an earlier switch whose record
+ * lands after a later one's lies within that of it. Twice that, for margin.
+ */
+const SWITCH_OVERLAP_MS = 10_000;
+
+/** More switch records than this in one session's directory are not read: `SWITCH_UNREADABLE`. */
+const MAX_SWITCH_RECORDS = 256;
+
+/** `newestTranscriptModel`'s answers that name no model: the file is missing, or holds no response. */
+const TRANSCRIPT_MISSING = Symbol("transcript missing");
+const NO_RESPONSE = Symbol("no response");
+/** `newestTranscriptModel`'s answer when the file cannot be inspected: no model can be told. */
+const UNINSPECTABLE = Object.freeze({ model: UNKNOWN_MODEL, at: Number.NaN });
+
+/**
+ * Record the model Claude Code reports for a session: SessionStart's `model`, "the active
+ * model identifier", which it may omit (https://code.claude.com/docs/en/hooks#sessionstart-input).
+ * An omitted or unusable one leaves any earlier record as it is. Local, bounded, and it never
+ * throws: a session with no record has one source fewer (`holdModelFor`).
+ */
+export async function recordSessionModel(sessionId, model) {
+	try {
+		const id = modelId(model);
+		if (typeof sessionId !== "string" || sessionId === "") return;
+		if (id === null || id === SYNTHETIC_MODEL || id === UNKNOWN_MODEL) return;
+		const dir = await privateDir(SESSION_MODEL_DIR);
+		if (!dir.ok) return;
+		await writeAtomic(join(dir.dir, sanitize(sessionId)), id);
+	} catch {
+		// The next hold resolves without it.
+	}
+}
+
+/**
+ * The model recorded for a session (`recordSessionModel`), or null. Read only from a directory
+ * that passes `privateDir`'s checks, as it is written: an id planted where others can write
+ * would price a hold at a model of their choosing.
+ */
+async function sessionModel(sessionId) {
+	if (typeof sessionId !== "string" || sessionId === "") return null;
+	try {
+		const dir = await privateDir(SESSION_MODEL_DIR, { create: false });
+		if (!dir.ok) return null;
+		const text = await readRegular(join(dir.dir, sanitize(sessionId)), READ_BOUND.small);
+		const id = modelId(text);
+		return id === UNKNOWN_MODEL ? null : id;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Record a switch of the session's model: PostModelSwitch's `to_model`, "the model ID the switch
+ * changes to", with when this hook saw it (https://code.claude.com/docs/en/hooks#postmodelswitch).
+ * Claude Code runs it after every change of the session's model: one requested, an automatic
+ * fallback, a plan-mode setting, a resume. Each run writes a record of its own, so two runs that
+ * overlap never replace each other's (`lastSwitch` reads them together); records too old to matter
+ * are then removed. An unusable `to_model` records nothing. Local, bounded, and it never throws.
+ *
+ * A record is evidence only once its write COMPLETED: it is written whole and renamed into place
+ * (`writeAtomic`), and the run marks itself `.pending` first, removing the mark only after. A
+ * write that fails leaves the switch unrecorded, and the previous record would then read as the
+ * session's model: so a failed run leaves a `.failed` mark, or, when even that cannot be written
+ * (a full disk), renames the records there are to `.failed` (a rename needs no space). With neither
+ * (no record yet to rename), its `.pending` mark is kept as the evidence. `lastSwitch` reads any
+ * mark as unreadable, `unknown`, until a later run's record completes and clears it, and reads a
+ * directory with no record in it the same way. A run that leaves no evidence there at all (its
+ * directory not made, or not even its `.pending` mark written) marks the SESSION instead
+ * (`markSessionSwitchFailed`), which `lastSwitch` reads as unreadable too, on every path.
+ */
+export async function recordModelSwitch(sessionId, model) {
+	const id = modelId(model);
+	if (typeof sessionId !== "string" || sessionId === "") return;
+	if (id === null || id === SYNTHETIC_MODEL || id === UNKNOWN_MODEL) return;
+	let dir;
+	try {
+		dir = await privateDir(switchDir(sessionId));
+	} catch {
+		dir = { ok: false };
+	}
+	if (!dir.ok) {
+		await markSessionSwitchFailed(sessionId);
+		return;
+	}
+	const at = Date.now();
+	const base = `${at}.${process.pid}.${randomBytes(6).toString("hex")}`;
+	const pending = join(dir.dir, `${base}.pending`);
+	let marked = false;
+	try {
+		await writeFile(pending, "", { flag: "wx", mode: 0o600 });
+		marked = true;
+		await writeAtomic(join(dir.dir, `${base}.json`), JSON.stringify({ model: id, at }));
+	} catch {
+		// A failure mark stands in for the `.pending` one, which would read as a live writer. With
+		// none recorded (a full disk, no record to rename), the `.pending` mark is the only evidence
+		// of the switch: kept, it reads `unknown` until a later run prunes it. Without even that,
+		// the session is marked.
+		if (await markSwitchFailed(dir.dir, base)) await unlink(pending).catch(() => {});
+		else if (!marked) await markSessionSwitchFailed(sessionId);
+		return;
+	}
+	// The record is complete. A mark already gone was cleared by a newer run, never a failure.
+	await unlink(pending).catch(() => {});
+	try {
+		for (const other of await readdir(dir.dir)) {
+			const recorded = Number.parseInt(other, 10);
+			// Superseded: a record too old to overlap this one, a failure mark a run before this one
+			// left, and a `.pending` mark of a run too old to be still writing (a run writes within its
+			// hook's timeout, well inside the overlap window). A younger one is a live writer's: kept.
+			const stale = other.endsWith(".json")
+				? recorded < at - SWITCH_OVERLAP_MS
+				: other.endsWith(".failed")
+					? recorded < at
+					: other.endsWith(".pending") && recorded < at - SWITCH_OVERLAP_MS;
+			if (stale) await unlink(join(dir.dir, other)).catch(() => {});
+		}
+	} catch {
+		// Pruning is housekeeping: the record stands.
+	}
+}
+
+/**
+ * A switch run that left no evidence in its own directory (a full disk): the session's state would
+ * read as no switch, so a transcript response or SessionStart's record from before it (which may
+ * name the cheaper model) would price the session's holds (`holdModelFor`). SessionStart's record
+ * is renamed to the session's failure mark (a rename needs no space), else the mark is written,
+ * and it is dated now (`utimes` needs no space either). `lastSwitch` reads it as unreadable until a
+ * switch is recorded after that date. Nothing removes it: a run that removed a mark it found older
+ * could remove one a later failing run had just re-dated, the only evidence of that switch. When
+ * neither the rename nor the mark's write succeeds, SessionStart's record is removed, so the
+ * session reads as having no model. With no record to rename and no room for the mark, nothing
+ * records the switch. Never throws.
+ */
+async function markSessionSwitchFailed(sessionId) {
+	try {
+		const dir = await privateDir(SESSION_MODEL_DIR, { create: false });
+		if (!dir.ok) return;
+		const record = join(dir.dir, sanitize(sessionId));
+		const mark = join(dir.dir, sessionSwitchFailed(sessionId));
+		try {
+			await rename(record, mark);
+		} catch (error) {
+			// No record to rename: the mark is written, or kept as an earlier run left it.
+			await writeFile(mark, "", { flag: "wx", mode: 0o600 }).catch(() => {});
+			// The rename itself can want space (the longer name may grow the directory). With no mark
+			// standing, SessionStart's record is removed (an unlink needs none), so it prices nothing.
+			const standing = await lstat(mark).then(
+				() => true,
+				() => false,
+			);
+			if (error?.code !== "ENOENT" && !standing) await unlink(record).catch(() => {});
+		}
+		const now = new Date();
+		await utimes(mark, now, now).catch(() => {});
+	} catch {
+		// Nothing more can be done.
+	}
+}
+
+/**
+ * How much later than a session's mark (`markSessionSwitchFailed`) a switch must be recorded to
+ * supersede it. A filesystem may store an mtime coarsely, rounded down (HFS+ to the second, FAT to
+ * two), so the failure may have come up to this long after the date its mark reads: a record inside
+ * that window may predate the failure, and the tie goes to the mark (fail dearest). Both sides are
+ * the wall clock in epoch ms: a record's `at` is `Date.now()`, and the mark is dated `new Date()`.
+ */
+const MARK_RESOLUTION_MS = 2_000;
+
+/**
+ * When the session was last marked (`markSessionSwitchFailed`), in epoch ms; null when it never
+ * was; `SWITCH_UNREADABLE` when that cannot be told, since then no switch state can be trusted.
+ */
+async function sessionSwitchMark(sessionId) {
+	try {
+		const dir = await privateDir(SESSION_MODEL_DIR, { create: false });
+		if (!dir.ok) return dir.reason.includes("ENOENT") ? null : SWITCH_UNREADABLE;
+		return (await lstat(join(dir.dir, sessionSwitchFailed(sessionId)))).mtimeMs;
+	} catch (err) {
+		return err?.code === "ENOENT" ? null : SWITCH_UNREADABLE;
+	}
+}
+
+/**
+ * A switch run that could not record its switch: leave state that reads `unknown`. True when a
+ * failure mark was written or a record renamed to one, false when nothing was. Never throws.
+ */
+async function markSwitchFailed(dir, base) {
+	try {
+		await writeFile(join(dir, `${base}.failed`), "", { flag: "wx", mode: 0o600 });
+		return true;
+	} catch {
+		// Not even an empty file could be written: rename what is there instead.
+	}
+	let marked = false;
+	try {
+		for (const other of await readdir(dir)) {
+			if (other.endsWith(".json")) {
+				try {
+					await rename(join(dir, other), join(dir, `${other}.failed`));
+					marked = true;
+				} catch {
+					// That record stays as it is; any other renamed still marks the failure.
+				}
+			}
+		}
+	} catch {
+		// Nothing more can be done here: the caller keeps its `.pending` mark.
+	}
+	return marked;
+}
+
+/**
+ * The session's latest switch (`recordModelSwitch`) as `{ models, at }`: `at` the newest record's
+ * time, and `models` every model recorded within `SWITCH_OVERLAP_MS` of it, since records that
+ * close may have landed out of order. One model means the session's model is known; more mean the
+ * latest switch is ambiguous. Null when none is recorded, or `SWITCH_UNREADABLE` when one may be
+ * but cannot be read (fail dearest): a session marked by a run that could record nothing
+ * (`markSessionSwitchFailed`) with no switch recorded since, a directory that fails `privateDir`'s
+ * checks for any reason but ENOENT, more than `MAX_SWITCH_RECORDS`, or a record that cannot be
+ * read or does not parse. A record still being written (`.tmp`) is not yet one.
+ */
+async function lastSwitch(sessionId) {
+	if (typeof sessionId !== "string" || sessionId === "") return null;
+	const marked = await sessionSwitchMark(sessionId);
+	if (marked === SWITCH_UNREADABLE) return marked;
+	const read = await readSwitchDir(sessionId);
+	// A switch the session's mark records, unless a switch recorded after it supersedes it.
+	if (
+		marked !== null &&
+		(read === null || (typeof read === "object" && read.at < marked + MARK_RESOLUTION_MS))
+	) {
+		return SWITCH_UNREADABLE;
+	}
+	return read;
+}
+
+/** `lastSwitch`'s reading of the session's switch directory alone. */
+async function readSwitchDir(sessionId) {
+	const dir = await privateDir(switchDir(sessionId), { create: false });
+	if (!dir.ok) return dir.reason.includes("ENOENT") ? null : SWITCH_UNREADABLE;
+	// A record listed and then gone was removed by a newer run (`recordModelSwitch`), whose own
+	// record the listing may have missed: never read as no switch, the directory is listed again.
+	for (let attempt = 0; attempt < SWITCH_READ_ATTEMPTS; attempt += 1) {
+		const read = await readSwitches(dir.dir);
+		if (read !== RECORD_GONE) return read;
+	}
+	return SWITCH_UNREADABLE;
+}
+
+/** `readSwitches`' answer when a record it listed is gone before it is read. */
+const RECORD_GONE = Symbol("record gone");
+
+/** How many times `lastSwitch` lists a directory whose records keep going. */
+const SWITCH_READ_ATTEMPTS = 3;
+
+/** One listing of a session's switch records, as `lastSwitch` answers, or `RECORD_GONE`. */
+async function readSwitches(dir) {
+	let names;
+	try {
+		names = (await readdir(dir)).filter((name) => !name.endsWith(".tmp"));
+		// A switch run in progress, or one whose write did not complete (`recordModelSwitch`): no
+		// record can be trusted as current, so `unknown`.
+		if (names.some((name) => name.endsWith(".pending") || name.endsWith(".failed"))) {
+			return SWITCH_UNREADABLE;
+		}
+		// The directory is made only by a switch run, and a run whose record completes leaves it
+		// there: empty, it is a run that could write nothing (a full disk) or one still starting.
+		if (names.length === 0) return SWITCH_UNREADABLE;
+	} catch {
+		return SWITCH_UNREADABLE;
+	}
+	if (names.length > MAX_SWITCH_RECORDS) return SWITCH_UNREADABLE;
+	const records = [];
+	for (const name of names) {
+		let text;
+		try {
+			text = await readRegular(join(dir, name), READ_BOUND.small);
+		} catch (err) {
+			return err?.code === "ENOENT" ? RECORD_GONE : SWITCH_UNREADABLE;
+		}
+		let record;
+		try {
+			record = JSON.parse(text);
+		} catch {
+			return SWITCH_UNREADABLE;
+		}
+		const id = modelId(record?.model);
+		if (id === null || id === UNKNOWN_MODEL || !Number.isSafeInteger(record.at)) {
+			return SWITCH_UNREADABLE;
+		}
+		records.push({ model: id, at: record.at });
+	}
+	if (records.length === 0) return null;
+	const at = Math.max(...records.map((record) => record.at));
+	const models = new Set(
+		records.filter((record) => record.at >= at - SWITCH_OVERLAP_MS).map((record) => record.model),
+	);
+	return { models, at };
+}
+
+/**
+ * A transcript line's response, as `{ model, at }`: its model id, `unknown` when unusable, and its
+ * `timestamp` in epoch ms (NaN when it has none); or undefined when it is no response. A complete
+ * line that holds the `"usage"` key but does not parse is `unknown`, never passed over for an older
+ * response: that key cannot occur inside escaped JSON text, so such a line is a corrupt response.
+ * (A line still being written never gets here: `newestTranscriptModel`.)
+ */
+function responseModelOf(line) {
+	if (!line.includes(USAGE_FIELD)) return undefined;
+	let entry;
+	try {
+		entry = JSON.parse(line.toString("utf-8"));
+	} catch {
+		return { model: UNKNOWN_MODEL, at: Number.NaN };
+	}
+	if (!isObject(entry?.message?.usage)) return undefined;
+	const id = modelId(entry.message.model);
+	// The `<synthetic>` placeholder is no response of any model.
+	if (id === SYNTHETIC_MODEL) return undefined;
+	return { model: id ?? UNKNOWN_MODEL, at: Date.parse(entry.timestamp) };
+}
+
+/**
+ * The NEWEST response in a transcript (`responseModelOf`'s `{ model, at }`), scanned BACKWARD from
+ * its end in `READ_CHUNK_BYTES` chunks, so a response line of any size the ingest accepts is read
+ * whole:
+ * - the newest complete response line, its model `unknown` when it names no usable one (never an
+ *   older response's, which may be cheaper);
+ * - `UNINSPECTABLE`, an `unknown` model, when the transcript cannot be inspected: unreadable for any
+ *   reason but ENOENT, a final line its newline has not yet ended (still being written, whatever it
+ *   holds), a line over `MAX_LINE_BYTES`, or `MAX_READ_BYTES` scanned without reaching its start;
+ * - `NO_RESPONSE` only after a read back to its first byte found no response;
+ * - `TRANSCRIPT_MISSING` when it does not exist (ENOENT).
+ * Nothing here is posted.
+ */
+async function newestTranscriptModel(path) {
+	let handle;
+	try {
+		({ handle } = await openRegular(path));
+	} catch (err) {
+		return err?.code === "ENOENT" ? TRANSCRIPT_MISSING : UNINSPECTABLE;
+	}
+	try {
+		const { size } = await handle.stat();
+		let end = size;
+		// The bytes before the first newline seen so far: a line whose start lies further back.
+		let carry = Buffer.alloc(0);
+		while (end > 0) {
+			if (size - end >= MAX_READ_BYTES) return UNINSPECTABLE;
+			const start = Math.max(0, end - READ_CHUNK_BYTES);
+			const chunk = Buffer.alloc(end - start);
+			let read = 0;
+			while (read < chunk.length) {
+				const { bytesRead } = await handle.read(chunk, read, chunk.length - read, start + read);
+				if (bytesRead === 0) return UNINSPECTABLE;
+				read += bytesRead;
+			}
+			// Only a line its newline has ended is evidence. A final one without it is still being
+			// written (Claude Code appends asynchronously), whatever it holds so far, parsed or not and
+			// with or without its `"usage"` key: the response it will be cannot be told yet.
+			if (end === size && chunk[chunk.length - 1] !== 0x0a) return UNINSPECTABLE;
+			const buffer = carry.length === 0 ? chunk : Buffer.concat([chunk, carry]);
+			// Newest first: every line after a newline is whole.
+			let stop = buffer.length;
+			let newline = stop > 0 ? buffer.lastIndexOf(0x0a, stop - 1) : -1;
+			while (newline !== -1) {
+				const found = responseModelOf(buffer.subarray(newline + 1, stop));
+				if (found !== undefined) return found;
+				stop = newline;
+				newline = stop > 0 ? buffer.lastIndexOf(0x0a, stop - 1) : -1;
+			}
+			carry = buffer.subarray(0, stop);
+			if (carry.length > MAX_LINE_BYTES) return UNINSPECTABLE;
+			end = start;
+		}
+		// At its first byte: the carry is the transcript's first line.
+		return responseModelOf(carry) ?? NO_RESPONSE;
+	} catch {
+		return UNINSPECTABLE;
+	} finally {
+		await handle.close().catch(() => {});
+	}
+}
+
+/** The marker that a hold of this agent has read a response from its transcript (`holdModelFor`). */
+const seenName = (sessionId, agentId) => `${sanitize(sessionId)}__${agentId}.seen`;
+
+/** Record, once, that a hold of this agent read a response from its transcript. Never throws. */
+async function markSeen(sessionId, agentId) {
+	try {
+		const dir = await privateDir(SESSION_MODEL_DIR);
+		if (!dir.ok) return;
+		await writeFile(join(dir.dir, seenName(sessionId, agentId)), "", { flag: "wx", mode: 0o600 });
+	} catch {
+		// Recorded already (EEXIST), or not now: the cursor is the other record of it.
+	}
+}
+
+/** Whether `markSeen` recorded this agent; true when that cannot be told (fail dearest). */
+async function seenBefore(sessionId, agentId) {
+	const dir = await privateDir(SESSION_MODEL_DIR, { create: false });
+	if (!dir.ok) return !dir.reason.includes("ENOENT");
+	try {
+		await lstat(join(dir.dir, seenName(sessionId, agentId)));
+		return true;
+	} catch (err) {
+		return err?.code !== "ENOENT";
+	}
+}
+
+/**
+ * The model a hold is authorized at when no transcript window names one: every estimate hold,
+ * a transcript hold with no window, and PostToolUse's replacement of an expired hold. Never a
+ * configured or built-in default, which priced an Opus session's holds at a cheaper model's
+ * rate, and never a model cheaper than the one the session might be using NOW:
+ *  1. the newest response in the agent's transcript (`newestTranscriptModel`): only the file is
+ *     always current (a cursor lags it while another hook holds the agent's lock, or when a read
+ *     stopped before the end). In estimate mode too (`UT_CC_USAGE=estimate`, or an agent that
+ *     settles at the estimate): only that response's model id is read, never its usage, which is
+ *     still estimated. A newest response with no usable model, or a transcript that cannot be
+ *     inspected, is `unknown`. The file may LAG: Claude Code writes it asynchronously, so it "may
+ *     not yet include the current turn's most recent messages when a hook fires"
+ *     (https://code.claude.com/docs/en/hooks#common-input-fields). So when the session's latest
+ *     model switch (`recordModelSwitch`) names another model than that response, or is ambiguous
+ *     (two hook runs that overlapped name different models), and the response is not dated after
+ *     the switch (or bears no date), the response may predate it: `unknown`,
+ *     never the cheaper of the two, and never the switch's model either, since a one-turn
+ *     fallback model can serve a turn without a switch. A switch record that cannot be read is
+ *     `unknown` too. It counts for every agent of the session: an automatic fallback changes the
+ *     session's model;
+ *  2. with no response to read (the transcript is missing, holds none, or no path names it), the
+ *     model of the session's latest switch (`unknown` when it is ambiguous), else the one Claude
+ *     Code reported for the session at
+ *     SessionStart (`recordSessionModel`), for the MAIN agent only: it is the session's model,
+ *     and a subagent may run a dearer one (Claude Code's
+ *     SubagentStart input names no model, https://code.claude.com/docs/en/hooks#subagentstart-input,
+ *     and the Agent tool's `resolvedModel` arrives only once the subagent has finished). And ONLY
+ *     while it is provably current: before this agent has read anything (its cursor has read no
+ *     byte and names no model, and no hold of it has read a response, `markSeen`). After that a
+ *     switch may have happened since, so the transcript gone, or never named, is `unknown`;
+ *  3. `unknown`: the server prices an id it does not know at the dearest rate it publishes (core
+ *     pricing.ts `FALLBACK_RATE`) and marks the receipt `rateSource: "fallback"`.
+ * `readBefore` is whether this agent's cursor has read a byte; `lastModel`, the model it last
+ * read. Returns `{ model, source }`, `source` being `transcript`, `session` or `unknown`: what the
+ * hold's `params.modelSource` says. Never throws.
+ */
+export async function holdModelFor({ sessionId, agentId, input, lastModel, readBefore = false }) {
+	const unknown = { model: UNKNOWN_MODEL, source: "unknown" };
+	if (!isAgentId(agentId)) return unknown;
+	const path = transcriptPathFor(input ?? {}, agentId);
+	const switched = await lastSwitch(sessionId);
+	if (path !== undefined) {
+		const newest = await newestTranscriptModel(path);
+		if (typeof newest === "object") {
+			await markSeen(sessionId, agentId);
+			if (newest.model === UNKNOWN_MODEL || switched === SWITCH_UNREADABLE) return unknown;
+			// NaN (no date) is never after the switch. Before it, only the one model the session
+			// switched to is taken: another model, or an ambiguous switch, is `unknown`.
+			const current = switched?.models.size === 1 && switched.models.has(newest.model);
+			if (switched !== null && !(newest.at > switched.at) && !current) return unknown;
+			return { model: newest.model, source: "transcript" };
+		}
+	}
+	const read =
+		readBefore === true || modelId(lastModel) !== null || (await seenBefore(sessionId, agentId));
+	if (read || agentId !== "main" || switched === SWITCH_UNREADABLE) return unknown;
+	if (switched !== null) {
+		return switched.models.size === 1
+			? { model: [...switched.models][0], source: "session" }
+			: unknown;
+	}
+	const reported = await sessionModel(sessionId);
+	if (reported !== null) return { model: reported, source: "session" };
+	return unknown;
+}
+
+/**
  * Why an agent's estimate mode is recorded, or null when it is not. A marker that
  * cannot be read throws: an agent that may be in estimate mode posts nothing.
  */
@@ -1896,7 +2418,12 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 			// A cursor from before the marker: record it now.
 			return stickToEstimate(where, peek.cursor.estimateReason ?? "transcript unreadable", false);
 		}
-		return { kind: "busy", lastModel: peek.cursor.lastModel, transcriptPath };
+		return {
+			kind: "busy",
+			lastModel: peek.cursor.lastModel,
+			readBefore: peek.cursor.byteOffset > 0,
+			transcriptPath,
+		};
 	}
 	try {
 		// Again under the lock: a hook that recorded estimate mode since the check
@@ -2016,7 +2543,7 @@ export async function prepareWindow({
 		return { mode: opened.kind, reason: opened.reason, becameSticky: opened.becameSticky === true };
 	}
 	const none = async () => {};
-	const empty = (lastModel, agentType) => ({
+	const empty = (lastModel, agentType, readBefore) => ({
 		mode: "transcript",
 		window: null,
 		key: null,
@@ -2024,6 +2551,7 @@ export async function prepareWindow({
 		agentTypeRaw: agentType.raw,
 		principal: principalFor(sessionId, agentId, agentType.raw),
 		lastModel,
+		readBefore,
 		commit: none,
 		settledElsewhere: none,
 		abandon: none,
@@ -2033,6 +2561,7 @@ export async function prepareWindow({
 		return empty(
 			opened.lastModel,
 			await agentTypeFor(opened.transcriptPath, agentId, agentTypeHint),
+			opened.readBefore,
 		);
 	}
 	const { cursor } = opened;
@@ -2061,7 +2590,7 @@ export async function prepareWindow({
 	} catch (err) {
 		await opened.release();
 		say(`usertrust: transcript window skipped — ${errText(err)}`);
-		return empty(cursor.lastModel, agentType);
+		return empty(cursor.lastModel, agentType, cursor.byteOffset > 0);
 	}
 	let decided = false;
 	const key = window === null ? null : vehicleKey(sessionId, agentId, window.ids);
@@ -2073,6 +2602,7 @@ export async function prepareWindow({
 		agentTypeRaw: agentType.raw,
 		principal: principalFor(sessionId, agentId, agentType.raw),
 		lastModel: cursor.lastModel,
+		readBefore: cursor.byteOffset > 0,
 		async commit(transferId) {
 			if (window === null || decided) return;
 			decided = true;
