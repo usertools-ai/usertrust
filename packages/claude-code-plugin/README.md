@@ -91,8 +91,7 @@ Either way, a session reads its settings once, at its first hook: see
 | `UT_CC_MODE`         | `watch`                  | `enforce` (matched case-insensitively) blocks over-budget calls; any other value is watch-only (see [Modes](#modes-watch-only-by-default)) |
 | `UT_CC_UNIT`         | unset                    | The principal's `unit`, e.g. `platform` (see *Attribution*) |
 | `UT_CC_ROLE`         | unset                    | The principal's `role`, e.g. `release-engineer` (see *Attribution*) |
-| `UT_CC_MODEL`        | `claude-sonnet-4-6`      | Model for an estimate hold before any transcript model is known |
-| `UT_CC_USAGE`        | `transcript`             | `estimate` settles per-call estimates only       |
+| `UT_CC_USAGE`        | `transcript`             | `estimate` settles per-call estimates only: it reads the transcript tail for the model id only; usage is always estimated |
 | `UT_CC_STATE_DIR`    | `~/.claude/usertrust-cc` | Pending holds, and what was already posted (keep it; see below) |
 | `UT_CC_HOLD_GRACE_MS` | `60000`                 | How much longer than a Bash call's timeout its hold is asked to live, in ms, 0 to 3 600 000 (see [Long tool calls](#long-tool-calls)) |
 | `UT_CC_SEND_CONTENT` | `1`                      | `0` sends `{"redacted":true}` instead of content |
@@ -133,8 +132,7 @@ The path is built from your account's home directory (`os.userInfo().homedir`), 
 | `stateDir`    | yes      |                     | Absolute path of the state dir (`UT_CC_STATE_DIR`)        |
 | `failOpen`    | no       | `false`             | `true`: in enforce mode, calls proceed while governance is down (`UT_FAIL_OPEN`) |
 | `sendContent` | no       | `true`              | `false` sends `{"redacted":true}` instead of content (`UT_CC_SEND_CONTENT`) |
-| `usage`       | no       | `transcript`        | `estimate` settles per-call estimates only (`UT_CC_USAGE`) |
-| `model`       | no       | `claude-sonnet-4-6` | Model for an estimate hold (`UT_CC_MODEL`)                |
+| `usage`       | no       | `transcript`        | `estimate` settles per-call estimates only: it reads the transcript tail for the model id only; usage is always estimated (`UT_CC_USAGE`) |
 | `unit`        | no       | unset               | The principal's `unit` (`UT_CC_UNIT`)                     |
 | `role`        | no       | unset               | The principal's `role` (`UT_CC_ROLE`)                     |
 | `holdGraceMs` | no       | `60000`             | A Bash call's hold life past its timeout, in ms, 0 to 3 600 000 (`UT_CC_HOLD_GRACE_MS`) |
@@ -321,6 +319,43 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   Claude Code's `<synthetic>` placeholder is priced as the model a later entry of
   it names. An id that is not printable text (control or format characters,
   spaces, over 256 characters) is sent as `unknown`, never rewritten into another.
+- **The model a hold names is the session's own.** A hold with no window (an
+  estimate hold, a tool call with nothing new before it, and PostToolUse's fresh hold
+  for an estimate hold that expired) names the model of the newest response in the
+  agent's transcript, scanned back from its end, for the model id only (estimate mode
+  included, whose usage is always estimated): only the file is always current. A
+  newest response whose model is missing or not a usable id, a final line its newline
+  has not yet ended (still being written, whatever it holds so far), a newest
+  response line that does not parse (corrupt), a transcript that cannot be
+  read or inspected (a line over the ingest's limit, or more scanned than it reads),
+  all mean `unknown`. The file can lag the conversation (Claude Code writes it
+  asynchronously), so a `PostModelSwitch` hook records each switch of the session's
+  model (`to_model`, whenever it changes: a `/model`, an automatic fallback, a
+  resume), and a newest response from before the latest switch that names another
+  model means `unknown`, for every agent of the session; one dated after it is the
+  transcript's to say. Each run of the hook keeps a record of its own, and switches
+  recorded within 10 seconds of the newest are read together, since two runs that
+  overlap can land out of order: when they name different models, the switch is
+  ambiguous, and a hold that depends on it means `unknown`. A record counts only once its
+  write completed: a run whose write failed (a full disk, say) leaves a mark that means
+  `unknown`, never the previous record, until a later run's record completes. With no response to read, the hold names the model of the
+  session's latest switch, else the one Claude Code reported at SessionStart (its
+  `model`, which Claude Code may omit), but only for
+  the main agent (it is the session's model, and a subagent may run a dearer one;
+  nothing names a subagent's own model before its first response), and only while
+  that is provably current: before the agent has read anything. After that a switch
+  may have happened since, so a transcript gone or never named means `unknown`.
+  usertrust-server prices `unknown` at the dearest rate it publishes and marks it as a
+  fallback, so a hold is never priced below the model the session may now be using.
+  A fresh hold for an expired one names the model the expired hold was authorized at.
+  The authorize says which it used in `params.modelSource` (`transcript`, `session`,
+  `hold` or `unknown`). The model is not a setting: `UT_CC_MODEL`, or a config file's
+  `model`, is ignored, and SessionStart says so. `PostModelSwitch` needs Claude Code
+  v2.1.251 or later, and is registered in its own file, `hooks/model-switch.json`: an
+  older Claude Code rejects a whole hooks file that names an event it does not know,
+  so there it loses only this hook (and logs that the file failed to load), and every
+  other hook runs. Without it a switch is named by the next response the transcript
+  holds.
 - **Forked subagents.** A forked subagent's transcript begins with a copy of its
   ancestor's entries — the same response ids — so the plugin posts each response
   id from ONE agent only: the first agent to claim it (a file per id under
@@ -397,7 +432,9 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   again, so no usage is ever counted both as an estimate and as real. The switch
   is recorded OUTSIDE the agent's cursor (`$UT_CC_STATE_DIR/transcripts/estimate/`)
   before any estimate is settled, so losing the cursor cannot undo it; if it
-  cannot be recorded, the hold is given back instead. `UT_CC_USAGE=estimate` uses
+  cannot be recorded, the hold is given back instead. In estimate mode the plugin still
+  reads the transcript tail for the model id only (the model a hold names, above);
+  usage is always estimated. `UT_CC_USAGE=estimate` uses
   the estimate for every agent, and records that the same way, so a session
   resumed without it posts nothing it already settled at the estimate. A subagent
   inherits the estimate mode of any agent of its session: a forked subagent's

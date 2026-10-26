@@ -48,7 +48,6 @@ import {
 	breakerOpen,
 	callStart,
 	claimForSettle,
-	defaultModel,
 	endExpiredHold,
 	estimateTokens,
 	failureOutcome,
@@ -82,6 +81,7 @@ import {
 	authorizeLabels,
 	estimatePrincipalFor,
 	estimateReasonFor,
+	holdModelFor,
 	OUTCOME_NOTES,
 	recordHoldOutcome,
 	settleLabels,
@@ -265,6 +265,12 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 	const principal = principalCapable(capabilities)
 		? estimatePrincipalFor(sessionId, agentId, input.agent_type)
 		: undefined;
+	// The replacement is the SAME call's charge, at the model its hold was authorized at; an
+	// older record that names none resolves as a fresh hold would (transcript.mjs `holdModelFor`).
+	const { model, source: modelSource } =
+		typeof entry.holdModel === "string" && entry.holdModel !== ""
+			? { model: entry.holdModel, source: entry.holdModel === "unknown" ? "unknown" : "hold" }
+			: await holdModelFor({ sessionId, agentId, input });
 	// Every replacement authorize, first or retried, leaves the fresh hold's settle its share of the
 	// hook's budget: a hold granted with no time left to settle it would leave the call uncharged.
 	const replacementTimeout = () => Math.min(5000, timeLeft() - RETRY_SETTLE_RESERVE_MS);
@@ -276,7 +282,7 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 		return serverRequest(
 			"/v1/authorize",
 			{
-				model: defaultModel(),
+				model,
 				...(typeof usage.inputTokens === "number"
 					? { estimatedInputTokens: usage.inputTokens }
 					: {}),
@@ -285,6 +291,7 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 					hook: "PostToolUse",
 					tool_name: input.tool_name ?? "unknown",
 					replaces: entry.transferId,
+					modelSource,
 				},
 				actor: `claude-code:${sessionId}`,
 				...(principal === undefined ? {} : { principal }),
