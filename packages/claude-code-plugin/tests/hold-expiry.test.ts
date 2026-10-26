@@ -436,6 +436,22 @@ describe("a hold's life, as the server states it", () => {
 		expect(gaps).toHaveLength(1);
 	});
 
+	it("a fresh hold whose settle goes unanswered keeps its own life on its record, for the settle point that meets it", async () => {
+		// The expired hold, then a fresh one that lives 30 s; the fresh hold's settle is never answered,
+		// so its record stays for Stop or SessionEnd, which must know when that hold's life ends.
+		life = [0, 30_000];
+		await pre("tu_1", {}, ESTIMATE);
+		await outlive();
+		slowBy.set("/v1/settle", [8_000]);
+		const before = Date.now();
+		await post("tu_1", {}, ESTIMATE);
+		const after = Date.now();
+		const record = await holdRecord();
+		expect(record.transferId).toBe("tx_2");
+		expect(record.expiresAt as number).toBeGreaterThanOrEqual(before + 30_000);
+		expect(record.expiresAt as number).toBeLessThanOrEqual(after + 30_000);
+	}, 20_000);
+
 	it("a window's hold whose life ends before its settle could arrive is given back, never settled: the window waits", async () => {
 		capabilities = ["hold-expiry", "release"];
 		await runHook(SESSION_START, { session_id: SESSION, source: "startup" }, env);
