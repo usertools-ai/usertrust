@@ -41,5 +41,5 @@ if (!validate(receipt)) {
 No validator handy? The schemas are plain static JSON — fetch one and read `required` / `properties` directly. String formats (`date-time`, `uuid`) are annotations; `ajv-formats` enforces them, other validators may not.
 
 <Callout type="info">
-Schema validation checks shape, not integrity. To prove an audit log is untampered — hash chain, sequence continuity, Merkle root — run the zero-dependency [usertrust-verify](/docs/verify) package against the vault. It works offline.
+Schema validation checks shape, not integrity. To check an audit log's hash chain and sequence continuity, run the zero-dependency [usertrust-verify](/docs/verify) package against the vault. It works offline. Without an external anchor, a log rewritten together with its sidecar still passes; [Verification](/docs/concepts/audit-trail#verification) says what the check does and does not catch.
 </Callout>
