@@ -173,6 +173,30 @@ test("useRealTimers anywhere but a top-level afterEach or afterAll: the file's f
 		assert.deepEqual(shapes([fake, line, "setTimeout(r, 20);"].join("\n")), ["3:sleep"], line);
 });
 
+test("useRealTimers after each test voids a fake set up once: only the first test ran on it", () => {
+	const tests = [
+		'it("a", () => {});',
+		'it("b", async () => { await new Promise((r) => setTimeout(r, 25)); });',
+	];
+	const pairings: Array<[string, string, string[]]> = [
+		["beforeAll(() => vi.useFakeTimers());", "afterEach(() => vi.useRealTimers());", ["4:sleep"]],
+		["vi.useFakeTimers();", "afterEach(() => vi.useRealTimers());", ["4:sleep"]],
+		["beforeEach(() => vi.useFakeTimers());", "afterEach(() => vi.useRealTimers());", ["4:sleep+"]],
+		["beforeAll(() => vi.useFakeTimers());", "afterAll(() => vi.useRealTimers());", ["4:sleep+"]],
+		["vi.useFakeTimers();", "afterAll(() => vi.useRealTimers());", ["4:sleep+"]],
+	];
+	for (const [fake, real, expected] of pairings)
+		assert.deepEqual(shapes([fake, real, ...tests].join("\n")), expected, `${fake} ${real}`);
+	// A fake in each test's beforeEach as well as once: the one set up once still runs out after a test.
+	const both = [
+		"vi.useFakeTimers();",
+		"beforeEach(() => vi.useFakeTimers());",
+		"afterEach(() => vi.useRealTimers());",
+		...tests,
+	];
+	assert.deepEqual(shapes(both.join("\n")), ["5:sleep"]);
+});
+
 test("a fake inside one test, a describe or a helper accepts nothing", () => {
 	const inTest = ['it("a", () => {', "\tvi.useFakeTimers();", "});", "setTimeout(r, 20);"];
 	assert.deepEqual(shapes(inTest.join("\n")), ["4:sleep"]);

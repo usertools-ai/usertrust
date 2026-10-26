@@ -47,7 +47,9 @@ top level of the file, or in a top-level `beforeEach` or `beforeAll`, and its `t
 the API: `setTimeout` or `setInterval` for a sleep, `Date` for `Date.now()`. A fake inside one
 test or `describe` accepts nothing, because the check does not follow which tests it covers. For the
 same reason, a file that calls `vi.useRealTimers` anywhere but a top-level `afterEach` or `afterAll`
-gets nothing from its fakes.
+gets nothing from its fakes, and neither does one that calls it in a top-level `afterEach` while a fake
+is set up once (at the top level or in a `beforeAll`): after the first test, the rest run on real
+timers.
 
 Don't commit agent config. A pull request that adds, edits or removes Claude Code's `.claude/`,
 an `.mcp.json`, or `.grok/` or `.codex/`, at any depth, fails the `agent-config` check: it would

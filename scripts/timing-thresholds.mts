@@ -23,7 +23,8 @@
  *    a top-level `beforeEach`/`beforeAll`, with no `toFake` or a `toFake` that names the hit's
  *    API (`setTimeout` or `setInterval` for a sleep, `Date` for `Date.now()`). A fake inside one
  *    test or `describe` accepts nothing, and neither does a `toFake` that is not a literal list,
- *    nor any fake in a file that calls `useRealTimers` anywhere but a top-level `afterEach`/`afterAll`:
+ *    nor any fake in a file that calls `useRealTimers` anywhere but a top-level `afterEach`/`afterAll`,
+ *    or in a top-level `afterEach` when a fake is set up once (at the top level or in a `beforeAll`):
  *    the scan does not follow which tests a fake covers, so it counts those hits. `performance.now`,
  *    `process.hrtime` and timeouts are never accepted by a fake; or
  *  - a `timing:` comment on its line, or in the comment lines directly above it, states the
@@ -169,11 +170,14 @@ function fileLevel(call: ts.CallExpression): boolean {
 }
 
 /**
- * Whether a real-timer call only undoes the fake after the tests: directly in a top-level
- * `afterEach`/`afterAll`. Anywhere else it may give some tests real timers again.
+ * When a real-timer call undoes the fake: "all" after every test (directly in a top-level
+ * `afterAll`), "each" after each test (a top-level `afterEach`), or "some" anywhere else, where it
+ * may give some tests real timers again.
  */
-function restoresAfter(call: ts.CallExpression): boolean {
-	return inTopLevelHook(call, ["afterEach", "afterAll"]);
+function restores(call: ts.CallExpression): "all" | "each" | "some" {
+	if (inTopLevelHook(call, ["afterAll"])) return "all";
+	if (inTopLevelHook(call, ["afterEach"])) return "each";
+	return "some";
 }
 
 /**
@@ -258,6 +262,10 @@ export function scan(file: string, source: string): Hit[] {
 	let fakes: Set<string> | null | undefined;
 	// Real timers again anywhere but after the tests: no fake covers the whole file.
 	let realAgain = false;
+	// Real timers after each test, and a fake set up once (at the top level or in a `beforeAll`):
+	// only the first test runs on the fake, so no fake covers the whole file either.
+	let restoredEach = false;
+	let fakedOnce = false;
 	const visit = (node: ts.Node): void => {
 		if (ts.isCallExpression(node)) {
 			const name = dotted(node.expression);
@@ -265,9 +273,13 @@ export function scan(file: string, source: string): Hit[] {
 				const these = faked(node);
 				if (fakes === undefined || fakes === null) fakes = these;
 				else if (these !== null) fakes = new Set([...fakes].filter((n) => these.has(n)));
+				if (!inTopLevelHook(node, ["beforeEach"])) fakedOnce = true;
 			}
-			if ((name === "vi.useRealTimers" || name === "jest.useRealTimers") && !restoresAfter(node))
-				realAgain = true;
+			if (name === "vi.useRealTimers" || name === "jest.useRealTimers") {
+				const when = restores(node);
+				if (when === "some") realAgain = true;
+				if (when === "each") restoredEach = true;
+			}
 			const timer = sleeps(node);
 			if (timer !== undefined) found.push({ node, shape: "sleep", api: timer });
 			if (
@@ -299,7 +311,11 @@ export function scan(file: string, source: string): Hit[] {
 	};
 	visit(sf);
 	const covers = (api: string | undefined): boolean =>
-		api !== undefined && !realAgain && fakes !== undefined && (fakes === null || fakes.has(api));
+		api !== undefined &&
+		!realAgain &&
+		!(restoredEach && fakedOnce) &&
+		fakes !== undefined &&
+		(fakes === null || fakes.has(api));
 	return found.map(({ node, shape, api }) => {
 		const line = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line;
 		const byFakeClock = covers(api);
