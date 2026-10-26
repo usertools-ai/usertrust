@@ -276,12 +276,21 @@ function main(): number {
 			console.error("timing-thresholds: --base needs a revision");
 			return 2;
 		}
-		const atBase = spawnSync("git", ["show", `${rev}:timing-thresholds.baseline.json`], {
-			cwd: root,
-			encoding: "utf-8",
-		});
-		if (atBase.status !== 0) {
+		const git = (args: string[]) => spawnSync("git", args, { cwd: root, encoding: "utf-8" });
+		// A revision that does not resolve (unfetched, or misspelt) fails: read as "no baseline yet",
+		// it would skip the comparison and pass.
+		const commit = git(["rev-parse", "--verify", "--quiet", `${rev}^{commit}`]);
+		if (commit.status !== 0) {
+			console.error(`timing-thresholds: --base ${rev} is not a commit in this checkout`);
+			return 2;
+		}
+		const at = `${commit.stdout.trim()}:timing-thresholds.baseline.json`;
+		const atBase = git(["show", at]);
+		if (git(["cat-file", "-e", at]).status !== 0) {
 			console.log(`timing-thresholds: ${rev} has no baseline yet; nothing to compare it with`);
+		} else if (atBase.status !== 0) {
+			console.error(`timing-thresholds: git show ${at} exited ${atBase.status}: ${atBase.stderr}`);
+			return 2;
 		} else {
 			const grew = grewFrom(JSON.parse(atBase.stdout) as Counts, baseline);
 			for (const g of grew)

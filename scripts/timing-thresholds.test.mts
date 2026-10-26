@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { count, grewFrom, type Hit, scan, TEST_FILE, totals } from "./timing-thresholds.mts";
 import { compare, failed } from "./typecheck-tests.mts";
 
@@ -148,4 +151,16 @@ test("totals and grewFrom: the baseline may not grow from the base's, but a rena
 	assert.deepEqual(grewFrom(base, { ...base, "c.test.ts sleep": 1 }), [
 		{ shape: "sleep", base: 2, now: 3 },
 	]);
+});
+
+test("--base: a revision that is not a commit here fails, rather than skipping the comparison", () => {
+	const script = join(dirname(fileURLToPath(import.meta.url)), "timing-thresholds.mts");
+	const run = (rev: string) =>
+		spawnSync(process.execPath, ["--import", "tsx", script, "--base", rev], { encoding: "utf-8" });
+	const missing = run("no-such-revision-anywhere");
+	assert.equal(missing.status, 2, `${missing.stdout}${missing.stderr}`);
+	assert.match(missing.stderr, /--base no-such-revision-anywhere is not a commit/);
+	// Control: the same run against HEAD, whose baseline is the one in the tree, passes.
+	const head = run("HEAD");
+	assert.equal(head.status, 0, `${head.stdout}${head.stderr}`);
 });
