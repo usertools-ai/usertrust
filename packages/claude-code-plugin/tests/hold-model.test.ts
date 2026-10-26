@@ -630,7 +630,7 @@ describe("the model a hold names is the session's own", () => {
 		["its directory cannot be made", "mkdir"],
 		["not even its `.pending` mark can be written", "pending"],
 	])(
-		"a FIRST switch that leaves no evidence at all removes SessionStart's record: `unknown`, never its model: %s",
+		"a FIRST switch that leaves no evidence in its directory marks the session: `unknown`, never SessionStart's model: %s",
 		async (_name, failing) => {
 			const sessionId = `switch-first-none-${failing}`;
 			const child = `
@@ -675,9 +675,103 @@ describe("the model a hold names is the session's own", () => {
 			);
 			expect(JSON.parse(stdout)).toEqual({ model: "unknown", source: "unknown" });
 			const models = await readdir(join(stateDir, "transcripts", "session-models"));
+			// SessionStart's record is renamed to the mark: no space needed.
 			expect(models).not.toContain(sessionId);
+			expect(models).toContain(`${sessionId}.switch-failed`);
 		},
 	);
+
+	it("a switch that leaves no evidence in its directory reads `unknown` on the TRANSCRIPT path too, until a switch is recorded after it", async () => {
+		// The transcript's newest response predates the switch and names the cheaper model; with the
+		// switch unrecorded, it would read as the session's model.
+		const sessionId = "switch-none-transcript";
+		const path = join(projectDir, `${sessionId}.jsonl`);
+		// Dated after the late record below (10 s back), so only the mark keeps it from reading.
+		await writeTranscript(path, response("msg_h", HAIKU, 5_000));
+		const child = `
+			import fs from "node:fs/promises";
+			import { syncBuiltinESMExports } from "node:module";
+			const { transcript, sessionId, haiku, opus, path, fresh } = JSON.parse(process.env.CASE);
+			const { holdModelFor, recordModelSwitch, recordSessionModel } = await import(transcript);
+			await recordSessionModel(sessionId, haiku);
+			// SessionStart ran an hour ago: the mark it is renamed to must be dated by the failure.
+			const record = \`\${process.env.UT_CC_STATE_DIR}/transcripts/session-models/\${sessionId}\`;
+			const hourAgo = new Date(Date.now() - 3_600_000);
+			await fs.utimes(record, hourAgo, hourAgo);
+			const mkdir = fs.mkdir;
+			fs.mkdir = async (dir, ...rest) => {
+				if (String(dir).endsWith(".switches")) {
+					throw Object.assign(new Error("no space"), { code: "ENOSPC" });
+				}
+				return mkdir(dir, ...rest);
+			};
+			syncBuiltinESMExports();
+			await recordModelSwitch(sessionId, opus);
+			const at = (input) => holdModelFor({ sessionId, agentId: "main", input, lastModel: null });
+			const failed = await at({ transcript_path: path });
+			fs.mkdir = mkdir;
+			syncBuiltinESMExports();
+			// A run from before the failure whose record lands after it never supersedes the mark.
+			const now = Date.now;
+			Date.now = () => now() - 10_000;
+			await recordModelSwitch(sessionId, opus);
+			Date.now = now;
+			const late = await at({ transcript_path: path });
+			// A switch recorded after the mark supersedes it: a response after that reads as itself.
+			await new Promise((resolve) => setTimeout(resolve, 5));
+			await recordModelSwitch(sessionId, opus);
+			await new Promise((resolve) => setTimeout(resolve, 5));
+			await fs.appendFile(path, fresh);
+			const recorded = await at({ transcript_path: path });
+			// A later run that again records nothing re-dates the mark, which then outranks the
+			// switch recorded before it (nothing removes a mark, so no run can remove this one).
+			await new Promise((resolve) => setTimeout(resolve, 5));
+			// Nothing can be written in its directory, and its records cannot be renamed either.
+			const write = fs.writeFile;
+			const rename = fs.rename;
+			fs.writeFile = async (file, ...rest) => {
+				if (String(file).includes(".switches")) {
+					throw Object.assign(new Error("no space"), { code: "ENOSPC" });
+				}
+				return write(file, ...rest);
+			};
+			fs.rename = async (from, ...rest) => {
+				if (String(from).includes(".switches")) {
+					throw Object.assign(new Error("read-only"), { code: "EROFS" });
+				}
+				return rename(from, ...rest);
+			};
+			syncBuiltinESMExports();
+			await recordModelSwitch(sessionId, opus);
+			const refailed = await at({ transcript_path: path });
+			process.stdout.write(JSON.stringify({ failed, late, recorded, refailed }));
+		`;
+		const { stdout } = await promisify(execFile)(
+			process.execPath,
+			["--input-type=module", "-e", child],
+			{
+				env: {
+					PATH: process.env.PATH ?? "",
+					HOME: stateDir,
+					UT_CC_STATE_DIR: stateDir,
+					CASE: JSON.stringify({
+						transcript: TRANSCRIPT,
+						sessionId,
+						haiku: HAIKU,
+						opus: OPUS,
+						path,
+						fresh: response("msg_o", OPUS, -1_000),
+					}),
+				},
+			},
+		);
+		expect(JSON.parse(stdout)).toEqual({
+			failed: { model: "unknown", source: "unknown" },
+			late: { model: "unknown", source: "unknown" },
+			recorded: { model: OPUS, source: "transcript" },
+			refailed: { model: "unknown", source: "unknown" },
+		});
+	});
 
 	it("a switch directory with no record in it reads `unknown`, never SessionStart's model", async () => {
 		for (const name of ["UT_CC_CONFIG", "UT_SERVER_URL", "UT_SERVER_KEY"]) delete process.env[name];

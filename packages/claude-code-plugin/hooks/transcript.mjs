@@ -1796,6 +1796,13 @@ const SWITCH_UNREADABLE = Symbol("switch unreadable");
 const switchDir = (sessionId) => join(SESSION_MODEL_DIR, `${sanitize(sessionId)}.switches`);
 
 /**
+ * A session's switch run that left no evidence in its directory (`markSessionSwitchFailed`): beside
+ * SessionStart's record, which it replaces. A sanitized session id holds no dot, so it names no
+ * other session's file.
+ */
+const sessionSwitchFailed = (sessionId) => `${sanitize(sessionId)}.switch-failed`;
+
+/**
  * How far apart two switch records can be and still have landed out of order. A hook writes its
  * record within its own timeout (5 s, hooks/model-switch.json), so an earlier switch whose record
  * lands after a later one's lies within that of it. Twice that, for margin.
@@ -1863,9 +1870,9 @@ async function sessionModel(sessionId) {
  * (a full disk), renames the records there are to `.failed` (a rename needs no space). With neither
  * (no record yet to rename), its `.pending` mark is kept as the evidence. `lastSwitch` reads any
  * mark as unreadable, `unknown`, until a later run's record completes and clears it, and reads a
- * directory with no record in it the same way. A run that leaves no evidence at all (its directory
- * not made, or not even its `.pending` mark written) removes SessionStart's record instead
- * (`forgetSessionModel`).
+ * directory with no record in it the same way. A run that leaves no evidence there at all (its
+ * directory not made, or not even its `.pending` mark written) marks the SESSION instead
+ * (`markSessionSwitchFailed`), which `lastSwitch` reads as unreadable too, on every path.
  */
 export async function recordModelSwitch(sessionId, model) {
 	const id = modelId(model);
@@ -1878,7 +1885,7 @@ export async function recordModelSwitch(sessionId, model) {
 		dir = { ok: false };
 	}
 	if (!dir.ok) {
-		await forgetSessionModel(sessionId);
+		await markSessionSwitchFailed(sessionId);
 		return;
 	}
 	const at = Date.now();
@@ -1893,9 +1900,9 @@ export async function recordModelSwitch(sessionId, model) {
 		// A failure mark stands in for the `.pending` one, which would read as a live writer. With
 		// none recorded (a full disk, no record to rename), the `.pending` mark is the only evidence
 		// of the switch: kept, it reads `unknown` until a later run prunes it. Without even that,
-		// SessionStart's record goes.
+		// the session is marked.
 		if (await markSwitchFailed(dir.dir, base)) await unlink(pending).catch(() => {});
-		else if (!marked) await forgetSessionModel(sessionId);
+		else if (!marked) await markSessionSwitchFailed(sessionId);
 		return;
 	}
 	// The record is complete. A mark already gone was cleared by a newer run, never a failure.
@@ -1919,16 +1926,44 @@ export async function recordModelSwitch(sessionId, model) {
 }
 
 /**
- * A switch run that left no evidence of its switch: SessionStart's record would read as the
- * session's model (`holdModelFor`), and it may be the cheaper one. It is removed (an unlink needs
- * no space), so the main agent's holds read `unknown` until a switch is recorded. Never throws.
+ * A switch run that left no evidence in its own directory (a full disk): the session's state would
+ * read as no switch, so a transcript response or SessionStart's record from before it (which may
+ * name the cheaper model) would price the session's holds (`holdModelFor`). SessionStart's record
+ * is renamed to the session's failure mark (a rename needs no space), else the mark is written,
+ * and it is dated now (`utimes` needs no space either). `lastSwitch` reads it as unreadable until a
+ * switch is recorded after that date. Nothing removes it: a run that removed a mark it found older
+ * could remove one a later failing run had just re-dated, the only evidence of that switch. With
+ * no record to rename and no room for the mark, nothing records the switch. Never throws.
  */
-async function forgetSessionModel(sessionId) {
+async function markSessionSwitchFailed(sessionId) {
 	try {
 		const dir = await privateDir(SESSION_MODEL_DIR, { create: false });
-		if (dir.ok) await unlink(join(dir.dir, sanitize(sessionId)));
+		if (!dir.ok) return;
+		const mark = join(dir.dir, sessionSwitchFailed(sessionId));
+		try {
+			await rename(join(dir.dir, sanitize(sessionId)), mark);
+		} catch {
+			// No record to rename: the mark is written, or kept as an earlier run left it.
+			await writeFile(mark, "", { flag: "wx", mode: 0o600 }).catch(() => {});
+		}
+		const now = new Date();
+		await utimes(mark, now, now).catch(() => {});
 	} catch {
-		// No record, or none removable: nothing more can be done.
+		// Nothing more can be done.
+	}
+}
+
+/**
+ * When the session was last marked (`markSessionSwitchFailed`), in epoch ms; null when it never
+ * was; `SWITCH_UNREADABLE` when that cannot be told, since then no switch state can be trusted.
+ */
+async function sessionSwitchMark(sessionId) {
+	try {
+		const dir = await privateDir(SESSION_MODEL_DIR, { create: false });
+		if (!dir.ok) return dir.reason.includes("ENOENT") ? null : SWITCH_UNREADABLE;
+		return (await lstat(join(dir.dir, sessionSwitchFailed(sessionId)))).mtimeMs;
+	} catch (err) {
+		return err?.code === "ENOENT" ? null : SWITCH_UNREADABLE;
 	}
 }
 
@@ -1966,12 +2001,25 @@ async function markSwitchFailed(dir, base) {
  * time, and `models` every model recorded within `SWITCH_OVERLAP_MS` of it, since records that
  * close may have landed out of order. One model means the session's model is known; more mean the
  * latest switch is ambiguous. Null when none is recorded, or `SWITCH_UNREADABLE` when one may be
- * but cannot be read (fail dearest): from a directory that fails `privateDir`'s checks for any
- * reason but ENOENT, more than `MAX_SWITCH_RECORDS`, or a record that cannot be read or does not
- * parse. A record still being written (`.tmp`) is not yet one.
+ * but cannot be read (fail dearest): a session marked by a run that could record nothing
+ * (`markSessionSwitchFailed`) with no switch recorded since, a directory that fails `privateDir`'s
+ * checks for any reason but ENOENT, more than `MAX_SWITCH_RECORDS`, or a record that cannot be
+ * read or does not parse. A record still being written (`.tmp`) is not yet one.
  */
 async function lastSwitch(sessionId) {
 	if (typeof sessionId !== "string" || sessionId === "") return null;
+	const marked = await sessionSwitchMark(sessionId);
+	if (marked === SWITCH_UNREADABLE) return marked;
+	const read = await readSwitchDir(sessionId);
+	// A switch the session's mark records, unless a switch recorded after it supersedes it.
+	if (marked !== null && (read === null || (typeof read === "object" && marked >= read.at))) {
+		return SWITCH_UNREADABLE;
+	}
+	return read;
+}
+
+/** `lastSwitch`'s reading of the session's switch directory alone. */
+async function readSwitchDir(sessionId) {
 	const dir = await privateDir(switchDir(sessionId), { create: false });
 	if (!dir.ok) return dir.reason.includes("ENOENT") ? null : SWITCH_UNREADABLE;
 	// A record listed and then gone was removed by a newer run (`recordModelSwitch`), whose own
