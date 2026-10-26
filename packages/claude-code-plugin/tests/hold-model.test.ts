@@ -626,6 +626,78 @@ describe("the model a hold names is the session's own", () => {
 		expect(names.filter((n) => n.endsWith(".json") || n.endsWith(".failed"))).toEqual([]);
 	});
 
+	it.each([
+		["its directory cannot be made", "mkdir"],
+		["not even its `.pending` mark can be written", "pending"],
+	])(
+		"a FIRST switch that leaves no evidence at all removes SessionStart's record: `unknown`, never its model: %s",
+		async (_name, failing) => {
+			const sessionId = `switch-first-none-${failing}`;
+			const child = `
+			import fs from "node:fs/promises";
+			import { syncBuiltinESMExports } from "node:module";
+			const { transcript, sessionId, haiku, opus, failing } = JSON.parse(process.env.CASE);
+			const { holdModelFor, recordModelSwitch, recordSessionModel } = await import(transcript);
+			await recordSessionModel(sessionId, haiku);
+			const noSpace = () => Object.assign(new Error("no space"), { code: "ENOSPC" });
+			const mkdir = fs.mkdir;
+			const write = fs.writeFile;
+			fs.mkdir = async (dir, ...rest) => {
+				if (failing === "mkdir" && String(dir).endsWith(".switches")) throw noSpace();
+				return mkdir(dir, ...rest);
+			};
+			fs.writeFile = async (file, ...rest) => {
+				if (failing === "pending" && String(file).includes(".switches")) throw noSpace();
+				return write(file, ...rest);
+			};
+			syncBuiltinESMExports();
+			await recordModelSwitch(sessionId, opus);
+			const read = await holdModelFor({ sessionId, agentId: "main", input: {}, lastModel: null });
+			process.stdout.write(JSON.stringify(read));
+		`;
+			const { stdout } = await promisify(execFile)(
+				process.execPath,
+				["--input-type=module", "-e", child],
+				{
+					env: {
+						PATH: process.env.PATH ?? "",
+						HOME: stateDir,
+						UT_CC_STATE_DIR: stateDir,
+						CASE: JSON.stringify({
+							transcript: TRANSCRIPT,
+							sessionId,
+							haiku: HAIKU,
+							opus: OPUS,
+							failing,
+						}),
+					},
+				},
+			);
+			expect(JSON.parse(stdout)).toEqual({ model: "unknown", source: "unknown" });
+			const models = await readdir(join(stateDir, "transcripts", "session-models"));
+			expect(models).not.toContain(sessionId);
+		},
+	);
+
+	it("a switch directory with no record in it reads `unknown`, never SessionStart's model", async () => {
+		for (const name of ["UT_CC_CONFIG", "UT_SERVER_URL", "UT_SERVER_KEY"]) delete process.env[name];
+		process.env.UT_CC_STATE_DIR = stateDir;
+		const { holdModelFor, recordSessionModel } = (await import(TRANSCRIPT)) as {
+			holdModelFor: (a: Record<string, unknown>) => Promise<{ model: string; source: string }>;
+			recordSessionModel: (session: string, model: unknown) => Promise<void>;
+		};
+		const sessionId = "switch-dir-empty";
+		await recordSessionModel(sessionId, HAIKU);
+		// A run made the directory and could write nothing in it.
+		await mkdir(join(stateDir, "transcripts", "session-models", `${sessionId}.switches`), {
+			mode: 0o700,
+		});
+		expect(await holdModelFor({ sessionId, agentId: "main", input: {}, lastModel: null })).toEqual({
+			model: "unknown",
+			source: "unknown",
+		});
+	});
+
 	it("a run whose own `.pending` a newer run already cleared records its switch, and leaves no failure mark", async () => {
 		const sessionId = "switch-mark-cleared";
 		const child = `

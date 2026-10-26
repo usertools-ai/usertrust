@@ -1862,7 +1862,10 @@ async function sessionModel(sessionId) {
  * session's model: so a failed run leaves a `.failed` mark, or, when even that cannot be written
  * (a full disk), renames the records there are to `.failed` (a rename needs no space). With neither
  * (no record yet to rename), its `.pending` mark is kept as the evidence. `lastSwitch` reads any
- * mark as unreadable, `unknown`, until a later run's record completes and clears it.
+ * mark as unreadable, `unknown`, until a later run's record completes and clears it, and reads a
+ * directory with no record in it the same way. A run that leaves no evidence at all (its directory
+ * not made, or not even its `.pending` mark written) removes SessionStart's record instead
+ * (`forgetSessionModel`).
  */
 export async function recordModelSwitch(sessionId, model) {
 	const id = modelId(model);
@@ -1872,20 +1875,27 @@ export async function recordModelSwitch(sessionId, model) {
 	try {
 		dir = await privateDir(switchDir(sessionId));
 	} catch {
+		dir = { ok: false };
+	}
+	if (!dir.ok) {
+		await forgetSessionModel(sessionId);
 		return;
 	}
-	if (!dir.ok) return;
 	const at = Date.now();
 	const base = `${at}.${process.pid}.${randomBytes(6).toString("hex")}`;
 	const pending = join(dir.dir, `${base}.pending`);
+	let marked = false;
 	try {
 		await writeFile(pending, "", { flag: "wx", mode: 0o600 });
+		marked = true;
 		await writeAtomic(join(dir.dir, `${base}.json`), JSON.stringify({ model: id, at }));
 	} catch {
 		// A failure mark stands in for the `.pending` one, which would read as a live writer. With
 		// none recorded (a full disk, no record to rename), the `.pending` mark is the only evidence
-		// of the switch: kept, it reads `unknown` until a later run prunes it.
+		// of the switch: kept, it reads `unknown` until a later run prunes it. Without even that,
+		// SessionStart's record goes.
 		if (await markSwitchFailed(dir.dir, base)) await unlink(pending).catch(() => {});
+		else if (!marked) await forgetSessionModel(sessionId);
 		return;
 	}
 	// The record is complete. A mark already gone was cleared by a newer run, never a failure.
@@ -1905,6 +1915,20 @@ export async function recordModelSwitch(sessionId, model) {
 		}
 	} catch {
 		// Pruning is housekeeping: the record stands.
+	}
+}
+
+/**
+ * A switch run that left no evidence of its switch: SessionStart's record would read as the
+ * session's model (`holdModelFor`), and it may be the cheaper one. It is removed (an unlink needs
+ * no space), so the main agent's holds read `unknown` until a switch is recorded. Never throws.
+ */
+async function forgetSessionModel(sessionId) {
+	try {
+		const dir = await privateDir(SESSION_MODEL_DIR, { create: false });
+		if (dir.ok) await unlink(join(dir.dir, sanitize(sessionId)));
+	} catch {
+		// No record, or none removable: nothing more can be done.
 	}
 }
 
@@ -1975,6 +1999,9 @@ async function readSwitches(dir) {
 		if (names.some((name) => name.endsWith(".pending") || name.endsWith(".failed"))) {
 			return SWITCH_UNREADABLE;
 		}
+		// The directory is made only by a switch run, and a run whose record completes leaves it
+		// there: empty, it is a run that could write nothing (a full disk) or one still starting.
+		if (names.length === 0) return SWITCH_UNREADABLE;
 	} catch {
 		return SWITCH_UNREADABLE;
 	}
