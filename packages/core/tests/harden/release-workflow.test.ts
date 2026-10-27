@@ -52,7 +52,7 @@
  *   carries them too, at the version it records.
  */
 
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	chmodSync,
@@ -353,12 +353,13 @@ describe("publish.yml", () => {
 		expect(order[3]).toBeGreaterThan(0);
 	});
 
-	it("publish verifies, dry-runs, pushes, publishes, then releases, in that order", () => {
+	it("publish verifies, dry-runs, proves the npm token, pushes, publishes, then releases, in that order", () => {
 		const order = [
 			jobSteps("publish").findIndex((s) => s.uses?.startsWith("actions/download-artifact@")),
 			stepIndex("publish", "Select and verify what to publish"),
 			stepIndex("publish", "Require the rebuild to match, tarball by tarball"),
 			stepIndex("publish", "Publish packages (dry run)"),
+			stepIndex("publish", "Prove the npm token before anything is pushed"),
 			stepIndex("publish", "Push the release commit and tag"),
 			stepIndex("publish", "Publish packages"),
 			stepIndex("publish", "Create GitHub Release"),
@@ -442,9 +443,35 @@ describe("publish.yml", () => {
 		);
 	});
 
-	it("only the publish step sees the npm token", () => {
+	it("only the token preflight and the publish step see the npm token", () => {
 		const withToken = allSteps().filter(([, s]) => JSON.stringify(s).includes("NPM_TOKEN"));
-		expect(withToken.map(([j, s]) => `${j}: ${s.name}`)).toEqual(["publish: Publish packages"]);
+		expect(withToken.map(([j, s]) => `${j}: ${s.name}`)).toEqual([
+			"publish: Prove the npm token before anything is pushed",
+			"publish: Publish packages",
+		]);
+	});
+
+	it("the npm token is proven before the push, in every mode, and nothing is pushed if it fails", () => {
+		const pre = step("publish", "Prove the npm token before anything is pushed");
+		const push = step("publish", "Push the release commit and tag");
+		// Before the push (and so before the publish), after the dry run: a dead token stops the
+		// run while master is untouched.
+		const i = stepIndex("publish", pre.name as string);
+		expect(i).toBeGreaterThan(stepIndex("publish", "Publish packages (dry run)"));
+		expect(i).toBeLessThan(stepIndex("publish", push.name as string));
+		// No condition: it runs for a dry run and a republish too (a republish publishes with
+		// the token), and it cannot be skipped by a failed earlier step either.
+		expect(pre.if).toBeUndefined();
+		expect(pre).not.toHaveProperty("continue-on-error");
+		// Exactly the token, handed as NODE_AUTH_TOKEN, to exactly the script's subcommand: no
+		// other env, no inline shell that could print it.
+		expect(pre.env).toEqual({
+			NODE_AUTH_TOKEN: "${{ secrets.NPM_TOKEN }}",
+			NPM_PUBLISH_AUTH: "${{ vars.NPM_PUBLISH_AUTH }}",
+		});
+		expect(pre.run?.trim()).toBe("bash scripts/release.sh preflight-token");
+		// It reads only: no push, publish, release or tag in it.
+		expect(pre.run).not.toMatch(/\bgit push\b|\bnpm publish\b|\bgh release\b|tag-release/);
 	});
 
 	it("no setup-node restores a cache, and no step is a cache step", () => {
@@ -613,6 +640,12 @@ const FAKE_NPM = `#!/usr/bin/env bash
 #   Failures print npm's --json error object on stdout, and its lines on stderr.
 # view <name>@<v> dist --json: answers from a "<name>@<v> dist <integrity> <shasum>" line, or
 #   "<name>@<v> dist error|raw:<text>"; none = E404.
+# whoami: appends "whoami|<userconfig text>|<globalconfig bytes>" to $FAKE_LOG and answers from a
+#   "whoami <user>" line in $FAKE_REGISTRY, or "whoami error" (E401, quoting $NODE_AUTH_TOKEN when
+#   $FAKE_LEAK is set, as a careless npm might), "whoami hang" (sleeps 30 s) or "whoami raw:<text>".
+# access list collaborators <name> --json: appends "access|<name>" to $FAKE_LOG and answers from a
+#   "<name> collaborators <json>" line ("error" = E403, quoting the token when $FAKE_LEAK is set;
+#   "raw:<text>" printed as is); none = E404.
 # --version: prints $FAKE_NPM_VERSION (11.19.0 if unset).
 # pack ...: writes a ustar tarball, as npm's packer does, of package.json, README.md, LICENSE,
 #   NOTICE and dist/ to --pack-destination; logs "pack|<dir>|<args>".
@@ -698,6 +731,48 @@ view)
 		esac
 		;;
 	*) echo "fake npm: unexpected $*" >&2; exit 99 ;;
+	esac
+	;;
+whoami)
+	shift
+	cfg=/dev/null
+	gcfg=/dev/null
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--userconfig) cfg="$2"; shift ;;
+		--globalconfig) gcfg="$2"; shift ;;
+		esac
+		shift
+	done
+	echo "whoami|$(tr '\n' ';' < "$cfg")|$(wc -c < "$gcfg" | tr -d ' ')|cache=\${npm_config_cache:+set}" >> "$FAKE_LOG"
+	answer=$(awk '$1 == "whoami" { $1 = ""; sub(/^ /, ""); print; exit }' "$FAKE_REGISTRY")
+	case "$answer" in
+	hang) sleep 30 ;;
+	error)
+		echo "npm error code E401" >&2
+		echo "npm error 401 Unauthorized - GET https://registry.npmjs.org/-/whoami" >&2
+		[ -z "\${FAKE_LEAK:-}" ] || echo "npm error token was \${NODE_AUTH_TOKEN}" >&2
+		exit 1
+		;;
+	raw:*) echo "\${answer#raw:}" ;;
+	"") echo "npm error code E404" >&2; exit 1 ;;
+	*) echo "$answer" ;;
+	esac
+	;;
+access)
+	[ "$2 $3" = "list collaborators" ] || { echo "fake npm: unexpected $*" >&2; exit 99; }
+	echo "access|$4" >> "$FAKE_LOG"
+	answer=$(awk -v n="$4" '$1 == n && $2 == "collaborators" { $1 = ""; $2 = ""; sub(/^  /, ""); print; exit }' "$FAKE_REGISTRY")
+	case "$answer" in
+	error)
+		echo "npm error code E403" >&2
+		echo "npm error 403 Forbidden - GET https://registry.npmjs.org/-/package/$4/collaborators" >&2
+		[ -z "\${FAKE_LEAK:-}" ] || echo "npm error token was \${NODE_AUTH_TOKEN}" >&2
+		exit 1
+		;;
+	raw:*) echo "\${answer#raw:}" ;;
+	"") echo "npm error code E404" >&2; exit 1 ;;
+	*) echo "$answer" ;;
 	esac
 	;;
 publish)
@@ -917,26 +992,31 @@ function distOf(version: string, d: string, bytes?: Buffer): string {
 	return `${NAMES[d]}@${version} dist sha512-${sha512} ${sha1}`;
 }
 
+/** The environment release.sh runs in under the fake npm and gh. */
+function releaseEnv(env: Record<string, string> = {}): NodeJS.ProcessEnv {
+	return {
+		...gitEnv(),
+		PATH: `${join(dir, "bin")}:${process.env.PATH}`,
+		FAKE_REGISTRY: join(dir, "registry"),
+		FAKE_RUNS: join(dir, "runs.json"),
+		FAKE_JOBS: join(dir, "jobs.json"),
+		FAKE_LOG: join(dir, "log"),
+		FAKE_CALLS: join(dir, "calls"),
+		FAKE_ARTIFACTS: join(dir, "tarballs"),
+		FAKE_ENV: join(dir, "env.json"),
+		GITHUB_REPOSITORY: "owner/repo",
+		REQUIRED_CI_JOBS: publish.env?.REQUIRED_CI_JOBS ?? "",
+		REPUBLISH: "false",
+		...env,
+	};
+}
+
 function run(args: string[], env: Record<string, string> = {}) {
 	const r = spawnSync("bash", [join(repo, "scripts/release.sh"), ...args], {
 		cwd: repo,
 		encoding: "utf8",
 		timeout: 20_000,
-		env: {
-			...gitEnv(),
-			PATH: `${join(dir, "bin")}:${process.env.PATH}`,
-			FAKE_REGISTRY: join(dir, "registry"),
-			FAKE_RUNS: join(dir, "runs.json"),
-			FAKE_JOBS: join(dir, "jobs.json"),
-			FAKE_LOG: join(dir, "log"),
-			FAKE_CALLS: join(dir, "calls"),
-			FAKE_ARTIFACTS: join(dir, "tarballs"),
-			FAKE_ENV: join(dir, "env.json"),
-			GITHUB_REPOSITORY: "owner/repo",
-			REQUIRED_CI_JOBS: publish.env?.REQUIRED_CI_JOBS ?? "",
-			REPUBLISH: "false",
-			...env,
-		},
+		env: releaseEnv(env),
 	});
 	return { status: r.status, out: r.stdout, err: r.stderr };
 }
@@ -1514,6 +1594,263 @@ describe("release.sh publish: the npm dist-tag", { timeout: 30_000 }, () => {
 		rmSync(join(dir, "log"));
 		expect(run(["publish", out, "HEAD", "--dry-run"]).status).not.toBe(0);
 		expect(log()).toEqual(published("1.1.0", DIRS.slice(0, 3), true, "latest"));
+	});
+});
+
+// timing: 30 s budget per row; the slowest of the 26 rows took 0.86 s on an 8-core test host (3 runs, otherwise
+// idle), nearly all under 0.5 s: each row is two or three bash and fake-npm processes
+describe("release.sh preflight-token", { timeout: 30_000 }, () => {
+	// Not shaped like any provider's token: a public repository must not hold a lookalike secret.
+	const TOKEN = "fake-test-credential-0123456789abcdef";
+	const collab = (user: string, perm: string) => JSON.stringify({ [user]: perm });
+	const allWritable = (user = "alice") => [
+		`whoami ${user}`,
+		...DIRS.map((d) => `${NAMES[d]} collaborators ${collab(user, "read-write")}`),
+	];
+	const runPre = (env: Record<string, string> = {}) =>
+		run(["preflight-token"], { NODE_AUTH_TOKEN: TOKEN, ...env });
+	const accessed = () =>
+		log()
+			.filter((l) => l.startsWith("access|"))
+			.map((l) => l.slice(7));
+
+	it("passes when the token authenticates and its user can write every package", () => {
+		setRegistry(allWritable());
+		const r = runPre();
+		expect(r.status, r.err).toBe(0);
+		expect(r.out).toContain("authenticates as alice");
+		expect(r.out).toContain("can publish all six packages");
+		expect(accessed()).toEqual(DIRS.map((d) => NAMES[d]));
+	});
+
+	it("only reads: no publish, pack, view or install call is ever made", () => {
+		setRegistry(allWritable());
+		runPre();
+		const calls = readFileSync(join(dir, "calls"), "utf8").trim().split("\n");
+		expect(new Set(calls)).toEqual(new Set(["whoami", "access"]));
+	});
+
+	it("hands npm the token by reference, an empty global config and a private cache; never in a file", () => {
+		setRegistry(allWritable());
+		runPre();
+		const who = log().find((l) => l.startsWith("whoami|")) ?? "";
+		expect(who).toBe(
+			`whoami|//registry.npmjs.org/:_authToken=$${"{"}NODE_AUTH_TOKEN};|0|cache=set`,
+		);
+		expect(who).not.toContain(TOKEN);
+	});
+
+	it("NPM_PUBLISH_AUTH=oidc is the tokenless path: it passes with a warning and calls npm not at all", () => {
+		setRegistry([]);
+		for (const env of [{ NODE_AUTH_TOKEN: "" }, { NODE_AUTH_TOKEN: TOKEN }]) {
+			const r = run(["preflight-token"], { NPM_PUBLISH_AUTH: "oidc", ...env });
+			expect(r.status, r.err).toBe(0);
+			expect(r.out).toContain("::warning::NPM_PUBLISH_AUTH is oidc: no npm token is proven");
+		}
+		expect(log()).toEqual([]);
+	});
+
+	it("an unset or empty NPM_PUBLISH_AUTH is token mode, which still refuses an empty token", () => {
+		setRegistry(allWritable());
+		for (const env of [{ NPM_PUBLISH_AUTH: "" }, { NPM_PUBLISH_AUTH: "token" }]) {
+			const bad = run(["preflight-token"], { NODE_AUTH_TOKEN: "", ...env });
+			expect(bad.status).not.toBe(0);
+			expect(bad.err).toContain("NODE_AUTH_TOKEN is empty");
+			expect(run(["preflight-token"], { NODE_AUTH_TOKEN: TOKEN, ...env }).status).toBe(0);
+		}
+	});
+
+	it("any other NPM_PUBLISH_AUTH is refused, never read as oidc", () => {
+		setRegistry(allWritable());
+		for (const v of ["OIDC", "none", "false", "oidc ", "skip"]) {
+			const r = run(["preflight-token"], { NPM_PUBLISH_AUTH: v, NODE_AUTH_TOKEN: TOKEN });
+			expect(r.status, v).not.toBe(0);
+			expect(r.err, v).toContain("not token or oidc");
+		}
+		expect(log()).toEqual([]);
+	});
+
+	it("refuses an empty token before calling npm at all", () => {
+		setRegistry(allWritable());
+		for (const env of [
+			{ NODE_AUTH_TOKEN: "" },
+			{ NODE_AUTH_TOKEN: undefined as unknown as string },
+		]) {
+			const r = run(["preflight-token"], env);
+			expect(r.status).not.toBe(0);
+			expect(r.err).toContain("NODE_AUTH_TOKEN is empty");
+			expect(r.err).toContain("Nothing was pushed");
+		}
+		expect(log()).toEqual([]);
+	});
+
+	it("a token npm does not authenticate fails the run, naming that nothing was pushed", () => {
+		setRegistry(["whoami error", ...allWritable().slice(1)]);
+		const r = runPre();
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain("did not authenticate");
+		expect(r.err).toContain("Nothing was pushed");
+		expect(r.err).toContain("package owner");
+		expect(accessed()).toEqual([]);
+	});
+
+	it("an answer from whoami that is not a user name is refused", () => {
+		for (const bad of ["raw:", "raw:alice bob", "raw:al/ice", "raw:alice\u001b[2J"]) {
+			setRegistry([`whoami ${bad}`, ...allWritable().slice(1)]);
+			const r = runPre();
+			expect(r.status, bad).not.toBe(0);
+			expect(r.err, bad).toContain("not an npm user name");
+			expect(r.out + r.err, bad).not.toContain("\u001b");
+		}
+	});
+
+	it("a user with read-only access to one package fails the run, naming it, after checking all six", () => {
+		const lines = allWritable();
+		lines[1 + DIRS.indexOf("server")] =
+			`${NAMES.server} collaborators ${collab("alice", "read-only")}`;
+		setRegistry(lines);
+		const r = runPre();
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain(`alice has 'read-only' on ${NAMES.server}`);
+		expect(r.err).toContain(`cannot be shown to publish: ${NAMES.server}`);
+		expect(r.err).not.toContain(NAMES.core + " ");
+		expect(accessed()).toEqual(DIRS.map((d) => NAMES[d]));
+	});
+
+	it("a user the package does not list (team access only) fails the run", () => {
+		const lines = allWritable();
+		lines[1 + DIRS.indexOf("core")] =
+			`${NAMES.core} collaborators ${collab("someone-else", "read-write")}`;
+		setRegistry(lines);
+		const r = runPre();
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain(`alice has 'none' on ${NAMES.core}`);
+	});
+
+	it("an access list npm refuses to show fails the run for that package", () => {
+		const lines = allWritable();
+		lines[1 + DIRS.indexOf("acs-adapter")] = `${NAMES["acs-adapter"]} collaborators error`;
+		setRegistry(lines);
+		const r = runPre();
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain(`Could not read who may publish ${NAMES["acs-adapter"]}`);
+		expect(r.err).toContain(`cannot be shown to publish: ${NAMES["acs-adapter"]}`);
+	});
+
+	for (const bad of ["raw:not json", "raw:[]", 'raw:"read-write"', "raw:null", "raw:"]) {
+		it(`an access list of ${JSON.stringify(bad)} is not a user to permission object, and fails the run`, () => {
+			const lines = allWritable();
+			lines[1 + DIRS.indexOf("verify")] = `${NAMES.verify} collaborators ${bad}`;
+			setRegistry(lines);
+			const r = runPre();
+			expect(r.status).not.toBe(0);
+			expect(r.err).toContain(NAMES.verify);
+		});
+	}
+
+	it("a package with no access list at all (never published) fails the run", () => {
+		const lines = allWritable().filter((l) => !l.startsWith(`${NAMES.ui} `));
+		setRegistry(lines);
+		const r = runPre();
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain(NAMES.ui);
+	});
+
+	it("never prints the token, even when npm quotes it in its own error text", () => {
+		for (const lines of [
+			["whoami error", ...allWritable().slice(1)],
+			[
+				...allWritable().slice(0, 1),
+				`${NAMES.core} collaborators error`,
+				...allWritable().slice(2),
+			],
+		]) {
+			setRegistry(lines);
+			const r = runPre({ FAKE_LEAK: "1" });
+			expect(r.status).not.toBe(0);
+			expect(r.err).toContain("token was ***");
+			expect(r.out + r.err).not.toContain(TOKEN);
+		}
+		setRegistry(allWritable());
+		const ok = runPre({ FAKE_LEAK: "1" });
+		expect(ok.out + ok.err).not.toContain(TOKEN);
+	});
+
+	it("only npm ever sees the token: jq, mktemp and rm run with it unexported", () => {
+		// A jq shim in front of the real one records whether NODE_AUTH_TOKEN is in its environment.
+		const real = spawnSync("sh", ["-c", "command -v jq"], { encoding: "utf8" }).stdout.trim();
+		writeFileSync(
+			join(dir, "bin", "jq"),
+			`#!/usr/bin/env bash\nif [ -n "\${NODE_AUTH_TOKEN+x}" ]; then echo jq-env-token >> "$FAKE_LOG"; else echo jq-env-clean >> "$FAKE_LOG"; fi\nexec ${real} "$@"\n`,
+		);
+		chmodSync(join(dir, "bin", "jq"), 0o755);
+		setRegistry(allWritable());
+		const r = runPre({ FAKE_LEAK: "1" });
+		expect(r.status, r.err).toBe(0);
+		const jqs = log().filter((l) => l.startsWith("jq-env-"));
+		expect(jqs).toHaveLength(DIRS.length);
+		expect(new Set(jqs)).toEqual(new Set(["jq-env-clean"]));
+		// ... and npm did get it (the leak simulation reads it from npm's environment).
+		setRegistry(["whoami error", ...allWritable().slice(1)]);
+		expect(runPre({ FAKE_LEAK: "1" }).err).toContain("token was ***");
+	});
+
+	it("leaves nothing behind in the temp directory, success or failure", () => {
+		const tmp = join(dir, "tmpdir");
+		mkdirSync(tmp);
+		for (const lines of [allWritable(), ["whoami error", ...allWritable().slice(1)]]) {
+			setRegistry(lines);
+			runPre({ TMPDIR: tmp });
+			expect(readdirSync(tmp)).toEqual([]);
+		}
+	});
+
+	it("a SIGTERM while npm runs ends the script (143), removes its temp directory, and calls npm no more", async () => {
+		const tmp = join(dir, "tmpdir");
+		mkdirSync(tmp);
+		setRegistry(["whoami hang", ...allWritable().slice(1)]);
+		const child = spawn("bash", [join(repo, "scripts/release.sh"), "preflight-token"], {
+			cwd: repo,
+			detached: true,
+			stdio: "ignore",
+			env: releaseEnv({ NODE_AUTH_TOKEN: TOKEN, TMPDIR: tmp }),
+		});
+		const closed = new Promise<number | null>((done) => child.on("close", (code) => done(code)));
+		// timing: waits up to 10 s (400 steps of 25 ms) for the fake npm to have started (it logs on
+		// entry); on an 8-core test host it started within 0.3 s in 20 of 20 runs
+		for (let i = 0; i < 400 && !log().some((l) => l.startsWith("whoami|")); i++) {
+			// timing: the 25 ms step of the wait above, 400 steps at most
+			await new Promise((r) => setTimeout(r, 25));
+		}
+		expect(log().some((l) => l.startsWith("whoami|"))).toBe(true);
+		// The whole process group: bash and the sleeping fake npm, as a CI cancel would.
+		process.kill(-(child.pid as number), "SIGTERM");
+		expect(await closed).toBe(143);
+		expect(readdirSync(tmp)).toEqual([]);
+		expect(log().filter((l) => l.startsWith("access|"))).toEqual([]);
+	});
+
+	it("a user name equal to the token is refused, never printed", () => {
+		setRegistry([`whoami ${TOKEN}`, ...allWritable().slice(1)]);
+		const r = runPre();
+		expect(r.status).not.toBe(0);
+		expect(r.out + r.err).not.toContain(TOKEN);
+	});
+
+	it("a permission word that is not a plain word is not printed", () => {
+		const lines = allWritable();
+		lines[1] = `${NAMES.core} collaborators ${JSON.stringify({ alice: TOKEN })}`;
+		setRegistry(lines);
+		const r = runPre();
+		expect(r.status).not.toBe(0);
+		expect(r.err).toContain("alice has '<not shown>'");
+		expect(r.out + r.err).not.toContain(TOKEN);
+	});
+
+	it("npm_config_registry in the environment does not redirect the check", () => {
+		setRegistry(allWritable());
+		const r = runPre({ npm_config_registry: "https://evil.invalid/" });
+		expect(r.status, r.err).toBe(0);
 	});
 });
 

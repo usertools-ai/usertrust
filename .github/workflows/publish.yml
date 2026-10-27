@@ -444,6 +444,20 @@ jobs:
           COMMIT: ${{ steps.source.outputs.commit }}
         run: bash scripts/release.sh publish "${RUNNER_TEMP}/release" "$COMMIT" --dry-run
 
+      # The token this job will publish with, proven BEFORE anything is pushed: npm whoami must
+      # answer, and the token's user must be a read-write collaborator on all six packages. It
+      # only reads. A dead NPM_TOKEN would otherwise fail the publish step (E404) after the push,
+      # leaving the repository with a version the registry lacks. It runs in every mode, a dry
+      # run included: a dry-run dispatch is how to learn the token works without touching master.
+      # NPM_TOKEN is in this step and in Publish packages, and in no other.
+      - name: Prove the npm token before anything is pushed
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # The repository variable NPM_PUBLISH_AUTH: unset or "token" proves the token; "oidc" is
+          # for a repository that has deleted NPM_TOKEN (docs/releasing.md) and skips the check.
+          NPM_PUBLISH_AUTH: ${{ vars.NPM_PUBLISH_AUTH }}
+        run: bash scripts/release.sh preflight-token
+
       # ── Push the release commit and tag ──
       # BEFORE publishing. If the push fails (master moved in either direction since dispatch,
       # or a branch rule refuses it), nothing is published and the release can simply be
