@@ -1808,7 +1808,9 @@ async function locate({ sessionId, agentId, input, mayEstimate, anySetting = fal
  * transcript, like the parent ("main"), which inherits nothing. Inheriting
  * further settled every subagent of a session at its tool-I/O estimate once one
  * agent's transcript was missing, about a tenth of what their transcripts held.
- * `hinted`: the hook's `agent_type` (`hintFor`). Returns why, or null; a marker dir that
+ * Only an agent with nothing of its transcript read yet inherits (`readsUnderWay`): one
+ * that switched mid-read would settle at the estimate calls whose responses it may post
+ * as well. `hinted`: the hook's `agent_type` (`hintFor`). Returns why, or null; a marker dir that
  * cannot be read throws.
  */
 async function inheritedEstimate(where, agentId, hinted) {
@@ -1831,6 +1833,22 @@ async function inheritedEstimate(where, agentId, hinted) {
 		return null;
 	}
 	return `${other.slice(prefix.length)} of this session settles at the estimate (a fork copies its ancestor's responses)`;
+}
+
+/**
+ * Whether some of the agent's transcript has been read: its cursor's offset is past 0. Such
+ * an agent never inherits estimate mode (`inheritedEstimate`); a response of its fork copy
+ * that the ancestor settled at the estimate is claimed under the same message id
+ * (`resolveAwaitingHold`), so it is not posted again. A cursor that cannot be read answers no.
+ * `read`: a `readCursor` result.
+ */
+function underWay(read) {
+	return read.ok && read.cursor.byteOffset > 0;
+}
+
+/** `underWay` of the cursor at `cursorPath`. */
+async function readsUnderWay(cursorPath) {
+	return underWay(await readCursor(cursorPath));
 }
 
 /** The agent's cursor, its estimate marker and the message claims, in the private state dir. */
@@ -2474,7 +2492,8 @@ export async function estimateReasonFor({ sessionId, agentId, input }) {
  * without writing anything (the breaker's skip, pre-tool-use.mjs, must touch no state):
  * UT_CC_USAGE=estimate (or the config file's), an agent id unsafe in a path, no transcript
  * path, or a recorded estimate mode, the agent's own or, for a fork (or a subagent of no
- * stated type), another agent's of its session (`inheritedEstimate`). A marker directory
+ * stated type) with nothing of its transcript read yet (`readsUnderWay`), another agent's
+ * of its session (`inheritedEstimate`). A marker directory
  * that cannot be read answers yes: an
  * answer this cannot give is never "no".
  */
@@ -2493,6 +2512,7 @@ export async function settlesAtEstimate({ sessionId, agentId, input }) {
 	if (agentId === "main" || !names.some((name) => name !== own && name.startsWith(prefix))) {
 		return false;
 	}
+	if (await readsUnderWay(join(stateRoot(), "transcripts", `${own}.json`))) return false;
 	return mayCopyAncestor(transcriptPathFor(input, agentId), hintFor(input, agentId));
 }
 
@@ -2547,22 +2567,30 @@ async function openAgent({
 	// Nothing of this agent is read now (UT_CC_USAGE=estimate, no transcript path),
 	// or its session's estimate mode is its own (`inheritedEstimate`), and a hold
 	// may settle at the estimate: recorded first, so no later hook posts the same
-	// usage for real.
+	// usage for real. An agent whose reads are under way inherits nothing
+	// (`readsUnderWay`): it goes on reading, holding the lock taken here.
+	let release = null;
 	if (transcriptPath === undefined || inherited !== null) {
 		const reason = inherited ?? where.unread;
-		if (inherited !== null) await noteNoTranscriptAgent({ where, sessionId, agentId, input, hook });
 		const held = await acquireLock(cursorPath, { waitMs: Math.max(waitMs, NO_PATH_LOCK_WAIT_MS) });
 		if (held === null) {
 			return { kind: "unavailable", reason: `${reason}, and another hook holds the agent's lock` };
 		}
-		try {
-			// UT_CC_USAGE=estimate (or the config file's) is the user's own setting: nothing to announce.
-			return await stickToEstimate(where, reason, reason !== howToSet("usage", "estimate"));
-		} finally {
-			await held();
+		if (transcriptPath !== undefined && (await readsUnderWay(cursorPath))) {
+			release = held;
+		} else {
+			try {
+				if (inherited !== null) {
+					await noteNoTranscriptAgent({ where, sessionId, agentId, input, hook });
+				}
+				// UT_CC_USAGE=estimate (or the config file's) is the user's own setting: nothing to announce.
+				return await stickToEstimate(where, reason, reason !== howToSet("usage", "estimate"));
+			} finally {
+				await held();
+			}
 		}
 	}
-	const release = await acquireLock(cursorPath, { waitMs });
+	release ??= await acquireLock(cursorPath, { waitMs });
 	if (release === null) {
 		const peek = await readCursor(cursorPath);
 		if (!peek.ok) return { kind: "unavailable", reason: peek.reason };
@@ -2585,13 +2613,17 @@ async function openAgent({
 			await release();
 			return { kind: "estimate", reason: marked };
 		}
-		const inheritedNow = await inheritedEstimate(where, agentId, hintFor(input, agentId));
-		if (inheritedNow !== null) {
-			const sticky = await stickToEstimate(where, inheritedNow, true);
-			await release();
-			return sticky;
-		}
 		const read = await readCursor(cursorPath);
+		// An agent whose reads are under way inherits nothing (`underWay`); one whose
+		// cursor cannot be read still does.
+		if (!underWay(read)) {
+			const inheritedNow = await inheritedEstimate(where, agentId, hintFor(input, agentId));
+			if (inheritedNow !== null) {
+				const sticky = await stickToEstimate(where, inheritedNow, true);
+				await release();
+				return sticky;
+			}
+		}
 		if (!read.ok) {
 			// Post nothing, and leave the cursor exactly as it is.
 			await release();

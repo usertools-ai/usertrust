@@ -440,7 +440,12 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   subagent inherits the estimate mode of any agent of its session: its transcript
   begins with a copy of its ancestor's responses, which an agent in estimate mode
   never claims, and which agent a fork copied is recorded nowhere. So does a subagent
-  whose type neither its meta file nor the hook states, since it may be a fork. A
+  whose type neither its meta file nor the hook states, since it may be a fork.
+  Either inherits only while none of its transcript has been read: an agent whose
+  reads are under way goes on reading, so no call of it is left uncharged by a
+  switch made between its hold and its settle. A response of its copy that the
+  ancestor settled at the estimate is claimed under the same message id (below),
+  so the fork does not post it again. A
   named subagent (`general-purpose`, `Explore`, a custom agent) copies no one's
   responses and reads its own transcript. One exception to "cannot be read": a
   SUBAGENT's transcript that does not exist yet, before any of it was read, is not
