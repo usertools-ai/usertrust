@@ -443,6 +443,17 @@ describe("publish.yml", () => {
 		);
 	});
 
+	it("every mktemp in release.sh names a template under TMPDIR or a private parent", () => {
+		// BSD mktemp with no template ignores TMPDIR, so a bare one writes outside the directory a
+		// caller (or a test) chose, and the temp-directory cleanup rows pass without testing anything.
+		const bare = readFileSync(SCRIPT, "utf8")
+			.split("\n")
+			.map((l, i) => [i + 1, l] as const)
+			.filter(([, l]) => /\bmktemp\b/.test(l) && !/^\s*#/.test(l))
+			.filter(([, l]) => !/mktemp (-d )?"(\$\{TMPDIR:-\/tmp\}|\$\{tmp\})\/[a-z]+\.XXXXXX"/.test(l));
+		expect(bare).toEqual([]);
+	});
+
 	it("only the token preflight and the publish step see the npm token", () => {
 		const withToken = allSteps().filter(([, s]) => JSON.stringify(s).includes("NPM_TOKEN"));
 		expect(withToken.map(([j, s]) => `${j}: ${s.name}`)).toEqual([
@@ -745,6 +756,7 @@ whoami)
 		shift
 	done
 	echo "whoami|$(tr '\n' ';' < "$cfg")|$(wc -c < "$gcfg" | tr -d ' ')|cache=\${npm_config_cache:+set}" >> "$FAKE_LOG"
+	echo "$npm_config_cache" >> "$FAKE_LOG.cachedir"
 	answer=$(awk '$1 == "whoami" { $1 = ""; sub(/^ /, ""); print; exit }' "$FAKE_REGISTRY")
 	case "$answer" in
 	hang) sleep 30 ;;
@@ -1793,6 +1805,17 @@ describe("release.sh preflight-token", { timeout: 30_000 }, () => {
 		// ... and npm did get it (the leak simulation reads it from npm's environment).
 		setRegistry(["whoami error", ...allWritable().slice(1)]);
 		expect(runPre({ FAKE_LEAK: "1" }).err).toContain("token was ***");
+	});
+
+	it("makes its temp files under TMPDIR (BSD mktemp without a template ignores it)", () => {
+		const tmp = join(dir, "tmpdir");
+		mkdirSync(tmp);
+		setRegistry(allWritable());
+		const r = runPre({ TMPDIR: tmp });
+		expect(r.status, r.err).toBe(0);
+		const used = readFileSync(join(dir, "log.cachedir"), "utf8").trim().split("\n");
+		expect(used.length).toBeGreaterThan(0);
+		for (const d of used) expect(d.startsWith(`${tmp}/release.`), d).toBe(true);
 	});
 
 	it("leaves nothing behind in the temp directory, success or failure", () => {

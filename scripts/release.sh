@@ -395,7 +395,7 @@ root_files() {
 # The lockstep version recorded in <commit>, read from git blobs only.
 version_at() {
 	local commit="$1" tmp dir v first="" firstdir=""
-	tmp=$(mktemp -d) || return 1
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/release.XXXXXX") || return 1
 	for dir in $(dirs); do
 		manifest_blob "$commit" "$dir" "${tmp}/${dir}.json" || return 1
 		v=$(manifest read "${tmp}/${dir}.json" "$(name_of "$dir")") || return 1
@@ -569,7 +569,7 @@ assert_bump() {
 	local bump="${1:-}" reason="${ALLOW_EARLY_MAJOR:-}" expected tmp out section required
 	local tags last="" last_n=-1 t n when now age
 	expected=$(expected_version "$bump") || return 1
-	tmp=$(mktemp -d) || return 1
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/release.XXXXXX") || return 1
 	if ! blob_to HEAD CHANGELOG.md "${tmp}/CHANGELOG.md"; then
 		rm -rf "$tmp"
 		return 1
@@ -644,7 +644,7 @@ assert_bump() {
 # "not published", because that would lead to publishing over it or skipping it blind.
 registry_has() {
 	local spec="$1" out rc errf
-	errf=$(mktemp)
+	errf=$(mktemp "${TMPDIR:-/tmp}/release.XXXXXX")
 	set +e
 	out=$(npm view "$spec" version --registry "$REGISTRY" 2>"$errf")
 	rc=$?
@@ -787,7 +787,7 @@ compare_builds() {
 		return 1
 	fi
 	version=$(version_at "$commit") || return 1
-	tmp=$(mktemp -d) || return 1
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/release.XXXXXX") || return 1
 	mkdir "${tmp}/release" "${tmp}/rebuild" || return 1
 	assemble_all "$tardir" "$commit" "$version" "${tmp}/release" "the build" || return 1
 	assemble_all "$redir" "$commit" "$version" "${tmp}/rebuild" "the rebuild" || return 1
@@ -852,7 +852,7 @@ publish() {
 	version=$(version_at "$commit") || return 1
 	tag=$(dist_tag "$version") || return 1
 	echo "npm dist-tag for ${version}: ${tag}"
-	tmp=$(mktemp -d) || return 1
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/release.XXXXXX") || return 1
 	assemble_all "$tardir" "$commit" "$version" "$tmp" "the build" || return 1
 	cfg="${tmp}/npmrc"
 	empty="${tmp}/empty-npmrc"
@@ -988,7 +988,7 @@ preflight_token() {
 	fi
 	export -n NODE_AUTH_TOKEN
 	umask 077
-	PREFLIGHT_TMP=$(mktemp -d) || return 1
+	PREFLIGHT_TMP=$(mktemp -d "${TMPDIR:-/tmp}/release.XXXXXX") || return 1
 	# A global, not a local: a local would be gone when the trap runs. A signal ends the script
 	# (the EXIT trap then cleans up), instead of running on into the next npm call.
 	trap 'rm -rf "$PREFLIGHT_TMP"' EXIT
@@ -1091,7 +1091,7 @@ process.stdin.on("end", () => {
 
 same_on_npm() {
 	local spec="$1" tgz="$2" out rc errf
-	errf=$(mktemp) || return 1
+	errf=$(mktemp "${TMPDIR:-/tmp}/release.XXXXXX") || return 1
 	set +e
 	out=$(npm view "$spec" dist --json --registry "$REGISTRY" 2>"$errf")
 	rc=$?
@@ -1117,7 +1117,7 @@ assert_protected() {
 		return 1
 	fi
 	: "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is not set}"
-	errf=$(mktemp)
+	errf=$(mktemp "${TMPDIR:-/tmp}/release.XXXXXX")
 	set +e
 	body=$(gh api "repos/${GITHUB_REPOSITORY}/environments/${env}" 2>"$errf")
 	rc=$?
@@ -1203,7 +1203,7 @@ verify_release_commit() {
 		err "v${version} (${commit}) sits on ${parent}, not on ${expected_parent}."
 		return 1
 	fi
-	tmp=$(mktemp -d) || return 1
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/release.XXXXXX") || return 1
 	raw="${tmp}/diff"
 	if ! git diff-tree -z -r --raw --no-renames --no-ext-diff --no-textconv "$parent" "$commit" >"$raw"; then
 		err "Could not diff ${parent}..${commit}."
@@ -1507,7 +1507,7 @@ newest_on_npm() {
 	local version="$1" entry pkg out rc errf list kind all=""
 	for entry in $PACKAGES; do
 		pkg="${entry##*:}"
-		errf=$(mktemp) || return 1
+		errf=$(mktemp "${TMPDIR:-/tmp}/release.XXXXXX") || return 1
 		set +e
 		out=$(npm view "$pkg" versions --json --tag latest --registry "$REGISTRY" 2>"$errf")
 		rc=$?
