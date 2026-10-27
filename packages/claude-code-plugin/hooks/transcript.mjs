@@ -305,6 +305,8 @@ const AGENT_TYPE_DIR = "agent-type";
 const MISSING_TRANSCRIPT = "transcript unreadable (ENOENT)";
 /** Why an agent whose transcript did not hold the call its hold waited for, at that call's PostToolUse, settles at the estimate (`resolveAwaitingHold`). */
 const UNSEEN_CALL_TRANSCRIPT = "its transcript did not hold a call that waited for it";
+/** Why an agent one of whose responses a waiting call claimed for its estimate settles at the estimate (`resolveAwaitingHold`). */
+const CLAIMED_CALL_TRANSCRIPT = "a call that waited for its transcript was charged at the estimate";
 /** Who a claim on a call's response is (`resolveAwaitingHold`): the call's estimate, never a window's post. */
 const ESTIMATED_CALL = "estimated-call";
 
@@ -1711,6 +1713,23 @@ async function selectOwn(opened, { left = null } = {}) {
 }
 
 /**
+ * The claim on a message id, only read: `{ holder, created: false }`, or `{ holder: null, code }`
+ * when there is none (`ENOENT`) or it cannot be read.
+ */
+async function claimOn(claimsDir, id) {
+	const digest = createHash("sha256").update(id).digest("hex");
+	try {
+		const holder = await readRegular(
+			join(claimsDir, digest.slice(0, 2), digest.slice(2)),
+			READ_BOUND.small,
+		);
+		return holder === "" ? { holder: null, code: "EMPTY" } : { holder, created: false };
+	} catch (err) {
+		return { holder: null, code: err?.code ?? "error" };
+	}
+}
+
+/**
  * The claim on a message id: `{ holder, created }` — `created` when this call made
  * it — or `{ holder: null, code }` when it can be neither made nor read. Published
  * by link(2), which never replaces an existing name, so a claim is whole the moment
@@ -2702,17 +2721,27 @@ async function noteNoTranscriptAgent({ where, sessionId, agentId, input, hook })
  * under the agent's lock, so no read of the transcript runs between the check and the ruling, and
  * never from what a later read is expected to do. The call's own response is the assistant entry
  * that holds the call's `tool_use` block (`responseOfCall`). In this order:
- *  - the response is in the transcript: this hold races every post for its message's CLAIM, in
- *    the claims dir every window and remainder posts through (`selectOwn`). Claimed by this hold
- *    (now, or by a run of it that died before its settle), it settles at the estimate
- *    (`estimate`), and no post can take the message after (a claim that exists is never posted
- *    again, and is never removed, so a failed estimate settle cannot let it be posted either).
- *    The agent goes on reading its transcript. Claimed already by another call's estimate of
- *    the same response, or by the agent's own reads AND a settle of it the server confirmed (the
- *    cursor's `posted`, or a finished hold not brought into it yet), the response is charged
- *    there, so the hold is given back (`transcript`, released as `unused`).
- *    Any other claim is `unknown`: a read claims a message before it posts it, and a claim of
- *    another agent's is not read under this lock.
+ *  - the response is in the transcript, and nothing of the transcript was read yet (cursor at
+ *    0): this hold races every post for its message's CLAIM, in the claims dir every window and
+ *    remainder posts through (`selectOwn`). Claimed by this hold (now, or by a run of it that
+ *    died before its settle), it settles at the estimate (`estimate`), and no post can take the
+ *    message after (a claim that exists is never posted again, and is never removed, so a failed
+ *    estimate settle cannot let it be posted either).
+ *  - the response is in the transcript, and some of it was read: the claim is only looked up
+ *    (`claimOn`), never made. A hold of another call of the same response may be counting on the
+ *    agent's reads to post it, so an unclaimed response is left to them: `unknown`, one gap.
+ *  - either way, a claim held for an estimate (this hold's, or another call's of the same
+ *    response: a response can make several calls) settles this call at its OWN estimate. An
+ *    estimate prices one call's tool input and output, never the response, while a post of the
+ *    response charges all of its calls, so a response is charged per call or posted whole, never
+ *    split: one response with two calls is charged two estimates, as in estimate mode. The agent
+ *    is recorded at the estimate first (`CLAIMED_CALL_TRANSCRIPT`), so every later call of it,
+ *    the response's other calls included, settles at its own estimate too, and its transcript is
+ *    never read after (`noteLateTranscript`). Claimed by the agent's own reads AND a settle of it
+ *    the server confirmed (the cursor's `posted`, or a finished hold not brought into it yet), the
+ *    response, every call of it, is charged there, so the hold is given back (`transcript`,
+ *    released as `unused`). Any other claim is `unknown`: a read claims a message before it posts
+ *    it, and a claim of another agent's is not read under this lock.
  *  - the response is not there (or the host named no call), and nothing of the transcript was
  *    read yet (cursor at 0): nothing of it was posted, so the hold settles at the estimate. The
  *    agent's estimate mode is recorded first (its own marker, a sibling's it inherits, a missing
@@ -2746,22 +2775,46 @@ export async function resolveAwaitingHold({ sessionId, agentId, input, waitMs = 
 		if (response.kind === "found") {
 			const window = `${sanitize(sessionId)}/${agentId}`;
 			const mine = `${window} ${ESTIMATED_CALL} ${toolUseId}`;
-			const claim = await claimHolder(where.claimsDir, response.id, mine);
-			if (claim.created || claim.holder === mine) {
-				// Made now, or by this same hold before a hook died ahead of its settle: either way the
-				// claim is this estimate's, so the response is never posted from the transcript.
+			// Once the agent's reads are under way, a hold of another call of the same response may
+			// be counting on them to post it: the response is claimed for no estimate then.
+			const reading = read.cursor.byteOffset > 0;
+			const claim = reading
+				? await claimOn(where.claimsDir, response.id)
+				: await claimHolder(where.claimsDir, response.id, mine);
+			if (claim.holder === null) {
 				return {
-					kind: "estimate",
+					kind: "unknown",
 					reason:
-						"the call's response was not posted yet; it is claimed for this estimate, and never posted from the transcript",
+						reading && claim.code === "ENOENT"
+							? "its response is not posted yet, and the agent's reads, which post it, are under way"
+							: `its response could not be claimed (${claim.code})`,
 				};
 			}
-			if (claim.holder === null) {
-				return { kind: "unknown", reason: `its response could not be claimed (${claim.code})` };
+			// Claimed now, or by this same hold before a hook died ahead of its settle, or by another
+			// call of the same response for ITS estimate: the response is never posted from the
+			// transcript. An estimate prices one call's own tool input and output, never the
+			// response, so every call of it is charged its own estimate, and so is every later call
+			// of the agent, which is recorded at the estimate first: a response is never split
+			// between a post and an estimate.
+			if (
+				claim.created ||
+				claim.holder === mine ||
+				claim.holder.startsWith(`${window} ${ESTIMATED_CALL} `)
+			) {
+				const sticky = await stickToEstimate(where, CLAIMED_CALL_TRANSCRIPT, true);
+				if (sticky.kind !== "estimate") return { kind: "unknown", reason: sticky.reason };
+				await noteLateTranscript({
+					where,
+					sessionId,
+					agentId,
+					recorded: sticky.reason,
+					hook: "PostToolUse",
+				});
+				return {
+					kind: "estimate",
+					reason: `the call's response is claimed for ${claim.holder === mine ? "this" : "another call's"} estimate, and never posted from the transcript; the agent settles at the estimate from now on`,
+				};
 			}
-			// Another call of the same response holds it for ITS estimate, which charges the response
-			// once (or writes its own gap).
-			if (claim.holder.startsWith(`${window} ${ESTIMATED_CALL} `)) return { kind: "transcript" };
 			// The agent's own window claims a message BEFORE posting it, so its claim alone proves
 			// nothing: only a settle of it the server confirmed does, in the cursor's `posted` or a
 			// finished hold not brought into it yet. `accounted` is not proof: it also holds ids that
@@ -2815,7 +2868,6 @@ export async function resolveAwaitingHold({ sessionId, agentId, input, waitMs = 
 	}
 }
 
-/** The hook's `tool_use_id`, when it is one a claim may carry; else null. */
 /** Whether a finished hold of the agent, not yet brought into its cursor, confirms a settle that posted `id`. */
 async function settledInJournal(sessionId, agentId, id) {
 	for (const record of await holdJournal(sessionId, agentId)) {
@@ -2825,6 +2877,7 @@ async function settledInJournal(sessionId, agentId, id) {
 	return false;
 }
 
+/** The hook's `tool_use_id`, when it is one a claim may carry; else null. */
 function callIdOf(input) {
 	const id = input?.tool_use_id;
 	return typeof id === "string" && id !== "" && id.length <= MAX_ID_CHARS ? id : null;
@@ -2932,15 +2985,22 @@ function callInLine(line, agentId, toolUseId, needle) {
 
 /**
  * The once-per-agent gap record of an agent recorded at the estimate because its transcript did
- * not exist (`MISSING_TRANSCRIPT`), or did not hold a call that waited for it
- * (`UNSEEN_CALL_TRANSCRIPT`), whose transcript exists now. Its lines are never posted: the
+ * not exist (`MISSING_TRANSCRIPT`), did not hold a call that waited for it
+ * (`UNSEEN_CALL_TRANSCRIPT`), or held a response a call that waited for it claimed for its
+ * estimate (`CLAIMED_CALL_TRANSCRIPT`), whose transcript exists now. Its lines are never posted: the
  * calls it covers were charged at the estimate, and posting them would charge them twice. So
  * what they hold reaches the ledger only as that estimate, which this record says. Once: a
  * marker under <state>/transcripts/late-transcript/, removed if the record could not be written.
  * Never throws.
  */
 async function noteLateTranscript({ where, sessionId, agentId, recorded, hook }) {
-	if (recorded !== MISSING_TRANSCRIPT && recorded !== UNSEEN_CALL_TRANSCRIPT) return;
+	if (
+		recorded !== MISSING_TRANSCRIPT &&
+		recorded !== UNSEEN_CALL_TRANSCRIPT &&
+		recorded !== CLAIMED_CALL_TRANSCRIPT
+	) {
+		return;
+	}
 	if (where.transcriptPath === undefined) return;
 	try {
 		await stat(where.transcriptPath);
@@ -2961,7 +3021,9 @@ async function noteLateTranscript({ where, sessionId, agentId, recorded, hook })
 			reason:
 				recorded === MISSING_TRANSCRIPT
 					? "its transcript appeared after the agent was settled at the estimate; its lines are not posted, so nothing is charged twice"
-					: "its transcript did not hold a call that waited for it, so the agent was settled at the estimate; its lines are not posted, so nothing is charged twice",
+					: recorded === UNSEEN_CALL_TRANSCRIPT
+						? "its transcript did not hold a call that waited for it, so the agent was settled at the estimate; its lines are not posted, so nothing is charged twice"
+						: "a call that waited for its transcript was charged at the estimate, so the agent was settled at the estimate; its lines are not posted, so nothing is charged twice",
 			started: null,
 		});
 		if (!written) await unlink(marker).catch(() => {});

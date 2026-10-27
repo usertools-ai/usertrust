@@ -1420,6 +1420,21 @@
 			"why": "how the plugin treats a malformed hold id"
 		},
 		{
+			"file": "packages/claude-code-plugin/README.md",
+			"text": "The claim is made before the settle is sent and is never removed, so a settle that fails leaves a gap, never a second charge.",
+			"why": "the plugin's metering of a call whose response it claimed, not the audit chain"
+		},
+		{
+			"file": "packages/claude-code-plugin/README.md",
+			"text": "So the claim switches the subagent to the estimate there, for every call after it, including the response's other calls; and if another call's estimate of the same response claimed it first, this call is charged its own estimate too.",
+			"why": "the plugin's metering of a subagent's later calls, not the audit chain"
+		},
+		{
+			"file": "packages/claude-code-plugin/README.md",
+			"text": "Any other claim proves nothing (a read claims a message before it posts it), so it is a gap, as below.",
+			"why": "how the plugin rules on a claim of a message's posting, not the audit chain"
+		},
+		{
 			"file": "packages/server/README.md",
 			"text": "A principal never changes which wallet pays.",
 			"why": "wallet attribution of a principal"

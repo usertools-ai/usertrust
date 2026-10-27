@@ -3929,7 +3929,7 @@ describe("estimate mode is inherited by a fork only; a subagent's missing transc
 		expect(sources()).toEqual(["estimated"]);
 	});
 
-	it("a subagent's transcript missing at its first hook waits: its own response, there by its PostToolUse, is claimed for the estimate, and the rest of the transcript is charged from it", async () => {
+	it("a subagent's transcript missing at its first hook waits: its own response, there by its PostToolUse, is claimed for the estimate, and the agent settles at the estimate from then on, so the claimed response is never posted", async () => {
 		await startServer(okResponder);
 		await writeMain([]);
 		const named = { agent_id: "g1", agent_type: "general-purpose" };
@@ -3944,8 +3944,11 @@ describe("estimate mode is inherited by a fork only; a subagent's missing transc
 		expect(post.stderr).toContain("claimed for this estimate");
 		expect(sources()).toEqual(["estimated"]);
 		expect(givenBack()).toEqual([]);
-		// The agent goes on reading its transcript: the next response is charged from it, and the
-		// claimed one never is.
+		// Another call of the same response may hold a transcript hold counting on a post of it: the
+		// agent switches to the estimate, so that call is charged its own.
+		expect(await readFile(markerOf("g1"), "utf-8")).toBe(
+			"a call that waited for its transcript was charged at the estimate",
+		);
 		await appendFile(
 			subagentPath("g1"),
 			`${issued("msg_g2", "tu_2", u(800, 100), "g1").join("\n")}\n`,
@@ -3953,15 +3956,10 @@ describe("estimate mode is inherited by a fork only; a subagent's missing transc
 		await run("pre-tool-use.mjs", preInput("tu_2", named));
 		await run("post-tool-use.mjs", postInput("tu_2", named));
 		await run("subagent-stop.mjs", { ...stopInput(), ...named });
-		expect(sources()).toEqual(["estimated", "provider"]);
-		expect(
-			settles()
-				.filter((s) => s.body.usageSource === "provider")
-				.map((s) => s.body.inputTokens),
-		).toEqual([800]);
-		expect(postedResponse()).toEqual([]);
-		await expect(stat(markerOf("g1"))).rejects.toMatchObject({ code: "ENOENT" });
-		expect((await watchRecords()).filter((r) => r.kind === "gap")).toEqual([]);
+		expect(sources()).toEqual(["estimated", "estimated"]);
+		expect(settles().some((s) => s.body.usageSource === "provider")).toBe(false);
+		const gaps = (await watchRecords()).filter((r) => r.kind === "gap");
+		expect(gaps).toMatchObject([{ phase: "late-transcript", agent: "g1", started: null }]);
 		// A named agent's late transcript is not a phantom: no probe record.
 		expect(await noTranscriptRecords()).toEqual([]);
 	});
@@ -4098,7 +4096,7 @@ describe("estimate mode is inherited by a fork only; a subagent's missing transc
 		expect(await readFile(markerOf("x1"), "utf-8")).toContain("did not hold a call that waited");
 	});
 
-	it("a fork's own response at its PostToolUse, behind entries copied from its ancestor: only its call's tool_use is matched, the hold claims it for the estimate, and nothing posts it after a sibling sticks", async () => {
+	it("a fork's own response at its PostToolUse, behind entries copied from its ancestor: only its call's tool_use is matched, the hold claims it for the estimate, the fork settles at the estimate from then on, and nothing posts the response", async () => {
 		await startServer(okResponder);
 		// The parent's response that spawned the fork, posted by the parent's own window.
 		await writeMain(responseEntries("msg_anc", SONNET, u(50, 10), {}, { toolUse: "tu_spawn" }));
@@ -4121,7 +4119,8 @@ describe("estimate mode is inherited by a fork only; a subagent's missing transc
 		await run("stop.mjs", stopInput());
 		expect(sources()).toEqual(["provider", "estimated"]);
 		expect(postedResponse()).toEqual([]);
-		expect((await watchRecords()).filter((r) => r.kind === "gap")).toEqual([]);
+		const gaps = (await watchRecords()).filter((r) => r.kind === "gap");
+		expect(gaps).toMatchObject([{ phase: "late-transcript", agent: "f1" }]);
 	});
 
 	it("a fork's transcript holding only entries copied from its ancestor at its PostToolUse: no copied call is this one, so nothing of it was read, the fork sticks, and the call is charged at the estimate", async () => {
@@ -4139,7 +4138,7 @@ describe("estimate mode is inherited by a fork only; a subagent's missing transc
 		expect(await readFile(markerOf("f1"), "utf-8")).toContain("did not hold a call that waited");
 	});
 
-	it("a named subagent known by its hook's agent_type alone, whose SubagentStop never arrives: its call charged once, and the rest of its transcript still posted at a session-wide Stop after a sibling sticks", async () => {
+	it("a named subagent known by its hook's agent_type alone, whose SubagentStop never arrives: its call charged once at the estimate its claim switched the agent to, and a session-wide Stop after a sibling sticks posts nothing of its transcript", async () => {
 		await startServer(okResponder);
 		await writeMain([]);
 		const named = { agent_id: "g1", agent_type: "general-purpose" };
@@ -4156,14 +4155,10 @@ describe("estimate mode is inherited by a fork only; a subagent's missing transc
 		// The parent's input names no type for g1: the type its own hook stated is recorded.
 		await run("stop.mjs", stopInput());
 		expect(settles().filter((s) => s.body.transferId === holdOf(0))).toHaveLength(1);
-		expect(sources()).toEqual(["estimated", "provider"]);
-		expect(
-			settles()
-				.filter((s) => s.body.usageSource === "provider")
-				.map((s) => s.body.inputTokens),
-		).toEqual([800]);
-		expect(postedResponse()).toEqual([]);
-		await expect(stat(markerOf("g1"))).rejects.toMatchObject({ code: "ENOENT" });
+		expect(sources()).toEqual(["estimated"]);
+		expect(await readFile(markerOf("g1"), "utf-8")).toBe(
+			"a call that waited for its transcript was charged at the estimate",
+		);
 	});
 
 	it("a named subagent known by its hook's agent_type alone, read at its first hook: a session-wide Stop after a sibling sticks still posts the rest of its transcript", async () => {
@@ -4206,7 +4201,7 @@ describe("estimate mode is inherited by a fork only; a subagent's missing transc
 		expect(sources()).toEqual(["provider", "estimated"]);
 	});
 
-	it("a parallel call reads the transcript while it holds only the prompt, the response lands, a sibling sticks and a third call inherits, then the first call's PostToolUse: its response is claimed for the estimate, never given back uncharged", async () => {
+	it("a parallel call reads the transcript while it holds only the prompt, the response lands, a sibling sticks and a third call inherits, then the first call's PostToolUse: the agent's reads are under way, so its response is left to them, and the call is given back with ONE gap naming it, never uncharged unrecorded", async () => {
 		await startServer(okResponder);
 		await writeMain([]);
 		const fork = { agent_id: "f1", agent_type: "fork" };
@@ -4230,17 +4225,24 @@ describe("estimate mode is inherited by a fork only; a subagent's missing transc
 		await run("pre-tool-use.mjs", preInput("tu_3", fork));
 		await expect(readFile(markerOf("f1"), "utf-8")).resolves.toContain("a0 of this session");
 		const post = await run("post-tool-use.mjs", postInput("tu_1", fork));
-		expect(post.stderr).toContain("claimed for this estimate");
-		expect(givenBack()).toEqual([]);
+		expect(post.stderr).toContain("the agent's reads, which post it, are under way");
+		expect(givenBack()).toHaveLength(1);
 		await run("post-tool-use.mjs", postInput("tu_3", fork));
 		await run("stop.mjs", stopInput());
-		expect(settles().filter((s) => s.body.transferId === holdOf(0))).toMatchObject([
-			{ body: { usageSource: "estimated" } },
-		]);
+		expect(settles().filter((s) => s.body.transferId === holdOf(0))).toEqual([]);
 		expect(postedResponse()).toEqual([]);
+		const gaps = (await watchRecords()).filter(
+			(r) => r.kind === "gap" && r.transferId === holdOf(0),
+		);
+		expect(gaps).toMatchObject([{ releaseClass: "call-ran", toolUseId: "tu_1" }]);
+		// No claim is made for it: a read may still post it.
+		const digest = createHash("sha256").update("msg_f").digest("hex");
+		await expect(
+			stat(join(stateDir, "transcripts", "claims", digest.slice(0, 2), digest.slice(2))),
+		).rejects.toMatchObject({ code: "ENOENT" });
 	});
 
-	it("the same read, the first call's PostToolUse BEFORE the sibling sticks: its response is claimed for the estimate there, and a later inheritance cannot leave it uncharged", async () => {
+	it("the same read, and no sibling: the call is given back with ONE gap, and the agent's next read posts its response, so the call is charged once", async () => {
 		await startServer(okResponder);
 		await writeMain([]);
 		const fork = { agent_id: "f1", agent_type: "fork" };
@@ -4260,15 +4262,116 @@ describe("estimate mode is inherited by a fork only; a subagent's missing transc
 			`${issued("msg_f", "tu_1", u(1200, 300), "f1").join("\n")}\n`,
 		);
 		const post = await run("post-tool-use.mjs", postInput("tu_1", fork));
-		expect(post.stderr).toContain("claimed for this estimate");
-		await stuckSibling();
+		expect(post.stderr).toContain("the agent's reads, which post it, are under way");
 		await run("pre-tool-use.mjs", preInput("tu_3", fork));
 		await run("post-tool-use.mjs", postInput("tu_3", fork));
 		await run("subagent-stop.mjs", { ...stopInput(), ...fork });
-		expect(settles().filter((s) => s.body.transferId === holdOf(0))).toMatchObject([
-			{ body: { usageSource: "estimated" } },
-		]);
-		expect(postedResponse()).toEqual([]);
+		expect(settles().filter((s) => s.body.transferId === holdOf(0))).toEqual([]);
+		expect(postedResponse()).toHaveLength(1);
+		// Every other settle is an empty window's, at zero.
+		expect(settles().filter((s) => Number(s.body.inputTokens) > 0)).toHaveLength(1);
+		expect(sources()).not.toContain("estimated");
+		expect(
+			(await watchRecords()).filter((r) => r.kind === "gap" && r.transferId === holdOf(0)),
+		).toHaveLength(1);
+	});
+
+	describe("one response that makes two calls is written one block per entry, only the last complete", () => {
+		const named = { agent_id: "g1", agent_type: "general-purpose" };
+		const prompt = JSON.stringify({
+			type: "user",
+			sessionId: SESSION,
+			...sub("g1"),
+			message: { role: "user", content: "synthetic" },
+		});
+		/** The entry of `call`'s tool_use block in the response msg_r, as the host writes it. */
+		const block = (call: string, last: boolean) =>
+			JSON.stringify({
+				type: "assistant",
+				sessionId: SESSION,
+				uuid: `msg_r-${call}`,
+				...sub("g1"),
+				message: {
+					id: "msg_r",
+					model: SONNET,
+					role: "assistant",
+					type: "message",
+					stop_reason: last ? "tool_use" : null,
+					content: [{ type: "tool_use", id: call, name: "Bash", input: { command: "ls" } }],
+					usage: {
+						input_tokens: 1200,
+						cache_creation_input_tokens: 0,
+						cache_read_input_tokens: 0,
+						output_tokens: last ? 300 : 150,
+						cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },
+						service_tier: "standard",
+					},
+				},
+			});
+		const append = (line: string) => appendFile(subagentPath("g1"), `${line}\n`);
+		const estimatedOnce = (n: number) =>
+			expect(settles().filter((s) => s.body.transferId === holdOf(n))).toMatchObject([
+				{ body: { usageSource: "estimated" } },
+			]);
+
+		it("both calls waiting, the first one's PostToolUse before the second block lands: each call is charged its own estimate, two in all, and the response is never posted", async () => {
+			await startServer(okResponder);
+			await writeMain([]);
+			await run("pre-tool-use.mjs", preInput("tu_1", named));
+			await run("pre-tool-use.mjs", preInput("tu_2", named));
+			await writeSubagent("g1", "general-purpose", [prompt]);
+			await append(block("tu_1", false));
+			const first = await run("post-tool-use.mjs", postInput("tu_1", named));
+			expect(first.stderr).toContain("claimed for this estimate");
+			await run("post-tool-use.mjs", postInput("tu_2", named));
+			await append(block("tu_2", true));
+			await run("subagent-stop.mjs", { ...stopInput(), ...named });
+			estimatedOnce(0);
+			estimatedOnce(1);
+			expect(sources()).toEqual(["estimated", "estimated"]);
+			expect(givenBack()).toEqual([]);
+			expect(
+				(await watchRecords()).filter((r) => r.kind === "gap" && r.transferId !== undefined),
+			).toEqual([]);
+		});
+
+		it("the second call's hold reads the transcript before the first call's PostToolUse: the response is left to the reads, so the first call is given back with ONE gap, and the second call's window posts the response once, for both calls", async () => {
+			await startServer(okResponder);
+			await writeMain([]);
+			await run("pre-tool-use.mjs", preInput("tu_1", named));
+			await writeSubagent("g1", "general-purpose", [prompt]);
+			await append(block("tu_1", false));
+			const second = await run("pre-tool-use.mjs", preInput("tu_2", named));
+			expect(second.stderr).not.toContain("not written yet");
+			const first = await run("post-tool-use.mjs", postInput("tu_1", named));
+			expect(first.stderr).toContain("the agent's reads, which post it, are under way");
+			await append(block("tu_2", true));
+			await run("post-tool-use.mjs", postInput("tu_2", named));
+			await run("subagent-stop.mjs", { ...stopInput(), ...named });
+			expect(settles().filter((s) => s.body.transferId === holdOf(0))).toEqual([]);
+			expect(
+				(await watchRecords()).filter((r) => r.kind === "gap" && r.transferId === holdOf(0)),
+			).toHaveLength(1);
+			expect(postedResponse()).toHaveLength(1);
+			expect(settles().filter((s) => Number(s.body.inputTokens) > 0)).toHaveLength(1);
+			expect(sources()).not.toContain("estimated");
+		});
+
+		it("the second call's hold made after the agent switched: it is charged its estimate, and the response is still never posted", async () => {
+			await startServer(okResponder);
+			await writeMain([]);
+			await run("pre-tool-use.mjs", preInput("tu_1", named));
+			await writeSubagent("g1", "general-purpose", [prompt]);
+			await append(block("tu_1", false));
+			await run("post-tool-use.mjs", postInput("tu_1", named));
+			await append(block("tu_2", true));
+			await run("pre-tool-use.mjs", preInput("tu_2", named));
+			await run("post-tool-use.mjs", postInput("tu_2", named));
+			await run("subagent-stop.mjs", { ...stopInput(), ...named });
+			estimatedOnce(0);
+			estimatedOnce(1);
+			expect(postedResponse()).toEqual([]);
+		});
 	});
 
 	it("its response not in a transcript read before: whether any of it was posted cannot be told, so the call is given back uncharged, with ONE gap naming the call", async () => {
@@ -4512,12 +4615,19 @@ describe("estimate mode is inherited by a fork only; a subagent's missing transc
 			expect(postedResponse()).toEqual([]);
 		});
 
-		it("another call's estimate of the same response: charged there, so the hold is given back, with no gap", async () => {
+		it("another call's estimate of the same response: that estimate covers that call only, so this call settles at its own, and the response is never posted", async () => {
 			const post = await claimedBy(`${SESSION}/g1 estimated-call tu_0`);
-			expect(post.stderr).toContain("claimed by the post that charges it");
-			expect(settles()).toEqual([]);
-			expect(givenBack()).toHaveLength(1);
-			expect(await gaps()).toEqual([]);
+			expect(post.stderr).toContain("claimed for another call's estimate");
+			expect(settles().filter((s) => s.body.transferId === holdOf(0))).toMatchObject([
+				{ body: { usageSource: "estimated" } },
+			]);
+			expect(givenBack()).toEqual([]);
+			expect(await gaps()).toMatchObject([{ phase: "late-transcript", agent: "g1" }]);
+			expect(await readFile(markerOf("g1"), "utf-8")).toBe(
+				"a call that waited for its transcript was charged at the estimate",
+			);
+			await run("subagent-stop.mjs", { ...stopInput(), ...named });
+			expect(postedResponse()).toEqual([]);
 		});
 
 		it("the agent's own reads, but not accounted in its cursor (a read claims before it posts): not proof of a charge, so a gap names the call", async () => {

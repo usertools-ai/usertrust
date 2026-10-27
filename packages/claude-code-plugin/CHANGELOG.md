@@ -31,17 +31,23 @@ npm, and its version is its own: the `usertrust` packages and their
   named subagent (`general-purpose`, `Explore`, a custom agent) reads its own transcript.
   And a subagent's transcript that does not exist yet at its first hook, before any of it was
   read, no longer switches it to the estimate for good: that call's PostToolUse decides, from the
-  call's own response, found in the subagent's transcript by the call's id. A response no
-  window claimed yet is claimed for the call, which is charged at the estimate and never posted
-  from the transcript; one already charged (claimed by another call's estimate of the same
-  response, or posted by the subagent's own reads in a settle the server confirmed) gives the
-  hold back, and any other claim is a gap. A transcript still missing, or holding no such response before any of it was
+  call's own response, found in the subagent's transcript by the call's id.
+  A response no window claimed yet, before any of the transcript was read, is claimed for the
+  call, which is charged at the estimate and never posted from the transcript; the claim
+  switches the subagent to the estimate from then on. An estimate prices one call, never the
+  response, so one response that makes two calls is charged two estimates, one per call (a call
+  whose response another call's estimate claimed is charged its own), while a response posted
+  from the transcript covers all of its calls. A response posted by the subagent's own reads in
+  a settle the server confirmed gives the hold back; an unclaimed one, once some of the
+  transcript was read, is left to those reads, with a gap naming the call; and any other claim
+  is a gap.
+  A transcript still missing, or holding no such response before any of it was
   read, switches the subagent there, and the call is charged at the estimate, so no call goes
   uncharged for want of a transcript. What cannot be told (some of the transcript read without
   the response, a transcript over the read bound, an unfinished or unparseable line naming the
   call) gives the hold back uncharged with one gap record naming the call. A call that never reaches its PostToolUse is
-  decided at the subagent's SubagentStop. A transcript that appears only after the switch is
-  never read (its calls were charged at the estimate): one gap record says so. The parent's
+  decided at the subagent's SubagentStop. After the switch the transcript is
+  not read (its calls were charged at the estimate): one gap record says so. The parent's
   missing transcript switches it at once, as before. The parent's own `agent_type`, which a
   session-wide Stop carries, is never taken as a subagent's type. An agent that already recorded its estimate mode keeps it, so nothing it settled
   at the estimate is posted again. A subagent id that names no type and has no transcript is
