@@ -585,16 +585,23 @@ async function reserve(input) {
 			`usertrust: ${prepared.reason}; this agent now settles at the ESTIMATE for the rest of the session`,
 		);
 	}
-	if (prepared.mode === "unavailable") {
+	// A subagent whose transcript is not written yet (transcript.mjs `notWrittenYet`): its hold is
+	// an estimate hold that this call's PostToolUse rules on (`resolveAwaitingHold`).
+	const awaitingTranscript = prepared.mode === "unavailable" && prepared.awaitingTranscript;
+	if (awaitingTranscript) {
+		say(
+			`usertrust: ${prepared.reason}; this tool's hold is ruled on at its PostToolUse: given back if the transcript exists by then (the transcript posts the usage), else settled at the estimate`,
+		);
+	} else if (prepared.mode === "unavailable") {
 		say(
 			`usertrust: transcript usage unavailable for now (${prepared.reason}); this tool's hold will be given back, not settled at the estimate — the usage stays in the transcript for a later settle point`,
 		);
 	}
 	try {
 		const transcriptMode = prepared.mode === "transcript";
-		// Only an estimate-mode hold settles at the estimate. Every other one is a
-		// transcript hold: settled at its window's counts, or given back.
-		const settlesAtEstimate = prepared.mode === "estimate";
+		// Only an estimate-mode hold, or one awaiting its transcript, settles at the estimate.
+		// Every other one is a transcript hold: settled at its window's counts, or given back.
+		const settlesAtEstimate = prepared.mode === "estimate" || awaitingTranscript;
 		// What the server honours decides what this hold may carry (see lib.mjs).
 		// Unknown (a failed probe) reads as absent here: a key is sent only to a server
 		// known to honour it, and a principal — on either path, in one shape — only to
@@ -730,7 +737,9 @@ async function reserve(input) {
 					...holdLifeField(holdTtlMs, json),
 					expiresAt: holdExpiresAt(sentAt, json),
 					...(settlesAtEstimate
-						? {}
+						? awaitingTranscript
+							? { awaitingTranscript: true }
+							: {}
 						: {
 								usage: "transcript",
 								assignedIds: window?.ids ?? [],

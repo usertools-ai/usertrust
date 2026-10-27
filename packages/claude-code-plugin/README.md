@@ -436,13 +436,60 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   reads the transcript tail for the model id only (the model a hold names, above);
   usage is always estimated. `UT_CC_USAGE=estimate` uses
   the estimate for every agent, and records that the same way, so a session
-  resumed without it posts nothing it already settled at the estimate. A subagent
-  inherits the estimate mode of any agent of its session: a forked subagent's
-  transcript begins with a copy of its ancestor's responses, which an agent in
-  estimate mode never claims, and which agent a fork copied is recorded nowhere. A
-  hold is settled at the estimate ONLY in these cases: when the plugin's own state
-  is unusable for now, the hold is given back, because the transcript still holds
-  that usage.
+  resumed without it posts nothing it already settled at the estimate. A FORKED
+  subagent inherits the estimate mode of any agent of its session: its transcript
+  begins with a copy of its ancestor's responses, which an agent in estimate mode
+  never claims, and which agent a fork copied is recorded nowhere. So does a subagent
+  whose type neither its meta file nor the hook states, since it may be a fork.
+  Either inherits only while none of its transcript has been read: an agent whose
+  reads are under way goes on reading, so no call of it is left uncharged by a
+  switch made between its hold and its settle. A response of its copy that the
+  ancestor settled at the estimate is claimed under the same message id (below),
+  so the fork does not post it again. One edge is declared, not fixed: an ancestor
+  whose transcript cannot be read at a call's PreToolUse switches without reading
+  the response that made the call, so it claims nothing, and a fork whose reads are
+  under way posts its copy of that response at its real counts while each call it
+  made is charged its estimate as well. The response is posted once; each such call
+  is charged twice only for its own tool input and output, which its estimate prices.
+  It needs a transcript that cannot be read, and it is never a missed charge. A
+  named subagent (`general-purpose`, `Explore`, a custom agent) copies no one's
+  responses and reads its own transcript. One exception to "cannot be read": a
+  SUBAGENT's transcript that does not exist yet, before any of it was read, is not
+  written yet (Claude Code can run a subagent's first hooks before it creates the
+  file). The call's PostToolUse decides, under the subagent's lock, from the call's
+  own response: the entry of this subagent that holds the call's `tool_use` block,
+  found by the call's id (entries a fork copied from its ancestor hold the ancestor's
+  calls, never this one). If that response is there, no window claimed it yet, and
+  none of the transcript was read yet, the hold claims it, in the same claims
+  directory that posts every message once, and the call is charged at the estimate:
+  the response is never posted from the transcript. The claim is made before the
+  settle is sent and is never removed, so a settle that fails leaves a gap, never a
+  second charge. An estimate prices one call's own tool input and output, never the
+  response's tokens, so a response is charged per call or posted whole, never both:
+  one response that makes two calls is charged two estimates, one per call, as in
+  estimate mode, while a response posted from the transcript covers all of its calls.
+  So the claim switches the subagent to the estimate there, for every call after it,
+  including the response's other calls; and if another call's estimate of the same
+  response claimed it first, this call is charged its own estimate too. If the
+  subagent's own reads claimed it and the server confirmed their settle, the hold is
+  given back: the response is charged there. A settle never seen to end, or a claim
+  written off, is no such proof. Any other claim proves nothing (a read claims a
+  message before it posts it), so it is a gap, as below. A response that is there,
+  unclaimed, after some of the transcript was read is left to those reads, which post
+  it for all of its calls: the hold is given back, with a gap that names the call. If
+  the transcript is still missing, or holds no such response and none of it was read,
+  the subagent switches to the estimate there, and the call is charged at it. Anything
+  that cannot be told (some of the transcript read but the response not in it, a
+  transcript over 64 MiB or a line over 16 MiB, an unfinished or unparseable line that
+  names the call) gives the hold back uncharged, with ONE `gap` record that names the
+  call (`toolUseId`) and why, so it can be priced later; it is never charged at the
+  estimate there, since a later read could post the same response. A call that never
+  reaches its PostToolUse is decided at the subagent's SubagentStop. After the switch
+  the transcript is not read, whether it appeared only then or held a response a hold
+  claimed, since its calls were charged at the estimate, and posting them would charge
+  them twice: one `gap` record (`"phase":"late-transcript"`) says so. When the
+  plugin's own state is unusable for now, the hold is given back, because the
+  transcript still holds that usage.
 - **Private, durable state.** Cursors, claims and estimate-mode records live in
   `$UT_CC_STATE_DIR/transcripts/`, created `0700`; if that directory is not a real
   directory owned by you without group or other write access, transcript
@@ -822,7 +869,14 @@ trimmed:
 {"at":"2026-10-06T10:00:00.000Z","kind":"would_block","session":"<session id>","agent":"main","tool":"Bash","status":402,"error":"budget_exceeded","reason":"<the server's reason>"}
 {"at":"2026-10-06T10:00:05.000Z","kind":"gap","mode":"watch","session":"<session id>","agent":"main","tool":"Bash","reason":"fetch failed"}
 {"at":"2026-10-06T10:00:09.000Z","kind":"pre-metering","mode":"watch","session":"<session id>","agent":"main","responses":3,"reason":"written before this session was metered; not billed","started":null}
+{"at":"2026-10-06T10:00:12.000Z","kind":"no-transcript-agent","mode":"watch","session":"<session id>","agent":"<agent id>","hook":"PreToolUse","tool":"Bash","reason":"a subagent id with no stated agent type and no transcript; none of its usage can be read","started":null}
 ```
+
+A `no-transcript-agent` record is written once per agent: a hook arrived with a subagent id
+whose type nothing states (no `agent_type`, no meta file) and whose transcript does not
+exist. It names the hook and the tool, nothing of the call's content. None of such an agent's
+usage can be read, so what it is cannot be told from the plugin's side; the record is what a
+measurement can count. Like `pre-metering`, **it is never a gap**.
 
 A `pre-metering` record counts the responses a session's transcript held from before that
 session was metered (see the first-run time above): `responses` is how many, by message id,
@@ -953,6 +1007,12 @@ PreToolUse, when it settles a repeated or resumed call's earlier hold. Its `"pha
   connection dropped after sending, and the server may still act on it. A transcript hold's
   settle that ends this way is `claimed`, or `unresolved` under a key, which also say whether
   it is retried.
+
+One more `gap` record has `"phase":"late-transcript"`, written once per agent: a subagent
+switched to the estimate because its transcript did not exist, or did not hold the response
+of a call that waited for it, and the transcript exists now.
+Its lines are never posted, since the calls they cover were charged at the estimate, so what
+they hold reaches the ledger only as that estimate.
 
 A transcript settle that cannot be built once its hold is claimed (the server's capabilities
 read as unknown only then) sends nothing and hands the hold back for a later settle point:

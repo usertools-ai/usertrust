@@ -20,6 +20,47 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ### Fixed
 
+- **A named subagent is charged from its own transcript, not at an estimate.** Once any agent
+  of a session settled at the per-call estimate, every subagent of that session did too, for
+  the rest of the session: the rule exists because a FORK's transcript begins with a copy of
+  its ancestor's responses, but it caught every subagent. The first such agent was usually
+  one whose transcript did not exist yet. In one measured lab, subagents settled this way were
+  charged about 9% of what their own transcripts held, at the ledger's own rates, while the
+  parent sessions, priced the same way, came to 104%. Now only a fork inherits the
+  estimate mode, and so does a subagent whose type nothing states, since it may be a fork; a
+  named subagent (`general-purpose`, `Explore`, a custom agent) reads its own transcript.
+  Either inherits only while none of its transcript has been read: one whose reads are under
+  way goes on reading, so a call held while it read is never left uncharged by a sibling
+  switching before the call settled. A response of its copy that the ancestor settled at the
+  estimate is claimed under the same message id, so the fork does not post it again.
+  One edge is declared: an ancestor whose transcript cannot be read at a call's PreToolUse
+  claims nothing, so a fork that is reading posts its copy of that response, and each call that
+  response made is charged its estimate as well. The overcharge is one estimate for each call that
+  response made (its tool input and output), never a missed charge.
+  And a subagent's transcript that does not exist yet at its first hook, before any of it was
+  read, no longer switches it to the estimate for good: that call's PostToolUse decides, from the
+  call's own response, found in the subagent's transcript by the call's id.
+  A response no window claimed yet, before any of the transcript was read, is claimed for the
+  call, which is charged at the estimate and never posted from the transcript; the claim
+  switches the subagent to the estimate from then on. An estimate prices one call, never the
+  response, so one response that makes two calls is charged two estimates, one per call (a call
+  whose response another call's estimate claimed is charged its own), while a response posted
+  from the transcript covers all of its calls. A response posted by the subagent's own reads in
+  a settle the server confirmed gives the hold back; an unclaimed one, once some of the
+  transcript was read, is left to those reads, with a gap naming the call; and any other claim
+  is a gap.
+  A transcript still missing, or holding no such response before any of it was
+  read, switches the subagent there, and the call is charged at the estimate, so no call goes
+  uncharged for want of a transcript. What cannot be told (some of the transcript read without
+  the response, a transcript over the read bound, an unfinished or unparseable line naming the
+  call) gives the hold back uncharged with one gap record naming the call. A call that never reaches its PostToolUse is
+  decided at the subagent's SubagentStop. After the switch the transcript is
+  not read (its calls were charged at the estimate): one gap record says so. The parent's
+  missing transcript switches it at once, as before. The parent's own `agent_type`, which a
+  session-wide Stop carries, is never taken as a subagent's type. An agent that already recorded its estimate mode keeps it, so nothing it settled
+  at the estimate is posted again. A subagent id that names no type and has no transcript is
+  now written down once, as a `no-transcript-agent` watch record (hook and tool, no content),
+  so such agents can be counted; it is never a gap.
 - **A hold names the session's own model, never `claude-sonnet-4-6`.** A hold with no
   transcript window named `UT_CC_MODEL`, else a built-in `claude-sonnet-4-6`, whatever the
   session ran. An Opus session's estimate holds, and the holds of a tool call with nothing new
