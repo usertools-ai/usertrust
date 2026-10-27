@@ -72,7 +72,9 @@ npx usertrust verify --json
 Checks:
 - Every event's hash covers the previous event's hash
 - Chain starts from GENESIS_HASH (64 zeros)
-- No gaps or tampering in the sequence
+- Sequence numbers start at 1 and have no gaps
+
+What this does and does not catch is in [Verification](/docs/concepts/audit-trail#verification).
 
 ## usertrust snapshot
 

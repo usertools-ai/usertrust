@@ -20,6 +20,27 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ### Fixed
 
+- **A hold names the session's own model, never `claude-sonnet-4-6`.** A hold with no
+  transcript window named `UT_CC_MODEL`, else a built-in `claude-sonnet-4-6`, whatever the
+  session ran. An Opus session's estimate holds, and the holds of a tool call with nothing new
+  before it, read as Sonnet 4.6 on the ledger and were priced at its rate: the budget check
+  before the call was sized too small, and an agent that settles at the estimate (a forked
+  subagent, say) was charged at that rate too. Such a hold now names the model of the newest
+  response in its agent's transcript; with none to read, and only for the main agent before it
+  has read anything, the model of the session's latest switch, else the one Claude Code reported
+  at SessionStart; and otherwise `unknown`, which usertrust-server prices at the dearest rate it
+  publishes. The transcript can lag the conversation, so a new `PostModelSwitch` hook records
+  each switch of the session's model, and a newest response from before it that names another
+  model is `unknown`. Each run keeps its own record, and switches recorded within 10 seconds of
+  the newest are read together: two that name different models are ambiguous, and `unknown`. That hook is registered in its own file, `hooks/model-switch.json`: a Claude
+  Code before v2.1.251 does not know the event and rejects a whole hooks file that names it, so
+  it loses only this hook. Estimate mode (`UT_CC_USAGE=estimate`) now reads the
+  transcript tail for the model id only, so a model switched to mid-session is held and settled
+  at its own rate; its usage is still always estimated. Responses written before the session was metered now count
+  toward the model too, though they are still never billed. PostToolUse's fresh hold for an
+  estimate hold that expired is authorized at the expired hold's model. Each authorize says
+  which source it used, in `params.modelSource`.
+
 - **A hold past its life is never settled.** A tool call that outlives its hold (a Bash command
   or a permission prompt longer than the server's five minutes) found the hold voided by the
   ledger's pending timeout. Its settle could only fail, as a 410 `settlement_unrecoverable`, which
@@ -33,6 +54,21 @@ npm, and its version is its own: the `usertrust` packages and their
   hold's call is charged once on a fresh hold. A transcript hold's window goes back to a later
   settle point, or, under a key, is retried under it. An older server states no life, and nothing
   changes.
+- **A fresh hold too short for its own settle is never settled either.** The hold that replaces
+  one past its life, and the hold a transcript window is authorized on, were settled without
+  reading the life the server stated for them. On a server whose pending timeout is shorter than
+  a settle's own wait, that settle could arrive after the ledger had voided the hold, as a 410,
+  and the call went uncharged. Each is now judged the same way: if its life could end before its
+  settle arrives, it is given back, never settled. The estimate call is recorded as one that ran
+  without a charge; the window goes back to a later settle point.
+
+### Removed
+
+- **`UT_CC_MODEL` and the config file's `model`.** The model is the session's own, so nothing
+  configured can price a hold below it. Either one still set is ignored, never an error, and
+  SessionStart says so: `usertrust: UT_CC_MODEL is ignored: model is no longer configurable,
+  and the session's own model is used.` A config file whose `model` is not a valid id is no
+  longer refused for it.
 
 ## [3.0.3] - 2026-10-17
 

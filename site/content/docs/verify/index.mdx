@@ -19,7 +19,7 @@ npm install usertrust-verify
 npx usertrust-verify .usertrust
 ```
 
-Verifies the entire vault: hash chain integrity, event sequence, and Merkle root.
+Verifies the entire vault: hash chain integrity and event sequence. It also computes the Merkle root over the event hashes and prints it; the root is checked against a signed checkpoint only when you supply anchors (`--anchors` with `--pubkey`).
 
 ## Programmatic API
 

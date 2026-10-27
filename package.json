@@ -17,6 +17,8 @@
 		"typecheck": "tsc -b && tsc -p packages/core/tsconfig.type-tests.json && tsc -p packages/openclaw/tsconfig.type-tests.json && tsc -p packages/openshell/tsconfig.type-tests.json && tsx scripts/typecheck-tests.mts",
 		"typecheck:tests": "tsx scripts/typecheck-tests.mts",
 		"typecheck-tests:test": "node --import tsx --test scripts/typecheck-tests.test.mts",
+		"timing-thresholds": "tsx scripts/timing-thresholds.mts",
+		"timing-thresholds:test": "node --import tsx --test scripts/timing-thresholds.test.mts",
 		"typecheck:types": "tsc -p packages/core/tsconfig.type-tests.json"
 	},
 	"devDependencies": {

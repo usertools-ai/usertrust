@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { assertTestStateDir } from "./isolate-env.js";
 
 export interface HookRunResult {
 	code: number;
@@ -100,6 +102,15 @@ export const LAUNCH = join(HOOKS, "launch.mjs");
 /** The test-only preload that moves the passwd home (passwd-home.mjs). */
 export const PASSWD_HOME_PRELOAD = join(import.meta.dirname, "passwd-home.mjs");
 
+/** config.mjs's resolution, as a hook's first run makes it (session.mjs pins the result). */
+const { resolveSettings } = (await import(pathToFileURL(join(HOOKS, "config.mjs")).href)) as {
+	resolveSettings(args: {
+		env: Record<string, string | undefined>;
+		passwdHome: string | null;
+		uid: number | null;
+	}): { stateDir: string };
+};
+
 /**
  * The passwd home a run's hooks pin their sessions under, never the real one. It is
  * the test's own (TEST_PASSWD_HOME), else one named by the hash of UT_CC_STATE_DIR:
@@ -185,17 +196,27 @@ export function runHook(
 	// only when it comes first, so a kill is attributed to the one that made it.
 	const hostFirst =
 		hostDeadlineMs !== undefined && (timeoutMs === undefined || hostDeadlineMs < timeoutMs);
+	const childEnv: Record<string, string | undefined> = {
+		...inherited,
+		// Never the developer's own Claude Code settings (peer-meter.mjs reads
+		// `enabledPlugins` from them): a home and a project of the run's own.
+		CLAUDE_CONFIG_DIR: join(passwdHomeFor(env), ".claude"),
+		CLAUDE_PROJECT_DIR: join(passwdHomeFor(env), "project"),
+		...env,
+		TEST_PASSWD_HOME: passwdHomeFor(env),
+	};
+	// The state dir this hook's session resolves: never a live one (isolate-env.ts).
+	assertTestStateDir(
+		resolveSettings({
+			env: childEnv,
+			passwdHome: childEnv.TEST_PASSWD_HOME ?? null,
+			uid: typeof process.getuid === "function" ? process.getuid() : null,
+		}).stateDir,
+		`the ${basename(hookPath, ".mjs")} hook`,
+	);
 	return new Promise((resolve, reject) => {
 		const child = spawn(process.execPath, [...preload, ...nodeArgs, ...script], {
-			env: {
-				...inherited,
-				// Never the developer's own Claude Code settings (peer-meter.mjs reads
-				// `enabledPlugins` from them): a home and a project of the run's own.
-				CLAUDE_CONFIG_DIR: join(passwdHomeFor(env), ".claude"),
-				CLAUDE_PROJECT_DIR: join(passwdHomeFor(env), "project"),
-				...env,
-				TEST_PASSWD_HOME: passwdHomeFor(env),
-			},
+			env: childEnv,
 			stdio: ["pipe", "pipe", "pipe"],
 			...(timeoutMs === undefined || hostFirst ? {} : { timeout: timeoutMs }),
 		});

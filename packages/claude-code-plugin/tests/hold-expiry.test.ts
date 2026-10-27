@@ -38,8 +38,11 @@ let seen: Seen[];
 let stateDir: string;
 let projectDir: string;
 let env: Record<string, string>;
-/** The life each authorize answer states, in ms; undefined for an older server that states none. */
-let life: number | undefined;
+/**
+ * The life each authorize answer states, in ms; undefined for an older server that states none. A
+ * list states one per authorize in turn, then 60 s.
+ */
+let life: number | number[] | undefined;
 /** The capabilities /v1/health publishes. */
 let capabilities: string[];
 /** How a release (or, on a server without one, an abort) is answered. */
@@ -49,12 +52,20 @@ let refuseAuthorizes: number;
 /** Extra milliseconds the fake holds its answer, by path: a slow server uses up the hook's budget. */
 let slowBy: Map<string, number | number[]>;
 let nextTransfer: number;
+/**
+ * The fake's delayed answers still to fire. A row whose hook gives up on a slow answer ends before
+ * it fires, and it would then run against the NEXT row's state (its transfer ids, lives and
+ * refusals): `stopFake` cancels them.
+ */
+const delayedAnswers = new Set<ReturnType<typeof setTimeout>>();
+/** How many delayed answers fired after their server stopped: none, since `stopFake` cancels them. */
+let lateAnswers = 0;
 
 function startFake(): Promise<number> {
 	seen = [];
 	nextTransfer = 1;
 	return new Promise((resolve) => {
-		server = createServer((req, res) => {
+		const self = createServer((req, res) => {
 			let raw = "";
 			req.on("data", (c) => {
 				raw += c;
@@ -70,16 +81,19 @@ function startFake(): Promise<number> {
 				const body = JSON.parse(raw || "{}") as Seen["body"];
 				seen.push({ path: req.url ?? "", body });
 				const answer = () => {
+					// A server already stopped answers nothing: its row is over.
+					if (server !== self) return;
 					if (req.url === "/v1/authorize" && refuseAuthorizes > 0) {
 						refuseAuthorizes -= 1;
 						return reply(402, { error: "budget_exceeded", reason: "over budget" });
 					}
 					if (req.url === "/v1/authorize") {
 						const transferId = `tx_${nextTransfer++}`;
+						const stated = Array.isArray(life) ? (life.shift() ?? 60_000) : life;
 						return reply(200, {
 							transferId,
 							estimatedCost: 1,
-							...(life === undefined ? {} : { expiresInMs: life }),
+							...(stated === undefined ? {} : { expiresInMs: stated }),
 						});
 					}
 					if (req.url === "/v1/settle")
@@ -92,10 +106,17 @@ function startFake(): Promise<number> {
 				// A number delays every request to the path; a list, each in turn (then none).
 				const slow = slowBy.get(req.url ?? "");
 				const delay = Array.isArray(slow) ? (slow.shift() ?? 0) : (slow ?? 0);
-				if (delay > 0) setTimeout(answer, delay);
-				else answer();
+				if (delay > 0) {
+					const timer = setTimeout(() => {
+						delayedAnswers.delete(timer);
+						if (server !== self) lateAnswers += 1;
+						answer();
+					}, delay);
+					delayedAnswers.add(timer);
+				} else answer();
 			});
 		});
+		server = self;
 		server.listen(0, "127.0.0.1", () => {
 			const address = server?.address();
 			resolve(typeof address === "object" && address !== null ? address.port : 0);
@@ -118,10 +139,15 @@ beforeEach(async () => {
 		UT_SERVER_URL: `http://127.0.0.1:${port}`,
 	};
 });
-afterEach(() => {
+function stopFake() {
+	for (const timer of delayedAnswers) clearTimeout(timer);
+	delayedAnswers.clear();
+	server?.closeAllConnections();
 	server?.close();
 	server = undefined;
-});
+}
+
+afterEach(stopFake);
 
 const settled = () => seen.filter((s) => s.path === "/v1/settle").map((s) => s.body);
 const authorizes = () => seen.filter((s) => s.path === "/v1/authorize").map((s) => s.body);
@@ -192,7 +218,7 @@ describe("a hold's life, as the server states it", () => {
 	});
 
 	it("an estimate hold past its life is never settled: the call is charged once, on a fresh hold", async () => {
-		life = 0;
+		life = [0];
 		await pre("tu_1", {}, ESTIMATE);
 		await outlive();
 		const result = await post("tu_1", {}, ESTIMATE);
@@ -212,7 +238,8 @@ describe("a hold's life, as the server states it", () => {
 
 	it("a hold with less life left than its settle's own timeout is given back, and never settled", async () => {
 		// The settle would leave in time and could land after the pending timeout: the very 410.
-		life = 2_000;
+		// Only this hold is short; its replacement lives long enough for its settle.
+		life = [2_000];
 		await pre("tu_1", {}, ESTIMATE);
 		await post("tu_1", {}, ESTIMATE);
 		expect(settled().map((s) => s.transferId)).toEqual(["tx_2"]);
@@ -222,6 +249,7 @@ describe("a hold's life, as the server states it", () => {
 		await runHook(SESSION_START, { session_id: "sess-expiry-t", source: "startup" }, env);
 		const t = join(projectDir, "sess-expiry-t.jsonl");
 		await writeFile(t, response("msg_t"));
+		life = [2_000];
 		await runHook(PRE, { ...call("tu_t"), session_id: "sess-expiry-t", transcript_path: t }, env);
 		await runHook(
 			POST,
@@ -242,7 +270,7 @@ describe("a hold's life, as the server states it", () => {
 			(await records()).filter((r) => r.kind === "gap" && r.releaseClass === "call-ran");
 
 		it("402, then after the wait 200: the call is charged once, and no settle of the old hold", async () => {
-			life = 0;
+			life = [0];
 			await pre("tu_1", {}, ESTIMATE);
 			await outlive();
 			giveBackAnswer = GONE;
@@ -254,7 +282,7 @@ describe("a hold's life, as the server states it", () => {
 		}, 20_000);
 
 		it("402 twice: one call-ran gap, never a settle of the old hold, and never a second retry", async () => {
-			life = 0;
+			life = [0];
 			await pre("tu_1", {}, ESTIMATE);
 			await outlive();
 			giveBackAnswer = GONE;
@@ -266,7 +294,7 @@ describe("a hold's life, as the server states it", () => {
 		}, 20_000);
 
 		it("a 402 after a `released` give-back is final: the hold was this release's to end, so no wait", async () => {
-			life = 0;
+			life = [0];
 			await pre("tu_1", {}, ESTIMATE);
 			await outlive();
 			refuseAuthorizes = 1;
@@ -276,7 +304,7 @@ describe("a hold's life, as the server states it", () => {
 		});
 
 		it("a retry late in the budget still leaves its fresh hold's settle the time to land", async () => {
-			life = 0;
+			life = [0];
 			await pre("tu_1", {}, ESTIMATE);
 			await outlive();
 			giveBackAnswer = GONE;
@@ -293,7 +321,7 @@ describe("a hold's life, as the server states it", () => {
 		}, 20_000);
 
 		it("a slow give-back, then a FIRST authorize too late to settle: never a fresh hold left unsettled", async () => {
-			life = 0;
+			life = [0];
 			await pre("tu_1", {}, ESTIMATE);
 			await outlive();
 			// The give-back takes most of the budget, and the first replacement answers only after the
@@ -313,7 +341,7 @@ describe("a hold's life, as the server states it", () => {
 		}, 20_000);
 
 		it("with no room left in the hook's budget for the wait, no retry: the call-ran gap", async () => {
-			life = 0;
+			life = [0];
 			await pre("tu_1", {}, ESTIMATE);
 			await outlive();
 			giveBackAnswer = GONE;
@@ -329,7 +357,7 @@ describe("a hold's life, as the server states it", () => {
 	});
 
 	it("an estimate hold past its life whose give-back the server does not confirm is settled as before", async () => {
-		life = 0;
+		life = [0];
 		await pre("tu_1", {}, ESTIMATE);
 		await outlive();
 		giveBackAnswer = { status: 503, json: { error: "unavailable" } };
@@ -342,7 +370,7 @@ describe("a hold's life, as the server states it", () => {
 	it("a transcript hold past its life whose give-back the server does not confirm is settled as before", async () => {
 		await runHook(SESSION_START, { session_id: SESSION, source: "startup" }, env);
 		await writeFile(mainTranscript(), response("msg_a"));
-		life = 0;
+		life = [0];
 		await pre("tu_1", { transcript_path: mainTranscript() });
 		await outlive();
 		giveBackAnswer = { status: 503, json: { error: "unavailable" } };
@@ -355,7 +383,7 @@ describe("a hold's life, as the server states it", () => {
 		capabilities = ["hold-expiry", "release"];
 		await runHook(SESSION_START, { session_id: SESSION, source: "startup" }, env);
 		await writeFile(mainTranscript(), response("msg_a"));
-		life = 0;
+		life = [0];
 		await pre("tu_1", { transcript_path: mainTranscript() });
 		await outlive();
 		await post("tu_1", { transcript_path: mainTranscript() });
@@ -376,7 +404,7 @@ describe("a hold's life, as the server states it", () => {
 		capabilities = ["hold-expiry", "release", "idempotency-key"];
 		await runHook(SESSION_START, { session_id: SESSION, source: "startup" }, env);
 		await writeFile(mainTranscript(), response("msg_a"));
-		life = 0;
+		life = [0];
 		await pre("tu_1", { transcript_path: mainTranscript() });
 		const key = authorizes()[0]?.idempotencyKey;
 		expect(typeof key).toBe("string");
@@ -404,10 +432,101 @@ describe("a hold's life, as the server states it", () => {
 		await mkdir(projectDir, { recursive: true });
 		await writeFile(mainTranscript(), response("msg_old", 3_600_000));
 		await runHook(SESSION_START, { session_id: SESSION, source: "startup" }, env);
-		life = 0;
+		life = [0];
 		await pre("tu_1", { transcript_path: mainTranscript() });
 		await outlive();
 		await post("tu_1", { transcript_path: mainTranscript() });
 		expect(settled()).toEqual([]);
+	});
+	it("a fresh hold whose own life ends before its settle could arrive is given back, never settled: the call-ran gap", async () => {
+		life = [0];
+		await pre("tu_1", {}, ESTIMATE);
+		await outlive();
+		// The server's pending timeout is shorter than the fresh hold's settle could take to arrive.
+		life = [1_000];
+		await post("tu_1", {}, ESTIMATE);
+		expect(authorizes()).toHaveLength(2);
+		expect(settled()).toEqual([]);
+		expect(seen.filter((s) => s.path === "/v1/release").map((s) => s.body.transferId)).toContain(
+			"tx_2",
+		);
+		const gaps = (await readFile(join(stateDir, "watch.jsonl"), "utf-8"))
+			.split("\n")
+			.filter((line) => line !== "")
+			.map((line) => JSON.parse(line) as { kind?: string; releaseClass?: string })
+			.filter((r) => r.kind === "gap" && r.releaseClass === "call-ran");
+		expect(gaps).toHaveLength(1);
+	});
+
+	it("a fresh hold whose settle goes unanswered keeps its own life on its record, for the settle point that meets it", async () => {
+		// The expired hold, then a fresh one that lives 30 s; the fresh hold's settle is never answered,
+		// so its record stays for Stop or SessionEnd, which must know when that hold's life ends.
+		life = [0, 30_000];
+		await pre("tu_1", {}, ESTIMATE);
+		await outlive();
+		slowBy.set("/v1/settle", [8_000]);
+		const before = Date.now();
+		await post("tu_1", {}, ESTIMATE);
+		const after = Date.now();
+		const record = await holdRecord();
+		expect(record.transferId).toBe("tx_2");
+		expect(record.expiresAt as number).toBeGreaterThanOrEqual(before + 30_000);
+		expect(record.expiresAt as number).toBeLessThanOrEqual(after + 30_000);
+		// timing: 20 s budget for a row bounded by the hook's 5 s settle wait; it took 5.2 s in each
+		// of 3 local runs.
+	}, 20_000);
+
+	it("a window's hold whose life ends before its settle could arrive is given back, never settled: the window waits", async () => {
+		capabilities = ["hold-expiry", "release"];
+		await runHook(SESSION_START, { session_id: SESSION, source: "startup" }, env);
+		await writeFile(mainTranscript(), response("msg_a"));
+		life = [0];
+		await pre("tu_1", { transcript_path: mainTranscript() });
+		await outlive();
+		await post("tu_1", { transcript_path: mainTranscript() });
+		// The window goes to Stop, whose hold for it lives too briefly for its settle to arrive.
+		life = [1_000];
+		await runHook(
+			STOP,
+			{ session_id: SESSION, transcript_path: mainTranscript(), stop_hook_active: false },
+			env,
+		);
+		expect(settled().filter((s) => s.inputTokens === 10)).toEqual([]);
+		const windowHold = `tx_${nextTransfer - 1}`;
+		expect(seen.filter((s) => s.path === "/v1/release").map((s) => s.body.transferId)).toContain(
+			windowHold,
+		);
+		// A later settle point, on a hold that lives long enough, posts it once.
+		life = 60_000;
+		await runHook(
+			STOP,
+			{ session_id: SESSION, transcript_path: mainTranscript(), stop_hook_active: false },
+			env,
+		);
+		expect(settled().filter((s) => s.inputTokens === 10)).toHaveLength(1);
+	});
+});
+
+describe("the fake server", () => {
+	it("a slow answer whose caller gave up never fires into the next row", async () => {
+		slowBy.set("/v1/authorize", 300);
+		// A hook that gives up on a slow answer, as the budget rows' hooks do.
+		await fetch(`${env.UT_SERVER_URL}/v1/authorize`, {
+			method: "POST",
+			body: "{}",
+			signal: AbortSignal.timeout(50),
+		}).catch(() => {});
+		// The row ends, and the next one starts its own fake.
+		lateAnswers = 0;
+		stopFake();
+		await startFake();
+		refuseAuthorizes = 1;
+		// timing: 500 ms, 200 ms past the slow answer's 300 ms. On CI this test took 555 and 558 ms of
+		// its 5 s timeout. A runner that held the answer past 500 ms would let a regression pass here.
+		await new Promise((resolve) => setTimeout(resolve, 500));
+		// The abandoned answer never fired, and took none of the next row's transfer ids or refusals.
+		expect(lateAnswers).toBe(0);
+		expect(nextTransfer).toBe(1);
+		expect(refuseAuthorizes).toBe(1);
 	});
 });
