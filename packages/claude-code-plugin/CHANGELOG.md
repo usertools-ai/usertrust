@@ -33,6 +33,9 @@ npm, and its version is its own: the `usertrust` packages and their
   way goes on reading, so a call held while it read is never left uncharged by a sibling
   switching before the call settled. A response of its copy that the ancestor settled at the
   estimate is claimed under the same message id, so the fork does not post it again.
+  One edge is declared: an ancestor whose transcript cannot be read at a call's PreToolUse
+  claims nothing, so a fork that is reading posts its copy of that response, and the call is
+  charged its estimate as well. The overcharge is that one call's estimate, never a missed charge.
   And a subagent's transcript that does not exist yet at its first hook, before any of it was
   read, no longer switches it to the estimate for good: that call's PostToolUse decides, from the
   call's own response, found in the subagent's transcript by the call's id.

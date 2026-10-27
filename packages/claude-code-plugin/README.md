@@ -445,7 +445,13 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   reads are under way goes on reading, so no call of it is left uncharged by a
   switch made between its hold and its settle. A response of its copy that the
   ancestor settled at the estimate is claimed under the same message id (below),
-  so the fork does not post it again. A
+  so the fork does not post it again. One edge is declared, not fixed: an ancestor
+  whose transcript cannot be read at a call's PreToolUse switches without reading
+  the response that made the call, so it claims nothing, and a fork whose reads are
+  under way posts its copy of that response at its real counts while the ancestor's
+  call is charged its estimate as well. The response is posted once; the call is
+  charged twice only for its own tool input and output, which its estimate prices.
+  It needs a transcript that cannot be read, and it is never a missed charge. A
   named subagent (`general-purpose`, `Explore`, a custom agent) copies no one's
   responses and reads its own transcript. One exception to "cannot be read": a
   SUBAGENT's transcript that does not exist yet, before any of it was read, is not
