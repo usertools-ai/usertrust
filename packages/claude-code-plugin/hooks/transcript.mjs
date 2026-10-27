@@ -93,6 +93,9 @@
 //  - partial: every id seen but not yet accounted or denied, with its counts,
 //    and whether this agent holds its claim.
 //  - accounted / denied: the most recent 10 000 ids each.
+//  - posted: the most recent 10 000 accounted ids whose settle the server
+//    CONFIRMED (200, or `already_settled`). `accounted` also holds ids that may
+//    have posted (a settle never seen to end) and ids written off.
 //  - assigned: id → the vehicle it is BOUND to — a transferId, "remainder" (a
 //    remainder in flight) or "authorizing" (written BEFORE PreToolUse's
 //    authorize) — each recorded before any call that could post it. A binding
@@ -296,11 +299,14 @@ const ESTIMATE_DIR = "estimate";
 const NO_TRANSCRIPT_DIR = "no-transcript";
 /** Per (session, agent) under <state>/transcripts: its late-transcript gap is written (`noteLateTranscript`). */
 const LATE_TRANSCRIPT_DIR = "late-transcript";
+/** Per (session, agent) under <state>/transcripts: the type its own hook stated (`rememberAgentType`). */
+const AGENT_TYPE_DIR = "agent-type";
 /** Why an agent whose transcript did not exist settles at the estimate (`ingest`'s ENOENT reason). */
 const MISSING_TRANSCRIPT = "transcript unreadable (ENOENT)";
-/** Why a fork, or an agent of no stated type, whose transcript appeared only after its first hook settles at the estimate (`resolveAwaitingHold`). */
-const LATE_ANCESTOR_TRANSCRIPT =
-	"its transcript, which may begin with an ancestor's, appeared after its first hook";
+/** Why an agent whose transcript did not hold the call its hold waited for, at that call's PostToolUse, settles at the estimate (`resolveAwaitingHold`). */
+const UNSEEN_CALL_TRANSCRIPT = "its transcript did not hold a call that waited for it";
+/** Who a claim on a call's response is (`resolveAwaitingHold`): the call's estimate, never a window's post. */
+const ESTIMATED_CALL = "estimated-call";
 
 /**
  * Untrusted strings in a path or an actor string (agent type/id) →
@@ -775,22 +781,55 @@ async function agentTypeFor(transcriptPath, agentId, hinted) {
 		: { name: safeName(type, "subagent"), raw: type.slice(0, 128) };
 }
 
+/** The subagent's meta file's `agentType`, or null (no transcript path, no meta file, none in it). */
+async function metaAgentType(transcriptPath) {
+	if (transcriptPath === undefined) return null;
+	try {
+		const meta = JSON.parse(
+			await readRegular(transcriptPath.replace(/\.jsonl$/, ".meta.json"), READ_BOUND.record),
+		);
+		if (typeof meta?.agentType === "string" && meta.agentType !== "") return meta.agentType;
+	} catch {
+		// No meta file.
+	}
+	return null;
+}
+
 /**
- * A subagent's type as something states it: its meta file's `agentType`, else the hook's
- * `agent_type`; null when neither names one (no transcript path, no meta file, no hint).
+ * A subagent's type as something states it: its meta file's `agentType`, else the type an
+ * earlier hook of its own stated (`typePath`, `rememberAgentType`), else this hook's
+ * `agent_type`; null when none names one.
  */
-async function statedAgentType(transcriptPath, hinted) {
-	if (transcriptPath !== undefined) {
+async function statedAgentType(transcriptPath, hinted, typePath) {
+	const meta = await metaAgentType(transcriptPath);
+	if (meta !== null) return meta;
+	if (typePath !== undefined) {
 		try {
-			const meta = JSON.parse(
-				await readRegular(transcriptPath.replace(/\.jsonl$/, ".meta.json"), READ_BOUND.record),
-			);
-			if (typeof meta?.agentType === "string" && meta.agentType !== "") return meta.agentType;
+			const remembered = (await readRegular(typePath, READ_BOUND.record)).trim();
+			if (remembered !== "") return remembered;
 		} catch {
-			// No meta file — use the hint.
+			// None remembered — use the hint.
 		}
 	}
 	return typeof hinted === "string" && hinted !== "" ? hinted : null;
+}
+
+/**
+ * Record the type the agent's OWN hook states (`hintFor`) when no meta file states one, once
+ * (<state>/transcripts/agent-type/<session>__<agent>), so a later settle whose input is the
+ * parent's (a session-wide Stop, SessionEnd) still knows it: without it, a named subagent
+ * known by its hook's type alone would pass for an untyped one there, inherit a sibling's
+ * estimate mode, and never have the rest of its transcript read. Never throws.
+ */
+async function rememberAgentType(where, hinted) {
+	if (typeof hinted !== "string" || hinted === "" || where.typePath === undefined) return;
+	try {
+		if ((await metaAgentType(where.transcriptPath)) !== null) return;
+		await mkdir(dirname(where.typePath), { recursive: true, mode: 0o700 });
+		await writeFile(where.typePath, hinted.slice(0, 128), { flag: "wx", mode: 0o600 });
+	} catch {
+		// EEXIST: remembered already. Anything else: not this time.
+	}
 }
 
 /** The agent type Claude Code gives a FORKED subagent, whose transcript begins with its ancestor's. */
@@ -801,8 +840,8 @@ const FORK_AGENT_TYPE = "fork";
  * does, and so may one whose type nothing states. A NAMED subagent (general-purpose, Explore,
  * a custom agent) starts from its own prompt, and copies no one's responses.
  */
-async function mayCopyAncestor(transcriptPath, hinted) {
-	const type = await statedAgentType(transcriptPath, hinted);
+async function mayCopyAncestor(transcriptPath, hinted, typePath) {
+	const type = await statedAgentType(transcriptPath, hinted, typePath);
 	return type === null || type === FORK_AGENT_TYPE;
 }
 
@@ -859,6 +898,7 @@ function emptyCursor() {
 		nextSeq: 0,
 		partial: new Map(),
 		accounted: new Set(),
+		posted: new Set(),
 		denied: new Set(),
 		assigned: new Map(),
 		estimateMode: false,
@@ -933,6 +973,9 @@ function parseCursor(raw) {
 		cursor.assigned.set(id, value);
 	}
 	cursor.accounted = new Set(raw.accounted);
+	// Absent in a cursor written before it was kept: no settle is known confirmed.
+	if (raw.posted !== undefined && !isStringArray(raw.posted)) return null;
+	cursor.posted = new Set(raw.posted ?? []);
 	cursor.denied = new Set(raw.denied);
 	cursor.estimateMode = raw.estimateMode;
 	cursor.estimateReason = typeof raw.estimateReason === "string" ? raw.estimateReason : null;
@@ -1057,6 +1100,7 @@ async function writeCursor(path, cursor) {
 			nextSeq: cursor.nextSeq,
 			partial: Object.fromEntries(cursor.partial),
 			accounted: [...cursor.accounted].slice(-ID_HISTORY),
+			posted: [...cursor.posted].slice(-ID_HISTORY),
 			denied: [...cursor.denied].slice(-ID_HISTORY),
 			assigned: Object.fromEntries(cursor.assigned),
 			estimateMode: cursor.estimateMode,
@@ -1078,6 +1122,12 @@ function accountIds(cursor, ids) {
 		cursor.partial.delete(id);
 		cursor.accounted.add(id);
 	}
+}
+
+/** Accounted ids whose settle the server confirmed: charged once, never posted again. */
+function postIds(cursor, ids) {
+	accountIds(cursor, ids);
+	for (const id of ids) cursor.posted.add(id);
 }
 
 function releaseIds(cursor, ids) {
@@ -1264,6 +1314,7 @@ async function reconcile(cursor, sessionId, agentId) {
 		if (record.kind === "done") {
 			if (record.outcome === "released") releaseIds(cursor, record.ids);
 			else if (record.outcome === "unresolved") holdUnresolved(cursor, record);
+			else if (record.outcome === "settled") postIds(cursor, record.ids);
 			else accountIds(cursor, record.ids);
 			finished.push(record.path);
 		} else if (record.kind === "settling" && now - record.mtimeMs > staleSettlingAfter(record)) {
@@ -1705,14 +1756,16 @@ async function claimHolder(claimsDir, id, owner) {
  * or naming none — gets `transcriptPath: undefined` and the reason in `unread`
  * when it `mayEstimate`, so its estimate is recorded before it settles (see
  * `openAgent`); one that does not is turned away before the state dir is touched.
+ * `anySetting`: the transcript path whatever the setting says now (an awaiting hold's
+ * ruling, `resolveAwaitingHold`, which must claim its response before any estimate).
  */
-async function locate({ sessionId, agentId, input, mayEstimate }) {
+async function locate({ sessionId, agentId, input, mayEstimate, anySetting = false }) {
 	const configured = usageMode() === "estimate";
 	// The user's own setting, as this session spells it: UT_CC_USAGE=estimate, or the config file's.
 	const bySetting = howToSet("usage", "estimate");
 	if (configured && !mayEstimate) return { ok: false, reason: bySetting };
 	if (!isAgentId(agentId)) return { ok: false, reason: "agent id is not safe in a path" };
-	const transcriptPath = configured ? undefined : transcriptPathFor(input, agentId);
+	const transcriptPath = configured && !anySetting ? undefined : transcriptPathFor(input, agentId);
 	if (transcriptPath === undefined && !mayEstimate) {
 		return { ok: false, reason: "no transcript path" };
 	}
@@ -1752,7 +1805,12 @@ async function inheritedEstimate(where, agentId, hinted) {
 		throw err;
 	}
 	const other = names.find((name) => name !== own && name.startsWith(prefix));
-	if (other === undefined || !(await mayCopyAncestor(where.transcriptPath, hinted))) return null;
+	if (
+		other === undefined ||
+		!(await mayCopyAncestor(where.transcriptPath, hinted, where.typePath))
+	) {
+		return null;
+	}
 	return `${other.slice(prefix.length)} of this session settles at the estimate (a fork copies its ancestor's responses)`;
 }
 
@@ -1777,6 +1835,7 @@ async function cursorLocation(sessionId, agentId) {
 		cursorPath: join(dir.dir, `${name}.json`),
 		claimsDir: join(dir.dir, CLAIMS_DIR),
 		estimatePath: join(dir.dir, ESTIMATE_DIR, name),
+		typePath: join(dir.dir, AGENT_TYPE_DIR, name),
 		since,
 	};
 }
@@ -2458,6 +2517,7 @@ async function openAgent({
 		await noteLateTranscript({ where, sessionId, agentId, recorded, hook });
 		return { kind: "estimate", reason: recorded };
 	}
+	await rememberAgentType(where, hintFor(input, agentId));
 	let inherited;
 	try {
 		inherited = await inheritedEstimate(where, agentId, hintFor(input, agentId));
@@ -2528,9 +2588,9 @@ async function openAgent({
 		if (!ingested.ok && notWrittenYet(ingested, agentId, cursor, lastChance)) {
 			// A subagent's first hooks can run before Claude Code creates its transcript: nothing is
 			// recorded yet, so the transcript, once it exists, is still read. A hold made now is an
-			// estimate hold that its PostToolUse rules on (`resolveAwaitingHold`): given back if the
-			// transcript exists by then, which posts the usage; else the agent sticks there, and the
-			// call settles at the estimate, so no call goes uncharged for a transcript never written.
+			// estimate hold that its PostToolUse rules on (`resolveAwaitingHold`), from the call's
+			// own response and its claim: given back if a post took it, else settled at the estimate,
+			// so no call goes uncharged, or is charged twice, for a transcript not written yet.
 			await noteNoTranscriptAgent({ where, sessionId, agentId, input, hook });
 			await writeCursor(cursorPath, cursor);
 			await removeFiles(finished);
@@ -2638,33 +2698,37 @@ async function noteNoTranscriptAgent({ where, sessionId, agentId, input, hook })
 
 /**
  * PostToolUse's ruling on a hold PreToolUse made while the subagent's transcript was not written
- * yet (the hold's `awaitingTranscript`, `notWrittenYet`), taken under the agent's lock, so no
- * read of the transcript can run between the check and what follows it. In this order:
- *  - `transcript`, when some of the transcript was read already: that read took the call's
- *    usage, and posts it, whatever was recorded since (a sibling's estimate mode inherited, the
- *    agent's own marker). The hold carries none (`unused`). Settled at the estimate, it would be
- *    charged twice.
- *  - `estimate`, when nothing of it was read and the agent settles at the estimate already:
- *    its own marker, or a sibling's estimate mode it inherits (`inheritedEstimate`), recorded
- *    now (`stickToEstimate`). Its transcript will never be read, so given back, the call would
- *    go uncharged.
- *  - `transcript`, when the transcript exists now and the agent is a NAMED one: the first
- *    settle point that reads it posts the call's usage. A named agent never inherits, so no
- *    sibling's estimate mode can cancel that read.
- *  - `estimate`, when the transcript exists now and the agent may copy an ancestor (a fork, or
- *    no stated type: `mayCopyAncestor`): a sibling that sticks before the next read would be
- *    inherited, and the read never made, so given back, the call would go uncharged. The
- *    agent's estimate mode is recorded (`LATE_ANCESTOR_TRANSCRIPT`), and its skipped lines are
- *    named by the late-transcript gap.
- *  - `estimate`, when it is still missing: the agent's estimate mode is recorded before the hold
- *    settles at the estimate, so a transcript that appears later is never read: its lines are
- *    skipped, and a gap names them (`noteLateTranscript`).
- *  - `unknown`: neither could be established (the lock, the state, the transcript's stat). The
- *    hold can neither carry the usage nor be left to the transcript, so it is given back as a call
- *    that ran uncharged: a gap.
+ * yet (the hold's `awaitingTranscript`, `notWrittenYet`). It is ruled only from what is read now,
+ * under the agent's lock, so no read of the transcript runs between the check and the ruling, and
+ * never from what a later read is expected to do. The call's own response is the assistant entry
+ * that holds the call's `tool_use` block (`responseOfCall`). In this order:
+ *  - the response is in the transcript: this hold races every post for its message's CLAIM, in
+ *    the claims dir every window and remainder posts through (`selectOwn`). Claimed by this hold
+ *    (now, or by a run of it that died before its settle), it settles at the estimate
+ *    (`estimate`), and no post can take the message after (a claim that exists is never posted
+ *    again, and is never removed, so a failed estimate settle cannot let it be posted either).
+ *    The agent goes on reading its transcript. Claimed already by another call's estimate of
+ *    the same response, or by the agent's own reads AND a settle of it the server confirmed (the
+ *    cursor's `posted`, or a finished hold not brought into it yet), the response is charged
+ *    there, so the hold is given back (`transcript`, released as `unused`).
+ *    Any other claim is `unknown`: a read claims a message before it posts it, and a claim of
+ *    another agent's is not read under this lock.
+ *  - the response is not there (or the host named no call), and nothing of the transcript was
+ *    read yet (cursor at 0): nothing of it was posted, so the hold settles at the estimate. The
+ *    agent's estimate mode is recorded first (its own marker, a sibling's it inherits, a missing
+ *    transcript's, or `UNSEEN_CALL_TRANSCRIPT`), so its transcript is never read after: a late
+ *    one's lines are skipped, and a gap names them (`noteLateTranscript`).
+ *  - `unknown`, for everything else: the response is not there, but some of the transcript was
+ *    read (any of the response could have been posted from a part read before), or the lock,
+ *    the state, or the transcript could not be read whole. The hold is given back as a call that
+ *    ran uncharged, one gap that names the call. Never the estimate: a later post could charge
+ *    the same response again.
  */
 export async function resolveAwaitingHold({ sessionId, agentId, input, waitMs = 0 }) {
-	const where = await locate({ sessionId, agentId, input, mayEstimate: true });
+	// Whatever the usage setting says now: a hold made while it read transcripts may be settled
+	// at the estimate only once its response is claimed, or a setting switched back would let a
+	// later read post that response too.
+	const where = await locate({ sessionId, agentId, input, mayEstimate: true, anySetting: true });
 	if (!where.ok || where.transcriptPath === undefined) {
 		return { kind: "unknown", reason: where.reason ?? "no transcript path" };
 	}
@@ -2673,31 +2737,68 @@ export async function resolveAwaitingHold({ sessionId, agentId, input, waitMs = 
 	try {
 		const read = await readCursor(where.cursorPath);
 		if (!read.ok) return { kind: "unknown", reason: read.reason };
-		if (read.cursor.byteOffset > 0) return { kind: "transcript" };
+		const toolUseId = callIdOf(input);
+		const response =
+			toolUseId === null
+				? await transcriptPresence(where.transcriptPath)
+				: await responseOfCall(where.transcriptPath, agentId, toolUseId);
+		if (response.kind === "unknown") return response;
+		if (response.kind === "found") {
+			const window = `${sanitize(sessionId)}/${agentId}`;
+			const mine = `${window} ${ESTIMATED_CALL} ${toolUseId}`;
+			const claim = await claimHolder(where.claimsDir, response.id, mine);
+			if (claim.created || claim.holder === mine) {
+				// Made now, or by this same hold before a hook died ahead of its settle: either way the
+				// claim is this estimate's, so the response is never posted from the transcript.
+				return {
+					kind: "estimate",
+					reason:
+						"the call's response was not posted yet; it is claimed for this estimate, and never posted from the transcript",
+				};
+			}
+			if (claim.holder === null) {
+				return { kind: "unknown", reason: `its response could not be claimed (${claim.code})` };
+			}
+			// Another call of the same response holds it for ITS estimate, which charges the response
+			// once (or writes its own gap).
+			if (claim.holder.startsWith(`${window} ${ESTIMATED_CALL} `)) return { kind: "transcript" };
+			// The agent's own window claims a message BEFORE posting it, so its claim alone proves
+			// nothing: only a settle of it the server confirmed does, in the cursor's `posted` or a
+			// finished hold not brought into it yet. `accounted` is not proof: it also holds ids that
+			// may have posted and ids written off. Any other holder's state is not read under this lock.
+			if (
+				claim.holder === window &&
+				(read.cursor.posted.has(response.id) ||
+					(await settledInJournal(sessionId, agentId, response.id)))
+			) {
+				return { kind: "transcript" };
+			}
+			return {
+				kind: "unknown",
+				reason:
+					claim.holder === window
+						? "its response is claimed by the agent's own reads, and no settle of it is confirmed"
+						: "its response is claimed by another agent's reads",
+			};
+		}
+		if (read.cursor.byteOffset > 0) {
+			return {
+				kind: "unknown",
+				reason:
+					toolUseId === null
+						? "the host named no call, and some of the transcript was read"
+						: "its response is not in the transcript, and some of the transcript was read",
+			};
+		}
 		const marked = await estimateMarker(where.estimatePath);
 		if (marked !== null) return { kind: "estimate", reason: marked };
-		const inherited = await inheritedEstimate(where, agentId, hintFor(input, agentId));
-		if (inherited !== null) {
-			const sticky = await stickToEstimate(where, inherited, true);
-			return sticky.kind === "estimate" ? sticky : { kind: "unknown", reason: sticky.reason };
-		}
-		const missing = await stat(where.transcriptPath).then(
-			() => false,
-			(err) => (err?.code === "ENOENT" ? true : (err?.code ?? "error")),
-		);
-		if (missing !== true && missing !== false) {
-			return { kind: "unknown", reason: `transcript unreadable (${missing})` };
-		}
-		if (
-			missing === false &&
-			!(await mayCopyAncestor(where.transcriptPath, hintFor(input, agentId)))
-		) {
-			return { kind: "transcript" };
-		}
-		const reason = missing ? MISSING_TRANSCRIPT : LATE_ANCESTOR_TRANSCRIPT;
+		const missing = response.kind === "missing";
+		const reason =
+			(await inheritedEstimate(where, agentId, hintFor(input, agentId))) ??
+			(missing ? MISSING_TRANSCRIPT : UNSEEN_CALL_TRANSCRIPT);
 		const sticky = await stickToEstimate(where, reason, true);
 		if (sticky.kind !== "estimate") return { kind: "unknown", reason: sticky.reason };
-		if (!missing) {
+		if (reason === UNSEEN_CALL_TRANSCRIPT) {
 			await noteLateTranscript({
 				where,
 				sessionId,
@@ -2714,17 +2815,132 @@ export async function resolveAwaitingHold({ sessionId, agentId, input, waitMs = 
 	}
 }
 
+/** The hook's `tool_use_id`, when it is one a claim may carry; else null. */
+/** Whether a finished hold of the agent, not yet brought into its cursor, confirms a settle that posted `id`. */
+async function settledInJournal(sessionId, agentId, id) {
+	for (const record of await holdJournal(sessionId, agentId)) {
+		if (record.kind === "done" && record.outcome === "settled" && record.ids.includes(id))
+			return true;
+	}
+	return false;
+}
+
+function callIdOf(input) {
+	const id = input?.tool_use_id;
+	return typeof id === "string" && id !== "" && id.length <= MAX_ID_CHARS ? id : null;
+}
+
+/** Whether the transcript exists, for a call the host named no id for: `missing`, `absent`, or `unknown`. */
+async function transcriptPresence(transcriptPath) {
+	try {
+		await stat(transcriptPath);
+		return { kind: "absent" };
+	} catch (err) {
+		return err?.code === "ENOENT"
+			? { kind: "missing" }
+			: { kind: "unknown", reason: `transcript unreadable (${err?.code ?? "error"})` };
+	}
+}
+
+/**
+ * The call's own response in the agent's transcript, read WHOLE: `{ kind: "found", id }`, the
+ * message id of the assistant entry of this agent that holds the call's `tool_use` block;
+ * `missing` (no transcript); `absent` (every line was read, and none holds it); or `unknown`, when
+ * the answer cannot be told: a transcript over MAX_READ_BYTES, one that shrank or failed while it
+ * was read, a line over MAX_LINE_BYTES, an unparseable line or an unfinished last line that
+ * names the call, or a response with no usable id. Entries a fork copied from its ancestor hold
+ * the ancestor's calls, never this one: a tool_use id names one call.
+ */
+async function responseOfCall(transcriptPath, agentId, toolUseId) {
+	let handle;
+	try {
+		({ handle } = await openRegular(transcriptPath));
+	} catch (err) {
+		return err?.code === "ENOENT"
+			? { kind: "missing" }
+			: { kind: "unknown", reason: `transcript unreadable (${err?.code ?? "error"})` };
+	}
+	try {
+		const { size } = await handle.stat();
+		if (size > MAX_READ_BYTES) {
+			return {
+				kind: "unknown",
+				reason: `transcript over ${MAX_READ_BYTES >> 20} MiB, not read for the call`,
+			};
+		}
+		const needle = Buffer.from(JSON.stringify(toolUseId));
+		const chunk = Buffer.alloc(Math.min(READ_CHUNK_BYTES, size));
+		let carry = Buffer.alloc(0);
+		let position = 0;
+		while (position < size) {
+			const want = Math.min(chunk.length, size - position);
+			const { bytesRead } = await handle.read(chunk, 0, want, position);
+			if (bytesRead === 0) {
+				return { kind: "unknown", reason: "transcript shrank while it was read for the call" };
+			}
+			position += bytesRead;
+			const data =
+				carry.length === 0
+					? chunk.subarray(0, bytesRead)
+					: Buffer.concat([carry, chunk.subarray(0, bytesRead)]);
+			let from = 0;
+			for (let end = data.indexOf(0x0a); end !== -1; end = data.indexOf(0x0a, from)) {
+				const found = callInLine(data.subarray(from, end), agentId, toolUseId, needle);
+				if (found !== null) return found;
+				from = end + 1;
+			}
+			carry = Buffer.from(data.subarray(from));
+			if (carry.length > MAX_LINE_BYTES) {
+				return {
+					kind: "unknown",
+					reason: `a transcript line over ${MAX_LINE_BYTES >> 20} MiB, not read for the call`,
+				};
+			}
+		}
+		if (carry.includes(needle)) {
+			return { kind: "unknown", reason: "the call's transcript entry is still being written" };
+		}
+		return { kind: "absent" };
+	} catch (err) {
+		return { kind: "unknown", reason: `transcript unreadable (${err?.code ?? "error"})` };
+	} finally {
+		await handle.close().catch(() => {});
+	}
+}
+
+/** One transcript line's answer for `responseOfCall`: found, unknown, or null (not this call's). */
+function callInLine(line, agentId, toolUseId, needle) {
+	if (!line.includes(needle)) return null;
+	let entry;
+	try {
+		entry = JSON.parse(line.toString("utf-8"));
+	} catch {
+		return { kind: "unknown", reason: "a transcript line that names the call is not JSON" };
+	}
+	const message = entry?.message;
+	if (entry?.type !== "assistant" || entry?.agentId !== agentId) return null;
+	if (!Array.isArray(message?.content)) return null;
+	if (!message.content.some((block) => block?.type === "tool_use" && block.id === toolUseId)) {
+		return null;
+	}
+	const id = message.id;
+	if (typeof id !== "string" || id === "" || id.length > MAX_ID_CHARS) {
+		return { kind: "unknown", reason: "the call's response has no usable message id" };
+	}
+	return { kind: "found", id };
+}
+
 /**
  * The once-per-agent gap record of an agent recorded at the estimate because its transcript did
- * not exist (`MISSING_TRANSCRIPT`), or appeared only after its first hook when it may copy an
- * ancestor (`LATE_ANCESTOR_TRANSCRIPT`), whose transcript exists now. Its lines are never posted: the
+ * not exist (`MISSING_TRANSCRIPT`), or did not hold a call that waited for it
+ * (`UNSEEN_CALL_TRANSCRIPT`), whose transcript exists now. Its lines are never posted: the
  * calls it covers were charged at the estimate, and posting them would charge them twice. So
  * what they hold reaches the ledger only as that estimate, which this record says. Once: a
  * marker under <state>/transcripts/late-transcript/, removed if the record could not be written.
  * Never throws.
  */
 async function noteLateTranscript({ where, sessionId, agentId, recorded, hook }) {
-	if (recorded !== MISSING_TRANSCRIPT && recorded !== LATE_ANCESTOR_TRANSCRIPT) return;
+	if (recorded !== MISSING_TRANSCRIPT && recorded !== UNSEEN_CALL_TRANSCRIPT) return;
 	if (where.transcriptPath === undefined) return;
 	try {
 		await stat(where.transcriptPath);
@@ -2745,7 +2961,7 @@ async function noteLateTranscript({ where, sessionId, agentId, recorded, hook })
 			reason:
 				recorded === MISSING_TRANSCRIPT
 					? "its transcript appeared after the agent was settled at the estimate; its lines are not posted, so nothing is charged twice"
-					: "its transcript, which may begin with an ancestor's, appeared after its first hook, so the agent was settled at the estimate; its lines are not posted, so nothing is charged twice",
+					: "its transcript did not hold a call that waited for it, so the agent was settled at the estimate; its lines are not posted, so nothing is charged twice",
 			started: null,
 		});
 		if (!written) await unlink(marker).catch(() => {});
@@ -2893,7 +3109,7 @@ export async function prepareWindow({
 			// outcome, which the next lock holder writes off all the same.
 			if (window === null || decided) return;
 			decided = true;
-			accountIds(cursor, window.ids);
+			postIds(cursor, window.ids);
 			await opened.save().catch((err) => {
 				say(`usertrust: cursor not updated — ${errText(err)}`);
 			});
@@ -3593,7 +3809,7 @@ async function remainderOf(
 			});
 			if (result.outcome !== "unresolved") cursor.unresolved.delete(key);
 			if (result.outcome === "settled") {
-				accountIds(cursor, vehicle.ids);
+				postIds(cursor, vehicle.ids);
 				summary.posted += vehicle.ids.length;
 			} else if (result.outcome === "denied") {
 				denyIds(cursor, vehicle.ids);
@@ -3693,7 +3909,8 @@ async function remainderOf(
 			});
 			// An unresolved vehicle stays parked; any other outcome is final for it.
 			if (key !== undefined && result.outcome !== "unresolved") cursor.unresolved.delete(key);
-			if (result.outcome === "settled" || result.outcome === "claimed") accountIds(cursor, ids);
+			if (result.outcome === "settled") postIds(cursor, ids);
+			else if (result.outcome === "claimed") accountIds(cursor, ids);
 			else if (result.outcome === "denied") denyIds(cursor, ids);
 			else if (result.outcome !== "unresolved") releaseIds(cursor, ids);
 			if (result.outcome === "settled") summary.posted += ids.length;

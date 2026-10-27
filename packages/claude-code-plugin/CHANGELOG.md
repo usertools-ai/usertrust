@@ -30,12 +30,16 @@ npm, and its version is its own: the `usertrust` packages and their
   estimate mode, and so does a subagent whose type nothing states, since it may be a fork; a
   named subagent (`general-purpose`, `Explore`, a custom agent) reads its own transcript.
   And a subagent's transcript that does not exist yet at its first hook, before any of it was
-  read, no longer switches it to the estimate for good: that call's PostToolUse decides. If the
-  transcript exists by then, a named subagent's hold is given back and the transcript posts the
-  usage; a fork, or a subagent of no stated type, switches there instead, since a sibling that
-  switched before its next read would be inherited, and that read never made. If it
-  is still missing, the subagent switches there and the call is charged at the estimate, so no
-  call goes uncharged for want of a transcript. A call that never reaches its PostToolUse is
+  read, no longer switches it to the estimate for good: that call's PostToolUse decides, from the
+  call's own response, found in the subagent's transcript by the call's id. A response no
+  window claimed yet is claimed for the call, which is charged at the estimate and never posted
+  from the transcript; one already charged (claimed by another call's estimate of the same
+  response, or posted by the subagent's own reads in a settle the server confirmed) gives the
+  hold back, and any other claim is a gap. A transcript still missing, or holding no such response before any of it was
+  read, switches the subagent there, and the call is charged at the estimate, so no call goes
+  uncharged for want of a transcript. What cannot be told (some of the transcript read without
+  the response, a transcript over the read bound, an unfinished or unparseable line naming the
+  call) gives the hold back uncharged with one gap record naming the call. A call that never reaches its PostToolUse is
   decided at the subagent's SubagentStop. A transcript that appears only after the switch is
   never read (its calls were charged at the estimate): one gap record says so. The parent's
   missing transcript switches it at once, as before. The parent's own `agent_type`, which a

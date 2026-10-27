@@ -276,11 +276,15 @@ function responseEntries(
 	model: string,
 	u: Usage,
 	extra: Record<string, unknown> = {},
-	options: { partials?: number; complete?: boolean; text?: string } = {},
+	options: { partials?: number; complete?: boolean; text?: string; toolUse?: string } = {},
 ): string[] {
 	const lines: string[] = [];
 	const partials = options.partials ?? 2;
-	const content = [{ type: "text", text: options.text ?? "synthetic" }];
+	// `toolUse`: the response issued that tool call (its `tool_use` block, by the call's id).
+	const content =
+		options.toolUse === undefined
+			? [{ type: "text", text: options.text ?? "synthetic" }]
+			: [{ type: "tool_use", id: options.toolUse, name: "Bash", input: { command: "ls" } }];
 	const usage = (output: number) => ({
 		input_tokens: u.input,
 		cache_creation_input_tokens: u.cacheWrite,
@@ -3834,6 +3838,18 @@ describe("estimate mode is inherited by a fork only; a subagent's missing transc
 	}
 	const noTranscriptRecords = async () =>
 		(await watchRecords()).filter((r) => r.kind === "no-transcript-agent");
+	const subagentPath = (agentId: string) =>
+		join(projectDir, SESSION, "subagents", `agent-${agentId}.jsonl`);
+	/** The response that issued `toolUseId`, as `agentId`'s transcript entries. */
+	const issued = (id: string, toolUseId: string, usage: Usage, agentId: string) =>
+		responseEntries(id, SONNET, usage, sub(agentId), { toolUse: toolUseId });
+	/** The transferId of the hold the Nth authorize made (0-based). */
+	const holdOf = (n: number) => transferOf(authorizes()[n]);
+	/** Settles that post the response of 1200 input tokens from the transcript. */
+	const postedResponse = () =>
+		settles().filter(
+			(s) => s.body.usageSource === "provider" && Number(s.body.inputTokens) >= 1200,
+		);
 
 	it("a NAMED subagent whose transcript exists is charged from it, though a sibling settles at the estimate", async () => {
 		// The lab's measurement: a named subagent of such a session was charged its tool-I/O
@@ -3913,7 +3929,7 @@ describe("estimate mode is inherited by a fork only; a subagent's missing transc
 		expect(sources()).toEqual(["estimated"]);
 	});
 
-	it("a subagent's transcript missing at its first hook waits: the hold is given back, and the transcript is charged once it exists", async () => {
+	it("a subagent's transcript missing at its first hook waits: its own response, there by its PostToolUse, is claimed for the estimate, and the rest of the transcript is charged from it", async () => {
 		await startServer(okResponder);
 		await writeMain([]);
 		const named = { agent_id: "g1", agent_type: "general-purpose" };
@@ -3922,20 +3938,30 @@ describe("estimate mode is inherited by a fork only; a subagent's missing transc
 		expect(pre.stderr).toContain("not written yet");
 		expect(pre.stderr).not.toContain("ESTIMATE");
 		await expect(stat(markerOf("g1"))).rejects.toMatchObject({ code: "ENOENT" });
-		// The transcript appears, holding the response the first call's turn made.
-		await writeSubagent(
-			"g1",
-			"general-purpose",
-			responseEntries("msg_g", SONNET, u(1200, 300), sub("g1")),
+		// The transcript appears, holding the response that issued the first call.
+		await writeSubagent("g1", "general-purpose", issued("msg_g", "tu_1", u(1200, 300), "g1"));
+		const post = await run("post-tool-use.mjs", postInput("tu_1", named));
+		expect(post.stderr).toContain("claimed for this estimate");
+		expect(sources()).toEqual(["estimated"]);
+		expect(givenBack()).toEqual([]);
+		// The agent goes on reading its transcript: the next response is charged from it, and the
+		// claimed one never is.
+		await appendFile(
+			subagentPath("g1"),
+			`${issued("msg_g2", "tu_2", u(800, 100), "g1").join("\n")}\n`,
 		);
-		await run("post-tool-use.mjs", postInput("tu_1", named));
 		await run("pre-tool-use.mjs", preInput("tu_2", named));
 		await run("post-tool-use.mjs", postInput("tu_2", named));
 		await run("subagent-stop.mjs", { ...stopInput(), ...named });
-		// Charged once, at the transcript's counts (the first call's empty hold settles at zero).
-		expect(settles().filter((s) => s.body.usageSource === "estimated")).toEqual([]);
-		expect(settles().reduce((sum, s) => sum + Number(s.body.inputTokens), 0)).toBe(1200);
+		expect(sources()).toEqual(["estimated", "provider"]);
+		expect(
+			settles()
+				.filter((s) => s.body.usageSource === "provider")
+				.map((s) => s.body.inputTokens),
+		).toEqual([800]);
+		expect(postedResponse()).toEqual([]);
 		await expect(stat(markerOf("g1"))).rejects.toMatchObject({ code: "ENOENT" });
+		expect((await watchRecords()).filter((r) => r.kind === "gap")).toEqual([]);
 		// A named agent's late transcript is not a phantom: no probe record.
 		expect(await noTranscriptRecords()).toEqual([]);
 	});
@@ -3995,25 +4021,29 @@ describe("estimate mode is inherited by a fork only; a subagent's missing transc
 		expect(late[0]).toMatchObject({ kind: "gap", session: SESSION, agent: "g1", started: null });
 	});
 
-	it("the transcript arriving between PreToolUse and PostToolUse: the hold is given back, and the call is charged exactly once, from the transcript", async () => {
+	it("the transcript arriving between PreToolUse and PostToolUse without the call's response: nothing of it was read, so the agent sticks there, and the call is charged once, at the estimate, with one gap naming the skip", async () => {
 		await startServer(okResponder);
 		await writeMain([]);
 		const named = { agent_id: "g1", agent_type: "general-purpose" };
 		await run("pre-tool-use.mjs", preInput("tu_1", named));
+		// A response that issued no call of this agent's hooks.
 		await writeSubagent(
 			"g1",
 			"general-purpose",
 			responseEntries("msg_g", SONNET, u(1200, 300), sub("g1")),
 		);
 		const post = await run("post-tool-use.mjs", postInput("tu_1", named));
-		expect(post.stderr).toContain("the transcript exists now");
-		expect(givenBack()).toHaveLength(1);
-		expect(settles()).toEqual([]);
+		expect(post.stderr).toContain("settling at the ESTIMATE");
+		expect(sources()).toEqual(["estimated"]);
+		expect(givenBack()).toEqual([]);
+		expect(await readFile(markerOf("g1"), "utf-8")).toBe(
+			"its transcript did not hold a call that waited for it",
+		);
 		await run("subagent-stop.mjs", { ...stopInput(), ...named });
-		expect(sources()).toEqual(["provider"]);
-		expect(settles().map((s) => s.body.inputTokens)).toEqual([1200]);
-		await expect(stat(markerOf("g1"))).rejects.toMatchObject({ code: "ENOENT" });
-		expect((await watchRecords()).filter((r) => r.kind === "gap")).toEqual([]);
+		expect(sources()).toEqual(["estimated"]);
+		const late = (await watchRecords()).filter((r) => r.phase === "late-transcript");
+		expect(late).toHaveLength(1);
+		expect(late[0]).toMatchObject({ kind: "gap", session: SESSION, agent: "g1", started: null });
 	});
 
 	it("a fork's awaiting hold whose transcript appears, and whose sibling sticks, before its PostToolUse: the call settles at the inherited estimate, never given back uncharged", async () => {
@@ -4041,11 +4071,11 @@ describe("estimate mode is inherited by a fork only; a subagent's missing transc
 		await run("pre-tool-use.mjs", preInput("tu_1", fork));
 		await writeSubagent("f1", "fork", responseEntries("msg_f", SONNET, u(1200, 300), sub("f1")));
 		const post = await run("post-tool-use.mjs", postInput("tu_1", fork));
-		// A later read could be cancelled by a sibling's estimate mode: the fork sticks here.
+		// Nothing of it was read, and its response is not in it: the fork sticks here.
 		expect(post.stderr).toContain("settling at the ESTIMATE");
 		expect(sources()).toEqual(["estimated"]);
 		expect(givenBack()).toEqual([]);
-		expect(await readFile(markerOf("f1"), "utf-8")).toContain("appeared after its first hook");
+		expect(await readFile(markerOf("f1"), "utf-8")).toContain("did not hold a call that waited");
 		// Named at once, though no later hook of the agent may open it again.
 		expect((await watchRecords()).filter((r) => r.phase === "late-transcript")).toHaveLength(1);
 		await stuckSibling();
@@ -4065,36 +4095,101 @@ describe("estimate mode is inherited by a fork only; a subagent's missing transc
 		await run("post-tool-use.mjs", postInput("tu_1", { agent_id: "x1" }));
 		expect(sources()).toEqual(["estimated"]);
 		expect(givenBack()).toEqual([]);
-		expect(await readFile(markerOf("x1"), "utf-8")).toContain("appeared after its first hook");
+		expect(await readFile(markerOf("x1"), "utf-8")).toContain("did not hold a call that waited");
 	});
 
-	it("control: a NAMED agent in the same shape is given back, and charged from its transcript, a sibling sticking after or not", async () => {
+	it("a fork's own response at its PostToolUse, behind entries copied from its ancestor: only its call's tool_use is matched, the hold claims it for the estimate, and nothing posts it after a sibling sticks", async () => {
+		await startServer(okResponder);
+		// The parent's response that spawned the fork, posted by the parent's own window.
+		await writeMain(responseEntries("msg_anc", SONNET, u(50, 10), {}, { toolUse: "tu_spawn" }));
+		await run("pre-tool-use.mjs", preInput("tu_spawn"));
+		await run("post-tool-use.mjs", postInput("tu_spawn"));
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([50]);
+		const fork = { agent_id: "f1", agent_type: "fork" };
+		await run("pre-tool-use.mjs", preInput("tu_1", fork));
+		// The fork's file begins with a copy of the parent's entries, `agentId` rewritten to its own.
+		await writeSubagent("f1", "fork", [
+			...issued("msg_anc", "tu_spawn", u(50, 10), "f1"),
+			...issued("msg_f", "tu_1", u(1200, 300), "f1"),
+		]);
+		const post = await run("post-tool-use.mjs", postInput("tu_1", fork));
+		expect(post.stderr).toContain("claimed for this estimate");
+		expect(settles().filter((s) => s.body.transferId === holdOf(1))).toHaveLength(1);
+		expect(sources()).toEqual(["provider", "estimated"]);
+		await stuckSibling();
+		await run("subagent-stop.mjs", { ...stopInput(), ...fork });
+		await run("stop.mjs", stopInput());
+		expect(sources()).toEqual(["provider", "estimated"]);
+		expect(postedResponse()).toEqual([]);
+		expect((await watchRecords()).filter((r) => r.kind === "gap")).toEqual([]);
+	});
+
+	it("a fork's transcript holding only entries copied from its ancestor at its PostToolUse: no copied call is this one, so nothing of it was read, the fork sticks, and the call is charged at the estimate", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_anc", SONNET, u(50, 10), {}, { toolUse: "tu_spawn" }));
+		await run("pre-tool-use.mjs", preInput("tu_spawn"));
+		await run("post-tool-use.mjs", postInput("tu_spawn"));
+		const fork = { agent_id: "f1", agent_type: "fork" };
+		await run("pre-tool-use.mjs", preInput("tu_1", fork));
+		await writeSubagent("f1", "fork", issued("msg_anc", "tu_spawn", u(50, 10), "f1"));
+		const post = await run("post-tool-use.mjs", postInput("tu_1", fork));
+		expect(post.stderr).toContain("settling at the ESTIMATE");
+		expect(givenBack()).toEqual([]);
+		expect(sources()).toEqual(["provider", "estimated"]);
+		expect(await readFile(markerOf("f1"), "utf-8")).toContain("did not hold a call that waited");
+	});
+
+	it("a named subagent known by its hook's agent_type alone, whose SubagentStop never arrives: its call charged once, and the rest of its transcript still posted at a session-wide Stop after a sibling sticks", async () => {
 		await startServer(okResponder);
 		await writeMain([]);
 		const named = { agent_id: "g1", agent_type: "general-purpose" };
 		await run("pre-tool-use.mjs", preInput("tu_1", named));
-		await writeSubagent(
-			"g1",
-			"general-purpose",
-			responseEntries("msg_g", SONNET, u(1200, 300), sub("g1")),
-		);
+		// No meta file: only the hook says the agent is named.
+		await writeSubagent("g1", null, issued("msg_g", "tu_1", u(1200, 300), "g1"));
 		const post = await run("post-tool-use.mjs", postInput("tu_1", named));
-		expect(post.stderr).toContain("the transcript exists now");
-		expect(givenBack()).toHaveLength(1);
+		expect(post.stderr).toContain("claimed for this estimate");
+		await appendFile(
+			subagentPath("g1"),
+			`${issued("msg_g2", "tu_x", u(800, 100), "g1").join("\n")}\n`,
+		);
 		await stuckSibling();
-		await run("subagent-stop.mjs", { ...stopInput(), ...named });
-		expect(sources()).toEqual(["provider"]);
-		expect(settles().map((s) => s.body.inputTokens)).toEqual([1200]);
+		// The parent's input names no type for g1: the type its own hook stated is recorded.
+		await run("stop.mjs", stopInput());
+		expect(settles().filter((s) => s.body.transferId === holdOf(0))).toHaveLength(1);
+		expect(sources()).toEqual(["estimated", "provider"]);
+		expect(
+			settles()
+				.filter((s) => s.body.usageSource === "provider")
+				.map((s) => s.body.inputTokens),
+		).toEqual([800]);
+		expect(postedResponse()).toEqual([]);
 		await expect(stat(markerOf("g1"))).rejects.toMatchObject({ code: "ENOENT" });
-		expect((await watchRecords()).filter((r) => r.kind === "gap")).toEqual([]);
 	});
 
-	it("an awaiting hold whose transcript a parallel call read before the agent inherited: the hold is given back, and the call is never charged twice", async () => {
+	it("a named subagent known by its hook's agent_type alone, read at its first hook: a session-wide Stop after a sibling sticks still posts the rest of its transcript", async () => {
+		await startServer(okResponder);
+		await writeMain([]);
+		const named = { agent_id: "g1", agent_type: "general-purpose" };
+		await writeSubagent("g1", null, responseEntries("msg_g1", SONNET, u(1200, 300), sub("g1")));
+		await run("pre-tool-use.mjs", preInput("tu_1", named));
+		await run("post-tool-use.mjs", postInput("tu_1", named));
+		await stuckSibling();
+		await appendFile(
+			join(projectDir, SESSION, "subagents", "agent-g1.jsonl"),
+			`${responseEntries("msg_g2", SONNET, u(800, 100), sub("g1")).join("\n")}\n`,
+		);
+		await run("stop.mjs", stopInput());
+		expect(sources()).toEqual(["provider", "provider"]);
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([1200, 800]);
+		await expect(stat(markerOf("g1"))).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
+	it("an awaiting hold whose response a parallel call posted before the agent inherited: the claim is the parallel window's, so the hold is given back, and the call is never charged twice", async () => {
 		await startServer(okResponder);
 		await writeMain([]);
 		const fork = { agent_id: "f1", agent_type: "fork" };
 		await run("pre-tool-use.mjs", preInput("tu_1", fork));
-		await writeSubagent("f1", "fork", responseEntries("msg_f", SONNET, u(1200, 300), sub("f1")));
+		await writeSubagent("f1", "fork", issued("msg_f", "tu_1", u(1200, 300), "f1"));
 		// A parallel call reads the transcript: the response that made tu_1 is posted at its counts.
 		await run("pre-tool-use.mjs", preInput("tu_2", fork));
 		await run("post-tool-use.mjs", postInput("tu_2", fork));
@@ -4104,11 +4199,426 @@ describe("estimate mode is inherited by a fork only; a subagent's missing transc
 		await run("pre-tool-use.mjs", preInput("tu_3", fork));
 		await expect(readFile(markerOf("f1"), "utf-8")).resolves.toContain("a0 of this session");
 		const post = await run("post-tool-use.mjs", postInput("tu_1", fork));
-		expect(post.stderr).toContain("the transcript exists now");
+		expect(post.stderr).toContain("claimed by the post that charges it");
 		expect(sources()).toEqual(["provider"]);
 		expect(givenBack()).toHaveLength(1);
 		await run("post-tool-use.mjs", postInput("tu_3", fork));
 		expect(sources()).toEqual(["provider", "estimated"]);
+	});
+
+	it("a parallel call reads the transcript while it holds only the prompt, the response lands, a sibling sticks and a third call inherits, then the first call's PostToolUse: its response is claimed for the estimate, never given back uncharged", async () => {
+		await startServer(okResponder);
+		await writeMain([]);
+		const fork = { agent_id: "f1", agent_type: "fork" };
+		await run("pre-tool-use.mjs", preInput("tu_1", fork));
+		await writeSubagent("f1", "fork", [
+			JSON.stringify({
+				type: "user",
+				sessionId: SESSION,
+				...sub("f1"),
+				message: { role: "user", content: "synthetic" },
+			}),
+		]);
+		// The read moves the cursor past the prompt, and posts nothing.
+		await run("pre-tool-use.mjs", preInput("tu_2", fork));
+		await run("post-tool-use.mjs", postInput("tu_2", fork));
+		await appendFile(
+			subagentPath("f1"),
+			`${issued("msg_f", "tu_1", u(1200, 300), "f1").join("\n")}\n`,
+		);
+		await stuckSibling();
+		await run("pre-tool-use.mjs", preInput("tu_3", fork));
+		await expect(readFile(markerOf("f1"), "utf-8")).resolves.toContain("a0 of this session");
+		const post = await run("post-tool-use.mjs", postInput("tu_1", fork));
+		expect(post.stderr).toContain("claimed for this estimate");
+		expect(givenBack()).toEqual([]);
+		await run("post-tool-use.mjs", postInput("tu_3", fork));
+		await run("stop.mjs", stopInput());
+		expect(settles().filter((s) => s.body.transferId === holdOf(0))).toMatchObject([
+			{ body: { usageSource: "estimated" } },
+		]);
+		expect(postedResponse()).toEqual([]);
+	});
+
+	it("the same read, the first call's PostToolUse BEFORE the sibling sticks: its response is claimed for the estimate there, and a later inheritance cannot leave it uncharged", async () => {
+		await startServer(okResponder);
+		await writeMain([]);
+		const fork = { agent_id: "f1", agent_type: "fork" };
+		await run("pre-tool-use.mjs", preInput("tu_1", fork));
+		await writeSubagent("f1", "fork", [
+			JSON.stringify({
+				type: "user",
+				sessionId: SESSION,
+				...sub("f1"),
+				message: { role: "user", content: "synthetic" },
+			}),
+		]);
+		await run("pre-tool-use.mjs", preInput("tu_2", fork));
+		await run("post-tool-use.mjs", postInput("tu_2", fork));
+		await appendFile(
+			subagentPath("f1"),
+			`${issued("msg_f", "tu_1", u(1200, 300), "f1").join("\n")}\n`,
+		);
+		const post = await run("post-tool-use.mjs", postInput("tu_1", fork));
+		expect(post.stderr).toContain("claimed for this estimate");
+		await stuckSibling();
+		await run("pre-tool-use.mjs", preInput("tu_3", fork));
+		await run("post-tool-use.mjs", postInput("tu_3", fork));
+		await run("subagent-stop.mjs", { ...stopInput(), ...fork });
+		expect(settles().filter((s) => s.body.transferId === holdOf(0))).toMatchObject([
+			{ body: { usageSource: "estimated" } },
+		]);
+		expect(postedResponse()).toEqual([]);
+	});
+
+	it("its response not in a transcript read before: whether any of it was posted cannot be told, so the call is given back uncharged, with ONE gap naming the call", async () => {
+		await startServer(okResponder);
+		await writeMain([]);
+		const named = { agent_id: "g1", agent_type: "general-purpose" };
+		await run("pre-tool-use.mjs", preInput("tu_1", named));
+		await writeSubagent("g1", "general-purpose", [
+			JSON.stringify({
+				type: "user",
+				sessionId: SESSION,
+				...sub("g1"),
+				message: { role: "user", content: "synthetic" },
+			}),
+		]);
+		await run("pre-tool-use.mjs", preInput("tu_2", named));
+		await run("post-tool-use.mjs", postInput("tu_2", named));
+		await run("post-tool-use.mjs", postInput("tu_1", named));
+		expect(settles().filter((s) => s.body.transferId === holdOf(0))).toEqual([]);
+		const gaps = (await watchRecords()).filter(
+			(r) => r.kind === "gap" && r.transferId === holdOf(0),
+		);
+		expect(gaps).toHaveLength(1);
+		expect(gaps[0]).toMatchObject({ releaseClass: "call-ran", toolUseId: "tu_1", agent: "g1" });
+		expect(String(gaps[0]?.reason)).toContain("some of the transcript was read");
+		// The response lands later and is read: charged once, from the transcript; the gap over-reports.
+		await appendFile(
+			subagentPath("g1"),
+			`${issued("msg_g", "tu_1", u(1200, 300), "g1").join("\n")}\n`,
+		);
+		await run("subagent-stop.mjs", { ...stopInput(), ...named });
+		expect(postedResponse()).toHaveLength(1);
+	});
+
+	it("a transcript over the read bound at the call's PostToolUse is not ruled absent: the call is given back uncharged, with ONE gap naming the call and why", async () => {
+		await startServer(okResponder);
+		await writeMain([]);
+		const named = { agent_id: "g1", agent_type: "general-purpose" };
+		await run("pre-tool-use.mjs", preInput("tu_1", named));
+		// 65 lines of 1 MiB of NULs (holes: a sparse file), so a scan that ignored the bound would
+		// read it all, find no call, and rule it absent.
+		await mkdir(join(projectDir, SESSION, "subagents"), { recursive: true });
+		const handle = await open(subagentPath("g1"), "w");
+		try {
+			for (let i = 1; i <= 65; i += 1) await handle.write("\n", i * (1 << 20) - 1);
+		} finally {
+			await handle.close();
+		}
+		await run("post-tool-use.mjs", postInput("tu_1", named));
+		expect(settles()).toEqual([]);
+		expect(givenBack()).toHaveLength(1);
+		const gaps = (await watchRecords()).filter((r) => r.kind === "gap");
+		expect(gaps).toHaveLength(1);
+		expect(gaps[0]).toMatchObject({
+			releaseClass: "call-ran",
+			toolUseId: "tu_1",
+			transferId: holdOf(0),
+		});
+		expect(String(gaps[0]?.reason)).toContain("over 64 MiB");
+		await expect(stat(markerOf("g1"))).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
+	it("a transcript line over the line bound before the call's response is not ruled past: the call is given back uncharged, with ONE gap naming the call and why", async () => {
+		await startServer(okResponder);
+		await writeMain([]);
+		const named = { agent_id: "g1", agent_type: "general-purpose" };
+		await run("pre-tool-use.mjs", preInput("tu_1", named));
+		// One line of 17 MiB of NULs (a hole), then the call's response: a scan that dropped the
+		// line bound would find the response past it.
+		await mkdir(join(projectDir, SESSION, "subagents"), { recursive: true });
+		const handle = await open(subagentPath("g1"), "w");
+		try {
+			const tail = `\n${issued("msg_g", "tu_1", u(1200, 300), "g1").join("\n")}\n`;
+			await handle.write(tail, 17 * (1 << 20));
+		} finally {
+			await handle.close();
+		}
+		await run("post-tool-use.mjs", postInput("tu_1", named));
+		expect(settles()).toEqual([]);
+		const gaps = (await watchRecords()).filter((r) => r.kind === "gap");
+		expect(gaps).toMatchObject([
+			{ releaseClass: "call-ran", toolUseId: "tu_1", transferId: holdOf(0) },
+		]);
+		expect(String(gaps[0]?.reason)).toContain("over 16 MiB");
+	});
+
+	it("the call's entry still being written (no newline yet) at its PostToolUse is not ruled absent: given back uncharged, with one gap", async () => {
+		await startServer(okResponder);
+		await writeMain([]);
+		const named = { agent_id: "g1", agent_type: "general-purpose" };
+		await run("pre-tool-use.mjs", preInput("tu_1", named));
+		await mkdir(join(projectDir, SESSION, "subagents"), { recursive: true });
+		const [first] = issued("msg_g", "tu_1", u(1200, 300), "g1");
+		await writeFile(subagentPath("g1"), String(first).slice(0, -20));
+		await run("post-tool-use.mjs", postInput("tu_1", named));
+		expect(settles()).toEqual([]);
+		const gaps = (await watchRecords()).filter((r) => r.kind === "gap");
+		expect(gaps).toMatchObject([{ releaseClass: "call-ran", toolUseId: "tu_1" }]);
+		expect(String(gaps[0]?.reason)).toContain("still being written");
+	});
+
+	it("an unparseable line naming the call is not ruled absent: given back uncharged, with one gap", async () => {
+		await startServer(okResponder);
+		await writeMain([]);
+		const named = { agent_id: "g1", agent_type: "general-purpose" };
+		await run("pre-tool-use.mjs", preInput("tu_1", named));
+		await mkdir(join(projectDir, SESSION, "subagents"), { recursive: true });
+		await writeFile(subagentPath("g1"), `{"type":"assistant","id":"tu_1",\n`);
+		await run("post-tool-use.mjs", postInput("tu_1", named));
+		expect(settles()).toEqual([]);
+		const gaps = (await watchRecords()).filter((r) => r.kind === "gap");
+		expect(gaps).toMatchObject([{ releaseClass: "call-ran", toolUseId: "tu_1" }]);
+		expect(String(gaps[0]?.reason)).toContain("not JSON");
+	});
+
+	it("an entry of ANOTHER agent holding the call is not this agent's response: nothing of the transcript was read, so the agent sticks and the call is charged at the estimate", async () => {
+		await startServer(okResponder);
+		await writeMain([]);
+		const named = { agent_id: "g1", agent_type: "general-purpose" };
+		await run("pre-tool-use.mjs", preInput("tu_1", named));
+		await writeSubagent("g1", "general-purpose", issued("msg_o", "tu_1", u(1200, 300), "a9"));
+		const post = await run("post-tool-use.mjs", postInput("tu_1", named));
+		expect(post.stderr).toContain("settling at the ESTIMATE");
+		expect(post.stderr).not.toContain("claimed for this estimate");
+		expect(await readFile(markerOf("g1"), "utf-8")).toContain("did not hold a call that waited");
+	});
+
+	it("an estimate settle that fails after its hold claimed the response leaves the claim: no later read posts the response as well", async () => {
+		let failed = false;
+		await startServer((path, body) => {
+			if (path === "/v1/settle" && !failed) {
+				failed = true;
+				return { status: 500, json: { error: "internal" } };
+			}
+			return okResponder(path, body);
+		});
+		await writeMain([]);
+		const named = { agent_id: "g1", agent_type: "general-purpose" };
+		await run("pre-tool-use.mjs", preInput("tu_1", named));
+		await writeSubagent("g1", "general-purpose", issued("msg_g", "tu_1", u(1200, 300), "g1"));
+		const post = await run("post-tool-use.mjs", postInput("tu_1", named));
+		expect(post.stderr).toContain("claimed for this estimate");
+		expect(settles().map((s) => s.status)).toEqual([500]);
+		// The claim is made before the settle is sent, and never removed.
+		const digest = createHash("sha256").update("msg_g").digest("hex");
+		const claim = join(stateDir, "transcripts", "claims", digest.slice(0, 2), digest.slice(2));
+		expect(await readFile(claim, "utf-8")).toBe(`${SESSION}/g1 estimated-call tu_1`);
+		await run("pre-tool-use.mjs", preInput("tu_2", named));
+		await run("post-tool-use.mjs", postInput("tu_2", named));
+		await run("subagent-stop.mjs", { ...stopInput(), ...named });
+		expect(postedResponse()).toEqual([]);
+		expect((await watchRecords()).filter((r) => r.kind === "gap")).not.toEqual([]);
+	});
+
+	it("the usage setting switched to estimate between the call's PreToolUse and PostToolUse (the session's pins removed), then back: the hold is still ruled, its response claimed before the estimate, and never posted after", async () => {
+		await startServer(okResponder);
+		await writeMain([]);
+		const named = { agent_id: "g1", agent_type: "general-purpose" };
+		await run("pre-tool-use.mjs", preInput("tu_1", named));
+		await writeSubagent("g1", "general-purpose", issued("msg_g", "tu_1", u(1200, 300), "g1"));
+		// A session's settings are pinned at its first hook; its pins removed, the next hook pins
+		// the setting then current.
+		repin();
+		const post = await run("post-tool-use.mjs", postInput("tu_1", named), {
+			UT_CC_USAGE: "estimate",
+		});
+		expect(post.stderr).toContain("claimed for this estimate");
+		expect(settles().filter((s) => s.body.transferId === holdOf(0))).toMatchObject([
+			{ body: { usageSource: "estimated" } },
+		]);
+		// Back to reading transcripts: the next call's read and the agent's end post nothing twice.
+		repin();
+		await run("pre-tool-use.mjs", preInput("tu_2", named));
+		await run("post-tool-use.mjs", postInput("tu_2", named));
+		await run("subagent-stop.mjs", { ...stopInput(), ...named });
+		expect(postedResponse()).toEqual([]);
+	});
+
+	describe("a claim on the call's response that exists already is ruled by WHOSE it is", () => {
+		const named = { agent_id: "g1", agent_type: "general-purpose" };
+		/**
+		 * The hold awaits, its response is in the transcript, and `holder` claimed it first; then
+		 * `before` sets up the agent's state, and the call's PostToolUse runs.
+		 */
+		async function claimedBy(holder: string, before?: () => Promise<void>) {
+			await startServer(okResponder);
+			await writeMain([]);
+			await run("pre-tool-use.mjs", preInput("tu_1", named));
+			await writeSubagent("g1", "general-purpose", issued("msg_g", "tu_1", u(1200, 300), "g1"));
+			const digest = createHash("sha256").update("msg_g").digest("hex");
+			const dir = join(stateDir, "transcripts", "claims", digest.slice(0, 2));
+			await mkdir(dir, { recursive: true });
+			await writeFile(join(dir, digest.slice(2)), holder);
+			await before?.();
+			return run("post-tool-use.mjs", postInput("tu_1", named));
+		}
+		const gaps = async () => (await watchRecords()).filter((r) => r.kind === "gap");
+		/** The agent's cursor, with `fields` over what it holds (or over an empty one). */
+		async function cursorWith(fields: Record<string, unknown>) {
+			let base: Record<string, unknown> = {
+				v: 2,
+				byteOffset: 0,
+				nextSeq: 0,
+				partial: {},
+				accounted: [],
+				denied: [],
+				assigned: {},
+				estimateMode: false,
+				estimateReason: null,
+				lastModel: null,
+				unresolved: {},
+			};
+			try {
+				base = JSON.parse(await readFile(cursorPath("g1"), "utf-8"));
+			} catch {
+				// No cursor yet: the empty one.
+			}
+			await writeFile(cursorPath("g1"), JSON.stringify({ ...base, ...fields }));
+		}
+		/** A finished hold of the agent whose settle of the response ended `outcome`, not brought into its cursor yet. */
+		const finishedHold = (outcome: string) =>
+			writeFile(
+				join(stateDir, `${SESSION}__tx_parallel.done`),
+				JSON.stringify({
+					agentId: "g1",
+					transferId: "tx_parallel",
+					assignedIds: ["msg_g"],
+					outcome,
+					usage: "transcript",
+				}),
+			);
+
+		it("this hold's own, left by a run of it that died before its settle: the call settles at the estimate, and the response is never posted", async () => {
+			const post = await claimedBy(`${SESSION}/g1 estimated-call tu_1`);
+			expect(post.stderr).toContain("claimed for this estimate");
+			expect(settles().filter((s) => s.body.transferId === holdOf(0))).toMatchObject([
+				{ body: { usageSource: "estimated" } },
+			]);
+			expect(givenBack()).toEqual([]);
+			await run("subagent-stop.mjs", { ...stopInput(), ...named });
+			expect(postedResponse()).toEqual([]);
+		});
+
+		it("another call's estimate of the same response: charged there, so the hold is given back, with no gap", async () => {
+			const post = await claimedBy(`${SESSION}/g1 estimated-call tu_0`);
+			expect(post.stderr).toContain("claimed by the post that charges it");
+			expect(settles()).toEqual([]);
+			expect(givenBack()).toHaveLength(1);
+			expect(await gaps()).toEqual([]);
+		});
+
+		it("the agent's own reads, but not accounted in its cursor (a read claims before it posts): not proof of a charge, so a gap names the call", async () => {
+			await claimedBy(`${SESSION}/g1`);
+			expect(settles()).toEqual([]);
+			const found = await gaps();
+			expect(found).toMatchObject([
+				{ releaseClass: "call-ran", toolUseId: "tu_1", transferId: holdOf(0) },
+			]);
+			expect(String(found[0]?.reason)).toContain(
+				"claimed by the agent's own reads, and no settle of it is confirmed",
+			);
+		});
+
+		it("the agent's own reads, whose settle the server confirmed (the cursor's posted): charged there, so the hold is given back, with no gap", async () => {
+			await claimedBy(`${SESSION}/g1`, () =>
+				cursorWith({ accounted: ["msg_g"], posted: ["msg_g"] }),
+			);
+			expect(settles()).toEqual([]);
+			expect(givenBack()).toHaveLength(1);
+			expect(await gaps()).toEqual([]);
+		});
+
+		it("the agent's own reads, accounted in its cursor with no settle confirmed (a binding whose hook died, written off by a later lock holder): not proof of a charge, so a gap names the call", async () => {
+			await claimedBy(`${SESSION}/g1`, () => cursorWith({ accounted: ["msg_g"] }));
+			expect(settles()).toEqual([]);
+			const found = await gaps();
+			expect(found).toMatchObject([{ releaseClass: "call-ran", toolUseId: "tu_1" }]);
+			expect(String(found[0]?.reason)).toContain("no settle of it is confirmed");
+		});
+
+		it("the agent's own reads, whose finished hold says the server confirmed the settle, not brought into the cursor yet: the hold is given back, with no gap", async () => {
+			await claimedBy(`${SESSION}/g1`, () => finishedHold("settled"));
+			expect(settles()).toEqual([]);
+			expect(givenBack()).toHaveLength(1);
+			expect(await gaps()).toEqual([]);
+		});
+
+		it("the agent's own reads, whose finished hold says its settle may have posted (claimed): not proof of a charge, so a gap names the call", async () => {
+			await claimedBy(`${SESSION}/g1`, () => finishedHold("claimed"));
+			expect(settles()).toEqual([]);
+			const found = await gaps();
+			expect(found).toMatchObject([{ releaseClass: "call-ran", toolUseId: "tu_1" }]);
+			expect(String(found[0]?.reason)).toContain("no settle of it is confirmed");
+		});
+
+		it("a parallel call's read posts the response, and a later hook brings that settle into the cursor before the call's PostToolUse: the cursor's posted names it, and the hold is given back, with no gap", async () => {
+			await startServer(okResponder);
+			await writeMain([]);
+			await run("pre-tool-use.mjs", preInput("tu_1", named));
+			await writeSubagent("g1", "general-purpose", issued("msg_g", "tu_1", u(1200, 300), "g1"));
+			await run("pre-tool-use.mjs", preInput("tu_2", named));
+			await run("post-tool-use.mjs", postInput("tu_2", named));
+			await run("pre-tool-use.mjs", preInput("tu_3", named));
+			const cursor = (await readCursor("g1")) as unknown as { posted?: string[] };
+			expect(cursor.posted).toContain("msg_g");
+			await run("post-tool-use.mjs", postInput("tu_1", named));
+			expect(postedResponse()).toHaveLength(1);
+			expect(givenBack().filter((r) => r.body.transferId === holdOf(0))).toHaveLength(1);
+			expect(await gaps()).toEqual([]);
+		});
+
+		it("the same finished hold, brought into the cursor by a later hook before the call's PostToolUse: still not proof of a charge, so a gap names the call", async () => {
+			await claimedBy(`${SESSION}/g1`, async () => {
+				await finishedHold("claimed");
+				await run("pre-tool-use.mjs", preInput("tu_3", named));
+			});
+			const cursor = (await readCursor("g1")) as unknown as { posted?: string[] };
+			expect(cursor.posted ?? []).not.toContain("msg_g");
+			expect(settles().filter((s) => s.body.transferId === holdOf(0))).toEqual([]);
+			const found = await gaps();
+			expect(found.filter((r) => r.toolUseId === "tu_1")).toMatchObject([
+				{ releaseClass: "call-ran" },
+			]);
+		});
+
+		it("a parallel call's window whose key the server says is charged already (already_settled) holds the response: posted names it, and the hold is given back, with no gap", async () => {
+			capabilities = [...ALL_CAPABILITIES];
+			const server = keyedServer();
+			server.charged.add(keyOf("g1", ["msg_g"]));
+			await startServer(server.responder);
+			await writeMain([]);
+			await run("pre-tool-use.mjs", preInput("tu_1", named));
+			await writeSubagent("g1", "general-purpose", issued("msg_g", "tu_1", u(1200, 300), "g1"));
+			await run("pre-tool-use.mjs", preInput("tu_2", named));
+			expect(authorizes().map((a) => a.status)).toEqual([200, 409, 200]);
+			const cursor = (await readCursor("g1")) as unknown as { posted?: string[] };
+			expect(cursor.posted).toContain("msg_g");
+			await run("post-tool-use.mjs", postInput("tu_1", named));
+			expect(postedResponse()).toEqual([]);
+			expect(givenBack().filter((r) => r.body.transferId === holdOf(0))).toHaveLength(1);
+			expect(await gaps()).toEqual([]);
+		});
+
+		it("another agent's reads, whose state is not read under this lock: a gap names the call", async () => {
+			await claimedBy(`${SESSION}/f9`);
+			expect(settles()).toEqual([]);
+			const found = await gaps();
+			expect(found).toMatchObject([{ releaseClass: "call-ran", toolUseId: "tu_1" }]);
+			expect(String(found[0]?.reason)).toContain("claimed by another agent's reads");
+		});
 	});
 
 	it("a session-wide Stop does not lend the parent's agent_type to a subagent: a fork with no meta file still inherits", async () => {

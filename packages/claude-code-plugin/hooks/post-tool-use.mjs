@@ -493,9 +493,10 @@ const AWAITING_LOCK_WAIT_MS = 1_000;
 
 /**
  * A hold made while the subagent's transcript was not written yet (transcript.mjs
- * `resolveAwaitingHold`): settled at the estimate if the transcript is still missing (the
- * agent sticks there first), given back as `unused` if it exists now (it posts the call's
- * usage), and given back as a call that ran uncharged, a gap, when neither can be told.
+ * `resolveAwaitingHold`): given back as `unused` when a post claimed the call's response
+ * already; settled at the estimate when this hold claimed it, or when nothing of the transcript
+ * was read and the agent sticks first; else given back as a call that ran uncharged, with one
+ * gap that names the call (its tool_use_id) and why, so the call can be priced later.
  */
 async function settleAwaitingHold({ sessionId, agentId, entry, input }) {
 	const ruling = await resolveAwaitingHold({
@@ -522,15 +523,16 @@ async function settleAwaitingHold({ sessionId, agentId, entry, input }) {
 			session: sessionId,
 			agent: agentId,
 			transferId: entry.transferId,
-			reason: `whether the transcript holds this call could not be told (${ruling.reason}); it is not charged`,
+			reason: `whether this call's response is posted could not be told (${ruling.reason}); it is not charged`,
 			started: callStart(entry),
 			releaseClass: "call-ran",
+			toolUseId: typeof input.tool_use_id === "string" ? input.tool_use_id.slice(0, 256) : null,
 		});
 	}
 	const givenBack = await giveBack(
 		entry.transferId,
 		unused
-			? "the transcript exists now and posts this call's usage"
+			? "this call's response was claimed by the post that charges it"
 			: "the call's charge could not be ruled on",
 		Math.max(250, Math.min(5000, timeLeft())),
 		unused ? "unused" : "call-ran",
@@ -539,7 +541,7 @@ async function settleAwaitingHold({ sessionId, agentId, entry, input }) {
 	say(
 		`usertrust: hold ${entry.transferId} ${givenBack ? "given back" : "left to the server's TTL sweep"}: ${
 			unused
-				? "the transcript exists now, and posts this call's usage"
+				? "this call's response was claimed by the post that charges it"
 				: `this call is not charged (${ruling.reason}; recorded as a gap)`
 		}`,
 	);
@@ -609,7 +611,8 @@ try {
 			);
 		}
 		await recordHoldOutcome(sessionId, entry, result);
-	} else if (entry?.awaitingTranscript === true && usageMode() === "transcript") {
+	} else if (entry?.awaitingTranscript === true) {
+		// Ruled whatever the usage setting says now (`resolveAwaitingHold`).
 		await settleAwaitingHold({ sessionId, agentId, entry, input });
 	} else if (entry) {
 		if (usageMode() === "transcript") {

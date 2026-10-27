@@ -445,17 +445,30 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   responses and reads its own transcript. One exception to "cannot be read": a
   SUBAGENT's transcript that does not exist yet, before any of it was read, is not
   written yet (Claude Code can run a subagent's first hooks before it creates the
-  file). The call's PostToolUse decides: if the transcript exists by then, a named
-  subagent's hold is given back and the transcript posts the usage (a fork, or a
-  subagent of no stated type, switches to the estimate there instead: a sibling that
-  switched before its next read would be inherited, and that read never made); if it is still missing, the
-  subagent switches to the estimate there, and the call is charged at it. A call
-  that never reaches its PostToolUse is decided at the subagent's SubagentStop. A
-  transcript that appears only after the switch is never read, since its calls were
-  charged at the estimate, and posting them would charge them twice: one `gap`
-  record (`"phase":"late-transcript"`) says so. A hold is settled at the estimate ONLY in these cases: when the plugin's own state
-  is unusable for now, the hold is given back, because the transcript still holds
-  that usage.
+  file). The call's PostToolUse decides, under the subagent's lock, from the call's
+  own response: the entry of this subagent that holds the call's `tool_use` block,
+  found by the call's id (entries a fork copied from its ancestor hold the ancestor's
+  calls, never this one). If that response is there and no window claimed it yet, the
+  hold claims it, in the same claims directory that posts every message once, and the
+  call is charged at the estimate: the response is never posted from the transcript.
+  The claim is made before the settle is sent and is never removed, so a settle that
+  fails leaves a gap, never a second charge. If another call's estimate of the same
+  response claimed it first, or the subagent's own reads claimed it and the server
+  confirmed their settle, the hold is given back: the response is charged there. A
+  settle never seen to end, or a claim written off, is no such proof. Any other claim proves nothing (a read claims a message before it posts it),
+  so it is a gap, as below. If the transcript is still missing, or holds
+  no such response and none of it was read, the subagent switches to the estimate
+  there, and the call is charged at it. Anything that cannot be told (some of the
+  transcript read but the response not in it, a transcript over 64 MiB or a line over
+  16 MiB, an unfinished or unparseable line that names the call) gives the hold back
+  uncharged, with ONE `gap` record that names the call (`toolUseId`) and why, so it can
+  be priced later; it is never charged at the estimate there, since a later read could
+  post the same response. A call that never reaches its PostToolUse is decided at the
+  subagent's SubagentStop. A transcript that appears only after the switch is never
+  read, since its calls were charged at the estimate, and posting them would charge
+  them twice: one `gap` record (`"phase":"late-transcript"`) says so. When the plugin's
+  own state is unusable for now, the hold is given back, because the transcript still
+  holds that usage.
 - **Private, durable state.** Cursors, claims and estimate-mode records live in
   `$UT_CC_STATE_DIR/transcripts/`, created `0700`; if that directory is not a real
   directory owned by you without group or other write access, transcript
@@ -975,9 +988,8 @@ PreToolUse, when it settles a repeated or resumed call's earlier hold. Its `"pha
   it is retried.
 
 One more `gap` record has `"phase":"late-transcript"`, written once per agent: a subagent
-switched to the estimate because its transcript did not exist, or (a fork, or a subagent of
-no stated type) because it appeared only after the subagent's first hook, and the transcript
-exists now.
+switched to the estimate because its transcript did not exist, or did not hold the response
+of a call that waited for it, and the transcript exists now.
 Its lines are never posted, since the calls they cover were charged at the estimate, so what
 they hold reaches the ledger only as that estimate.
 
