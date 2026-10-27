@@ -29,6 +29,10 @@ npm, and its version is its own: the `usertrust` packages and their
   parent sessions, priced the same way, came to 104%. Now only a fork inherits the
   estimate mode, and so does a subagent whose type nothing states, since it may be a fork; a
   named subagent (`general-purpose`, `Explore`, a custom agent) reads its own transcript.
+  Either inherits only while none of its transcript has been read: one whose reads are under
+  way goes on reading, so a call held while it read is never left uncharged by a sibling
+  switching before the call settled. A response of its copy that the ancestor settled at the
+  estimate is claimed under the same message id, so the fork does not post it again.
   And a subagent's transcript that does not exist yet at its first hook, before any of it was
   read, no longer switches it to the estimate for good: that call's PostToolUse decides, from the
   call's own response, found in the subagent's transcript by the call's id.

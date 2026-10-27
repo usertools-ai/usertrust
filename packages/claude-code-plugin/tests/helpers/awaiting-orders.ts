@@ -10,6 +10,11 @@
 // Measured, not assumed: every local subagent response with two or more calls (3722 of them)
 // had that shape, the last entry alone carrying the stop_reason.
 //
+// THE SHAPE (`Shape`). "one" is the response above. "separate" puts each call in its own
+// response, each complete on its own entry: B1 holds tu_1 in msg_r (1200 input tokens), B2 holds
+// tu_2 in msg_s (10,000 input tokens), both with a `stop_reason`. A settle's input tokens then say
+// which responses it posted (`postedIn`), so each call is held to its own response.
+//
 // THE HOOKS. Each call's PreToolUse and PostToolUse is its own event: Pre1, Post1, Pre2, Post2.
 // The order they run in was measured from the transcripts' own `hook_success` records (one per
 // hook run, naming its hookEvent and toolUseID, written as the hook ends), against the block
@@ -42,22 +47,18 @@
 //
 // THE INVARIANT, per call, because an estimate is per call (post-tool-use.mjs
 // `settleAtEstimate` prices the call's own tool input and output, never its response's tokens)
-// while a post of msg_r charges the whole response, so it covers both calls:
-//  - msg_r is posted at most once, and never besides an estimate of either of its calls;
-//  - each call is settled at its estimate at most once;
-//  - a call is covered by the post, or by its own estimate, or else exactly one gap names its
-//    hold. Never uncovered with no gap.
+// while a post of a response charges the whole response, so it covers each call it holds:
+//  - each response is posted at most once, and never besides an estimate of a call it holds;
+//  - each call is settled at its estimate at most once, and at most one gap names its hold;
+//  - a call is covered by its response's post, or by its own estimate, or else exactly one gap
+//    names its hold. Never uncovered with no gap;
+//  - after SessionEnd, every call is posted or estimated: a gap alone is not a charge (the
+//    hooks before awaiting holds charged every call one way or the other).
 // Asserted after the events for every awaiting call (its ruling relies on no later read), and
 // after EACH end hook for both calls. The double-charge half is asserted at every one of those
-// points for both. No transferId is ever settled twice.
-//
-// ONE EXEMPTION, from the coverage half only: the late-inheritance hole (`lateInheritanceHole`).
-// When a fork or an untyped agent inherits a sibling's estimate mode, a hold it made from its
-// transcript BEFORE the sibling's marker was written can be left uncharged with no gap: the switch
-// drops it. That is outside this rule and fixed separately; the same orders fail on the hooks
-// before this rule, at the same count, with no awaiting hold at all. Only such a call is exempt,
-// never an awaiting or an estimate hold, and never from the double-charge half. Each sibling shard
-// pins how many orders the exemption was used in, so a change in that count fails it.
+// points for both. No transferId is ever settled twice. Nothing is exempt: an agent whose reads
+// are under way never inherits a sibling's estimate mode (transcript.mjs `readsUnderWay`), so
+// no hold it made from its transcript is dropped by a switch.
 //
 // Every transcript here is SYNTHETIC, in the measured shape (transcript.mjs, "WHAT THE
 // TRANSCRIPT HOLDS"). No real transcript content is used.
@@ -73,8 +74,12 @@ const HOOKS = join(import.meta.dirname, "..", "..", "hooks");
 const SESSION = "11111111-2222-4333-8444-555555555555";
 const SONNET = "claude-sonnet-4-6";
 const AGENT = "s1";
-/** The response's input tokens: what marks a settle that posts it. */
+/** msg_r's input tokens, and msg_s's: what marks a settle that posts each (`postedIn`). */
 const RESPONSE_INPUT = 1200;
+const SEPARATE_INPUT = 10_000;
+
+/** Whether the two calls share one response or each have their own (the header). */
+export type Shape = "one" | "separate";
 
 export type AgentKind = "named-meta" | "named-hint" | "fork" | "untyped";
 
@@ -185,22 +190,30 @@ const parentInput = () => ({ session_id: SESSION, transcript_path: mainTranscrip
 const subagentFile = () => join(projectDir, SESSION, "subagents", `agent-${AGENT}.jsonl`);
 const sidechain = { agentId: AGENT, isSidechain: true };
 
-/** msg_r's entry for one call's block: the last one (B2) carries the stop_reason. */
-function blockEntry(call: Call, last: boolean): string {
+/** The response that holds a call's block. */
+const responseOf = (call: Call, shape: Shape) =>
+	shape === "separate" && call === "tu_2" ? "msg_s" : "msg_r";
+
+/**
+ * The entry for one call's block. "one": msg_r's, and the last one (B2) carries the
+ * stop_reason. "separate": each call's own response, complete on it.
+ */
+function blockEntry(call: Call, last: boolean, shape: Shape): string {
+	const id = responseOf(call, shape);
 	return JSON.stringify({
 		type: "assistant",
 		sessionId: SESSION,
-		uuid: `msg_r-${call}`,
+		uuid: `${id}-${call}`,
 		...sidechain,
 		message: {
-			id: "msg_r",
+			id,
 			model: SONNET,
 			role: "assistant",
 			type: "message",
-			stop_reason: last ? "tool_use" : null,
+			stop_reason: last || shape === "separate" ? "tool_use" : null,
 			content: [{ type: "tool_use", id: call, name: "Bash", input: { command: "ls" } }],
 			usage: {
-				input_tokens: RESPONSE_INPUT,
+				input_tokens: id === "msg_s" ? SEPARATE_INPUT : RESPONSE_INPUT,
 				cache_creation_input_tokens: 0,
 				cache_read_input_tokens: 0,
 				output_tokens: last ? 300 : 150,
@@ -225,39 +238,40 @@ const settles = () => requests.filter((r) => r.path === "/v1/settle");
 interface Hold {
 	tx: string;
 	awaiting: boolean;
-	/** The hold was made from the transcript (its pending record's `usage`). */
-	transcript: boolean;
-	/** Its PreToolUse's place in the order. */
-	at: number;
 }
 
 /**
- * The late-inheritance hole (the header's exemption): a hold made from the transcript before the
- * sibling's marker, which sits at `marker` in the order (-1: no marker).
+ * How many times each response was posted, from the provider settles' input tokens: msg_s's
+ * 10,000 and msg_r's 1200 add up to a total that names both counts (up to eight msg_r posts).
  */
-function lateInheritanceHole(hold: Hold, marker: number): boolean {
-	return marker >= 0 && hold.transcript && hold.at < marker;
+function postedIn(): { msg_r: number; msg_s: number } {
+	const count = { msg_r: 0, msg_s: 0 };
+	for (const s of settles().filter((x) => x.body.usageSource === "provider")) {
+		const tokens = Number(s.body.inputTokens);
+		const rest = tokens % SEPARATE_INPUT;
+		expect(rest % RESPONSE_INPUT, `a settle posted ${tokens} input tokens`).toBe(0);
+		count.msg_s += Math.floor(tokens / SEPARATE_INPUT);
+		count.msg_r += rest / RESPONSE_INPUT;
+	}
+	return count;
 }
 
 /**
  * The invariant (the header) on the calls whose holds exist. `covered` names the calls that must
- * be charged by now, or carry their gap. A call left uncovered by the late-inheritance hole is
- * added to `exempted` instead of failing.
+ * be charged by now, or carry their gap; `final`: every call must be charged.
  */
 async function assertPerCall(
 	holds: Map<Call, Hold>,
 	covered: Call[],
 	at: string,
-	marker: number,
-	exempted: Set<Call>,
+	shape: Shape,
+	final = false,
 ) {
-	const posted = settles().filter(
-		(s) => s.body.usageSource === "provider" && Number(s.body.inputTokens) >= RESPONSE_INPUT,
-	).length;
+	const posted = postedIn();
 	const gaps = (await watchRecords()).filter((r) => r.kind === "gap");
 	const seen: Record<string, unknown> = { posted };
 	for (const [call, { tx, awaiting }] of holds) {
-		// A transcript hold that posts msg_r settles under its own transferId too: that is the post.
+		// A transcript hold that posts a response settles under its own transferId too: that is the post.
 		const estimated = settles().filter(
 			(s) => s.body.transferId === tx && s.body.usageSource === "estimated",
 		);
@@ -268,15 +282,17 @@ async function assertPerCall(
 		};
 	}
 	const say = `after ${at}: ${JSON.stringify(seen)}`;
-	expect(posted, say).toBeLessThanOrEqual(1);
+	expect(posted.msg_r, `${say}: msg_r posted twice`).toBeLessThanOrEqual(1);
+	expect(posted.msg_s, `${say}: msg_s posted twice`).toBeLessThanOrEqual(1);
 	for (const call of holds.keys()) {
 		const { estimated, gaps: named } = seen[call] as { estimated: number; gaps: number };
+		const charged = posted[responseOf(call, shape)];
 		expect(estimated, `${say}: ${call} settled at its estimate twice`).toBeLessThanOrEqual(1);
-		if (posted === 1) expect(estimated, `${say}: ${call} estimated AND posted`).toBe(0);
-		if (covered.includes(call) && posted === 0 && estimated === 0) {
-			const hold = holds.get(call) as Hold;
-			if (named === 0 && lateInheritanceHole(hold, marker)) exempted.add(call);
-			else expect(named, `${say}: ${call} uncharged`).toBe(1);
+		expect(named, `${say}: ${call} gapped twice`).toBeLessThanOrEqual(1);
+		if (charged === 1) expect(estimated, `${say}: ${call} estimated AND posted`).toBe(0);
+		if (final) expect(charged + estimated, `${say}: ${call} only gapped at the end`).toBe(1);
+		else if (covered.includes(call) && charged === 0 && estimated === 0) {
+			expect(named, `${say}: ${call} uncharged`).toBe(1);
 		}
 	}
 	const ids = settles().map((s) => String(s.body.transferId));
@@ -288,14 +304,11 @@ const endLabel = {
 	lost: "Stop, SessionEnd (no SubagentStop)",
 };
 
-/**
- * The orders for one kind of agent and one place of the sibling's marker. `lateInheritance` pins
- * how many orders the late-inheritance exemption was used in (the header).
- */
+/** The orders for one kind of agent, one place of the sibling's marker, and one shape. */
 export function defineAwaitingOrders(
 	kind: AgentKind,
 	sibling: SiblingAt = "none",
-	lateInheritance = 0,
+	shape: Shape = "one",
 ) {
 	const { meta, hook } = KINDS[kind];
 	const own = { agent_id: AGENT, ...(hook === undefined ? {} : { agent_type: hook }) };
@@ -313,7 +326,7 @@ export function defineAwaitingOrders(
 		tool_response: "eight ch",
 	});
 
-	async function step(event: Event, index: number, holds: Map<Call, Hold>) {
+	async function step(event: Event, holds: Map<Call, Hold>) {
 		switch (event) {
 			case "W": {
 				const dir = join(projectDir, SESSION, "subagents");
@@ -337,7 +350,7 @@ export function defineAwaitingOrders(
 			case "B2":
 				await appendFile(
 					subagentFile(),
-					`${blockEntry(event === "B1" ? "tu_1" : "tu_2", event === "B2")}\n`,
+					`${blockEntry(event === "B1" ? "tu_1" : "tu_2", event === "B2", shape)}\n`,
 				);
 				return;
 			case "S":
@@ -359,15 +372,7 @@ export function defineAwaitingOrders(
 				const tx = hold?.transferId ?? "";
 				const record = (await readdir(stateDir)).find((f) => f.endsWith(`.${tx}.json`));
 				expect(record, `${id}'s hold was not recorded`).toBeDefined();
-				const pending = JSON.parse(await readFile(join(stateDir, record ?? ""), "utf-8")) as {
-					usage?: string;
-				};
-				holds.set(id, {
-					tx,
-					awaiting: pre.stderr.includes("not written yet"),
-					transcript: pending.usage === "transcript",
-					at: index,
-				});
+				holds.set(id, { tx, awaiting: pre.stderr.includes("not written yet") });
 				return;
 			}
 			case "Post1":
@@ -378,9 +383,10 @@ export function defineAwaitingOrders(
 	}
 
 	const label =
-		sibling === "none"
+		(sibling === "none"
 			? ""
-			: `, the sibling's marker ${sibling === "end" ? "last" : `before hook ${sibling}`}`;
+			: `, the sibling's marker ${sibling === "end" ? "last" : `before hook ${sibling}`}`) +
+		(shape === "separate" ? ", each call in its own response" : "");
 	describe(`every order around an awaiting hold, for a ${kind} subagent${label}`, () => {
 		beforeEach(async () => {
 			stateDir = await mkdtemp(join(tmpdir(), "utcc-orders-state-"));
@@ -405,20 +411,17 @@ export function defineAwaitingOrders(
 			expect(new Set(ORDERS.map((o) => o.join(" "))).size).toBe(120);
 		});
 
-		let exemptOrders = 0;
 		for (const base of ORDERS) {
 			const order = withSibling(base, sibling);
-			const marker = order.indexOf("S");
 			for (const end of ["own", "lost"] as const) {
 				it(`${order.join(" ")} then ${endLabel[end]}`, async () => {
 					const holds = new Map<Call, Hold>();
-					const exempted = new Set<Call>();
-					for (const [index, event] of order.entries()) await step(event, index, holds);
+					for (const event of order) await step(event, holds);
 					const awaiting = [...holds].filter(([, h]) => h.awaiting).map(([c]) => c);
 					expect(awaiting.length, "no hold was an awaiting one").toBeGreaterThan(0);
 					const both: Call[] = ["tu_1", "tu_2"];
-					const check = (covered: Call[], at: string) =>
-						assertPerCall(holds, covered, at, marker, exempted);
+					const check = (covered: Call[], at: string, final = false) =>
+						assertPerCall(holds, covered, at, shape, final);
 					await check(awaiting, "the events");
 					if (end === "own") {
 						await run("subagent-stop.mjs", { ...parentInput(), ...own });
@@ -431,16 +434,9 @@ export function defineAwaitingOrders(
 						hook_event_name: "SessionEnd",
 						reason: "other",
 					});
-					await check(both, "SessionEnd");
-					if (exempted.size > 0) exemptOrders += 1;
+					await check(both, "SessionEnd", true);
 				});
 			}
-		}
-
-		if (sibling !== "none") {
-			it(`uses the late-inheritance exemption in exactly ${lateInheritance} of ${ORDERS.length * 2} runs (each order, with each end)`, () => {
-				expect(exemptOrders).toBe(lateInheritance);
-			});
 		}
 	});
 }
