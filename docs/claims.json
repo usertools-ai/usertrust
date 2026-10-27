@@ -1,0 +1,1572 @@
+{
+	"$comment": "The integrity claims register. Read docs/CLAIMS.md before editing; packages/core/tests/harden/claims-register.test.ts enforces it.",
+	"scope": {
+		"scan": [
+			{
+				"file": "CHANGELOG.md",
+				"section": "[Unreleased]"
+			},
+			{
+				"file": "README.md"
+			},
+			{
+				"file": "LIMITATIONS.md"
+			},
+			{
+				"file": "docs/anchoring.md"
+			},
+			{
+				"dir": "packages",
+				"ext": "README.md",
+				"depth": 1
+			},
+			{
+				"dir": "site/content/docs",
+				"ext": ".mdx"
+			}
+		],
+		"exclude": ["site/content/docs/policy/pii.mdx"],
+		"denied": [
+			{
+				"file": "CHANGELOG.md",
+				"section": "[Unreleased]"
+			},
+			{
+				"file": "README.md"
+			},
+			{
+				"file": "LIMITATIONS.md"
+			},
+			{
+				"file": "docs/anchoring.md"
+			},
+			{
+				"dir": "packages",
+				"ext": "README.md",
+				"depth": 1
+			},
+			{
+				"dir": "site/content/docs",
+				"ext": ".mdx"
+			},
+			{
+				"dir": "site/app",
+				"ext": ".tsx"
+			}
+		]
+	},
+	"vocabulary": [
+		"tamper",
+		"immutab",
+		"append-only",
+		"reorder",
+		"truncat",
+		"\\binsert(ed|ion)?\\b",
+		"roll(ed)? ?back",
+		"(breaks|fails?) verification",
+		"(is|are) (all )?detected",
+		"\\bVERIFIED\\b",
+		"\\bprove[sn]?\\b",
+		"every (governed )?(LLM )?call",
+		"\\b(cannot|can ?not|can[\u2019']?t|could ?n[o\u2019']t|won[\u2019']?t|never|no(?: |-)?one can|nobody can|nothing can|no \\w+ (?:has|have|can|could|will))( ever)?( \\w+ly)?( be(en)?| have been| has been)?( \\w+ly)? (re-?writ|modif|alter|chang|edit|delet|eras|overwrit|forg|falsif|remov)",
+		"unalterab|unchangeab|unmodifiab|indelib|unforgeab|incorruptib|write-once|\\bpermanent|\\bforever\\b",
+		"\\bdetect(s|ed)?\\b",
+		"\\bguarantee"
+	],
+	"pendingCeiling": 15,
+	"claims": [
+		{
+			"id": "tamper-evident",
+			"kind": "guarantee",
+			"claim": "An edited event, an event inserted inside the chain, or one deleted from its middle fails verification, unless every later hash is recomputed.",
+			"statements": [
+				{
+					"file": "README.md",
+					"text": "Tamper-evident by construction."
+				},
+				{
+					"file": "LIMITATIONS.md",
+					"text": "Editing a record, deleting a record from the middle of the chain, and re-hashing the whole chain against a published anchor are all detected."
+				},
+				{
+					"file": "packages/core/README.md",
+					"text": "Tamper-evident by construction."
+				},
+				{
+					"file": "packages/verify/README.md",
+					"text": "- **Hash chain** — every event links to the previous event's SHA-256 hash; editing an event, or inserting or removing one inside the chain, breaks verification."
+				},
+				{
+					"file": "site/content/docs/concepts/audit-trail.mdx",
+					"text": "Events are appended to a JSONL file where each event's SHA-256 hash covers the previous event's hash, forming a tamper-evident chain."
+				},
+				{
+					"file": "site/content/docs/index.mdx",
+					"text": "Tamper-evident by construction."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/harden/integrity-claims-pins.test.ts",
+					"test": "an edited event fails verification"
+				},
+				{
+					"file": "packages/core/tests/harden/integrity-claims-pins.test.ts",
+					"test": "deleting one event from the middle of the chain fails verification"
+				},
+				{
+					"file": "packages/core/tests/harden/integrity-claims-pins.test.ts",
+					"test": "an event inserted in the middle of the chain, without re-hashing what follows, fails verification"
+				},
+				{
+					"file": "packages/core/tests/audit/verify.test.ts",
+					"test": "detects tampered event data"
+				},
+				{
+					"file": "packages/verify/tests/verify.test.ts",
+					"test": "detects tampered event hash"
+				},
+				{
+					"file": "packages/core/tests/harden/differential.test.ts",
+					"test": "6. hand-tampered data → both FAILED"
+				},
+				{
+					"file": "packages/core/tests/harden/verify-exit-code.test.ts",
+					"test": "sets process.exitCode = 1 for a tampered vault"
+				}
+			]
+		},
+		{
+			"id": "not-tamper-proof",
+			"kind": "caveat",
+			"claim": "Without an external anchor, verification does not catch: lines moved in the file, a log cut short or extended with .meta rewritten or deleted, or a whole chain re-hashed with .meta rewritten.",
+			"statements": [
+				{
+					"file": "docs/anchoring.md",
+					"text": "The audit chain is tamper-evident on its own — but only *if you trust the operator's files*."
+				},
+				{
+					"file": "docs/anchoring.md",
+					"text": "Tamper-**evident**, not tamper-proof: detection produces a hard FAIL verdict, not restored data."
+				},
+				{
+					"file": "packages/verify/README.md",
+					"text": "Events are verified in `sequence` order, so moving lines around in the file without changing any event is not reported, and an event added after the last one, with `.meta` rewritten to match, verifies like any other (see **Head anchor**)."
+				},
+				{
+					"file": "site/content/docs/concepts/audit-trail.mdx",
+					"text": "Tamper-evident is not tamper-proof: the file can be rewritten, and [Verification](#verification) says what checking the chain does and does not catch."
+				},
+				{
+					"file": "LIMITATIONS.md",
+					"text": "Anyone who can rewrite both the vault file and its sidecar can produce a chain that verifies on its own."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/harden/integrity-claims-pins.test.ts",
+					"test": "moving lines around in the file without changing any event is not reported: events are checked in sequence order"
+				},
+				{
+					"file": "packages/core/tests/harden/integrity-claims-pins.test.ts",
+					"test": "a log cut short whose .meta is rewritten to match verifies as valid"
+				},
+				{
+					"file": "packages/core/tests/harden/integrity-claims-pins.test.ts",
+					"test": "a log cut short whose .meta is deleted verifies as valid"
+				},
+				{
+					"file": "packages/core/tests/harden/integrity-claims-pins.test.ts",
+					"test": "a cut log is reported until a new writer appends after the cut, which rewrites .meta; then the shorter chain verifies"
+				},
+				{
+					"file": "packages/core/tests/harden/integrity-claims-pins.test.ts",
+					"test": "an event added after the last one, with .meta rewritten to match, verifies like any other"
+				},
+				{
+					"file": "packages/core/tests/harden/integrity-claims-pins.test.ts",
+					"test": "an edited event whose chain is re-hashed from the start, with .meta rewritten, verifies as valid"
+				}
+			]
+		},
+		{
+			"id": "meta-catches-a-cut",
+			"kind": "guarantee",
+			"claim": "While .meta still records the longer head, a log cut short, deleted or emptied fails verification.",
+			"statements": [
+				{
+					"file": "packages/verify/README.md",
+					"text": "While the sidecar still records the longer head and count, the verifier fails a log that has been **truncated or deleted**."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/harden/tail-truncation.test.ts",
+					"test": "detects a dropped last line via the .meta anchor"
+				},
+				{
+					"file": "packages/core/tests/harden/tail-truncation.test.ts",
+					"test": "detects full deletion of the log while .meta still records events"
+				},
+				{
+					"file": "packages/verify/tests/harden/tail-truncation.test.ts",
+					"test": "detects full deletion of the log while .meta records events"
+				},
+				{
+					"file": "packages/core/tests/harden/differential.test.ts",
+					"test": "2. tail-truncated (drop last line, keep .meta) → both FAILED"
+				},
+				{
+					"file": "packages/core/tests/harden/integrity-claims-pins.test.ts",
+					"test": "emptying events.jsonl while .meta remains: the next append continues from the sidecar, and verification reports the gap"
+				}
+			]
+		},
+		{
+			"id": "writer-appends-only",
+			"kind": "guarantee",
+			"claim": "The writer only appends to events.jsonl; it never rewrites an earlier byte.",
+			"statements": [
+				{
+					"file": "README.md",
+					"text": "Append-only JSONL."
+				},
+				{
+					"file": "packages/core/README.md",
+					"text": "Append-only JSONL."
+				},
+				{
+					"file": "site/content/docs/api/types.mdx",
+					"text": "Each event's `hash` covers the `previousHash`, forming an append-only chain."
+				},
+				{
+					"file": "site/content/docs/concepts/audit-trail.mdx",
+					"text": "--- title: Audit Trail description: SHA-256 hash-chained, append-only audit log for every governed LLM call. ---"
+				},
+				{
+					"file": "site/content/docs/concepts/index.mdx",
+					"text": "<Card title=\"Audit Trail\" description=\"SHA-256 hash-chained, append-only log for every governed call\" href=\"/docs/concepts/audit-trail\" />"
+				},
+				{
+					"file": "site/content/docs/index.mdx",
+					"text": "- **SHA-256 hash-chained audit trail** — Append-only JSONL."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/harden/integrity-claims-pins.test.ts",
+					"test": "the writer only appends: each append leaves every earlier byte of events.jsonl as it was"
+				}
+			]
+		},
+		{
+			"id": "anchor-catches-a-rewrite",
+			"kind": "guarantee",
+			"claim": "With external anchors and a pinned key, a rewrite, rollback, deletion or fork of the events an anchor covers fails verification, re-hashed or not.",
+			"statements": [
+				{
+					"file": "README.md",
+					"text": "Even a fully re-hashed, internally-consistent rewrite of the events an anchor covers fails verification against the externally-held root; events appended after the last anchor are covered only by the next one."
+				},
+				{
+					"file": "README.md",
+					"text": "With [external anchoring](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md) enabled, verification goes further: the auditor fetches signed checkpoints from an append-only store the operator cannot rewrite and pins the public key out-of-band — so even a fully re-hashed rewrite of the events an anchor covers fails:"
+				},
+				{
+					"file": "docs/anchoring.md",
+					"text": "Competing records at the same position in the append-only store are cryptographic fork evidence."
+				},
+				{
+					"file": "docs/anchoring.md",
+					"text": "| `ANCHOR_MISMATCH` | valid signature, content contradicts the vault: rewrite, rollback, deletion, fork | **1** |"
+				},
+				{
+					"file": "docs/anchoring.md",
+					"text": "| Roll back to an older, internally-valid snapshot | `ANCHOR_MISMATCH` — anchored size exceeds observed size |"
+				},
+				{
+					"file": "packages/core/README.md",
+					"text": "Even a fully re-hashed, internally-consistent rewrite of the events an anchor covers fails verification against the externally-held root; events appended after the last anchor are covered only by the next one."
+				},
+				{
+					"file": "packages/core/README.md",
+					"text": "With [external anchoring](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md) enabled, verification goes further: the auditor fetches signed checkpoints from an append-only store the operator cannot rewrite and pins the public key out-of-band — so even a fully re-hashed rewrite of the events an anchor covers fails:"
+				},
+				{
+					"file": "packages/verify/README.md",
+					"text": "This upgrades the guarantee from *tamper-evident if you trust the operator's files* to **independently verifiable**: even a fully re-hashed, internally-consistent rewrite fails against the externally-held root."
+				},
+				{
+					"file": "packages/verify/README.md",
+					"text": "Result states: `ANCHORED_VERIFIED`, `UNANCHORED` (legacy vaults — valid, weaker, labeled), `ANCHOR_UNVERIFIABLE`, `ANCHOR_STALE`, and the hard failures `ANCHOR_INVALID` / `ANCHOR_MISMATCH` (rewrite, rollback, deletion, or fork against the signed checkpoints — always exit 1)."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/harden/anchoring/anchor-corpus.test.ts",
+					"test": "1. F1 KILL: mutate anchored event + full re-chain + .meta rewrite → ANCHOR_MISMATCH/root-mismatch; --tx never prints INCLUSION VERIFIED"
+				},
+				{
+					"file": "packages/core/tests/harden/anchoring/anchor-corpus.test.ts",
+					"test": "2. F2 KILL: delete the ENTIRE audit tree; external anchor supplied → ANCHOR_MISMATCH/deletion, exit 1"
+				},
+				{
+					"file": "packages/core/tests/harden/anchoring/anchor-corpus.test.ts",
+					"test": "3. tail truncation below latest treeSize + .meta rewrite → ANCHOR_MISMATCH/rollback"
+				},
+				{
+					"file": "packages/core/tests/harden/anchoring/anchor-corpus.test.ts",
+					"test": "4. rollback to an older internally-valid snapshot → ANCHOR_MISMATCH/rollback (AC-1.3)"
+				},
+				{
+					"file": "packages/core/tests/harden/anchoring/anchor-corpus.test.ts",
+					"test": "5. fork: rewrite events ≤ treeSize, regrow chain → root-mismatch + consistency-failure (AC-1.4, row 17)"
+				},
+				{
+					"file": "packages/core/tests/harden/anchoring/anchor-corpus.test.ts",
+					"test": "10. fork evidence: same prevAnchorHash, same key, DIVERGENT content → ANCHOR_MISMATCH/fork"
+				},
+				{
+					"file": "packages/core/tests/harden/anchoring/anchor-corpus.test.ts",
+					"test": "28. competing rotations extending the same predecessor → ANCHOR_MISMATCH/fork"
+				}
+			]
+		},
+		{
+			"id": "anchor-key-rotation",
+			"kind": "guarantee",
+			"claim": "An auditor who pins the original root key fails a rotation to a key it did not pin.",
+			"statements": [
+				{
+					"file": "docs/anchoring.md",
+					"text": "Auditors keep pinning the *original* root key and add the new fingerprint as `--successor-pin` — a hijacked rotation to an attacker key then fails verification outright."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/harden/anchoring/anchor-corpus.test.ts",
+					"test": "26. rotation hijack with pins supplied: rotation to an unpinned key → ANCHOR_MISMATCH/rotation-unpinned"
+				},
+				{
+					"file": "packages/core/tests/harden/anchoring/anchor-corpus.test.ts",
+					"test": "6. attacker keypair re-signs full history; auditor pins the real root → ANCHOR_INVALID (AC-6.3)"
+				}
+			]
+		},
+		{
+			"id": "anchor-tail-reported",
+			"kind": "caveat",
+			"claim": "Events appended after the last anchor are not covered by it; the unanchored tail is reported, and is a failure under the freshness flags.",
+			"statements": [
+				{
+					"file": "docs/anchoring.md",
+					"text": "An attacker's cheapest move is to *stop anchoring* and tamper later."
+				},
+				{
+					"file": "docs/anchoring.md",
+					"text": "| `ANCHOR_STALE` | verified prefix, but the tail exceeds your `--max-*` freshness policy | 0 + warning / 1 |"
+				},
+				{
+					"file": "docs/anchoring.md",
+					"text": "| Stop anchoring, tamper later | the unanchored tail is reported on every verify, and the store-side monitor fires |"
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/harden/anchoring/anchor-corpus.test.ts",
+					"test": "18. stale beyond thresholds → ANCHOR_STALE; exit 0 default, 1 strict"
+				},
+				{
+					"file": "packages/core/tests/harden/anchoring/anchor-corpus.test.ts",
+					"test": "29. mirror-only + --require-external-anchor → exit 1 (state stays ANCHORED_VERIFIED)"
+				}
+			]
+		},
+		{
+			"id": "anchor-tail-rewrite",
+			"kind": "caveat",
+			"claim": "A rewrite of only the events after the last anchor is not caught by that anchor.",
+			"statements": [
+				{
+					"file": "LIMITATIONS.md",
+					"text": "records appended after the last anchor are still unanchored"
+				}
+			],
+			"proofs": [],
+			"pending": "no test rewrites the events after the last anchor and asserts the anchored verdict"
+		},
+		{
+			"id": "anchor-store-append-only",
+			"kind": "caveat",
+			"claim": "The anchor store's append-only property comes from the store's own configuration (Object Lock, ownership, WORM), not from usertrust.",
+			"statements": [
+				{
+					"file": "README.md",
+					"text": "**External anchoring** — Ed25519-signed chain-head checkpoints pushed to an append-only store the vault operator cannot rewrite (S3 Object Lock, protected git branch, SIEM)."
+				},
+				{
+					"file": "docs/anchoring.md",
+					"text": "External anchoring closes that gap: the writer periodically emits a **signed checkpoint** of the chain head (Merkle root + size + last hash, Ed25519-signed, hash-chained to the previous checkpoint) to an **append-only store the vault operator cannot silently rewrite**."
+				},
+				{
+					"file": "docs/anchoring.md",
+					"text": "Immutable object names mean an overwrite attempt of a past anchor is a denied write, never a silent replace — and a bucket listing exposes the true anchor high-water mark in one command."
+				},
+				{
+					"file": "docs/anchoring.md",
+					"text": "**SIEM (Splunk HEC / Datadog logs)** — `--sink-url https://…` POSTs each record; SIEM ingest credentials are inherently append-only."
+				},
+				{
+					"file": "docs/anchoring.md",
+					"text": "WORM guarantees come from the store's own configuration — S3 Object Lock compliance-mode retention, POSIX ownership, an appliance's WORM mode."
+				},
+				{
+					"file": "docs/anchoring.md",
+					"text": "- **Compromise**: a stolen key can sign forks — it cannot rewrite stored anchors."
+				},
+				{
+					"file": "docs/anchoring.md",
+					"text": "The append-only witness, not the key custody, is the control for that."
+				},
+				{
+					"file": "packages/core/README.md",
+					"text": "**External anchoring** — Ed25519-signed chain-head checkpoints pushed to an append-only store the vault operator cannot rewrite (S3 Object Lock, protected git branch, SIEM)."
+				},
+				{
+					"file": "packages/verify/README.md",
+					"text": "- **External anchors** (optional) — binds the vault to Ed25519-signed checkpoints held in an append-only store the vault operator cannot rewrite."
+				}
+			],
+			"proofs": [],
+			"pending": "external: a property of the deployer's store, which a repository test cannot exercise"
+		},
+		{
+			"id": "doctor-is-a-probe",
+			"kind": "caveat",
+			"claim": "anchor doctor probes permissions; it is not proof that the store is append-only.",
+			"statements": [
+				{
+					"file": "docs/anchoring.md",
+					"text": "Doctor is a **permission probe, not proof of immutability**."
+				},
+				{
+					"file": "docs/anchoring.md",
+					"text": "| `--sink-file` | creates `.doctor-probe-<pid>` in the store's directory, then attempts `unlink` (`delete-denied`) and in-place truncation (`overwrite-denied`)."
+				},
+				{
+					"file": "docs/anchoring.md",
+					"text": "| `--sink-url`, `--sink-rekor`, `command` | `info` — no probe is possible from here; verify the append-only property at the receiving system. |"
+				},
+				{
+					"file": "docs/anchoring.md",
+					"text": "- **POSIX directory semantics.** Deletion is governed by write permission on the *directory*; in-place truncation is governed by permission on the *file*."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/harden/anchoring/anchor-doctor.test.ts",
+					"test": "worded as a permission probe — never as proof that the store is append-only"
+				},
+				{
+					"file": "packages/core/tests/harden/anchoring/anchor-doctor.test.ts",
+					"test": "fails both probes in an ordinary writable store directory"
+				}
+			]
+		},
+		{
+			"id": "rekor-inclusion",
+			"kind": "guarantee",
+			"claim": "A Rekor receipt is verified offline: checkpoint signature, inclusion path, and binding to the anchor record; a SET is what attests integratedTime.",
+			"statements": [
+				{
+					"file": "docs/anchoring.md",
+					"text": "What ships now is the complete, tested verification path — receipt schema, > signed-note checkpoints, RFC 9162 inclusion, SET-verified attested time — plus a sink that works > against any log accepting these entries."
+				},
+				{
+					"file": "docs/anchoring.md",
+					"text": "Verification is offline and zero-dependency: the signed-note checkpoint is parsed and its ECDSA P-256 signature checked, inclusion is proven by an RFC 9162 index-based path walk, and the stored entry is bound to *your* record by payload hash and by decoded signature bytes."
+				},
+				{
+					"file": "docs/anchoring.md",
+					"text": "Receipts *without* a SET still prove inclusion, but fall back to operator-claimed time for freshness: an unsigned `integratedTime` is a number the party under audit could have chosen."
+				},
+				{
+					"file": "docs/anchoring.md",
+					"text": "**Checkpoint-replay caveat.** Offline verification proves the entry was included in the log — *at `integratedTime`* only when a SET vouches for that time — under a checkpoint signed by the pinned key."
+				},
+				{
+					"file": "packages/verify/README.md",
+					"text": "A verified receipt also makes `--max-anchor-age` measure against the log's attested `integratedTime` instead of the operator's own timestamp."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/harden/anchoring/rekor-verify.test.ts",
+					"test": "15. a tampered inclusion-path element"
+				},
+				{
+					"file": "packages/core/tests/harden/anchoring/rekor-verify.test.ts",
+					"test": "19. checkpoint signed by a key the auditor did not pin"
+				},
+				{
+					"file": "packages/core/tests/harden/anchoring/rekor-verify.test.ts",
+					"test": "12. entryBody signature is not the anchor record's signature"
+				},
+				{
+					"file": "packages/core/tests/harden/anchoring/rekor-verify.test.ts",
+					"test": "40. editing integratedTime alone now fails — the SET is the only signature over it"
+				},
+				{
+					"file": "packages/core/tests/harden/anchoring/rekor-verify.test.ts",
+					"test": "43. a receipt with NO SET proves inclusion and attests no time"
+				}
+			]
+		},
+		{
+			"id": "rekor-checkpoint-replay",
+			"kind": "caveat",
+			"claim": "Offline Rekor verification does not show the checkpoint is consistent with the log's current head.",
+			"statements": [
+				{
+					"file": "docs/anchoring.md",
+					"text": "Treat Rekor as an additional witness alongside an > append-only store, never as a replacement for one."
+				},
+				{
+					"file": "docs/anchoring.md",
+					"text": "It does **not** prove that checkpoint is consistent with the log's current head — a forked or rewound log would need a consistency proof against a checkpoint you fetched yourself."
+				}
+			],
+			"proofs": [],
+			"pending": "external: needs a live transparency log to fork or rewind"
+		},
+		{
+			"id": "bundle-is-operator-evidence",
+			"kind": "caveat",
+			"claim": "A bundle is operator-supplied: only checkpoints the auditor fetches show none were omitted.",
+			"statements": [
+				{
+					"file": "docs/anchoring.md",
+					"text": "A bundle is convenience packaging, not a trust upgrade: it is operator-supplied evidence, so signatures still verify against your out-of-band `--pubkey`, but only checkpoints *you* fetch from the append-only store prove the operator did not omit the ones that contradict them."
+				}
+			],
+			"proofs": [],
+			"pending": "no test omits a contradicting checkpoint from a bundle and asserts the bundle alone still verifies"
+		},
+		{
+			"id": "export-diff",
+			"kind": "caveat",
+			"claim": "Tampering anchored over between exports is caught at the next export diff, given one honest earlier export.",
+			"statements": [
+				{
+					"file": "docs/anchoring.md",
+					"text": "Tampering that happens *and is anchored over* between exports is caught at the next export diff — provided at least one honest export of an earlier head exists."
+				}
+			],
+			"proofs": [],
+			"pending": "no test diffs two exports across an anchored-over rewrite"
+		},
+		{
+			"id": "sample-output",
+			"kind": "guarantee",
+			"claim": "The documented sample line is what usertrust-verify prints for a clean unanchored vault.",
+			"statements": [
+				{
+					"file": "README.md",
+					"text": "Vault integrity: VERIFIED (UNANCHORED — internal consistency only)"
+				},
+				{
+					"file": "packages/core/README.md",
+					"text": "Vault integrity: VERIFIED (UNANCHORED — internal consistency only)"
+				},
+				{
+					"file": "packages/verify/README.md",
+					"text": "Vault integrity: VERIFIED (UNANCHORED — internal consistency only)"
+				},
+				{
+					"file": "site/content/docs/quickstart.mdx",
+					"text": "Vault integrity: VERIFIED (UNANCHORED — internal consistency only)"
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/harden/integrity-claims-pins.test.ts",
+					"test": "every 'Vault integrity:' line in the READMEs and the quickstart is the line usertrust-verify prints for a clean unanchored vault"
+				}
+			]
+		},
+		{
+			"id": "verify-exit-codes",
+			"kind": "guarantee",
+			"claim": "usertrust-verify exits 0 for a verified vault and 1 for a failed one, so it can gate CI.",
+			"statements": [
+				{
+					"file": "docs/anchoring.md",
+					"text": "# CI gate: must be externally anchored, fresh, and verified — or exit 1 usertrust-verify .usertrust --anchors anchors.jsonl --pubkey root.pem \\ --require-anchor --require-external-anchor --max-unanchored-events 5000"
+				},
+				{
+					"file": "packages/verify/README.md",
+					"text": "# CI gate: externally anchored, fresh, verified — or exit 1 usertrust-verify .usertrust --anchors anchors.jsonl --pubkey root.pem \\ --require-anchor --require-external-anchor --max-unanchored-events 5000"
+				},
+				{
+					"file": "packages/verify/README.md",
+					"text": "```bash usertrust-verify .usertrust || echo \"TAMPERED — do not deploy\""
+				},
+				{
+					"file": "packages/verify/README.md",
+					"text": "| `0` | Vault verified |"
+				},
+				{
+					"file": "packages/verify/README.md",
+					"text": "| `1` | Verification failed (tamper, truncation, or corrupt anchor) |"
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/harden/verify-exit-code.test.ts",
+					"test": "sets process.exitCode = 1 for a tampered vault"
+				},
+				{
+					"file": "packages/core/tests/harden/verify-exit-code.test.ts",
+					"test": "leaves process.exitCode = 0 for a clean vault"
+				},
+				{
+					"file": "packages/core/tests/harden/anchoring/anchor-corpus.test.ts",
+					"test": "21. legacy vault, no anchors anywhere → UNANCHORED; exit 0 default, 1 strict (AC-4.1)"
+				}
+			]
+		},
+		{
+			"id": "segment-continuity",
+			"kind": "guarantee",
+			"claim": "A rotated vault is verified as one chain by sequence; a missing whole segment is a gap.",
+			"statements": [
+				{
+					"file": "packages/verify/README.md",
+					"text": "- **Segment continuity** — a rotated vault (multiple `*.jsonl` segments) is verified as one continuous chain by sequence number; a missing whole segment is detected as a sequence gap."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/harden/differential.test.ts",
+					"test": "3. whole-segment-deleted continuous rotation → both FAILED"
+				},
+				{
+					"file": "packages/core/tests/cli/inspect-rotated.test.ts",
+					"test": "a missing MIDDLE segment is a failure that NAMES the absent range and both neighbouring files"
+				}
+			]
+		},
+		{
+			"id": "missing-dir-is-not-tamper",
+			"kind": "guarantee",
+			"claim": "A path with no audit directory is reported as missing, not as a tampered chain.",
+			"statements": [
+				{
+					"file": "README.md",
+					"text": "Giving `usertrust-verify` the project root reports a missing audit directory, not a tampered chain."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/harden/false-ok.test.ts",
+					"test": "still reports a genuinely absent audit directory honestly"
+				},
+				{
+					"file": "packages/core/tests/harden/differential.test.ts",
+					"test": "15. audit dir absent entirely → both FAILED and agree"
+				}
+			]
+		},
+		{
+			"id": "verifier-zero-dependency",
+			"kind": "guarantee",
+			"claim": "usertrust-verify has no dependencies and does not import the SDK.",
+			"statements": [
+				{
+					"file": "packages/verify/README.md",
+					"text": "It recomputes the SHA-256 hash chain and checks it against the vault's tamper-evident head anchor — without trusting (or importing) the usertrust SDK."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/harden/anchoring/anchor-additive.test.ts",
+					"test": "4. AC-2.1: packages/verify dependencies stay exactly {} (no peer/optional smuggling)"
+				},
+				{
+					"file": "packages/core/tests/harden/anchoring/anchor-additive.test.ts",
+					"test": "5. AC-2.2: every import in packages/verify/src resolves to node:* or a sibling file"
+				}
+			]
+		},
+		{
+			"id": "verifier-offline",
+			"kind": "guarantee",
+			"claim": "usertrust-verify works fully offline.",
+			"statements": [
+				{
+					"file": "packages/verify/README.md",
+					"text": "You fetch the checkpoint(s) from the operator's append-only store yourself (`aws s3 cp`, `git show`, a SIEM export) and pin the vault's public key **out-of-band** — the verifier deliberately never reads trust material from the vault under audit, and works fully offline."
+				}
+			],
+			"proofs": [],
+			"pending": "nothing forbids node:http or node:net in packages/verify/src"
+		},
+		{
+			"id": "consistency-proof-needs-a-root",
+			"kind": "caveat",
+			"claim": "A consistency proof shows an extension only against an older root obtained independently; on its own it verifies for a rewritten log too.",
+			"statements": [
+				{
+					"file": "site/content/docs/concepts/merkle-proofs.mdx",
+					"text": "- **Consistency proofs** -- prove a newer tree is a valid extension of an older tree"
+				},
+				{
+					"file": "site/content/docs/concepts/merkle-proofs.mdx",
+					"text": "On its own it shows nothing about tampering: `verifyConsistencyProof` takes both roots from the proof, so a log rewritten from the start yields proofs that verify against its own roots."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/harden/integrity-claims-pins.test.ts",
+					"test": "${label}: a proof built from a rewritten log verifies on its own, and fails against the original root"
+				},
+				{
+					"file": "packages/core/tests/harden/differential.test.ts",
+					"test": "7. both generators produce proofs both verifiers accept (sizes 1..17)"
+				}
+			]
+		},
+		{
+			"id": "merkle-inclusion",
+			"kind": "guarantee",
+			"claim": "An inclusion proof shows an event is in the tree with a given root, checkable without the full log.",
+			"statements": [
+				{
+					"file": "site/content/docs/concepts/merkle-proofs.mdx",
+					"text": "- **Inclusion proofs** -- prove a specific event exists in the tree"
+				},
+				{
+					"file": "site/content/docs/concepts/merkle-proofs.mdx",
+					"text": "These proofs can be verified by any third party without access to the full audit log."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/audit/merkle.test.ts",
+					"test": "generates and verifies proof for each leaf in a 4-leaf tree"
+				},
+				{
+					"file": "packages/core/tests/audit/merkle.test.ts",
+					"test": "rejects proof with wrong root"
+				},
+				{
+					"file": "packages/core/tests/harden/differential.test.ts",
+					"test": "8. both reject a forged leafIndex on an otherwise-valid fold"
+				}
+			]
+		},
+		{
+			"id": "every-call-recorded",
+			"kind": "guarantee",
+			"claim": "Every governed call is recorded on the audit chain, or its receipt carries auditDegraded and verify reports the missing event.",
+			"statements": [
+				{
+					"file": "README.md",
+					"text": "Every governed LLM call becomes a tamper-evident, auditable transaction."
+				},
+				{
+					"file": "README.md",
+					"text": "Every governed call is metered, policy-checked and recorded on the audit chain; a call whose record could not be written says so on its receipt (`auditDegraded`, see [LIMITATIONS.md, section 5](https://github.com/usertools-ai/usertrust/blob/master/LIMITATIONS.md#5-one-audit-writer-per-vault-one-process-at-a-time))."
+				},
+				{
+					"file": "packages/core/README.md",
+					"text": "Every governed call is metered, policy-checked and recorded on the audit chain; a call whose record could not be written says so on its receipt (`auditDegraded`, see [LIMITATIONS.md, section 5](https://github.com/usertools-ai/usertrust/blob/master/LIMITATIONS.md#5-one-audit-writer-per-vault-one-process-at-a-time))."
+				},
+				{
+					"file": "packages/openclaw/README.md",
+					"text": "The call is recorded on the tamper-evident audit chain; if that write fails, a `USERTRUST_AUDIT_DEGRADED` warning reports it and the event is dead-lettered."
+				},
+				{
+					"file": "site/content/docs/concepts/audit-trail.mdx",
+					"text": "Every governed LLM call produces an audit event; a call whose event could not be written says so on its receipt (see [Dead-Letter Queue](#dead-letter-queue))."
+				},
+				{
+					"file": "site/content/docs/concepts/local-models.mdx",
+					"text": "Every governed local call still places a PENDING hold, settles at least 1 usertoken, and is recorded on the audit chain (or, if that write fails, its receipt carries `auditDegraded`) -- so runaway loops burn budget, anomaly governance still fires, and every governed call has a receipt."
+				},
+				{
+					"file": "site/content/docs/index.mdx",
+					"text": "usertrust wraps any LLM client (Anthropic, OpenAI, Google) with a JS Proxy so every governed AI call becomes an auditable, double-entry financial transaction, recorded on a tamper-evident audit chain."
+				},
+				{
+					"file": "site/content/docs/quickstart.mdx",
+					"text": "Every governed call appends a SHA-256-hashed event to `.usertrust/audit/events.jsonl` (a call whose event could not be written says so on its receipt, as `auditDegraded`)."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/harden/audit-fail-closed.test.ts",
+					"test": "fail-open (default): the call resolves with a degraded receipt (backward compat)"
+				},
+				{
+					"file": "packages/core/tests/harden/audit-fail-closed.test.ts",
+					"test": "fail-closed: a failed llm_call audit aborts the call — no POST, hold voided"
+				},
+				{
+					"file": "packages/core/tests/audit/denial-events.test.ts",
+					"test": "never throws, never replaces the denial, and marks auditDegraded"
+				},
+				{
+					"file": "packages/core/tests/cli/verify-completeness.test.ts",
+					"test": "text: the chain line, then INCOMPLETE naming the count, the kind and the transfer; exit 1"
+				}
+			]
+		},
+		{
+			"id": "single-writer",
+			"kind": "guarantee",
+			"claim": "One writer per vault: concurrent handles share one chain, and a writer that lost its lock is refused rather than forking it.",
+			"statements": [
+				{
+					"file": "LIMITATIONS.md",
+					"text": "Two concurrent writers would fork it, which is precisely the tampering the chain exists to make evident — so usertrust enforces single-writer semantics with an advisory file lock plus an in-process mutex."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/audit/shared-writer.test.ts",
+					"test": "two handles on one vault append CONCURRENTLY into ONE linked chain; neither fails"
+				},
+				{
+					"file": "packages/core/tests/audit/lock-lease.test.ts",
+					"test": "P1: a holder that stopped renewing loses the lock to another namespace, and its next append is REFUSED — the chain does not fork"
+				}
+			]
+		},
+		{
+			"id": "shortfall-recorded",
+			"kind": "guarantee",
+			"claim": "A post capped at its hold is recorded as a settlement_shortfall event.",
+			"statements": [
+				{
+					"file": "LIMITATIONS.md",
+					"text": "A call whose real cost turns out above its hold is posted capped at the hold, and the truncation is recorded as a `settlement_shortfall` event: visible, never silent."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/govern/settle-shortfall.test.ts",
+					"test": "audits settlement_shortfall and sets receipt.postedCost when the engine reports truncation"
+				},
+				{
+					"file": "packages/core/tests/govern/settle-shortfall.test.ts",
+					"test": "writes llm_call BEFORE settlement_shortfall on the real chain"
+				}
+			]
+		},
+		{
+			"id": "ui-integrity-state",
+			"kind": "guarantee",
+			"claim": "The dashboard re-verifies the chain as it grows and turns red on a rewrite, truncation or deletion.",
+			"statements": [
+				{
+					"file": "packages/ui/README.md",
+					"text": "- **Live tail** — new events stream in over SSE as they are written; each appended event is re-verified (hash + linkage) before it renders."
+				},
+				{
+					"file": "packages/ui/README.md",
+					"text": "Tampering mid-session raises a red integrity banner."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/ui/tests/evidence-latch.test.ts",
+					"test": "a same-length rewrite of an earlier event plus an append, inside one check, is extended by the append path and read INVALID at the periodic re-verify"
+				},
+				{
+					"file": "packages/ui/tests/evidence-latch.test.ts",
+					"test": "events appended after a successful full load, then the log truncated back to its first three, are latched"
+				},
+				{
+					"file": "packages/ui/tests/tail.test.ts",
+					"test": "red-first (deletion read as a first run): deleting the audit directory under an open dashboard turns it red"
+				}
+			]
+		},
+		{
+			"id": "ui-receipt-view",
+			"kind": "guarantee",
+			"claim": "The dashboard's Verify renders a receipt for a known transaction and a not-found for an unknown one.",
+			"statements": [
+				{
+					"file": "packages/ui/README.md",
+					"text": "- **Inspector** — select a row to see its call, cost and chain fields, docked beside the list on a wide screen, and a one-click **Verify** that replays the independent `usertrust-verify` check and renders a thermal-receipt style result: verified, failed, or not found in any of the vault's audit segments."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/ui/tests/verify-endpoint.test.ts",
+					"test": "returns a rendered receipt for a known transaction"
+				},
+				{
+					"file": "packages/ui/tests/verify-endpoint.test.ts",
+					"test": "404s an unknown transaction"
+				}
+			]
+		},
+		{
+			"id": "gap-dead-letter-write-lost",
+			"kind": "caveat",
+			"claim": "A dead-letter write that leaves no bytes is invisible to verify and health.",
+			"statements": [
+				{
+					"file": "LIMITATIONS.md",
+					"text": "if the dead-letter write itself fails and leaves no bytes, for instance on a full disk, neither `verify` nor `health` sees the gap"
+				}
+			],
+			"proofs": [],
+			"pending": "record gap: needs a full-disk harness"
+		},
+		{
+			"id": "gap-warn-injection-unmarked",
+			"kind": "caveat",
+			"claim": "A failed warn-mode injection_detected append is dead-lettered but leaves the receipt unmarked.",
+			"statements": [
+				{
+					"file": "LIMITATIONS.md",
+					"text": "a failed warn-mode `injection_detected` append is the exception: it is dead-lettered but leaves the receipt unmarked"
+				}
+			],
+			"proofs": [],
+			"pending": "record gap: no test asserts the unmarked receipt"
+		},
+		{
+			"id": "gap-failclosed-not-enforced",
+			"kind": "caveat",
+			"claim": "createGovernor() and usertrust-server do not enforce audit.failClosed.",
+			"statements": [
+				{
+					"file": "LIMITATIONS.md",
+					"text": "`createGovernor()` and `usertrust-server` do not enforce `audit.failClosed`"
+				}
+			],
+			"proofs": [],
+			"pending": "record gap: no test asserts either ignores the flag"
+		},
+		{
+			"id": "gap-two-copies-fork",
+			"kind": "caveat",
+			"claim": "Two installed copies of usertrust, or worker threads, can fork the chain.",
+			"statements": [
+				{
+					"file": "LIMITATIONS.md",
+					"text": "is judged a crashed instance and reclaimed — the fork this section exists to prevent"
+				}
+			],
+			"proofs": [],
+			"pending": "record gap: needs a two-installs harness"
+		},
+		{
+			"id": "gap-frozen-writer",
+			"kind": "caveat",
+			"claim": "A writer frozen in the middle of an append can add one more event, and verify then reports the chain broken there.",
+			"statements": [
+				{
+					"file": "LIMITATIONS.md",
+					"text": "Only a writer frozen in the middle of an append can add one more event, and `usertrust verify` then reports the chain broken there."
+				}
+			],
+			"proofs": [],
+			"pending": "record gap: needs a SIGSTOP harness"
+		},
+		{
+			"id": "gap-double-cut",
+			"kind": "caveat",
+			"claim": "A torn tail cut twice at the same offset is recorded once.",
+			"statements": [
+				{
+					"file": "LIMITATIONS.md",
+					"text": "One case is recorded once although it was cut twice."
+				}
+			],
+			"proofs": [],
+			"pending": "record gap: needs a crash-between-cuts harness"
+		},
+		{
+			"id": "gap-signal-release",
+			"kind": "caveat",
+			"claim": "A server stopped by SIGINT or SIGTERM may leave a hold's release off the chain.",
+			"statements": [
+				{
+					"file": "LIMITATIONS.md",
+					"text": "A hold whose void had not reached the ledger stays reserved until the ledger's 300-second hold timeout, and a release can be missing from the chain."
+				},
+				{
+					"file": "packages/server/README.md",
+					"text": "its release may not be recorded on the chain: a known issue in 5.0.0"
+				}
+			],
+			"proofs": [],
+			"pending": "record gap: needs a signal-shutdown harness"
+		},
+		{
+			"id": "gap-auxiliary-record",
+			"kind": "caveat",
+			"claim": "A lost auxiliary record (shortfall, detection) whose dead letter was not written is invisible to --receipts, verify and health.",
+			"statements": [
+				{
+					"file": "site/content/docs/api/errors.mdx",
+					"text": "auxiliary record such as a settlement shortfall, a detection, an implausible-usage or ambiguous-settlement record is invisible to it"
+				}
+			],
+			"proofs": [],
+			"pending": "record gap: needs a lost-dead-letter harness"
+		},
+		{
+			"id": "gap-attribution-evidence",
+			"kind": "caveat",
+			"claim": "openclaw's attribution evidence is not on the audit chain; only the selected costCenter is.",
+			"statements": [
+				{
+					"file": "packages/openclaw/README.md",
+					"text": "the attribution evidence (tool name/id) is NOT in the chain today"
+				}
+			],
+			"proofs": [],
+			"pending": "record gap: a documented residual, no test asserts the chain omits it"
+		},
+		{
+			"id": "receipts-catch-a-rewrite",
+			"kind": "guarantee",
+			"claim": "A caller holding a receipt finds a rewrite of its event: verify --receipts reports it unaudited even when the rewritten chain and its sidecar agree.",
+			"statements": [
+				{
+					"file": "LIMITATIONS.md",
+					"text": "a caller holding an ordinary receipt finds a rewrite of its event, since `usertrust verify --receipts` reports it unaudited and exits 1 even when the rewritten chain and its sidecar agree"
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/cli/verify-completeness.test.ts",
+					"test": "a receipt is audited only if its auditHash is an event on the chain naming its transfer"
+				}
+			]
+		},
+		{
+			"id": "redact-never-sends-detected",
+			"kind": "guarantee",
+			"claim": "Under pii \"redact\", PII the scan finds in a value redaction leaves as written refuses the call with PolicyDeniedError before anything is sent.",
+			"statements": [
+				{
+					"file": "LIMITATIONS.md",
+					"text": "`\"redact\"` never sends a value the scan detects."
+				},
+				{
+					"file": "site/content/docs/api/config.mdx",
+					"text": "PII the scan finds in a value it cannot rewrite (a name, an id, an object key or a number in tool-call `arguments`, replayed reasoning) throws a `PolicyDeniedError`, as `block` does |"
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/harden/pii-redact-control-fields.test.ts",
+					"test": "Anthropic: PII in a replayed thinking block, which redaction cannot rewrite, refuses the call and sends nothing"
+				}
+			]
+		},
+		{
+			"id": "budget-refused-before-egress",
+			"kind": "guarantee",
+			"claim": "With a live TigerBeetle ledger (not dryRun), a governed call whose PENDING hold does not fit the remaining budget is refused by the ledger before the provider is called, and the ledger never posts more than a call's hold. A call's real cost can still exceed its hold; that excess is recorded (shortfall-recorded), not prevented.",
+			"statements": [
+				{
+					"file": "README.md",
+					"text": "PENDING holds reserve the budget atomically."
+				},
+				{
+					"file": "LIMITATIONS.md",
+					"text": "Every claim about atomic budget enforcement (an over-budget PENDING hold rejected by the ledger before the provider is called) applies to full mode with a live TigerBeetle instance."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/harden/ledger-enforce-deny.test.ts",
+					"test": "re-throws InsufficientBalanceError unwrapped and never forwards to the provider"
+				},
+				{
+					"file": "packages/core/tests/harden/ledger-funded-wallet.test.ts",
+					"test": "creates a debits_must_not_exceed_credits wallet funded with the seed, and rejects over-budget holds"
+				},
+				{
+					"file": "packages/core/tests/integration/tigerbeetle.tb.test.ts",
+					"test": "hard-refuses a sequential over-budget call pre-spend and keeps the real ledger consistent"
+				}
+			]
+		}
+	],
+	"nonclaims": [
+		{
+			"file": "CHANGELOG.md",
+			"text": "Each of these statements is now listed in `docs/claims.json` with the test that proves it, and a test fails when the documentation states an integrity claim the list does not hold (see `docs/CLAIMS.md`). ",
+			"why": "a dated record of a documentation fix"
+		},
+		{
+			"file": "README.md",
+			"text": "The `receipt` returned from every governed call:",
+			"why": "introduces the receipt example"
+		},
+		{
+			"file": "README.md",
+			"text": "It asks for your provider API key (Anthropic `sk-ant-`, OpenAI `sk-` and Google `AIza` keys are detected from their prefix; any other provider you name yourself) and writes it to `.usertrust/.env`.",
+			"why": "provider API key detection in the setup wizard"
+		},
+		{
+			"file": "README.md",
+			"text": "Every call returns `{ response, receipt }`:",
+			"why": "the return shape of a governed call"
+		},
+		{
+			"file": "README.md",
+			"text": "Every LLM call costs money.",
+			"why": "problem statement"
+		},
+		{
+			"file": "README.md",
+			"text": "- There is no way to prove what happened after the fact",
+			"why": "problem statement, about running without usertrust"
+		},
+		{
+			"file": "LIMITATIONS.md",
+			"text": "The exact, current boundary is enumerated at the source in `packages/core/src/detect.ts` and `packages/core/src/default-deny.ts`.",
+			"why": "PII and injection detection boundary, not the audit chain"
+		},
+		{
+			"file": "LIMITATIONS.md",
+			"text": "**A client that rewrites every request** is refused by `trust()`, before the ledger client is built, and every call refuses too if one is changed later on the raw client the caller kept:",
+			"why": "client refusal in trust(), not the audit chain"
+		},
+		{
+			"file": "LIMITATIONS.md",
+			"text": "**Why:** usertrust detects clients by duck typing and wraps them with a JS Proxy.",
+			"why": "SDK client detection"
+		},
+		{
+			"file": "LIMITATIONS.md",
+			"text": "- **A lock from another PID namespace is reclaimed only once its lease has expired.** One container cannot probe another container's processes, and a differing boot id proves nothing across namespaces (systemd-nspawn gives a container a private boot id on the host's kernel).",
+			"why": "lock reclamation across PID namespaces"
+		},
+		{
+			"file": "LIMITATIONS.md",
+			"text": "- A client that hangs up after the server has written its `200` cannot be detected: that hold is registered as pending and swept as any other.",
+			"why": "server hold sweep race, not the audit chain"
+		},
+		{
+			"file": "docs/anchoring.md",
+			"text": "Anchor the current chain head to your append-only store usertrust anchor now --sink-file /mnt/worm/anchors.jsonl",
+			"why": "a command comment"
+		},
+		{
+			"file": "docs/anchoring.md",
+			"text": "> **The identity that can write the vault must have append-only — not delete, not overwrite — > access to the anchor store.**",
+			"why": "deployment instruction"
+		},
+		{
+			"file": "docs/anchoring.md",
+			"text": "**File on a different mount/principal** (`--sink-file`) — weakest option; acceptable only when the path is owned by a different principal with append-only ACLs.",
+			"why": "deployment guidance on choosing a sink"
+		},
+		{
+			"file": "docs/anchoring.md",
+			"text": "# Full history (strongest — linkage + append-only consistency between all checkpoints) usertrust-verify .usertrust --anchors anchors.jsonl --pubkey root.pem",
+			"why": "a command comment"
+		},
+		{
+			"file": "docs/anchoring.md",
+			"text": "# Per-transaction receipt, inclusion proven against the anchored root usertrust-verify .usertrust --tx tr_123 --anchor latest.json --pubkey root.pem",
+			"why": "a command comment"
+		},
+		{
+			"file": "packages/claude-code-plugin/README.md",
+			"text": "**In no mode does it approve a call:** it can only deny, so Claude Code's own permission settings decide every call it lets through, exactly as they would without it.",
+			"why": "the plugin's permission and metering behaviour, not the audit chain"
+		},
+		{
+			"file": "packages/claude-code-plugin/README.md",
+			"text": "**Upgrading from v1.3.0 or earlier:** those releases answered `allow` on every call they let through, so nearly every call no permission rule covers ran without the prompt Claude Code would otherwise show (deny and ask rules still applied); you will now see those prompts.",
+			"why": "the plugin's permission and metering behaviour, not the audit chain"
+		},
+		{
+			"file": "packages/claude-code-plugin/README.md",
+			"text": "**Known limitation: on a server without `release`, giving holds back can briefly fail every call.** A usertrust-server that does not publish `release` in its capabilities (3.4.0 and earlier) has no release route, so the plugin gives a hold back by aborting it in two places: leftover holds at Stop, SubagentStop and SessionEnd, and the cleanups after a failure (an unanswered transcript settle, a hold record that could not be written).",
+			"why": "the plugin's permission and metering behaviour, not the audit chain"
+		},
+		{
+			"file": "packages/claude-code-plugin/README.md",
+			"text": "A rejected key is a configuration problem, not an outage, and every call it touches goes unmetered, so:",
+			"why": "the plugin's permission and metering behaviour, not the audit chain"
+		},
+		{
+			"file": "packages/claude-code-plugin/README.md",
+			"text": "PreToolUse sends the stringified `tool_input` (truncated at 16 KiB) to your **self-hosted** server as message content so the core PII policy can scan it.",
+			"why": "the plugin's permission and metering behaviour, not the audit chain"
+		},
+		{
+			"file": "packages/claude-code-plugin/README.md",
+			"text": "By default, PreToolUse sends the tool input (truncated at 16 KiB) to **your self-hosted** server for the PII policy, and never to a third party.",
+			"why": "the plugin's permission and metering behaviour, not the audit chain"
+		},
+		{
+			"file": "packages/core/README.md",
+			"text": "The `receipt` returned from every call:",
+			"why": "introduces the receipt example"
+		},
+		{
+			"file": "packages/core/README.md",
+			"text": "Every call returns `{ response, receipt }`:",
+			"why": "the return shape of a governed call"
+		},
+		{
+			"file": "packages/core/README.md",
+			"text": "Every LLM call costs money.",
+			"why": "problem statement"
+		},
+		{
+			"file": "packages/core/README.md",
+			"text": "- There is no way to prove what happened after the fact",
+			"why": "problem statement, about running without usertrust"
+		},
+		{
+			"file": "packages/openclaw/README.md",
+			"text": "Find the most recent contiguous run of host-inserted tool-**result** messages that are the **trailing** entries of the context — i.e. the host asking the model to continue right after executing tools.",
+			"why": "tool-result attribution in the host context, not the audit chain"
+		},
+		{
+			"file": "packages/openclaw/README.md",
+			"text": "**Executed evidence, correlated and current.** Attribution derives from host-inserted > tool-RESULT blocks — and only a TRAILING run: the run must be the last message(s) of the > context (the host asking the model to continue after execution).",
+			"why": "tool-result attribution in the host context, not the audit chain"
+		},
+		{
+			"file": "packages/openclaw/README.md",
+			"text": "When `costCenters` is configured and `scarcityContext` is not `false`, every governed call gets a system-prompt block built from the frozen `envelopes`' live ledger balances:",
+			"why": "scarcity context injection"
+		},
+		{
+			"file": "packages/openclaw/README.md",
+			"text": "The contract is *proven* against an exact version of each, and the two are proven differently because only one of them is installed:",
+			"why": "adapter contract tests against pinned dependency versions"
+		},
+		{
+			"file": "packages/openclaw/README.md",
+			"text": "**Cache-tier normalization is guaranteed only under the pinned `@mariozechner/pi-ai` (contract suite pins the pinned adapters' behavior; the peer floor stays `>=0.12.0`).** On an older runtime `pi-ai` that doesn't yet surface the cache-read/cache-write fields, this plugin degrades predictably rather than losing money: the absent cache tiers ride inside `inputTokens` and price at `inputPer1k`, the same conservative-overstatement fallback the SDK applies to any absent cache rate (see the Money invariants in the root `AGENTS.md`).",
+			"why": "cost normalization under a pinned dependency"
+		},
+		{
+			"file": "packages/openshell/README.md",
+			"text": "A placement that fails may still have landed, so it is committed as `voiding` (the release path voids the derived id) rather than rolled back into an orphan.",
+			"why": "ledger hold lifecycle, not the audit chain"
+		},
+		{
+			"file": "packages/openshell/README.md",
+			"text": "- **Streams must finish.** A stream without its route's terminal event settles at the hold (`usage_unreadable`, `truncated`):",
+			"why": "ledger hold lifecycle, not the audit chain"
+		},
+		{
+			"file": "packages/server/README.md",
+			"text": "- **Residual race.** A client that hangs up AFTER the `200` is written cannot be detected: that hold is registered as pending and swept as any other.",
+			"why": "server hold lifecycle, not the audit chain"
+		},
+		{
+			"file": "packages/server/README.md",
+			"text": "The free-text `reason` is never read as the class: a release that states none (a TTL expiry, a shutdown) proves nothing about whether usage hides behind the hold.",
+			"why": "server hold lifecycle, not the audit chain"
+		},
+		{
+			"file": "site/content/docs/api/config.mdx",
+			"text": "Detected types: email, phone, SSN, credit card (Luhn-validated), IPv4, and the secret formats `api_key`, `aws_key`, `github_token`, `bearer_token`, `jwt`, `private_key` and `generic_secret`, plus `unscannable` for a value the patterns could not finish reading, which is treated as a secret.",
+			"why": "PII detection types"
+		},
+		{
+			"file": "site/content/docs/api/pricing.mdx",
+			"text": "Rates re-verified against Anthropic's published pricing page (`platform.claude.com/docs/en/about-claude/pricing`) on 2026-10-07; the 1-hour write column was re-read raw on 2026-10-08, and every row again on 2026-10-11.",
+			"why": "pricing table provenance and budget policy"
+		},
+		{
+			"file": "site/content/docs/api/pricing.mdx",
+			"text": "For a hard budget, `unknownModelPolicy: \"deny\"` is the guarantee.",
+			"why": "pricing table provenance and budget policy"
+		},
+		{
+			"file": "site/content/docs/api/trust.mdx",
+			"text": "- **Raw clients.** A resource's `_client` is the SDK's raw client, so every call through it is refused, and so are the client's raw HTTP members (`post`, `get`, `request`, …).",
+			"why": "client refusal in trust(), not the audit chain"
+		},
+		{
+			"file": "site/content/docs/api/trust.mdx",
+			"text": "A `withOptions()` that changes where or how calls are sent is refused: every call through the new client rejects.",
+			"why": "client refusal in trust(), not the audit chain"
+		},
+		{
+			"file": "site/content/docs/api/types.mdx",
+			"text": "Governance metadata returned with every LLM call.",
+			"why": "describes the receipt type"
+		},
+		{
+			"file": "site/content/docs/api/types.mdx",
+			"text": "The three supported provider types, detected via duck typing.",
+			"why": "SDK client detection"
+		},
+		{
+			"file": "site/content/docs/compare/agent-governance-toolkit.mdx",
+			"text": "The spec says so plainly: \"a tampering party can mutate them without invalidating `entry_hash`\" ([AUDIT-COMPLIANCE-1.0 §4.3.1, line 251](https://github.com/microsoft/agent-governance-toolkit/blob/179843b16eadd48bc9666c05f33a38f009542be1/docs/specs/AUDIT-COMPLIANCE-1.0.md#L251)), and instructs verifiers not to rely on those fields for tamper detection in v1.0.",
+			"why": "quotes another project's specification"
+		},
+		{
+			"file": "site/content/docs/concepts/audit-trail.mdx",
+			"text": "To ensure the same event always produces the same hash regardless of property insertion order or serialization quirks, usertrust applies deterministic canonicalization before hashing:",
+			"why": "canonical JSON key order"
+		},
+		{
+			"file": "site/content/docs/concepts/audit-trail.mdx",
+			"text": "The chain can be verified independently using either the built-in CLI or the standalone zero-dependency verifier:",
+			"why": "introduces the verify commands"
+		},
+		{
+			"file": "site/content/docs/concepts/index.mdx",
+			"text": "--- title: Concepts description: How usertrust governs every LLM call — the banking patterns, cryptographic proofs, and policy engine under the hood. ---",
+			"why": "page description"
+		},
+		{
+			"file": "site/content/docs/concepts/local-models.mdx",
+			"text": "Every call cost is floored at 1 usertoken -- zero-amount ledger transfers are invalid -- so a `{0,0}`-rate local call settles at **exactly 1 nominal usertoken**.",
+			"why": "pricing floor for local models"
+		},
+		{
+			"file": "site/content/docs/concepts/policy-engine.mdx",
+			"text": "The policy engine evaluates every governed LLM call against a set of rules before the call is forwarded to the provider.",
+			"why": "policy evaluation order"
+		},
+		{
+			"file": "site/content/docs/concepts/two-phase-spend.mdx",
+			"text": "--- title: Two-Phase Spend description: How usertrust uses banking-style authorization holds for every LLM call. ---",
+			"why": "the spend lifecycle, not the audit chain"
+		},
+		{
+			"file": "site/content/docs/concepts/two-phase-spend.mdx",
+			"text": "Every governed LLM call in usertrust follows a two-phase spend lifecycle.",
+			"why": "the spend lifecycle, not the audit chain"
+		},
+		{
+			"file": "site/content/docs/concepts/two-phase-spend.mdx",
+			"text": "Every call through a governed client executes this sequence inside `govern.ts`:",
+			"why": "the spend lifecycle, not the audit chain"
+		},
+		{
+			"file": "site/content/docs/concepts/two-phase-spend.mdx",
+			"text": "The two-phase lifecycle provides two guarantees that simple balance checks cannot:",
+			"why": "the spend lifecycle, not the audit chain"
+		},
+		{
+			"file": "site/content/docs/index.mdx",
+			"text": "--- title: usertrust description: Budget holds, audit trails, and spend limits for every LLM call. ---",
+			"why": "page description"
+		},
+		{
+			"file": "site/content/docs/index.mdx",
+			"text": "## Core Guarantees",
+			"why": "a section heading"
+		},
+		{
+			"file": "site/content/docs/index.mdx",
+			"text": "- **Two-phase spend lifecycle** — Every governed LLM call follows `PENDING hold → LLM call → POST (success) or VOID (failure)`.",
+			"why": "the spend lifecycle, not the audit chain"
+		},
+		{
+			"file": "site/content/docs/quickstart.mdx",
+			"text": "Every governed call executes a two-phase spend:",
+			"why": "the spend lifecycle, not the audit chain"
+		},
+		{
+			"file": "site/content/docs/quickstart.mdx",
+			"text": "Every call returns a `TrustReceipt`:",
+			"why": "the return shape of a governed call"
+		},
+		{
+			"file": "site/content/docs/quickstart.mdx",
+			"text": "usertrust detects your SDK by structural shape:",
+			"why": "SDK client detection"
+		},
+		{
+			"file": "site/content/docs/schemas.mdx",
+			"text": "usertrust publishes JSON Schema (draft 2020-12) definitions for its two public interop shapes: the receipt returned by every governed call, and one persisted line of the hash-chained audit log.",
+			"why": "names the receipt every governed call returns; a schema, not an audit claim"
+		},
+		{
+			"file": "site/content/docs/schemas.mdx",
+			"text": "| Trust Receipt v1 | [receipt.v1.schema.json](https://usertrust.ai/schemas/receipt.v1.schema.json) | The `TrustReceipt` returned by every governed call |",
+			"why": "names the receipt every governed call returns; a schema, not an audit claim"
+		},
+		{
+			"file": "LIMITATIONS.md",
+			"text": "Control values are never rewritten, because the provider needs them back unchanged:",
+			"why": "PII redaction leaves control fields as written; not an audit claim"
+		},
+		{
+			"file": "packages/claude-code-plugin/README.md",
+			"text": "is sent as `unknown`, never rewritten into another.",
+			"why": "how the plugin reports a session id it cannot use"
+		},
+		{
+			"file": "packages/claude-code-plugin/README.md",
+			"text": "Any other id is refused, never rewritten:",
+			"why": "how the plugin treats a malformed hold id"
+		},
+		{
+			"file": "packages/claude-code-plugin/README.md",
+			"text": "The claim is made before the settle is sent and is never removed, so a settle that fails leaves a gap, never a second charge.",
+			"why": "the plugin's metering of a call whose response it claimed, not the audit chain"
+		},
+		{
+			"file": "packages/claude-code-plugin/README.md",
+			"text": "So the claim switches the subagent to the estimate there, for every call after it, including the response's other calls; and if another call's estimate of the same response claimed it first, this call is charged its own estimate too.",
+			"why": "the plugin's metering of a subagent's later calls, not the audit chain"
+		},
+		{
+			"file": "packages/claude-code-plugin/README.md",
+			"text": "Any other claim proves nothing (a read claims a message before it posts it), so it is a gap, as below.",
+			"why": "how the plugin rules on a claim of a message's posting, not the audit chain"
+		},
+		{
+			"file": "packages/server/README.md",
+			"text": "A principal never changes which wallet pays.",
+			"why": "wallet attribution of a principal"
+		},
+		{
+			"file": "packages/server/README.md",
+			"text": "It is informational and never changes `ok`.",
+			"why": "a health counter that does not affect the health status"
+		},
+		{
+			"file": "site/content/docs/api/errors.mdx",
+			"text": "A failed denial-append never changes the error you receive.",
+			"why": "the error a caller sees when a denial event fails to append"
+		},
+		{
+			"file": "site/content/docs/concepts/local-models.mdx",
+			"text": "Renaming a local model (`ollama cp llama3.2 gpt-4o`) cannot change the regime in either direction.",
+			"why": "pricing regime of local models"
+		},
+		{
+			"file": "site/content/docs/concepts/two-phase-spend.mdx",
+			"text": "Hold becomes permanent spend",
+			"why": "the POST step of a ledger hold; not an audit claim"
+		},
+		{
+			"file": "site/content/docs/schemas.mdx",
+			"text": "Once published, a versioned schema never changes meaning.",
+			"why": "schema versioning policy"
+		}
+	],
+	"denied": [
+		{
+			"id": "denied-immutable",
+			"pattern": "\\bimmutable,? (audit|auditable)\\b",
+			"why": "The chain is tamper-evident, not immutable: it can be rewritten, and verification then detects the rewrite only with outside evidence.",
+			"contradictedBy": {
+				"file": "LIMITATIONS.md",
+				"text": "Anyone who can rewrite both the vault file and its sidecar can produce a chain that verifies on its own."
+			},
+			"pendingCopy": [
+				{
+					"file": "packages/core/README.md",
+					"text": "Every LLM call becomes an immutable, auditable transaction."
+				}
+			]
+		},
+		{
+			"id": "denied-tamper-proof",
+			"pattern": "(?<!not )\\btamper-proof\\b",
+			"why": "Verification detects tampering; it does not prevent it.",
+			"contradictedBy": {
+				"file": "docs/anchoring.md",
+				"text": "Tamper-**evident**, not tamper-proof"
+			}
+		},
+		{
+			"id": "denied-reorder-breaks",
+			"pattern": "\\breorder(ed|ing|s)?\\b[^.]{0,80}\\b(break|breaks|fail|fails)\\b",
+			"why": "Both verifiers read events in sequence order, so moving lines in the file is not reported.",
+			"contradictedBy": {
+				"file": "packages/core/tests/harden/integrity-claims-pins.test.ts",
+				"text": "moving lines around in the file without changing any event is not reported: events are checked in sequence order"
+			}
+		},
+		{
+			"id": "denied-shorter-chain-fails",
+			"pattern": "shorter[- ]but[- ]internally[- ]consistent chain no longer passes",
+			"why": "Without an anchor, a cut log whose .meta is rewritten or deleted verifies.",
+			"contradictedBy": {
+				"file": "packages/core/tests/harden/integrity-claims-pins.test.ts",
+				"text": "a log cut short whose .meta is deleted verifies as valid"
+			}
+		},
+		{
+			"id": "denied-bare-verified-sample",
+			"pattern": "Vault integrity: VERIFIED(?! \\()",
+			"why": "usertrust-verify never prints VERIFIED without saying whether the vault is anchored.",
+			"contradictedBy": {
+				"file": "packages/verify/src/cli.ts",
+				"text": "\"Vault integrity: VERIFIED (UNANCHORED — internal consistency only)\""
+			}
+		},
+		{
+			"id": "denied-only-appended-to",
+			"pattern": "proves? (that )?the audit log was only appended to|(?<!: )no events were modified or removed",
+			"why": "A consistency proof verifies against its own roots; it shows an extension only against a root obtained independently.",
+			"contradictedBy": {
+				"file": "packages/core/tests/harden/integrity-claims-pins.test.ts",
+				"text": "${label}: a proof built from a rewritten log verifies on its own, and fails against the original root"
+			}
+		},
+		{
+			"id": "denied-every-call-audited",
+			"pattern": "every (governed )?(LLM )?call is (metered, )?(audited|written to)|produces an immutable audit event",
+			"why": "A call whose audit write fails still settles by default; it is reported (auditDegraded, the dead-letter file, verify INCOMPLETE), not recorded on the chain.",
+			"contradictedBy": {
+				"file": "LIMITATIONS.md",
+				"text": "Its calls still settle, and every event that misses the chain is reported"
+			}
+		},
+		{
+			"id": "denied-trust-the-math",
+			"pattern": "nothing to trust but the math",
+			"why": "A rewritten unanchored vault verifies on its own; an auditor also needs an anchor or receipts kept outside the vault.",
+			"contradictedBy": {
+				"file": "LIMITATIONS.md",
+				"text": "Anyone who can rewrite both the vault file and its sidecar can produce a chain that verifies on its own."
+			},
+			"pendingCopy": [
+				{
+					"file": "site/content/docs/compare/agent-governance-toolkit.mdx",
+					"text": "nothing to trust but the math"
+				}
+			]
+		},
+		{
+			"id": "denied-proves-untampered",
+			"pattern": "prove[sn]? (that )?(an|the|your) (audit )?(log|chain|vault) (is|was) untampered",
+			"why": "Without an anchor, verification checks internal consistency; a log rewritten with its sidecar passes.",
+			"contradictedBy": {
+				"file": "LIMITATIONS.md",
+				"text": "Anyone who can rewrite both the vault file and its sidecar can produce a chain that verifies on its own."
+			}
+		},
+		{
+			"id": "denied-spends-only-what-granted",
+			"pattern": "\\b(didn'?t|did not|never) grant(ed)?\\b",
+			"why": "A call that does not fit its budget is refused before egress (budget-refused-before-egress), but a call's real cost can exceed its hold: content passed by reference, tool declarations resolved after authorization, an uncapped output above 4096 tokens, and an estimate not calibrated to any tokenizer. The excess is recorded as a settlement_shortfall event, not prevented, and dryRun and allowUngoverned calls hold nothing. So no agent STARTS a call its budget cannot cover; it can still spend past what its hold reserved.",
+			"contradictedBy": {
+				"file": "LIMITATIONS.md",
+				"text": "A call whose real cost turns out above its hold is posted capped at the hold, and the truncation is recorded as a `settlement_shortfall` event: visible, never silent."
+			}
+		}
+	]
+}

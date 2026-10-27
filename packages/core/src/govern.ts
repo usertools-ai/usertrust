@@ -127,7 +127,14 @@ import {
 	sanitizePolicyContext,
 } from "./policy/gate.js";
 import { detectInjection } from "./policy/injection.js";
-import { builtInAborted, detectPII, redactPII } from "./policy/pii.js";
+import { builtInAborted, detectPII, type PIIDetection, redactPII } from "./policy/pii.js";
+import {
+	detectContentPII,
+	redactContent,
+	reportUnlistedFields,
+	requestSchema,
+	scanContent,
+} from "./policy/pii-content.js";
 import type { ProxyConnection } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
 import { isRealAbortSignal } from "./shared/abort-signal.js";
@@ -491,6 +498,11 @@ export interface TrustEngine {
 		 * they never select an account. Omitted → all zero, exactly as before.
 		 */
 		userData?: PrincipalLedgerTags | undefined;
+		/**
+		 * The ledger's pending timeout for this hold, in whole seconds: the life the
+		 * authorize asked for (`AuthorizeParams.holdTtlMs`). Omitted → `LEDGER_HOLD_TIMEOUT_MS`.
+		 */
+		timeoutSeconds?: number | undefined;
 	}): Promise<{ transferId: string }>;
 	/**
 	 * Settle a PENDING hold. `actualAmount` is CAPPED at the reserved amount —
@@ -1602,6 +1614,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		resetTimeoutMs: config.circuitBreaker.resetTimeout,
 	});
 
+	// The request fields outside the PII content schema this governor has already reported.
+	const piiUnlistedReported = new Set<string>();
+
 	// 3. Proxy mode removed — throw early with clear error
 	if (opts?.proxy) {
 		throw new Error(
@@ -1973,6 +1988,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 			// Per-call audit degradation flag (not sticky across calls)
 			let callAuditDegraded = false;
+			// What the PII step's content scan found, for the `llm_call` audit record.
+			let contentPIIForAudit: PIIDetection | undefined;
 
 			// ── Denial evidence, per invocation ──
 			// The throw sites below fill this in; the flow BOUNDARIES read it and
@@ -2254,29 +2271,58 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 					// d. PII check + redact-egress
 					if (config.pii !== "off") {
+						// Two scans, and block decides on both, so it is never narrower than either.
+						// The prompt-field scan reads every string in the prompt fields, control values
+						// included. The content scan reads what redaction rewrites, as the SDK sends
+						// it: a tool call's JSON arguments decoded, and a Google text part hidden from
+						// enumeration that the SDK still sends.
 						const piiResult = detectPII(promptParts);
-						if (piiResult.found && config.pii === "block") {
+						const contentScan = scanContent(params, requestSchema(params, kind));
+						const contentPII = detectContentPII(contentScan);
+						contentPIIForAudit = contentPII;
+						if ((piiResult.found || contentPII.found) && config.pii === "block") {
 							// block mode: throw BEFORE any egress.
+							const types = [...new Set([...piiResult.types, ...contentPII.types])];
 							denial.denialClass = "pii";
 							// TYPE names only — a matched value is the very thing that must
 							// not reach the chain, or the DLQ behind it.
-							denial.piiTypes = piiResult.types;
+							denial.piiTypes = types;
 							throw new PolicyDeniedError(
-								`PII detected: ${piiResult.types.join(", ")}`,
+								`PII detected: ${types.join(", ")}`,
 								'PII enforcement blocked this call. Use { pii: "warn" } to log instead, or { pii: "redact" } to strip PII before egress.',
 							);
 						}
-						if (config.pii === "redact" && piiResult.found) {
-							// redact mode: forward a redacted DEEP CLONE so PII never egresses.
-							// redactPII is pure — the caller's original object is never mutated.
-							// Google's request is the mirror, which keeps a real AbortSignal at
-							// `config.abortSignal` for the transport: the SDK never serializes it, so it
-							// is kept by reference whatever own fields it carries, the same signal the
-							// serialization check above left out (`snapshotSource`, by `isRealAbortSignal`).
-							// Any other provider's request here is the parse of its serialization.
-							const redactedBody = redactPII(params, { signalSent: kind === "google" })
-								.data as Record<string, unknown>;
-							forwardArgs = [redactedBody, ...args.slice(1)];
+						if (config.pii === "redact") {
+							// redact mode: forward a copy with each CONTENT value (what the model reads)
+							// that holds PII replaced. Every control value (credentials, headers, cache
+							// keys, metadata, ids, replayed reasoning) is sent as the caller wrote it. Only
+							// the containers on the way to a replaced value are copied; everything else is
+							// the caller's own value, by reference, so Google's `config.abortSignal` and
+							// callable tools reach the SDK as they were. The caller's original object is
+							// never mutated. A field the provider's schema does not name is not rewritten,
+							// and is reported by path.
+							reportUnlistedFields(kind, contentScan.unlisted, piiUnlistedReported);
+							const rewrite = contentPII.found;
+							const redactedBody = rewrite
+								? (redactContent(params, contentScan) as Record<string, unknown>)
+								: params;
+							// What the prompt-field scan detects and redaction cannot rewrite without changing
+							// the call (a name or an id, an object key, a number in a tool call's JSON
+							// arguments, replayed reasoning, a field the schema does not name) is refused
+							// as block refuses it, before any egress: redact never sends a value either scan
+							// detects.
+							const left = piiResult.found
+								? detectPII(extractPromptParts(redactedBody, kind))
+								: piiResult;
+							if (left.found) {
+								denial.denialClass = "pii";
+								denial.piiTypes = left.types;
+								throw new PolicyDeniedError(
+									`PII detected: ${left.types.join(", ")}`,
+									'PII redaction cannot remove it without changing a value the call needs as written (a name or id, an object key, a number, replayed reasoning). Remove it from the request, or use { pii: "warn" } to send it and log the types.',
+								);
+							}
+							if (rewrite) forwardArgs = [redactedBody, ...args.slice(1)];
 						}
 						// "warn" mode: continue, no transform (audit copy is redacted later).
 					}
@@ -2713,10 +2759,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						...costCenterAudit,
 					};
 					if (config.pii === "warn" || config.pii === "redact") {
-						const piiResult = redactPII(promptParts);
-						if (piiResult.detection.found) {
-							auditEventData.piiDetected = piiResult.detection.types;
-							auditEventData.piiPaths = piiResult.detection.paths;
+						const pii = auditPII(redactPII(promptParts).detection, contentPIIForAudit);
+						if (pii !== undefined) {
+							auditEventData.piiDetected = pii.types;
+							auditEventData.piiPaths = pii.paths;
 						}
 					}
 					const auditEvent = await audit.appendEvent({
@@ -3439,10 +3485,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						...costCenterAudit,
 					};
 					if (config.pii === "warn" || config.pii === "redact") {
-						const piiResult = redactPII(promptParts);
-						if (piiResult.detection.found) {
-							auditData.piiDetected = piiResult.detection.types;
-							auditData.piiPaths = piiResult.detection.paths;
+						const pii = auditPII(redactPII(promptParts).detection, contentPIIForAudit);
+						if (pii !== undefined) {
+							auditData.piiDetected = pii.types;
+							auditData.piiPaths = pii.paths;
 						}
 					}
 					const auditEvent = await audit.appendEvent({
@@ -4676,6 +4722,26 @@ function graftParseHooks(
  * chat.completions or Anthropic call carries `messages` and skips it, so existing
  * extraction stays byte-unchanged.
  */
+/**
+ * The PII an `llm_call` audit event records: the prompt-field scan's types and paths (paths from
+ * the prompt parts), then those the content scan adds (paths from the request root), so a hit only
+ * the content scan sees (a value written with JSON escapes in a tool call's arguments, a Google
+ * text part hidden from enumeration) is recorded too. `undefined` when neither found any.
+ */
+function auditPII(
+	prompt: PIIDetection,
+	content: PIIDetection | undefined,
+): { types: string[]; paths: string[] } | undefined {
+	if (!prompt.found && content?.found !== true) return undefined;
+	const types = new Set(prompt.types);
+	const paths = new Set(prompt.paths);
+	if (content?.found === true) {
+		for (const type of content.types) types.add(type);
+		for (const path of content.paths) paths.add(path);
+	}
+	return { types: [...types], paths: [...paths] };
+}
+
 export function extractPromptParts(
 	params: Record<string, unknown>,
 	kind: LLMClientKind,
@@ -4995,6 +5061,7 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 			amount: number;
 			debitAccountId?: bigint | undefined;
 			userData?: PrincipalLedgerTags | undefined;
+			timeoutSeconds?: number | undefined;
 		}): Promise<{ transferId: string }> {
 			// An ATTRIBUTED hold names its own debit account — the cost-center
 			// envelope the governor derived at authorize. Unattributed holds keep
@@ -5008,7 +5075,7 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 					code: XFER_SPEND,
 					// Named, not the client's default: the ledger expires the hold at this
 					// timeout, and a headless handle publishes it (`holdTimeoutMs`).
-					timeoutSeconds: LEDGER_HOLD_TIMEOUT_MS / 1000,
+					timeoutSeconds: params.timeoutSeconds ?? LEDGER_HOLD_TIMEOUT_MS / 1000,
 					// The principal's roll-up tags ride the hold; post/void inherit them.
 					...(params.userData !== undefined
 						? {

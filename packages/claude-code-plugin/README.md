@@ -91,9 +91,9 @@ Either way, a session reads its settings once, at its first hook: see
 | `UT_CC_MODE`         | `watch`                  | `enforce` (matched case-insensitively) blocks over-budget calls; any other value is watch-only (see [Modes](#modes-watch-only-by-default)) |
 | `UT_CC_UNIT`         | unset                    | The principal's `unit`, e.g. `platform` (see *Attribution*) |
 | `UT_CC_ROLE`         | unset                    | The principal's `role`, e.g. `release-engineer` (see *Attribution*) |
-| `UT_CC_MODEL`        | `claude-sonnet-4-6`      | Model for an estimate hold before any transcript model is known |
-| `UT_CC_USAGE`        | `transcript`             | `estimate` settles per-call estimates only       |
+| `UT_CC_USAGE`        | `transcript`             | `estimate` settles per-call estimates only: it reads the transcript tail for the model id only; usage is always estimated |
 | `UT_CC_STATE_DIR`    | `~/.claude/usertrust-cc` | Pending holds, and what was already posted (keep it; see below) |
+| `UT_CC_HOLD_GRACE_MS` | `60000`                 | How much longer than a Bash call's timeout its hold is asked to live, in ms, 0 to 3 600 000 (see [Long tool calls](#long-tool-calls)) |
 | `UT_CC_SEND_CONTENT` | `1`                      | `0` sends `{"redacted":true}` instead of content |
 | `UT_FAIL_OPEN`       | unset                    | Enforce mode only: `1` lets tool calls through when governance is down |
 
@@ -132,10 +132,10 @@ The path is built from your account's home directory (`os.userInfo().homedir`), 
 | `stateDir`    | yes      |                     | Absolute path of the state dir (`UT_CC_STATE_DIR`)        |
 | `failOpen`    | no       | `false`             | `true`: in enforce mode, calls proceed while governance is down (`UT_FAIL_OPEN`) |
 | `sendContent` | no       | `true`              | `false` sends `{"redacted":true}` instead of content (`UT_CC_SEND_CONTENT`) |
-| `usage`       | no       | `transcript`        | `estimate` settles per-call estimates only (`UT_CC_USAGE`) |
-| `model`       | no       | `claude-sonnet-4-6` | Model for an estimate hold (`UT_CC_MODEL`)                |
+| `usage`       | no       | `transcript`        | `estimate` settles per-call estimates only: it reads the transcript tail for the model id only; usage is always estimated (`UT_CC_USAGE`) |
 | `unit`        | no       | unset               | The principal's `unit` (`UT_CC_UNIT`)                     |
 | `role`        | no       | unset               | The principal's `role` (`UT_CC_ROLE`)                     |
+| `holdGraceMs` | no       | `60000`             | A Bash call's hold life past its timeout, in ms, 0 to 3 600 000 (`UT_CC_HOLD_GRACE_MS`) |
 
 **With `UT_CC_CONFIG` set, even to an empty string, the session is configured:**
 every setting comes from the file, and no `UT_*` variable is read, nor
@@ -319,6 +319,43 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   Claude Code's `<synthetic>` placeholder is priced as the model a later entry of
   it names. An id that is not printable text (control or format characters,
   spaces, over 256 characters) is sent as `unknown`, never rewritten into another.
+- **The model a hold names is the session's own.** A hold with no window (an
+  estimate hold, a tool call with nothing new before it, and PostToolUse's fresh hold
+  for an estimate hold that expired) names the model of the newest response in the
+  agent's transcript, scanned back from its end, for the model id only (estimate mode
+  included, whose usage is always estimated): only the file is always current. A
+  newest response whose model is missing or not a usable id, a final line its newline
+  has not yet ended (still being written, whatever it holds so far), a newest
+  response line that does not parse (corrupt), a transcript that cannot be
+  read or inspected (a line over the ingest's limit, or more scanned than it reads),
+  all mean `unknown`. The file can lag the conversation (Claude Code writes it
+  asynchronously), so a `PostModelSwitch` hook records each switch of the session's
+  model (`to_model`, whenever it changes: a `/model`, an automatic fallback, a
+  resume), and a newest response from before the latest switch that names another
+  model means `unknown`, for every agent of the session; one dated after it is the
+  transcript's to say. Each run of the hook keeps a record of its own, and switches
+  recorded within 10 seconds of the newest are read together, since two runs that
+  overlap can land out of order: when they name different models, the switch is
+  ambiguous, and a hold that depends on it means `unknown`. A record counts only once its
+  write completed: a run whose write failed (a full disk, say) leaves a mark that means
+  `unknown`, never the previous record, until a later run's record completes. With no response to read, the hold names the model of the
+  session's latest switch, else the one Claude Code reported at SessionStart (its
+  `model`, which Claude Code may omit), but only for
+  the main agent (it is the session's model, and a subagent may run a dearer one;
+  nothing names a subagent's own model before its first response), and only while
+  that is provably current: before the agent has read anything. After that a switch
+  may have happened since, so a transcript gone or never named means `unknown`.
+  usertrust-server prices `unknown` at the dearest rate it publishes and marks it as a
+  fallback, so a hold is never priced below the model the session may now be using.
+  A fresh hold for an expired one names the model the expired hold was authorized at.
+  The authorize says which it used in `params.modelSource` (`transcript`, `session`,
+  `hold` or `unknown`). The model is not a setting: `UT_CC_MODEL`, or a config file's
+  `model`, is ignored, and SessionStart says so. `PostModelSwitch` needs Claude Code
+  v2.1.251 or later, and is registered in its own file, `hooks/model-switch.json`: an
+  older Claude Code rejects a whole hooks file that names an event it does not know,
+  so there it loses only this hook (and logs that the file failed to load), and every
+  other hook runs. Without it a switch is named by the next response the transcript
+  holds.
 - **Forked subagents.** A forked subagent's transcript begins with a copy of its
   ancestor's entries — the same response ids — so the plugin posts each response
   id from ONE agent only: the first agent to claim it (a file per id under
@@ -395,15 +432,64 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   again, so no usage is ever counted both as an estimate and as real. The switch
   is recorded OUTSIDE the agent's cursor (`$UT_CC_STATE_DIR/transcripts/estimate/`)
   before any estimate is settled, so losing the cursor cannot undo it; if it
-  cannot be recorded, the hold is given back instead. `UT_CC_USAGE=estimate` uses
+  cannot be recorded, the hold is given back instead. In estimate mode the plugin still
+  reads the transcript tail for the model id only (the model a hold names, above);
+  usage is always estimated. `UT_CC_USAGE=estimate` uses
   the estimate for every agent, and records that the same way, so a session
-  resumed without it posts nothing it already settled at the estimate. A subagent
-  inherits the estimate mode of any agent of its session: a forked subagent's
-  transcript begins with a copy of its ancestor's responses, which an agent in
-  estimate mode never claims, and which agent a fork copied is recorded nowhere. A
-  hold is settled at the estimate ONLY in these cases: when the plugin's own state
-  is unusable for now, the hold is given back, because the transcript still holds
-  that usage.
+  resumed without it posts nothing it already settled at the estimate. A FORKED
+  subagent inherits the estimate mode of any agent of its session: its transcript
+  begins with a copy of its ancestor's responses, which an agent in estimate mode
+  never claims, and which agent a fork copied is recorded nowhere. So does a subagent
+  whose type neither its meta file nor the hook states, since it may be a fork.
+  Either inherits only while none of its transcript has been read: an agent whose
+  reads are under way goes on reading, so no call of it is left uncharged by a
+  switch made between its hold and its settle. A response of its copy that the
+  ancestor settled at the estimate is claimed under the same message id (below),
+  so the fork does not post it again. One edge is declared, not fixed: an ancestor
+  whose transcript cannot be read at a call's PreToolUse switches without reading
+  the response that made the call, so it claims nothing, and a fork whose reads are
+  under way posts its copy of that response at its real counts while each call it
+  made is charged its estimate as well. The response is posted once; each such call
+  is charged twice only for its own tool input and output, which its estimate prices.
+  It needs a transcript that cannot be read, and it is never a missed charge. A
+  named subagent (`general-purpose`, `Explore`, a custom agent) copies no one's
+  responses and reads its own transcript. One exception to "cannot be read": a
+  SUBAGENT's transcript that does not exist yet, before any of it was read, is not
+  written yet (Claude Code can run a subagent's first hooks before it creates the
+  file). The call's PostToolUse decides, under the subagent's lock, from the call's
+  own response: the entry of this subagent that holds the call's `tool_use` block,
+  found by the call's id (entries a fork copied from its ancestor hold the ancestor's
+  calls, never this one). If that response is there, no window claimed it yet, and
+  none of the transcript was read yet, the hold claims it, in the same claims
+  directory that posts every message once, and the call is charged at the estimate:
+  the response is never posted from the transcript. The claim is made before the
+  settle is sent and is never removed, so a settle that fails leaves a gap, never a
+  second charge. An estimate prices one call's own tool input and output, never the
+  response's tokens, so a response is charged per call or posted whole, never both:
+  one response that makes two calls is charged two estimates, one per call, as in
+  estimate mode, while a response posted from the transcript covers all of its calls.
+  So the claim switches the subagent to the estimate there, for every call after it,
+  including the response's other calls; and if another call's estimate of the same
+  response claimed it first, this call is charged its own estimate too. If the
+  subagent's own reads claimed it and the server confirmed their settle, the hold is
+  given back: the response is charged there. A settle never seen to end, or a claim
+  written off, is no such proof. Any other claim proves nothing (a read claims a
+  message before it posts it), so it is a gap, as below. A response that is there,
+  unclaimed, after some of the transcript was read is left to those reads, which post
+  it for all of its calls: the hold is given back, with a gap that names the call. If
+  the transcript is still missing, or holds no such response and none of it was read,
+  the subagent switches to the estimate there, and the call is charged at it. Anything
+  that cannot be told (some of the transcript read but the response not in it, a
+  transcript over 64 MiB or a line over 16 MiB, an unfinished or unparseable line that
+  names the call) gives the hold back uncharged, with ONE `gap` record that names the
+  call (`toolUseId`) and why, so it can be priced later; it is never charged at the
+  estimate there, since a later read could post the same response. A call that never
+  reaches its PostToolUse is decided at the subagent's SubagentStop. After the switch
+  the transcript is not read, whether it appeared only then or held a response a hold
+  claimed, since its calls were charged at the estimate, and posting them would charge
+  them twice: one `gap` record (`"phase":"late-transcript"`) says so. When the
+  plugin's own state is unusable for now, the hold is given back, because the
+  transcript still holds that usage.
 - **Private, durable state.** Cursors, claims and estimate-mode records live in
   `$UT_CC_STATE_DIR/transcripts/`, created `0700`; if that directory is not a real
   directory owned by you without group or other write access, transcript
@@ -729,10 +815,23 @@ In both modes PostToolUse/Stop/SubagentStop never block — the tool already ran
 an estimate hold is marked settle-attempted (`.settling`) before its one settle,
 and one whose settle goes unanswered is given back at Stop — never settled again —
 and the server's pending-TTL sweep voids anything orphaned. A call can wait at Claude
-Code's permission prompt for longer than the server keeps a hold (five minutes).
-A transcript hold whose settle then answers 404 gives its window back to a later
-settle point. An estimate hold is charged once, on a fresh hold of its own — but
-only on a clean 404 `unknown transferId` to its one settle. The plugin settles
+Code's permission prompt, or a long Bash command run, for longer than the server
+keeps a hold (five minutes; see [Long tool calls](#long-tool-calls) for a call that
+runs longer). A server that states each hold's life (`hold-expiry`:
+the authorize answer's `expiresInMs`) lets PreToolUse record when it ends, counted
+from the clock read before the authorize, so never later than the hold's last
+moment. Once a settle sent now could arrive after it (the settle's own timeout is counted
+too), the hold is given back first: the server counts a hold against the
+budget until its own sweep, so a replacement asked for beside it could be refused.
+Once the server confirms it ended, no settle is sent: it could only fail, as a 410
+`settlement_unrecoverable` the server records as spend it never charged, though the
+plugin charges that usage itself. The hold takes the path a gone answer takes, below.
+Unconfirmed, the settle is sent as before.
+An older server states no life, and the settle is sent as before.
+A transcript hold whose settle then answers 404, or is past its life, gives its
+window back to a later settle point (or, authorized under a key, is retried under
+it). An estimate hold is charged once, on a fresh hold of its own — but only on a
+clean 404 `unknown transferId` to its one settle, or past its life. The plugin settles
 each transferId at most once, so that 404 means the hold is gone unposted. A
 timeout, no answer, a 5xx or `settled: false` may have posted, and is never
 re-authorized. Neither is a 404 to a hold an earlier release recorded (its file
@@ -770,7 +869,14 @@ trimmed:
 {"at":"2026-10-06T10:00:00.000Z","kind":"would_block","session":"<session id>","agent":"main","tool":"Bash","status":402,"error":"budget_exceeded","reason":"<the server's reason>"}
 {"at":"2026-10-06T10:00:05.000Z","kind":"gap","mode":"watch","session":"<session id>","agent":"main","tool":"Bash","reason":"fetch failed"}
 {"at":"2026-10-06T10:00:09.000Z","kind":"pre-metering","mode":"watch","session":"<session id>","agent":"main","responses":3,"reason":"written before this session was metered; not billed","started":null}
+{"at":"2026-10-06T10:00:12.000Z","kind":"no-transcript-agent","mode":"watch","session":"<session id>","agent":"<agent id>","hook":"PreToolUse","tool":"Bash","reason":"a subagent id with no stated agent type and no transcript; none of its usage can be read","started":null}
 ```
+
+A `no-transcript-agent` record is written once per agent: a hook arrived with a subagent id
+whose type nothing states (no `agent_type`, no meta file) and whose transcript does not
+exist. It names the hook and the tool, nothing of the call's content. None of such an agent's
+usage can be read, so what it is cannot be told from the plugin's side; the record is what a
+measurement can count. Like `pre-metering`, **it is never a gap**.
 
 A `pre-metering` record counts the responses a session's transcript held from before that
 session was metered (see the first-run time above): `responses` is how many, by message id,
@@ -902,6 +1008,12 @@ PreToolUse, when it settles a repeated or resumed call's earlier hold. Its `"pha
   settle that ends this way is `claimed`, or `unresolved` under a key, which also say whether
   it is retried.
 
+One more `gap` record has `"phase":"late-transcript"`, written once per agent: a subagent
+switched to the estimate because its transcript did not exist, or did not hold the response
+of a call that waited for it, and the transcript exists now.
+Its lines are never posted, since the calls they cover were charged at the estimate, so what
+they hold reaches the ledger only as that estimate.
+
 A transcript settle that cannot be built once its hold is claimed (the server's capabilities
 read as unknown only then) sends nothing and hands the hold back for a later settle point:
 `deferred`. If that hand-back fails, the hold stays claimed (`.settling`), which a later settle
@@ -975,6 +1087,24 @@ When a later probe fails, an entry under a day old that lists `principal` lets t
 hook send its principal anyway, and stderr says so. It is never used for anything
 else: an idempotency key is sent only to a server whose live probe says it honours
 one, as a server that strips the key would let a retried settle post twice.
+
+### Long tool calls
+
+A hold lives five minutes by default: a call that runs longer finds it voided by the ledger before
+it settles, and in enforce mode its budget stops being reserved partway through. Against a server
+that honours `hold-ttl` (it lists it in `/v1/health` `capabilities` and states its ceiling as
+`maxHoldTtlMs`), PreToolUse asks for a longer life (`holdTtlMs`) where a call can outlast the default:
+
+| Tool | Hold life asked for |
+| ---- | ------------------- |
+| `Bash`, `PowerShell` | The call's own `timeout` (Claude Code passes one whenever it wants longer than the default), else `BASH_DEFAULT_TIMEOUT_MS` (two minutes unset), plus `holdGraceMs` (`UT_CC_HOLD_GRACE_MS`, default 60 000 ms) |
+| `Agent`, `Task` | The server's ceiling: a subagent runs until it is done (its own calls hold their own usage) |
+| A background command, any other tool | Nothing: the default |
+
+Never more than the server's ceiling, and nothing at all to a server that does not list `hold-ttl`
+(an older one would strip the key). The hold records what it asked for, so a crashed hook's
+`.settling` record of it is read as abandoned only once that life has passed too. A hold whose
+call never reports back keeps its budget reserved for up to that life, until the ledger voids it.
 
 ## From watching to enforcing
 

@@ -345,8 +345,10 @@ describe("drift detection — matched names must exist in the producer source", 
 	it("PII still rides as an ARRAY, which is the whole reason signal 4 was blind", () => {
 		// Pins the SHAPE, not just the name: `detection.types` is a string[], and a
 		// producer switching it to a boolean would silently re-break the matcher in
-		// the opposite direction.
-		expect(govern).toMatch(/piiDetected\s*=\s*\w+\.detection\.types/);
+		// the opposite direction. The producer assigns `auditPII(...).types`, the union
+		// of both PII scans, so the pin is on that assignment and its declared type.
+		expect(govern).toMatch(/piiDetected\s*=\s*\w+\.types\b/);
+		expect(govern).toMatch(/function auditPII\([^)]*\):\s*\{\s*types:\s*string\[\];/);
 	});
 
 	it("the anomaly reason is a KIND, never a data.anomalyDetected boolean", () => {

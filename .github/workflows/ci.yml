@@ -7,14 +7,21 @@ permissions:
 
 on:
   push:
-    branches: [master]
+    # candidate/**: a merge tool's TRUE merge commits of master and a pull request (or of a stack of them),
+    # tested before the merge so the tree that lands is a tree whose CI run passed. Graded like a pull request's
+    # merge commit; see the `tested-tree` job.
+    branches: [master, 'candidate/**']
   pull_request:
     branches: [master]
     types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # A pull request's runs share a group, so its superseded run is cancelled. Every PUSH run (master or a
+  # candidate/** branch) is a group of its own: a group holds one running and ONE pending run, and a newly
+  # queued run cancels the pending one whatever cancel-in-progress says, so a shared group for pushes would
+  # drop a middle master commit untested whenever three land close together.
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   agent-config:
@@ -58,9 +65,13 @@ jobs:
           EVENT: ${{ github.event_name }}
           SHA: ${{ github.sha }}
           BEFORE: ${{ github.event.before }}
+          REF: ${{ github.ref }}
         run: |
           launcher=$(mktemp)
           git cat-file blob "$SHA:.github/agent-config.sh" > "$launcher"
+          # A candidate/** branch is new (its `before` is all zeros) and holds a TRUE merge commit of master and a
+          # pull request: it is graded exactly as that pull request's merge commit, against its first parent.
+          case "$REF" in refs/heads/candidate/*) EVENT=pull_request ;; esac
           if [ "$EVENT" = pull_request ]; then
             bash "$launcher" pull_request "$SHA"
           else
@@ -96,6 +107,8 @@ jobs:
         run: |
           ./node_modules/.bin/biome check --write .
           git diff --exit-code
+      # The tested-tree stamp's verdict and ci.yml's wiring of it (scripts/tested-tree.test.mjs).
+      - run: node --test scripts/tested-tree.test.mjs
 
   typecheck:
     name: typecheck
@@ -105,6 +118,9 @@ jobs:
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The merge commit and its first parent, for the timing baseline's check.
+          fetch-depth: 2
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -125,6 +141,17 @@ jobs:
       - run: npm run typecheck
       # The ratchet's own comparison logic (scripts/typecheck-tests.test.mts).
       - run: npm run typecheck-tests:test
+      # Wall-clock thresholds in tests (sleeps, elapsed-time checks, timeouts) are frozen in
+      # timing-thresholds.baseline.json: a new one needs fake timers or a `// timing:` comment
+      # stating its bound and the headroom measured on CI.
+      - run: npm run timing-thresholds
+      # On a pull request, the baseline itself may not grow from the base's (the merge commit's
+      # first parent): a check of the baseline against itself would pass an --update. A candidate/**
+      # merge commit is checked the same way.
+      - name: The timing baseline only shrinks
+        if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/candidate/')
+        run: npm run timing-thresholds -- --base HEAD^1
+      - run: npm run timing-thresholds:test
 
   test:
     name: test
@@ -139,11 +166,13 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # scan-linear.test.ts runs in the scan-linear job below, not here (see that job).
       - name: Run tests with coverage
-        run: npx vitest run --coverage
+        run: npx vitest run --coverage --exclude packages/core/tests/harden/scan-linear.test.ts
       - name: Check coverage thresholds
         run: >-
           npx vitest run --coverage
+          --exclude packages/core/tests/harden/scan-linear.test.ts
           --coverage.thresholds.lines=92
           --coverage.thresholds.branches=84
           --coverage.thresholds.functions=90
@@ -155,6 +184,25 @@ jobs:
           name: coverage-report
           path: coverage/
           retention-days: 14
+
+  scan-linear:
+    name: scan-linear
+    # Same-repo branches and pushes run on Blacksmith; a FORK pull request stays on a
+    # GitHub-hosted runner (fork workflows still need maintainer approval per repo policy).
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2204' || 'ubuntu-latest' }}
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
+    # The detectors' linearity rows: each compares a scan's time on an input twice as long with its
+    # time on the input, several minutes of measuring. They run here, beside `test` and without
+    # coverage, so the test job does not wait on them. The test job excludes this file, and
+    # packages/core/tests/harden/scan-linear-ci.test.ts fails if either side drops it.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx vitest run packages/core/tests/harden/scan-linear.test.ts
 
   openclaw-contract:
     name: openclaw-contract
@@ -358,3 +406,28 @@ jobs:
       - name: Build (runs the prebuild check-facts gate)
         run: npm run build
         working-directory: site
+
+  # The stamp. A STABLE name, so a re-run supersedes a failure for anything that reads it by name. When every
+  # other job of this run passed, it emits ONE annotation, `tested-tree <github.sha>`: the commit this run
+  # tested (the merge commit on a pull request, the pushed commit on a push, a candidate/** merge commit
+  # included). A merge tool trusts only that annotation, on this check run, from GitHub Actions, in the same
+  # check suite as the jobs it judges, and resolves the commit's tree itself. It needs no permission and
+  # checks out nothing but the default ref. Skipped for drafts, whose jobs all skip.
+  # scripts/tested-tree.test.mjs pins this job, the candidate trigger and folds, and the cancel rule.
+  tested-tree:
+    name: tested-tree
+    needs: [agent-config, lint, typecheck, test, scan-linear, openclaw-contract, tb-integration, site-build]
+    if: always() && !cancelled() && !(github.event_name == 'pull_request' && github.event.pull_request.draft)
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2204' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Every job of this run passed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          TESTED_SHA: ${{ github.sha }}
+          REQUIRED: agent-config lint typecheck test scan-linear openclaw-contract tb-integration site-build
+        run: node scripts/tested-tree-verdict.mjs

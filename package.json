@@ -17,17 +17,19 @@
 		"typecheck": "tsc -b && tsc -p packages/core/tsconfig.type-tests.json && tsc -p packages/openclaw/tsconfig.type-tests.json && tsc -p packages/openshell/tsconfig.type-tests.json && tsx scripts/typecheck-tests.mts",
 		"typecheck:tests": "tsx scripts/typecheck-tests.mts",
 		"typecheck-tests:test": "node --import tsx --test scripts/typecheck-tests.test.mts",
+		"timing-thresholds": "tsx scripts/timing-thresholds.mts",
+		"timing-thresholds:test": "node --import tsx --test scripts/timing-thresholds.test.mts",
 		"typecheck:types": "tsc -p packages/core/tsconfig.type-tests.json"
 	},
 	"devDependencies": {
 		"@anthropic-ai/sdk": "^0.116.0",
 		"@biomejs/biome": "^2.5.7",
 		"@types/node": "^26.2.0",
-		"@vitest/coverage-v8": "^4.1.0",
+		"@vitest/coverage-v8": "^4.1.12",
 		"openai": "^7.4.0",
 		"tsx": "^4.23.11",
 		"typescript": "^5.9.0",
-		"vitest": "^4.0.0"
+		"vitest": "^4.1.12"
 	},
 	"packageManager": "npm@10.9.2+sha512.8ab88f10f224a0c614cb717a7f7c30499014f77134120e9c1f0211ea3cf3397592cbe483feb38e0c4b3be1c54e347292c76a1b5edb94a3289d5448484ab8ac81"
 }

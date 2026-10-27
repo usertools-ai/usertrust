@@ -247,14 +247,6 @@ export function announce(text, max = MAX_NOTE_CHARS) {
 }
 
 /**
- * The model an authorize names when no transcript says one: every estimate hold,
- * and a transcript hold before its first model is known.
- */
-export function defaultModel() {
-	return settings().model;
-}
-
-/**
  * Whether the plugin may block a tool call. It never grants one, in either mode
  * (see `proceed` in pre-tool-use.mjs). `watch` (the default) NEVER blocks: a
  * budget, policy or anomaly refusal (402/403/429) is written down as a
@@ -398,7 +390,15 @@ async function stampSessionSeen(session, at) {
 export const PRE_METERING = "pre-metering";
 
 /**
- * Append one watch record (`would_block`, `gap`, `deferred` or `pre-metering`) as a JSON line, with the time,
+ * The watch record of a subagent id that names no agent type and has no transcript
+ * (transcript.mjs `noteNoTranscriptAgent`): once per agent, the hook and tool it arrived
+ * with, no content. Nothing of such an agent's usage can be read, and what it is cannot be
+ * told from the plugin's side; the record is what a measurement can count. Never a gap.
+ */
+export const NO_TRANSCRIPT_AGENT = "no-transcript-agent";
+
+/**
+ * Append one watch record (`would_block`, `gap`, `deferred`, `pre-metering` or `no-transcript-agent`) as a JSON line, with the time,
  * session, agent and tool. Never throws: a record that cannot be written is said
  * on stderr, and the tool call proceeds either way. Returns whether the record was
  * written, so no note claims a record that is not there.
@@ -573,12 +573,18 @@ export async function recordPending(sessionId, agentId, entry, { settling = fals
 				...(typeof entry.estimatedInputTokens === "number"
 					? { estimatedInputTokens: entry.estimatedInputTokens }
 					: {}),
+				// The hold's life as its authorize knew it (pre-tool-use.mjs `holdLifeField`): a
+				// `.settling` record of it is stale only after that (transcript.mjs `staleSettlingAfter`).
+				...(Number.isSafeInteger(entry.holdTtlMs) ? { holdTtlMs: entry.holdTtlMs } : {}),
+				// When the hold's life ends, on this machine's clock (`holdExpiresAt`): past it, no
+				// settle is sent (`holdExpired`).
+				...(Number.isSafeInteger(entry.expiresAt) ? { expiresAt: entry.expiresAt } : {}),
 				// Which server and tenant made the hold: never the key itself.
 				...tenantBinding(),
 				// A transcript-mode hold also records what it will settle: the model it
 				// was authorized at, the transcript message ids assigned to it, and their
-				// summed counts.
-				...(entry.usage === "transcript" ? transcriptHoldFields(entry) : {}),
+				// summed counts. An estimate hold records its model alone (`estimateHoldModel`).
+				...(entry.usage === "transcript" ? transcriptHoldFields(entry) : estimateHoldModel(entry)),
 				// The job labels this hold was authorized with: what its settle names and what
 				// a replacement hold must carry (the labels belong to the HOLD, not the clock).
 				...jobHoldFields(entry),
@@ -1180,6 +1186,8 @@ function heldOf(path, body, mtimeMs, releasing) {
 		// Which server and tenant made the hold (`tenantBinding`), as written.
 		...(typeof body.serverUrl === "string" ? { serverUrl: body.serverUrl } : {}),
 		...(typeof body.keyHash === "string" ? { keyHash: body.keyHash } : {}),
+		// The life its authorize asked for: how long before its record reads as stale.
+		...(Number.isSafeInteger(body.holdTtlMs) ? { holdTtlMs: body.holdTtlMs } : {}),
 		// How long its settle has been in flight: a claim touches the file first.
 		mtimeMs,
 	};
@@ -1231,6 +1239,21 @@ function refusedOf(value) {
 		}
 	}
 	return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * An estimate hold's model, as it was authorized: what PostToolUse authorizes a replacement of
+ * the expired hold at (post-tool-use.mjs `settleEstimateHold`). Absent on an older record. And
+ * `awaitingTranscript`, on a hold made while its subagent's transcript was not written yet: its
+ * PostToolUse rules whether it settles at the estimate (transcript.mjs `resolveAwaitingHold`).
+ */
+function estimateHoldModel(entry) {
+	return {
+		...(typeof entry.holdModel === "string" && entry.holdModel !== ""
+			? { holdModel: entry.holdModel }
+			: {}),
+		...(entry.awaitingTranscript === true ? { awaitingTranscript: true } : {}),
+	};
 }
 
 function transcriptHoldFields(entry) {
@@ -1290,13 +1313,17 @@ export async function listPending(sessionId, agentId) {
 				...(typeof parsed.estimatedInputTokens === "number"
 					? { estimatedInputTokens: parsed.estimatedInputTokens }
 					: {}),
+				...(Number.isSafeInteger(parsed.holdTtlMs) ? { holdTtlMs: parsed.holdTtlMs } : {}),
+				...(Number.isSafeInteger(parsed.expiresAt) ? { expiresAt: parsed.expiresAt } : {}),
 				// The mark as written, whatever its value: `isGated` judges it.
 				...(Object.hasOwn(parsed, "gate") ? { gate: parsed.gate } : {}),
 				// A quarantined hold whose call ran (`quarantineHold`).
 				...(parsed.ran === true ? { ran: true } : {}),
 				...(typeof parsed.serverUrl === "string" ? { serverUrl: parsed.serverUrl } : {}),
 				...(typeof parsed.keyHash === "string" ? { keyHash: parsed.keyHash } : {}),
-				...(parsed.usage === "transcript" ? transcriptHoldFields(parsed) : {}),
+				...(parsed.usage === "transcript"
+					? transcriptHoldFields(parsed)
+					: estimateHoldModel(parsed)),
 				...jobHoldFields(parsed),
 				...(typeof parsed.startedAt === "string" ? { startedAt: parsed.startedAt } : {}),
 				mtimeMs,
@@ -1582,6 +1609,8 @@ export async function serverRequest(path, body, { timeoutMs = 5000 } = {}) {
 // ── What the server honours ──
 
 let capabilitiesRead;
+/** The longest hold the server lets an authorize ask for (`/v1/health` `maxHoldTtlMs`), or null. */
+let healthMaxHoldTtlMs = null;
 
 /**
  * Read the capabilities AGAIN, discarding a cached UNKNOWN. serverCapabilities() caches
@@ -1709,6 +1738,8 @@ export function serverCapabilities() {
 			const json = JSON.parse(text);
 			const list = Array.isArray(json?.capabilities) ? json.capabilities : [];
 			const capabilities = new Set(list.filter((c) => typeof c === "string"));
+			const max = json?.maxHoldTtlMs;
+			healthMaxHoldTtlMs = Number.isSafeInteger(max) && max > 0 ? max : null;
 			principalCachedAt = null;
 			await rememberCapabilities(capabilities);
 			return capabilities;
@@ -1721,6 +1752,44 @@ export function serverCapabilities() {
 	})();
 	return capabilitiesRead;
 }
+
+/**
+ * How long a tool call's hold should live (`holdTtlMs`, capability `hold-ttl`), or undefined for
+ * the server's default. Only a call that can outlive the default asks, and only a server that
+ * honours the key and states its ceiling is asked, never above that ceiling. An older server
+ * strips the key, and a hold that outlived its life could only be settled into a 410.
+ * - Bash and PowerShell: the call's own `timeout` (Claude Code passes one whenever it wants longer
+ *   than the default), else the host's `BASH_DEFAULT_TIMEOUT_MS` (two minutes unset), plus the
+ *   session's `holdGraceMs`, since PreToolUse runs before the command starts and PostToolUse after
+ *   it ends (https://code.claude.com/docs/en/tools-reference#timeout-and-output-limits). A command
+ *   run in the background returns at once: the default.
+ * - Agent and Task: the server's ceiling. A subagent runs until it is done, and this hold is only
+ *   the call's own estimate (the subagent's usage is held by its own calls).
+ * - Every other tool: the default.
+ */
+export async function holdTtlFor(toolName, toolInput, env = hostEnv()) {
+	const capabilities = await serverCapabilities();
+	const max = capabilities?.has("hold-ttl") === true ? healthMaxHoldTtlMs : null;
+	if (max === null) return undefined;
+	if (UNBOUNDED_TOOLS.has(toolName)) return max;
+	if (!TIMED_TOOLS.has(toolName) || toolInput?.run_in_background === true) return undefined;
+	const given = toolInput?.timeout;
+	const raw = env.BASH_DEFAULT_TIMEOUT_MS ?? "";
+	const timeout =
+		Number.isSafeInteger(given) && given > 0
+			? given
+			: /^[0-9]{1,9}$/.test(raw) && Number(raw) > 0
+				? Number(raw)
+				: BASH_DEFAULT_TIMEOUT_MS;
+	return Math.min(timeout + settings().holdGraceMs, max);
+}
+
+/** A foreground command's timeout when it names none and the host sets none: two minutes. */
+const BASH_DEFAULT_TIMEOUT_MS = 120_000;
+/** The tools whose call runs under a `timeout` (`holdTtlFor`). */
+const TIMED_TOOLS = new Set(["Bash", "PowerShell"]);
+/** The tools whose call no timeout bounds: a subagent runs until it is done. */
+const UNBOUNDED_TOOLS = new Set(["Agent", "Task"]);
 
 // ── The cached `principal` capability ──
 //
@@ -1822,6 +1891,52 @@ export function isUnknownRoute(response) {
  */
 export function isUnknownTransfer(response) {
 	return response.status === 404 && response.json?.reason === "unknown transferId";
+}
+
+/**
+ * When a hold's life ends, on this machine's clock: the authorize answer's `expiresInMs`
+ * (usertrust-server's `hold-expiry`, a DURATION) added to the clock read just BEFORE that
+ * authorize was sent (`sentAt`). That is never later than the hold's last moment, whatever the
+ * offset between the two machines' clocks. Undefined when the answer states no life: an older
+ * server, or a hold whose life the server does not know.
+ */
+export function holdExpiresAt(sentAt, json) {
+	const life = json?.expiresInMs;
+	if (!Number.isSafeInteger(sentAt) || !Number.isSafeInteger(life) || life < 0) return undefined;
+	return sentAt + life;
+}
+
+/**
+ * Whether a hold is past its recorded life (`holdExpiresAt`) at `now`. A caller about to settle
+ * passes the moment its settle could ARRIVE (now plus that request's timeout), never the moment it
+ * leaves: with less life left than that, the settle can land after the ledger's pending timeout.
+ * Past it, the ledger has voided the hold, or will have: a settle can only fail, as a 410
+ * `settlement_unrecoverable` the server records as spend it never charged, though this plugin
+ * charges that usage itself (a fresh hold, or a later settle point). So no settle is sent
+ * (`endExpiredHold`), and the hold takes the path a gone answer takes.
+ */
+export function holdExpired(entry, now = Date.now()) {
+	return Number.isSafeInteger(entry?.expiresAt) && now > entry.expiresAt;
+}
+
+/**
+ * End a hold past its life (`holdExpired`) before anything replaces it, and say how the server
+ * confirms it ended: `released` (200: this release ended it), `gone` (404 `unknown transferId`:
+ * the server no longer has it), or null when unconfirmed. The server counts a hold against the
+ * budget until its own sweep, which can run well after the hold's last moment, so a replacement
+ * asked for beside it could be refused; and a clock that is wrong may leave it live. `gone` is
+ * usually a hold the sweep ended long since, but can be one whose sweep is still voiding it, its
+ * funds not yet free (PostToolUse's replacement waits for that once). Unconfirmed, the caller sends
+ * the settle as before. No release class: it proves nothing. Never throws.
+ */
+export async function endExpiredHold(transferId, timeoutMs) {
+	try {
+		const response = await releaseHold(transferId, "the hold is past its life", { timeoutMs });
+		if (response.status === 200) return "released";
+		return isUnknownTransfer(response) ? "gone" : null;
+	} catch {
+		return null;
+	}
 }
 
 /**

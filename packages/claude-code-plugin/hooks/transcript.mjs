@@ -72,9 +72,12 @@
 //     period settled at an estimate never has its real usage posted as well:
 //     with an agent id unsafe in a path (no transcript of it is ever read), or
 //     once the agent's estimate mode is RECORDED — UT_CC_USAGE=estimate, its
-//     transcript could not be read, a hook named none, or (for a subagent)
-//     another agent of its session is in estimate mode, since a fork copies its
-//     ancestor's responses — by a marker outside its cursor (`stickToEstimate`),
+//     transcript could not be read (a subagent's still missing at its call's
+//     PostToolUse or its last settle point: before that it is not written yet,
+//     `notWrittenYet`, `resolveAwaitingHold`), a hook
+//     named none, or (for a fork, or a subagent of no stated type) another agent
+//     of its session is in estimate mode, since a fork copies its ancestor's
+//     responses — by a marker outside its cursor (`stickToEstimate`),
 //     written before any estimate is settled, so losing the cursor cannot undo
 //     it. While the transcript state cannot be used (the state dir, a corrupt
 //     cursor) or the marker cannot be written, a hold is given back instead: the
@@ -90,6 +93,9 @@
 //  - partial: every id seen but not yet accounted or denied, with its counts,
 //    and whether this agent holds its claim.
 //  - accounted / denied: the most recent 10 000 ids each.
+//  - posted: the most recent 10 000 accounted ids whose settle the server
+//    CONFIRMED (200, or `already_settled`). `accounted` also holds ids that may
+//    have posted (a settle never seen to end) and ids written off.
 //  - assigned: id → the vehicle it is BOUND to — a transferId, "remainder" (a
 //    remainder in flight) or "authorizing" (written BEFORE PreToolUse's
 //    authorize) — each recorded before any call that could post it. A binding
@@ -102,7 +108,9 @@
 // Shared by every agent of every session: <state>/transcripts/claims, one file
 // per claimed message id (named by its SHA-256), naming the agent that owns it.
 // Per (session, agent), OUTSIDE the cursor: <state>/transcripts/estimate/
-// <session>__<agent>, the agent's recorded estimate mode. And once:
+// <session>__<agent>, the agent's recorded estimate mode, and
+// <state>/transcripts/no-transcript/<session>__<agent>, that its
+// `no-transcript-agent` watch record is written (`noteNoTranscriptAgent`). And once:
 // <state>/transcripts/since, when this state was first made — a transcript entry
 // written before it is never posted (see `firstRun`). And per session:
 // <state>/transcripts/since-session/<session>, when that session was first metered
@@ -136,8 +144,11 @@ import {
 	callStart,
 	cleanup,
 	clearPending,
+	endExpiredHold,
 	failureOutcome,
 	guardMode,
+	holdExpired,
+	holdExpiresAt,
 	holdUsageStart,
 	isAlreadySettled,
 	isSettleGone,
@@ -147,6 +158,7 @@ import {
 	jobHoldFields,
 	LINKLESS,
 	listPending,
+	NO_TRANSCRIPT_AGENT,
 	openRegular,
 	PRE_METERING,
 	principalCapable,
@@ -204,9 +216,23 @@ const STALE_LOCK_MS = 60_000;
  * ledger's pending timeout (core's `LEDGER_HOLD_TIMEOUT_MS`, 5 min): the journal then
  * clears a stale record without giving its hold back, which strands nothing only
  * because the ledger has expired that hold by then. Pinned by
- * `tests/stale-settling.test.ts`.
+ * `tests/stale-settling.test.ts`. A hold asked to live longer (`holdTtlMs`) is stale
+ * that much later (`staleSettlingAfter`).
  */
 export const STALE_SETTLING_MS = 10 * 60_000;
+/** The ledger's default pending timeout (core's `LEDGER_HOLD_TIMEOUT_MS`), pinned to it by test. */
+export const DEFAULT_HOLD_LIFE_MS = 5 * 60_000;
+
+/**
+ * How long a `.settling` record of this hold must be left before it reads as a crashed hook's:
+ * `STALE_SETTLING_MS`, plus however much longer than the default its authorize asked the hold
+ * to live (`holdTtlMs`, lib.mjs `holdTtlFor`). The record's age counts from the settle's start,
+ * after the call ended, so its hold is past its life by then.
+ */
+export function staleSettlingAfter(record) {
+	const life = Number.isSafeInteger(record?.holdTtlMs) ? record.holdTtlMs : DEFAULT_HOLD_LIFE_MS;
+	return STALE_SETTLING_MS + Math.max(0, life - DEFAULT_HOLD_LIFE_MS);
+}
 const ID_HISTORY = 10_000;
 const MAX_ID_CHARS = 256;
 /** A transcript is read a chunk of this size at a time: a hook's memory stays bounded. */
@@ -269,6 +295,20 @@ const VEHICLE_KEY = /^cc:[0-9a-f]{48}$/;
 const CLAIMS_DIR = "claims";
 /** Where an agent's estimate mode is recorded, outside its cursor (see `stickToEstimate`). */
 const ESTIMATE_DIR = "estimate";
+/** Per (session, agent) under <state>/transcripts: its `no-transcript-agent` record is written. */
+const NO_TRANSCRIPT_DIR = "no-transcript";
+/** Per (session, agent) under <state>/transcripts: its late-transcript gap is written (`noteLateTranscript`). */
+const LATE_TRANSCRIPT_DIR = "late-transcript";
+/** Per (session, agent) under <state>/transcripts: the type its own hook stated (`rememberAgentType`). */
+const AGENT_TYPE_DIR = "agent-type";
+/** Why an agent whose transcript did not exist settles at the estimate (`ingest`'s ENOENT reason). */
+const MISSING_TRANSCRIPT = "transcript unreadable (ENOENT)";
+/** Why an agent whose transcript did not hold the call its hold waited for, at that call's PostToolUse, settles at the estimate (`resolveAwaitingHold`). */
+const UNSEEN_CALL_TRANSCRIPT = "its transcript did not hold a call that waited for it";
+/** Why an agent one of whose responses a waiting call claimed for its estimate settles at the estimate (`resolveAwaitingHold`). */
+const CLAIMED_CALL_TRANSCRIPT = "a call that waited for its transcript was charged at the estimate";
+/** Who a claim on a call's response is (`resolveAwaitingHold`): the call's estimate, never a window's post. */
+const ESTIMATED_CALL = "estimated-call";
 
 /**
  * Untrusted strings in a path or an actor string (agent type/id) →
@@ -551,7 +591,7 @@ async function inFlightSettles(sessionId, agentId) {
 			record.kind === "settling" &&
 			!record.estimate &&
 			record.ids.length > 0 &&
-			now - record.mtimeMs <= STALE_SETTLING_MS,
+			now - record.mtimeMs <= staleSettlingAfter(record),
 	);
 }
 
@@ -737,20 +777,83 @@ export async function subagentIds(input) {
  */
 async function agentTypeFor(transcriptPath, agentId, hinted) {
 	if (agentId === "main") return { name: "main", raw: "main" };
+	const type = await statedAgentType(transcriptPath, hinted);
+	return type === null
+		? { name: "subagent", raw: "subagent" }
+		: { name: safeName(type, "subagent"), raw: type.slice(0, 128) };
+}
+
+/** The subagent's meta file's `agentType`, or null (no transcript path, no meta file, none in it). */
+async function metaAgentType(transcriptPath) {
+	if (transcriptPath === undefined) return null;
 	try {
 		const meta = JSON.parse(
 			await readRegular(transcriptPath.replace(/\.jsonl$/, ".meta.json"), READ_BOUND.record),
 		);
-		if (typeof meta?.agentType === "string" && meta.agentType !== "") {
-			return { name: safeName(meta.agentType, "subagent"), raw: meta.agentType.slice(0, 128) };
-		}
+		if (typeof meta?.agentType === "string" && meta.agentType !== "") return meta.agentType;
 	} catch {
-		// No meta file — use the hint.
+		// No meta file.
 	}
-	return {
-		name: safeName(hinted, "subagent"),
-		raw: typeof hinted === "string" && hinted !== "" ? hinted.slice(0, 128) : "subagent",
-	};
+	return null;
+}
+
+/**
+ * A subagent's type as something states it: its meta file's `agentType`, else the type an
+ * earlier hook of its own stated (`typePath`, `rememberAgentType`), else this hook's
+ * `agent_type`; null when none names one.
+ */
+async function statedAgentType(transcriptPath, hinted, typePath) {
+	const meta = await metaAgentType(transcriptPath);
+	if (meta !== null) return meta;
+	if (typePath !== undefined) {
+		try {
+			const remembered = (await readRegular(typePath, READ_BOUND.record)).trim();
+			if (remembered !== "") return remembered;
+		} catch {
+			// None remembered — use the hint.
+		}
+	}
+	return typeof hinted === "string" && hinted !== "" ? hinted : null;
+}
+
+/**
+ * Record the type the agent's OWN hook states (`hintFor`) when no meta file states one, once
+ * (<state>/transcripts/agent-type/<session>__<agent>), so a later settle whose input is the
+ * parent's (a session-wide Stop, SessionEnd) still knows it: without it, a named subagent
+ * known by its hook's type alone would pass for an untyped one there, inherit a sibling's
+ * estimate mode, and never have the rest of its transcript read. Never throws.
+ */
+async function rememberAgentType(where, hinted) {
+	if (typeof hinted !== "string" || hinted === "" || where.typePath === undefined) return;
+	try {
+		if ((await metaAgentType(where.transcriptPath)) !== null) return;
+		await mkdir(dirname(where.typePath), { recursive: true, mode: 0o700 });
+		await writeFile(where.typePath, hinted.slice(0, 128), { flag: "wx", mode: 0o600 });
+	} catch {
+		// EEXIST: remembered already. Anything else: not this time.
+	}
+}
+
+/** The agent type Claude Code gives a FORKED subagent, whose transcript begins with its ancestor's. */
+const FORK_AGENT_TYPE = "fork";
+
+/**
+ * Whether a subagent's transcript may begin with a copy of an ancestor's responses: a fork's
+ * does, and so may one whose type nothing states. A NAMED subagent (general-purpose, Explore,
+ * a custom agent) starts from its own prompt, and copies no one's responses.
+ */
+async function mayCopyAncestor(transcriptPath, hinted, typePath) {
+	const type = await statedAgentType(transcriptPath, hinted, typePath);
+	return type === null || type === FORK_AGENT_TYPE;
+}
+
+/**
+ * The hook's `agent_type`, only when the hook is the agent's own (its `agent_id`): a session-wide
+ * settle (Stop, SessionEnd) carries the parent's input while it opens every subagent, and the
+ * parent's type names none of them. Another agent's type would let a fork pass for a named one.
+ */
+function hintFor(input, agentId) {
+	return input?.agent_id === agentId ? input?.agent_type : undefined;
 }
 
 /**
@@ -759,9 +862,24 @@ async function agentTypeFor(transcriptPath, agentId, hinted) {
  * makes transcript accounting unavailable for this run.
  */
 async function privateStateDir() {
-	const dir = join(stateRoot(), "transcripts");
+	return privateDir("transcripts");
+}
+
+/**
+ * <state>/<name>, made and checked as `privateStateDir` is. With `create: false` (a read) it is
+ * only checked, and a missing one is unavailable: a read never makes a directory. A nested name
+ * (`transcripts/session-models`) is checked level by level, its parent first: nothing is made in,
+ * or trusted from, a directory that fails the checks itself.
+ */
+async function privateDir(name, { create = true } = {}) {
+	const parent = dirname(name);
+	if (parent !== ".") {
+		const above = await privateDir(parent, { create });
+		if (!above.ok) return above;
+	}
+	const dir = join(stateRoot(), name);
 	try {
-		await mkdir(dir, { recursive: true, mode: 0o700 });
+		if (create) await mkdir(dir, { recursive: true, mode: 0o700 });
 		const info = await lstat(dir);
 		if (!info.isDirectory()) return { ok: false, reason: "state dir is not a directory" };
 		if (typeof process.getuid === "function" && info.uid !== process.getuid()) {
@@ -782,6 +900,7 @@ function emptyCursor() {
 		nextSeq: 0,
 		partial: new Map(),
 		accounted: new Set(),
+		posted: new Set(),
 		denied: new Set(),
 		assigned: new Map(),
 		estimateMode: false,
@@ -856,6 +975,9 @@ function parseCursor(raw) {
 		cursor.assigned.set(id, value);
 	}
 	cursor.accounted = new Set(raw.accounted);
+	// Absent in a cursor written before it was kept: no settle is known confirmed.
+	if (raw.posted !== undefined && !isStringArray(raw.posted)) return null;
+	cursor.posted = new Set(raw.posted ?? []);
 	cursor.denied = new Set(raw.denied);
 	cursor.estimateMode = raw.estimateMode;
 	cursor.estimateReason = typeof raw.estimateReason === "string" ? raw.estimateReason : null;
@@ -980,6 +1102,7 @@ async function writeCursor(path, cursor) {
 			nextSeq: cursor.nextSeq,
 			partial: Object.fromEntries(cursor.partial),
 			accounted: [...cursor.accounted].slice(-ID_HISTORY),
+			posted: [...cursor.posted].slice(-ID_HISTORY),
 			denied: [...cursor.denied].slice(-ID_HISTORY),
 			assigned: Object.fromEntries(cursor.assigned),
 			estimateMode: cursor.estimateMode,
@@ -1001,6 +1124,12 @@ function accountIds(cursor, ids) {
 		cursor.partial.delete(id);
 		cursor.accounted.add(id);
 	}
+}
+
+/** Accounted ids whose settle the server confirmed: charged once, never posted again. */
+function postIds(cursor, ids) {
+	accountIds(cursor, ids);
+	for (const id of ids) cursor.posted.add(id);
 }
 
 function releaseIds(cursor, ids) {
@@ -1162,6 +1291,7 @@ async function holdJournal(sessionId, agentId) {
 				mtimeMs,
 				estimate: body.usage !== "transcript",
 				agentId: sanitize(body.agentId ?? "main"),
+				...(Number.isSafeInteger(body.holdTtlMs) ? { holdTtlMs: body.holdTtlMs } : {}),
 				...jobHoldFields(body),
 				...(typeof body.startedAt === "string" ? { startedAt: body.startedAt } : {}),
 			});
@@ -1186,9 +1316,10 @@ async function reconcile(cursor, sessionId, agentId) {
 		if (record.kind === "done") {
 			if (record.outcome === "released") releaseIds(cursor, record.ids);
 			else if (record.outcome === "unresolved") holdUnresolved(cursor, record);
+			else if (record.outcome === "settled") postIds(cursor, record.ids);
 			else accountIds(cursor, record.ids);
 			finished.push(record.path);
-		} else if (record.kind === "settling" && now - record.mtimeMs > STALE_SETTLING_MS) {
+		} else if (record.kind === "settling" && now - record.mtimeMs > staleSettlingAfter(record)) {
 			// Its hook died mid-settle: the outcome is unknown. An ESTIMATE hold's
 			// .settling lands here too, with no ids: fresh, it adds nothing to `live`;
 			// stale, its hold is past the ledger's pending timeout (STALE_SETTLING_MS), so
@@ -1281,7 +1412,11 @@ async function ingest(cursor, path, since) {
 	try {
 		({ handle } = await openRegular(path));
 	} catch (err) {
-		return { ok: false, reason: `transcript unreadable (${err?.code ?? "error"})` };
+		return {
+			ok: false,
+			code: err?.code,
+			reason: `transcript unreadable (${err?.code ?? "error"})`,
+		};
 	}
 	const result = { ok: true, badLines: 0, longLines: 0, metered: false, atEnd: false };
 	const seen = { metered: false };
@@ -1377,6 +1512,16 @@ function foldLine(cursor, bytes, since, seen) {
 	} catch {
 		return false;
 	}
+	// Which model the agent runs, from EVERY response read, before anything decides whether its
+	// usage is posted: one from before metering, or one already accounted, is never billed again,
+	// but a hold names its model (`holdModelFor`). Lines are read in file order, so a read that
+	// reaches the end, a reread from zero after a truncation included, ends on the newest. A
+	// response whose model is missing or unusable makes it `unknown`, never an older response's
+	// (which may be cheaper); the `<synthetic>` placeholder names no model, and changes nothing.
+	if (isObject(entry?.message?.usage)) {
+		const responseModel = modelId(entry.message.model);
+		if (responseModel !== SYNTHETIC_MODEL) cursor.lastModel = responseModel ?? UNKNOWN_MODEL;
+	}
 	// Written before this session was first metered: never posted (`sessionFirstRun`), and
 	// counted once per response, to be declared (`recordPreMetering`).
 	if (Date.parse(entry?.timestamp) < since) {
@@ -1467,7 +1612,6 @@ function foldLine(cursor, bytes, since, seen) {
 		m.cacheWriteTokens,
 	);
 	if (message.stop_reason != null) m.complete = true;
-	if (named) cursor.lastModel = model;
 	return true;
 }
 
@@ -1569,6 +1713,23 @@ async function selectOwn(opened, { left = null } = {}) {
 }
 
 /**
+ * The claim on a message id, only read: `{ holder, created: false }`, or `{ holder: null, code }`
+ * when there is none (`ENOENT`) or it cannot be read.
+ */
+async function claimOn(claimsDir, id) {
+	const digest = createHash("sha256").update(id).digest("hex");
+	try {
+		const holder = await readRegular(
+			join(claimsDir, digest.slice(0, 2), digest.slice(2)),
+			READ_BOUND.small,
+		);
+		return holder === "" ? { holder: null, code: "EMPTY" } : { holder, created: false };
+	} catch (err) {
+		return { holder: null, code: err?.code ?? "error" };
+	}
+}
+
+/**
  * The claim on a message id: `{ holder, created }` — `created` when this call made
  * it — or `{ holder: null, code }` when it can be neither made nor read. Published
  * by link(2), which never replaces an existing name, so a claim is whole the moment
@@ -1614,14 +1775,16 @@ async function claimHolder(claimsDir, id, owner) {
  * or naming none — gets `transcriptPath: undefined` and the reason in `unread`
  * when it `mayEstimate`, so its estimate is recorded before it settles (see
  * `openAgent`); one that does not is turned away before the state dir is touched.
+ * `anySetting`: the transcript path whatever the setting says now (an awaiting hold's
+ * ruling, `resolveAwaitingHold`, which must claim its response before any estimate).
  */
-async function locate({ sessionId, agentId, input, mayEstimate }) {
+async function locate({ sessionId, agentId, input, mayEstimate, anySetting = false }) {
 	const configured = usageMode() === "estimate";
 	// The user's own setting, as this session spells it: UT_CC_USAGE=estimate, or the config file's.
 	const bySetting = howToSet("usage", "estimate");
 	if (configured && !mayEstimate) return { ok: false, reason: bySetting };
 	if (!isAgentId(agentId)) return { ok: false, reason: "agent id is not safe in a path" };
-	const transcriptPath = configured ? undefined : transcriptPathFor(input, agentId);
+	const transcriptPath = configured && !anySetting ? undefined : transcriptPathFor(input, agentId);
 	if (transcriptPath === undefined && !mayEstimate) {
 		return { ok: false, reason: "no transcript path" };
 	}
@@ -1635,15 +1798,22 @@ async function locate({ sessionId, agentId, input, mayEstimate }) {
 }
 
 /**
- * A SUBAGENT inherits the estimate mode of any agent of its session: a forked
+ * A FORK inherits the estimate mode of any agent of its session: a forked
  * subagent's transcript begins with a copy of its ancestor's responses, and an
  * agent in estimate mode never claims its responses, so the fork would post them
  * — usage its ancestor already settled at the estimate. Which agent a fork copied
- * is not recorded anywhere, so every subagent of such a session settles at the
- * estimate too. The parent ("main") copies no one: it inherits nothing. Returns why,
- * or null; a marker dir that cannot be read throws.
+ * is not recorded anywhere, so every fork of such a session settles at the
+ * estimate too, and so does a subagent whose type nothing states
+ * (`mayCopyAncestor`). A NAMED subagent copies no one: it reads its own
+ * transcript, like the parent ("main"), which inherits nothing. Inheriting
+ * further settled every subagent of a session at its tool-I/O estimate once one
+ * agent's transcript was missing, about a tenth of what their transcripts held.
+ * Only an agent with nothing of its transcript read yet inherits (`readsUnderWay`): one
+ * that switched mid-read would settle at the estimate calls whose responses it may post
+ * as well. `hinted`: the hook's `agent_type` (`hintFor`). Returns why, or null; a marker dir that
+ * cannot be read throws.
  */
-async function inheritedEstimate(where, agentId) {
+async function inheritedEstimate(where, agentId, hinted) {
 	if (agentId === "main") return null;
 	const dir = dirname(where.estimatePath);
 	const own = basename(where.estimatePath);
@@ -1656,9 +1826,29 @@ async function inheritedEstimate(where, agentId) {
 		throw err;
 	}
 	const other = names.find((name) => name !== own && name.startsWith(prefix));
-	return other === undefined
-		? null
-		: `${other.slice(prefix.length)} of this session settles at the estimate (a fork copies its ancestor's responses)`;
+	if (
+		other === undefined ||
+		!(await mayCopyAncestor(where.transcriptPath, hinted, where.typePath))
+	) {
+		return null;
+	}
+	return `${other.slice(prefix.length)} of this session settles at the estimate (a fork copies its ancestor's responses)`;
+}
+
+/**
+ * Whether some of the agent's transcript has been read: its cursor's offset is past 0. Such
+ * an agent never inherits estimate mode (`inheritedEstimate`); a response of its fork copy
+ * that the ancestor settled at the estimate is claimed under the same message id
+ * (`resolveAwaitingHold`), so it is not posted again. A cursor that cannot be read answers no.
+ * `read`: a `readCursor` result.
+ */
+function underWay(read) {
+	return read.ok && read.cursor.byteOffset > 0;
+}
+
+/** `underWay` of the cursor at `cursorPath`. */
+async function readsUnderWay(cursorPath) {
+	return underWay(await readCursor(cursorPath));
 }
 
 /** The agent's cursor, its estimate marker and the message claims, in the private state dir. */
@@ -1682,6 +1872,7 @@ async function cursorLocation(sessionId, agentId) {
 		cursorPath: join(dir.dir, `${name}.json`),
 		claimsDir: join(dir.dir, CLAIMS_DIR),
 		estimatePath: join(dir.dir, ESTIMATE_DIR, name),
+		typePath: join(dir.dir, AGENT_TYPE_DIR, name),
 		since,
 	};
 }
@@ -1739,6 +1930,504 @@ export async function stampFirstRun(sessionId) {
 	} catch {
 		// The first hook that needs it reports it.
 	}
+}
+
+/**
+ * Under the state dir, beside the other per-session transcript state: the model Claude Code
+ * reported for each session (`recordSessionModel`), its latest switch (`recordModelSwitch`), and
+ * which agents have read a response (`markSeen`).
+ */
+const SESSION_MODEL_DIR = join("transcripts", "session-models");
+
+/** `lastSwitch`'s answer when a switch may be recorded but cannot be read. */
+const SWITCH_UNREADABLE = Symbol("switch unreadable");
+
+/** A session's model switches (`recordModelSwitch`): one record per hook run, never overwritten. */
+const switchDir = (sessionId) => join(SESSION_MODEL_DIR, `${sanitize(sessionId)}.switches`);
+
+/**
+ * A session's switch run that left no evidence in its directory (`markSessionSwitchFailed`): beside
+ * SessionStart's record, which it replaces. A sanitized session id holds no dot, so it names no
+ * other session's file.
+ */
+const sessionSwitchFailed = (sessionId) => `${sanitize(sessionId)}.switch-failed`;
+
+/**
+ * How far apart two switch records can be and still have landed out of order. A hook writes its
+ * record within its own timeout (5 s, hooks/model-switch.json), so an earlier switch whose record
+ * lands after a later one's lies within that of it. Twice that, for margin.
+ */
+const SWITCH_OVERLAP_MS = 10_000;
+
+/** More switch records than this in one session's directory are not read: `SWITCH_UNREADABLE`. */
+const MAX_SWITCH_RECORDS = 256;
+
+/** `newestTranscriptModel`'s answers that name no model: the file is missing, or holds no response. */
+const TRANSCRIPT_MISSING = Symbol("transcript missing");
+const NO_RESPONSE = Symbol("no response");
+/** `newestTranscriptModel`'s answer when the file cannot be inspected: no model can be told. */
+const UNINSPECTABLE = Object.freeze({ model: UNKNOWN_MODEL, at: Number.NaN });
+
+/**
+ * Record the model Claude Code reports for a session: SessionStart's `model`, "the active
+ * model identifier", which it may omit (https://code.claude.com/docs/en/hooks#sessionstart-input).
+ * An omitted or unusable one leaves any earlier record as it is. Local, bounded, and it never
+ * throws: a session with no record has one source fewer (`holdModelFor`).
+ */
+export async function recordSessionModel(sessionId, model) {
+	try {
+		const id = modelId(model);
+		if (typeof sessionId !== "string" || sessionId === "") return;
+		if (id === null || id === SYNTHETIC_MODEL || id === UNKNOWN_MODEL) return;
+		const dir = await privateDir(SESSION_MODEL_DIR);
+		if (!dir.ok) return;
+		await writeAtomic(join(dir.dir, sanitize(sessionId)), id);
+	} catch {
+		// The next hold resolves without it.
+	}
+}
+
+/**
+ * The model recorded for a session (`recordSessionModel`), or null. Read only from a directory
+ * that passes `privateDir`'s checks, as it is written: an id planted where others can write
+ * would price a hold at a model of their choosing.
+ */
+async function sessionModel(sessionId) {
+	if (typeof sessionId !== "string" || sessionId === "") return null;
+	try {
+		const dir = await privateDir(SESSION_MODEL_DIR, { create: false });
+		if (!dir.ok) return null;
+		const text = await readRegular(join(dir.dir, sanitize(sessionId)), READ_BOUND.small);
+		const id = modelId(text);
+		return id === UNKNOWN_MODEL ? null : id;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Record a switch of the session's model: PostModelSwitch's `to_model`, "the model ID the switch
+ * changes to", with when this hook saw it (https://code.claude.com/docs/en/hooks#postmodelswitch).
+ * Claude Code runs it after every change of the session's model: one requested, an automatic
+ * fallback, a plan-mode setting, a resume. Each run writes a record of its own, so two runs that
+ * overlap never replace each other's (`lastSwitch` reads them together); records too old to matter
+ * are then removed. An unusable `to_model` records nothing. Local, bounded, and it never throws.
+ *
+ * A record is evidence only once its write COMPLETED: it is written whole and renamed into place
+ * (`writeAtomic`), and the run marks itself `.pending` first, removing the mark only after. A
+ * write that fails leaves the switch unrecorded, and the previous record would then read as the
+ * session's model: so a failed run leaves a `.failed` mark, or, when even that cannot be written
+ * (a full disk), renames the records there are to `.failed` (a rename needs no space). With neither
+ * (no record yet to rename), its `.pending` mark is kept as the evidence. `lastSwitch` reads any
+ * mark as unreadable, `unknown`, until a later run's record completes and clears it, and reads a
+ * directory with no record in it the same way. A run that leaves no evidence there at all (its
+ * directory not made, or not even its `.pending` mark written) marks the SESSION instead
+ * (`markSessionSwitchFailed`), which `lastSwitch` reads as unreadable too, on every path.
+ */
+export async function recordModelSwitch(sessionId, model) {
+	const id = modelId(model);
+	if (typeof sessionId !== "string" || sessionId === "") return;
+	if (id === null || id === SYNTHETIC_MODEL || id === UNKNOWN_MODEL) return;
+	let dir;
+	try {
+		dir = await privateDir(switchDir(sessionId));
+	} catch {
+		dir = { ok: false };
+	}
+	if (!dir.ok) {
+		await markSessionSwitchFailed(sessionId);
+		return;
+	}
+	const at = Date.now();
+	const base = `${at}.${process.pid}.${randomBytes(6).toString("hex")}`;
+	const pending = join(dir.dir, `${base}.pending`);
+	let marked = false;
+	try {
+		await writeFile(pending, "", { flag: "wx", mode: 0o600 });
+		marked = true;
+		await writeAtomic(join(dir.dir, `${base}.json`), JSON.stringify({ model: id, at }));
+	} catch {
+		// A failure mark stands in for the `.pending` one, which would read as a live writer. With
+		// none recorded (a full disk, no record to rename), the `.pending` mark is the only evidence
+		// of the switch: kept, it reads `unknown` until a later run prunes it. Without even that,
+		// the session is marked.
+		if (await markSwitchFailed(dir.dir, base)) await unlink(pending).catch(() => {});
+		else if (!marked) await markSessionSwitchFailed(sessionId);
+		return;
+	}
+	// The record is complete. A mark already gone was cleared by a newer run, never a failure.
+	await unlink(pending).catch(() => {});
+	try {
+		for (const other of await readdir(dir.dir)) {
+			const recorded = Number.parseInt(other, 10);
+			// Superseded: a record too old to overlap this one, a failure mark a run before this one
+			// left, and a `.pending` mark of a run too old to be still writing (a run writes within its
+			// hook's timeout, well inside the overlap window). A younger one is a live writer's: kept.
+			const stale = other.endsWith(".json")
+				? recorded < at - SWITCH_OVERLAP_MS
+				: other.endsWith(".failed")
+					? recorded < at
+					: other.endsWith(".pending") && recorded < at - SWITCH_OVERLAP_MS;
+			if (stale) await unlink(join(dir.dir, other)).catch(() => {});
+		}
+	} catch {
+		// Pruning is housekeeping: the record stands.
+	}
+}
+
+/**
+ * A switch run that left no evidence in its own directory (a full disk): the session's state would
+ * read as no switch, so a transcript response or SessionStart's record from before it (which may
+ * name the cheaper model) would price the session's holds (`holdModelFor`). SessionStart's record
+ * is renamed to the session's failure mark (a rename needs no space), else the mark is written,
+ * and it is dated now (`utimes` needs no space either). `lastSwitch` reads it as unreadable until a
+ * switch is recorded after that date. Nothing removes it: a run that removed a mark it found older
+ * could remove one a later failing run had just re-dated, the only evidence of that switch. When
+ * neither the rename nor the mark's write succeeds, SessionStart's record is removed, so the
+ * session reads as having no model. With no record to rename and no room for the mark, nothing
+ * records the switch. Never throws.
+ */
+async function markSessionSwitchFailed(sessionId) {
+	try {
+		const dir = await privateDir(SESSION_MODEL_DIR, { create: false });
+		if (!dir.ok) return;
+		const record = join(dir.dir, sanitize(sessionId));
+		const mark = join(dir.dir, sessionSwitchFailed(sessionId));
+		try {
+			await rename(record, mark);
+		} catch (error) {
+			// No record to rename: the mark is written, or kept as an earlier run left it.
+			await writeFile(mark, "", { flag: "wx", mode: 0o600 }).catch(() => {});
+			// The rename itself can want space (the longer name may grow the directory). With no mark
+			// standing, SessionStart's record is removed (an unlink needs none), so it prices nothing.
+			const standing = await lstat(mark).then(
+				() => true,
+				() => false,
+			);
+			if (error?.code !== "ENOENT" && !standing) await unlink(record).catch(() => {});
+		}
+		const now = new Date();
+		await utimes(mark, now, now).catch(() => {});
+	} catch {
+		// Nothing more can be done.
+	}
+}
+
+/**
+ * How much later than a session's mark (`markSessionSwitchFailed`) a switch must be recorded to
+ * supersede it. A filesystem may store an mtime coarsely, rounded down (HFS+ to the second, FAT to
+ * two), so the failure may have come up to this long after the date its mark reads: a record inside
+ * that window may predate the failure, and the tie goes to the mark (fail dearest). Both sides are
+ * the wall clock in epoch ms: a record's `at` is `Date.now()`, and the mark is dated `new Date()`.
+ */
+const MARK_RESOLUTION_MS = 2_000;
+
+/**
+ * When the session was last marked (`markSessionSwitchFailed`), in epoch ms; null when it never
+ * was; `SWITCH_UNREADABLE` when that cannot be told, since then no switch state can be trusted.
+ */
+async function sessionSwitchMark(sessionId) {
+	try {
+		const dir = await privateDir(SESSION_MODEL_DIR, { create: false });
+		if (!dir.ok) return dir.reason.includes("ENOENT") ? null : SWITCH_UNREADABLE;
+		return (await lstat(join(dir.dir, sessionSwitchFailed(sessionId)))).mtimeMs;
+	} catch (err) {
+		return err?.code === "ENOENT" ? null : SWITCH_UNREADABLE;
+	}
+}
+
+/**
+ * A switch run that could not record its switch: leave state that reads `unknown`. True when a
+ * failure mark was written or a record renamed to one, false when nothing was. Never throws.
+ */
+async function markSwitchFailed(dir, base) {
+	try {
+		await writeFile(join(dir, `${base}.failed`), "", { flag: "wx", mode: 0o600 });
+		return true;
+	} catch {
+		// Not even an empty file could be written: rename what is there instead.
+	}
+	let marked = false;
+	try {
+		for (const other of await readdir(dir)) {
+			if (other.endsWith(".json")) {
+				try {
+					await rename(join(dir, other), join(dir, `${other}.failed`));
+					marked = true;
+				} catch {
+					// That record stays as it is; any other renamed still marks the failure.
+				}
+			}
+		}
+	} catch {
+		// Nothing more can be done here: the caller keeps its `.pending` mark.
+	}
+	return marked;
+}
+
+/**
+ * The session's latest switch (`recordModelSwitch`) as `{ models, at }`: `at` the newest record's
+ * time, and `models` every model recorded within `SWITCH_OVERLAP_MS` of it, since records that
+ * close may have landed out of order. One model means the session's model is known; more mean the
+ * latest switch is ambiguous. Null when none is recorded, or `SWITCH_UNREADABLE` when one may be
+ * but cannot be read (fail dearest): a session marked by a run that could record nothing
+ * (`markSessionSwitchFailed`) with no switch recorded since, a directory that fails `privateDir`'s
+ * checks for any reason but ENOENT, more than `MAX_SWITCH_RECORDS`, or a record that cannot be
+ * read or does not parse. A record still being written (`.tmp`) is not yet one.
+ */
+async function lastSwitch(sessionId) {
+	if (typeof sessionId !== "string" || sessionId === "") return null;
+	const marked = await sessionSwitchMark(sessionId);
+	if (marked === SWITCH_UNREADABLE) return marked;
+	const read = await readSwitchDir(sessionId);
+	// A switch the session's mark records, unless a switch recorded after it supersedes it.
+	if (
+		marked !== null &&
+		(read === null || (typeof read === "object" && read.at < marked + MARK_RESOLUTION_MS))
+	) {
+		return SWITCH_UNREADABLE;
+	}
+	return read;
+}
+
+/** `lastSwitch`'s reading of the session's switch directory alone. */
+async function readSwitchDir(sessionId) {
+	const dir = await privateDir(switchDir(sessionId), { create: false });
+	if (!dir.ok) return dir.reason.includes("ENOENT") ? null : SWITCH_UNREADABLE;
+	// A record listed and then gone was removed by a newer run (`recordModelSwitch`), whose own
+	// record the listing may have missed: never read as no switch, the directory is listed again.
+	for (let attempt = 0; attempt < SWITCH_READ_ATTEMPTS; attempt += 1) {
+		const read = await readSwitches(dir.dir);
+		if (read !== RECORD_GONE) return read;
+	}
+	return SWITCH_UNREADABLE;
+}
+
+/** `readSwitches`' answer when a record it listed is gone before it is read. */
+const RECORD_GONE = Symbol("record gone");
+
+/** How many times `lastSwitch` lists a directory whose records keep going. */
+const SWITCH_READ_ATTEMPTS = 3;
+
+/** One listing of a session's switch records, as `lastSwitch` answers, or `RECORD_GONE`. */
+async function readSwitches(dir) {
+	let names;
+	try {
+		names = (await readdir(dir)).filter((name) => !name.endsWith(".tmp"));
+		// A switch run in progress, or one whose write did not complete (`recordModelSwitch`): no
+		// record can be trusted as current, so `unknown`.
+		if (names.some((name) => name.endsWith(".pending") || name.endsWith(".failed"))) {
+			return SWITCH_UNREADABLE;
+		}
+		// The directory is made only by a switch run, and a run whose record completes leaves it
+		// there: empty, it is a run that could write nothing (a full disk) or one still starting.
+		if (names.length === 0) return SWITCH_UNREADABLE;
+	} catch {
+		return SWITCH_UNREADABLE;
+	}
+	if (names.length > MAX_SWITCH_RECORDS) return SWITCH_UNREADABLE;
+	const records = [];
+	for (const name of names) {
+		let text;
+		try {
+			text = await readRegular(join(dir, name), READ_BOUND.small);
+		} catch (err) {
+			return err?.code === "ENOENT" ? RECORD_GONE : SWITCH_UNREADABLE;
+		}
+		let record;
+		try {
+			record = JSON.parse(text);
+		} catch {
+			return SWITCH_UNREADABLE;
+		}
+		const id = modelId(record?.model);
+		if (id === null || id === UNKNOWN_MODEL || !Number.isSafeInteger(record.at)) {
+			return SWITCH_UNREADABLE;
+		}
+		records.push({ model: id, at: record.at });
+	}
+	if (records.length === 0) return null;
+	const at = Math.max(...records.map((record) => record.at));
+	const models = new Set(
+		records.filter((record) => record.at >= at - SWITCH_OVERLAP_MS).map((record) => record.model),
+	);
+	return { models, at };
+}
+
+/**
+ * A transcript line's response, as `{ model, at }`: its model id, `unknown` when unusable, and its
+ * `timestamp` in epoch ms (NaN when it has none); or undefined when it is no response. A complete
+ * line that holds the `"usage"` key but does not parse is `unknown`, never passed over for an older
+ * response: that key cannot occur inside escaped JSON text, so such a line is a corrupt response.
+ * (A line still being written never gets here: `newestTranscriptModel`.)
+ */
+function responseModelOf(line) {
+	if (!line.includes(USAGE_FIELD)) return undefined;
+	let entry;
+	try {
+		entry = JSON.parse(line.toString("utf-8"));
+	} catch {
+		return { model: UNKNOWN_MODEL, at: Number.NaN };
+	}
+	if (!isObject(entry?.message?.usage)) return undefined;
+	const id = modelId(entry.message.model);
+	// The `<synthetic>` placeholder is no response of any model.
+	if (id === SYNTHETIC_MODEL) return undefined;
+	return { model: id ?? UNKNOWN_MODEL, at: Date.parse(entry.timestamp) };
+}
+
+/**
+ * The NEWEST response in a transcript (`responseModelOf`'s `{ model, at }`), scanned BACKWARD from
+ * its end in `READ_CHUNK_BYTES` chunks, so a response line of any size the ingest accepts is read
+ * whole:
+ * - the newest complete response line, its model `unknown` when it names no usable one (never an
+ *   older response's, which may be cheaper);
+ * - `UNINSPECTABLE`, an `unknown` model, when the transcript cannot be inspected: unreadable for any
+ *   reason but ENOENT, a final line its newline has not yet ended (still being written, whatever it
+ *   holds), a line over `MAX_LINE_BYTES`, or `MAX_READ_BYTES` scanned without reaching its start;
+ * - `NO_RESPONSE` only after a read back to its first byte found no response;
+ * - `TRANSCRIPT_MISSING` when it does not exist (ENOENT).
+ * Nothing here is posted.
+ */
+async function newestTranscriptModel(path) {
+	let handle;
+	try {
+		({ handle } = await openRegular(path));
+	} catch (err) {
+		return err?.code === "ENOENT" ? TRANSCRIPT_MISSING : UNINSPECTABLE;
+	}
+	try {
+		const { size } = await handle.stat();
+		let end = size;
+		// The bytes before the first newline seen so far: a line whose start lies further back.
+		let carry = Buffer.alloc(0);
+		while (end > 0) {
+			if (size - end >= MAX_READ_BYTES) return UNINSPECTABLE;
+			const start = Math.max(0, end - READ_CHUNK_BYTES);
+			const chunk = Buffer.alloc(end - start);
+			let read = 0;
+			while (read < chunk.length) {
+				const { bytesRead } = await handle.read(chunk, read, chunk.length - read, start + read);
+				if (bytesRead === 0) return UNINSPECTABLE;
+				read += bytesRead;
+			}
+			// Only a line its newline has ended is evidence. A final one without it is still being
+			// written (Claude Code appends asynchronously), whatever it holds so far, parsed or not and
+			// with or without its `"usage"` key: the response it will be cannot be told yet.
+			if (end === size && chunk[chunk.length - 1] !== 0x0a) return UNINSPECTABLE;
+			const buffer = carry.length === 0 ? chunk : Buffer.concat([chunk, carry]);
+			// Newest first: every line after a newline is whole.
+			let stop = buffer.length;
+			let newline = stop > 0 ? buffer.lastIndexOf(0x0a, stop - 1) : -1;
+			while (newline !== -1) {
+				const found = responseModelOf(buffer.subarray(newline + 1, stop));
+				if (found !== undefined) return found;
+				stop = newline;
+				newline = stop > 0 ? buffer.lastIndexOf(0x0a, stop - 1) : -1;
+			}
+			carry = buffer.subarray(0, stop);
+			if (carry.length > MAX_LINE_BYTES) return UNINSPECTABLE;
+			end = start;
+		}
+		// At its first byte: the carry is the transcript's first line.
+		return responseModelOf(carry) ?? NO_RESPONSE;
+	} catch {
+		return UNINSPECTABLE;
+	} finally {
+		await handle.close().catch(() => {});
+	}
+}
+
+/** The marker that a hold of this agent has read a response from its transcript (`holdModelFor`). */
+const seenName = (sessionId, agentId) => `${sanitize(sessionId)}__${agentId}.seen`;
+
+/** Record, once, that a hold of this agent read a response from its transcript. Never throws. */
+async function markSeen(sessionId, agentId) {
+	try {
+		const dir = await privateDir(SESSION_MODEL_DIR);
+		if (!dir.ok) return;
+		await writeFile(join(dir.dir, seenName(sessionId, agentId)), "", { flag: "wx", mode: 0o600 });
+	} catch {
+		// Recorded already (EEXIST), or not now: the cursor is the other record of it.
+	}
+}
+
+/** Whether `markSeen` recorded this agent; true when that cannot be told (fail dearest). */
+async function seenBefore(sessionId, agentId) {
+	const dir = await privateDir(SESSION_MODEL_DIR, { create: false });
+	if (!dir.ok) return !dir.reason.includes("ENOENT");
+	try {
+		await lstat(join(dir.dir, seenName(sessionId, agentId)));
+		return true;
+	} catch (err) {
+		return err?.code !== "ENOENT";
+	}
+}
+
+/**
+ * The model a hold is authorized at when no transcript window names one: every estimate hold,
+ * a transcript hold with no window, and PostToolUse's replacement of an expired hold. Never a
+ * configured or built-in default, which priced an Opus session's holds at a cheaper model's
+ * rate, and never a model cheaper than the one the session might be using NOW:
+ *  1. the newest response in the agent's transcript (`newestTranscriptModel`): only the file is
+ *     always current (a cursor lags it while another hook holds the agent's lock, or when a read
+ *     stopped before the end). In estimate mode too (`UT_CC_USAGE=estimate`, or an agent that
+ *     settles at the estimate): only that response's model id is read, never its usage, which is
+ *     still estimated. A newest response with no usable model, or a transcript that cannot be
+ *     inspected, is `unknown`. The file may LAG: Claude Code writes it asynchronously, so it "may
+ *     not yet include the current turn's most recent messages when a hook fires"
+ *     (https://code.claude.com/docs/en/hooks#common-input-fields). So when the session's latest
+ *     model switch (`recordModelSwitch`) names another model than that response, or is ambiguous
+ *     (two hook runs that overlapped name different models), and the response is not dated after
+ *     the switch (or bears no date), the response may predate it: `unknown`,
+ *     never the cheaper of the two, and never the switch's model either, since a one-turn
+ *     fallback model can serve a turn without a switch. A switch record that cannot be read is
+ *     `unknown` too. It counts for every agent of the session: an automatic fallback changes the
+ *     session's model;
+ *  2. with no response to read (the transcript is missing, holds none, or no path names it), the
+ *     model of the session's latest switch (`unknown` when it is ambiguous), else the one Claude
+ *     Code reported for the session at
+ *     SessionStart (`recordSessionModel`), for the MAIN agent only: it is the session's model,
+ *     and a subagent may run a dearer one (Claude Code's
+ *     SubagentStart input names no model, https://code.claude.com/docs/en/hooks#subagentstart-input,
+ *     and the Agent tool's `resolvedModel` arrives only once the subagent has finished). And ONLY
+ *     while it is provably current: before this agent has read anything (its cursor has read no
+ *     byte and names no model, and no hold of it has read a response, `markSeen`). After that a
+ *     switch may have happened since, so the transcript gone, or never named, is `unknown`;
+ *  3. `unknown`: the server prices an id it does not know at the dearest rate it publishes (core
+ *     pricing.ts `FALLBACK_RATE`) and marks the receipt `rateSource: "fallback"`.
+ * `readBefore` is whether this agent's cursor has read a byte; `lastModel`, the model it last
+ * read. Returns `{ model, source }`, `source` being `transcript`, `session` or `unknown`: what the
+ * hold's `params.modelSource` says. Never throws.
+ */
+export async function holdModelFor({ sessionId, agentId, input, lastModel, readBefore = false }) {
+	const unknown = { model: UNKNOWN_MODEL, source: "unknown" };
+	if (!isAgentId(agentId)) return unknown;
+	const path = transcriptPathFor(input ?? {}, agentId);
+	const switched = await lastSwitch(sessionId);
+	if (path !== undefined) {
+		const newest = await newestTranscriptModel(path);
+		if (typeof newest === "object") {
+			await markSeen(sessionId, agentId);
+			if (newest.model === UNKNOWN_MODEL || switched === SWITCH_UNREADABLE) return unknown;
+			// NaN (no date) is never after the switch. Before it, only the one model the session
+			// switched to is taken: another model, or an ambiguous switch, is `unknown`.
+			const current = switched?.models.size === 1 && switched.models.has(newest.model);
+			if (switched !== null && !(newest.at > switched.at) && !current) return unknown;
+			return { model: newest.model, source: "transcript" };
+		}
+	}
+	const read =
+		readBefore === true || modelId(lastModel) !== null || (await seenBefore(sessionId, agentId));
+	if (read || agentId !== "main" || switched === SWITCH_UNREADABLE) return unknown;
+	if (switched !== null) {
+		return switched.models.size === 1
+			? { model: [...switched.models][0], source: "session" }
+			: unknown;
+	}
+	const reported = await sessionModel(sessionId);
+	if (reported !== null) return { model: reported, source: "session" };
+	return unknown;
 }
 
 /**
@@ -1802,8 +2491,10 @@ export async function estimateReasonFor({ sessionId, agentId, input }) {
  * Whether this agent's usage is settled at the ESTIMATE, read without the agent's lock and
  * without writing anything (the breaker's skip, pre-tool-use.mjs, must touch no state):
  * UT_CC_USAGE=estimate (or the config file's), an agent id unsafe in a path, no transcript
- * path, or a recorded estimate mode, the agent's own or, for a subagent, another agent's of
- * its session (`inheritedEstimate`). A marker directory that cannot be read answers yes: an
+ * path, or a recorded estimate mode, the agent's own or, for a fork (or a subagent of no
+ * stated type) with nothing of its transcript read yet (`readsUnderWay`), another agent's
+ * of its session (`inheritedEstimate`). A marker directory
+ * that cannot be read answers yes: an
  * answer this cannot give is never "no".
  */
 export async function settlesAtEstimate({ sessionId, agentId, input }) {
@@ -1818,7 +2509,11 @@ export async function settlesAtEstimate({ sessionId, agentId, input }) {
 	}
 	if (names.includes(own)) return true;
 	const prefix = `${sanitize(sessionId)}__`;
-	return agentId !== "main" && names.some((name) => name !== own && name.startsWith(prefix));
+	if (agentId === "main" || !names.some((name) => name !== own && name.startsWith(prefix))) {
+		return false;
+	}
+	if (await readsUnderWay(join(stateRoot(), "transcripts", `${own}.json`))) return false;
+	return mayCopyAncestor(transcriptPathFor(input, agentId), hintFor(input, agentId));
 }
 
 /**
@@ -1834,8 +2529,19 @@ export async function settlesAtEstimate({ sessionId, agentId, input }) {
  *    may be settled at the estimate either: the transcript still holds that
  *    usage, and the first settle point that can use the state posts it;
  *  - `{ kind: "busy", lastModel }`, or `{ kind: "ready", ... }` holding the lock.
+ * `hook` names the hook, for a watch record; `lastChance`: no later settle point of this agent
+ * reads its transcript (its SubagentStop, or SessionEnd), so a transcript still missing there
+ * is the agent's settled state (`notWrittenYet`).
  */
-async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = false }) {
+async function openAgent({
+	sessionId,
+	agentId,
+	input,
+	hook,
+	waitMs = 0,
+	mayEstimate = false,
+	lastChance = false,
+}) {
 	const where = await locate({ sessionId, agentId, input, mayEstimate });
 	if (!where.ok) {
 		return { kind: where.unavailable ? "unavailable" : "estimate", reason: where.reason };
@@ -1846,10 +2552,14 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 	} catch (err) {
 		return { kind: "unavailable", reason: `estimate marker unreadable (${err?.code ?? "error"})` };
 	}
-	if (recorded !== null) return { kind: "estimate", reason: recorded };
+	if (recorded !== null) {
+		await noteLateTranscript({ where, sessionId, agentId, recorded, hook });
+		return { kind: "estimate", reason: recorded };
+	}
+	await rememberAgentType(where, hintFor(input, agentId));
 	let inherited;
 	try {
-		inherited = await inheritedEstimate(where, agentId);
+		inherited = await inheritedEstimate(where, agentId, hintFor(input, agentId));
 	} catch (err) {
 		return { kind: "unavailable", reason: `estimate markers unreadable (${err?.code ?? "error"})` };
 	}
@@ -1857,21 +2567,30 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 	// Nothing of this agent is read now (UT_CC_USAGE=estimate, no transcript path),
 	// or its session's estimate mode is its own (`inheritedEstimate`), and a hold
 	// may settle at the estimate: recorded first, so no later hook posts the same
-	// usage for real.
+	// usage for real. An agent whose reads are under way inherits nothing
+	// (`readsUnderWay`): it goes on reading, holding the lock taken here.
+	let release = null;
 	if (transcriptPath === undefined || inherited !== null) {
 		const reason = inherited ?? where.unread;
 		const held = await acquireLock(cursorPath, { waitMs: Math.max(waitMs, NO_PATH_LOCK_WAIT_MS) });
 		if (held === null) {
 			return { kind: "unavailable", reason: `${reason}, and another hook holds the agent's lock` };
 		}
-		try {
-			// UT_CC_USAGE=estimate (or the config file's) is the user's own setting: nothing to announce.
-			return await stickToEstimate(where, reason, reason !== howToSet("usage", "estimate"));
-		} finally {
-			await held();
+		if (transcriptPath !== undefined && (await readsUnderWay(cursorPath))) {
+			release = held;
+		} else {
+			try {
+				if (inherited !== null) {
+					await noteNoTranscriptAgent({ where, sessionId, agentId, input, hook });
+				}
+				// UT_CC_USAGE=estimate (or the config file's) is the user's own setting: nothing to announce.
+				return await stickToEstimate(where, reason, reason !== howToSet("usage", "estimate"));
+			} finally {
+				await held();
+			}
 		}
 	}
-	const release = await acquireLock(cursorPath, { waitMs });
+	release ??= await acquireLock(cursorPath, { waitMs });
 	if (release === null) {
 		const peek = await readCursor(cursorPath);
 		if (!peek.ok) return { kind: "unavailable", reason: peek.reason };
@@ -1879,7 +2598,12 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 			// A cursor from before the marker: record it now.
 			return stickToEstimate(where, peek.cursor.estimateReason ?? "transcript unreadable", false);
 		}
-		return { kind: "busy", lastModel: peek.cursor.lastModel, transcriptPath };
+		return {
+			kind: "busy",
+			lastModel: peek.cursor.lastModel,
+			readBefore: peek.cursor.byteOffset > 0,
+			transcriptPath,
+		};
 	}
 	try {
 		// Again under the lock: a hook that recorded estimate mode since the check
@@ -1889,13 +2613,17 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 			await release();
 			return { kind: "estimate", reason: marked };
 		}
-		const inheritedNow = await inheritedEstimate(where, agentId);
-		if (inheritedNow !== null) {
-			const sticky = await stickToEstimate(where, inheritedNow, true);
-			await release();
-			return sticky;
-		}
 		const read = await readCursor(cursorPath);
+		// An agent whose reads are under way inherits nothing (`underWay`); one whose
+		// cursor cannot be read still does.
+		if (!underWay(read)) {
+			const inheritedNow = await inheritedEstimate(where, agentId, hintFor(input, agentId));
+			if (inheritedNow !== null) {
+				const sticky = await stickToEstimate(where, inheritedNow, true);
+				await release();
+				return sticky;
+			}
+		}
 		if (!read.ok) {
 			// Post nothing, and leave the cursor exactly as it is.
 			await release();
@@ -1908,6 +2636,22 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 		}
 		const { live, finished, inFlight } = await reconcile(cursor, sessionId, agentId);
 		const ingested = await ingest(cursor, transcriptPath, where.since);
+		if (!ingested.ok && notWrittenYet(ingested, agentId, cursor, lastChance)) {
+			// A subagent's first hooks can run before Claude Code creates its transcript: nothing is
+			// recorded yet, so the transcript, once it exists, is still read. A hold made now is an
+			// estimate hold that its PostToolUse rules on (`resolveAwaitingHold`), from the call's
+			// own response and its claim: given back if a post took it, else settled at the estimate,
+			// so no call goes uncharged, or is charged twice, for a transcript not written yet.
+			await noteNoTranscriptAgent({ where, sessionId, agentId, input, hook });
+			await writeCursor(cursorPath, cursor);
+			await removeFiles(finished);
+			await release();
+			return {
+				kind: "unavailable",
+				awaitingTranscript: true,
+				reason: `${ingested.reason}: not written yet`,
+			};
+		}
 		if (!ingested.ok) {
 			const sticky = await stickToEstimate(where, ingested.reason, true);
 			if (sticky.kind === "estimate") {
@@ -1945,6 +2689,378 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 	} catch (err) {
 		await release();
 		return { kind: "unavailable", reason: `transcript state unavailable (${errText(err)})` };
+	}
+}
+
+/**
+ * Whether a failed first read is a SUBAGENT's transcript not written yet: missing (ENOENT)
+ * before any of it was read, at a hook a later settle point of the agent follows. Claude Code
+ * can run a subagent's first hooks before it creates the transcript, and settling such an agent
+ * at the estimate for good settled what its transcript would hold at a tool-I/O estimate. Still
+ * missing at the call's PostToolUse (`resolveAwaitingHold`), or at its last chance
+ * (`lastChance`: SubagentStop, SessionEnd), the estimate is the agent's only record: it sticks.
+ * The parent's, a transcript read before, and any other failure stick at once, as before.
+ */
+function notWrittenYet(ingested, agentId, cursor, lastChance) {
+	return ingested.code === "ENOENT" && agentId !== "main" && cursor.byteOffset === 0 && !lastChance;
+}
+
+/**
+ * The once-per-agent watch record (lib.mjs `NO_TRANSCRIPT_AGENT`) of a subagent id that no
+ * type is stated for (no meta file, no hook `agent_type`) and whose transcript does not exist:
+ * the hook and tool it arrived with, never content. An agent with a stated type writes none
+ * (its transcript is merely late). Once: a marker beside the estimate markers
+ * (<state>/transcripts/no-transcript/<session>__<agent>), made before the record and removed
+ * if the record could not be written. Best-effort evidence: it never throws.
+ */
+async function noteNoTranscriptAgent({ where, sessionId, agentId, input, hook }) {
+	const { transcriptPath } = where;
+	if (agentId === "main" || transcriptPath === undefined) return;
+	try {
+		if ((await statedAgentType(transcriptPath, hintFor(input, agentId))) !== null) return;
+		const missing = await stat(transcriptPath).then(
+			() => false,
+			(err) => err?.code === "ENOENT",
+		);
+		if (!missing) return;
+		const marker = join(
+			dirname(dirname(where.estimatePath)),
+			NO_TRANSCRIPT_DIR,
+			basename(where.estimatePath),
+		);
+		await mkdir(dirname(marker), { recursive: true, mode: 0o700 });
+		await writeFile(marker, "", { flag: "wx", mode: 0o600 });
+		const written = await recordWatchEvent({
+			kind: NO_TRANSCRIPT_AGENT,
+			mode: guardMode(),
+			session: sessionId,
+			agent: agentId,
+			hook: typeof hook === "string" ? hook : "unknown",
+			tool: typeof input?.tool_name === "string" ? input.tool_name.slice(0, 128) : null,
+			reason:
+				"a subagent id with no stated agent type and no transcript; none of its usage can be read",
+			started: null,
+		});
+		if (!written) await unlink(marker).catch(() => {});
+	} catch {
+		// EEXIST: recorded already. Anything else: not this time.
+	}
+}
+
+/**
+ * PostToolUse's ruling on a hold PreToolUse made while the subagent's transcript was not written
+ * yet (the hold's `awaitingTranscript`, `notWrittenYet`). It is ruled only from what is read now,
+ * under the agent's lock, so no read of the transcript runs between the check and the ruling, and
+ * never from what a later read is expected to do. The call's own response is the assistant entry
+ * that holds the call's `tool_use` block (`responseOfCall`). In this order:
+ *  - the response is in the transcript, and nothing of the transcript was read yet (cursor at
+ *    0): this hold races every post for its message's CLAIM, in the claims dir every window and
+ *    remainder posts through (`selectOwn`). Claimed by this hold (now, or by a run of it that
+ *    died before its settle), it settles at the estimate (`estimate`), and no post can take the
+ *    message after (a claim that exists is never posted again, and is never removed, so a failed
+ *    estimate settle cannot let it be posted either).
+ *  - the response is in the transcript, and some of it was read: the claim is only looked up
+ *    (`claimOn`), never made. A hold of another call of the same response may be counting on the
+ *    agent's reads to post it, so an unclaimed response is left to them: `unknown`, one gap.
+ *  - either way, a claim held for an estimate (this hold's, or another call's of the same
+ *    response: a response can make several calls) settles this call at its OWN estimate. An
+ *    estimate prices one call's tool input and output, never the response, while a post of the
+ *    response charges all of its calls, so a response is charged per call or posted whole, never
+ *    split: one response with two calls is charged two estimates, as in estimate mode. The agent
+ *    is recorded at the estimate first (`CLAIMED_CALL_TRANSCRIPT`), so every later call of it,
+ *    the response's other calls included, settles at its own estimate too, and its transcript is
+ *    never read after (`noteLateTranscript`). Claimed by the agent's own reads AND a settle of it
+ *    the server confirmed (the cursor's `posted`, or a finished hold not brought into it yet), the
+ *    response, every call of it, is charged there, so the hold is given back (`transcript`,
+ *    released as `unused`). Any other claim is `unknown`: a read claims a message before it posts
+ *    it, and a claim of another agent's is not read under this lock.
+ *  - the response is not there (or the host named no call), and nothing of the transcript was
+ *    read yet (cursor at 0): nothing of it was posted, so the hold settles at the estimate. The
+ *    agent's estimate mode is recorded first (its own marker, a sibling's it inherits, a missing
+ *    transcript's, or `UNSEEN_CALL_TRANSCRIPT`), so its transcript is never read after: a late
+ *    one's lines are skipped, and a gap names them (`noteLateTranscript`).
+ *  - `unknown`, for everything else: the response is not there, but some of the transcript was
+ *    read (any of the response could have been posted from a part read before), or the lock,
+ *    the state, or the transcript could not be read whole. The hold is given back as a call that
+ *    ran uncharged, one gap that names the call. Never the estimate: a later post could charge
+ *    the same response again.
+ */
+export async function resolveAwaitingHold({ sessionId, agentId, input, waitMs = 0 }) {
+	// Whatever the usage setting says now: a hold made while it read transcripts may be settled
+	// at the estimate only once its response is claimed, or a setting switched back would let a
+	// later read post that response too.
+	const where = await locate({ sessionId, agentId, input, mayEstimate: true, anySetting: true });
+	if (!where.ok || where.transcriptPath === undefined) {
+		return { kind: "unknown", reason: where.reason ?? "no transcript path" };
+	}
+	const release = await acquireLock(where.cursorPath, { waitMs });
+	if (release === null) return { kind: "unknown", reason: "another hook holds the agent's lock" };
+	try {
+		const read = await readCursor(where.cursorPath);
+		if (!read.ok) return { kind: "unknown", reason: read.reason };
+		const toolUseId = callIdOf(input);
+		const response =
+			toolUseId === null
+				? await transcriptPresence(where.transcriptPath)
+				: await responseOfCall(where.transcriptPath, agentId, toolUseId);
+		if (response.kind === "unknown") return response;
+		if (response.kind === "found") {
+			const window = `${sanitize(sessionId)}/${agentId}`;
+			const mine = `${window} ${ESTIMATED_CALL} ${toolUseId}`;
+			// Once the agent's reads are under way, a hold of another call of the same response may
+			// be counting on them to post it: the response is claimed for no estimate then.
+			const reading = read.cursor.byteOffset > 0;
+			const claim = reading
+				? await claimOn(where.claimsDir, response.id)
+				: await claimHolder(where.claimsDir, response.id, mine);
+			if (claim.holder === null) {
+				return {
+					kind: "unknown",
+					reason:
+						reading && claim.code === "ENOENT"
+							? "its response is not posted yet, and the agent's reads, which post it, are under way"
+							: `its response could not be claimed (${claim.code})`,
+				};
+			}
+			// Claimed now, or by this same hold before a hook died ahead of its settle, or by another
+			// call of the same response for ITS estimate: the response is never posted from the
+			// transcript. An estimate prices one call's own tool input and output, never the
+			// response, so every call of it is charged its own estimate, and so is every later call
+			// of the agent, which is recorded at the estimate first: a response is never split
+			// between a post and an estimate.
+			if (
+				claim.created ||
+				claim.holder === mine ||
+				claim.holder.startsWith(`${window} ${ESTIMATED_CALL} `)
+			) {
+				const sticky = await stickToEstimate(where, CLAIMED_CALL_TRANSCRIPT, true);
+				if (sticky.kind !== "estimate") return { kind: "unknown", reason: sticky.reason };
+				await noteLateTranscript({
+					where,
+					sessionId,
+					agentId,
+					recorded: sticky.reason,
+					hook: "PostToolUse",
+				});
+				return {
+					kind: "estimate",
+					reason: `the call's response is claimed for ${claim.holder === mine ? "this" : "another call's"} estimate, and never posted from the transcript; the agent settles at the estimate from now on`,
+				};
+			}
+			// The agent's own window claims a message BEFORE posting it, so its claim alone proves
+			// nothing: only a settle of it the server confirmed does, in the cursor's `posted` or a
+			// finished hold not brought into it yet. `accounted` is not proof: it also holds ids that
+			// may have posted and ids written off. Any other holder's state is not read under this lock.
+			if (
+				claim.holder === window &&
+				(read.cursor.posted.has(response.id) ||
+					(await settledInJournal(sessionId, agentId, response.id)))
+			) {
+				return { kind: "transcript" };
+			}
+			return {
+				kind: "unknown",
+				reason:
+					claim.holder === window
+						? "its response is claimed by the agent's own reads, and no settle of it is confirmed"
+						: "its response is claimed by another agent's reads",
+			};
+		}
+		if (read.cursor.byteOffset > 0) {
+			return {
+				kind: "unknown",
+				reason:
+					toolUseId === null
+						? "the host named no call, and some of the transcript was read"
+						: "its response is not in the transcript, and some of the transcript was read",
+			};
+		}
+		const marked = await estimateMarker(where.estimatePath);
+		if (marked !== null) return { kind: "estimate", reason: marked };
+		const missing = response.kind === "missing";
+		const reason =
+			(await inheritedEstimate(where, agentId, hintFor(input, agentId))) ??
+			(missing ? MISSING_TRANSCRIPT : UNSEEN_CALL_TRANSCRIPT);
+		const sticky = await stickToEstimate(where, reason, true);
+		if (sticky.kind !== "estimate") return { kind: "unknown", reason: sticky.reason };
+		if (reason === UNSEEN_CALL_TRANSCRIPT) {
+			await noteLateTranscript({
+				where,
+				sessionId,
+				agentId,
+				recorded: reason,
+				hook: "PostToolUse",
+			});
+		}
+		return sticky;
+	} catch (err) {
+		return { kind: "unknown", reason: `transcript state unreadable (${err?.code ?? "error"})` };
+	} finally {
+		await release();
+	}
+}
+
+/** Whether a finished hold of the agent, not yet brought into its cursor, confirms a settle that posted `id`. */
+async function settledInJournal(sessionId, agentId, id) {
+	for (const record of await holdJournal(sessionId, agentId)) {
+		if (record.kind === "done" && record.outcome === "settled" && record.ids.includes(id))
+			return true;
+	}
+	return false;
+}
+
+/** The hook's `tool_use_id`, when it is one a claim may carry; else null. */
+function callIdOf(input) {
+	const id = input?.tool_use_id;
+	return typeof id === "string" && id !== "" && id.length <= MAX_ID_CHARS ? id : null;
+}
+
+/** Whether the transcript exists, for a call the host named no id for: `missing`, `absent`, or `unknown`. */
+async function transcriptPresence(transcriptPath) {
+	try {
+		await stat(transcriptPath);
+		return { kind: "absent" };
+	} catch (err) {
+		return err?.code === "ENOENT"
+			? { kind: "missing" }
+			: { kind: "unknown", reason: `transcript unreadable (${err?.code ?? "error"})` };
+	}
+}
+
+/**
+ * The call's own response in the agent's transcript, read WHOLE: `{ kind: "found", id }`, the
+ * message id of the assistant entry of this agent that holds the call's `tool_use` block;
+ * `missing` (no transcript); `absent` (every line was read, and none holds it); or `unknown`, when
+ * the answer cannot be told: a transcript over MAX_READ_BYTES, one that shrank or failed while it
+ * was read, a line over MAX_LINE_BYTES, an unparseable line or an unfinished last line that
+ * names the call, or a response with no usable id. Entries a fork copied from its ancestor hold
+ * the ancestor's calls, never this one: a tool_use id names one call.
+ */
+async function responseOfCall(transcriptPath, agentId, toolUseId) {
+	let handle;
+	try {
+		({ handle } = await openRegular(transcriptPath));
+	} catch (err) {
+		return err?.code === "ENOENT"
+			? { kind: "missing" }
+			: { kind: "unknown", reason: `transcript unreadable (${err?.code ?? "error"})` };
+	}
+	try {
+		const { size } = await handle.stat();
+		if (size > MAX_READ_BYTES) {
+			return {
+				kind: "unknown",
+				reason: `transcript over ${MAX_READ_BYTES >> 20} MiB, not read for the call`,
+			};
+		}
+		const needle = Buffer.from(JSON.stringify(toolUseId));
+		const chunk = Buffer.alloc(Math.min(READ_CHUNK_BYTES, size));
+		let carry = Buffer.alloc(0);
+		let position = 0;
+		while (position < size) {
+			const want = Math.min(chunk.length, size - position);
+			const { bytesRead } = await handle.read(chunk, 0, want, position);
+			if (bytesRead === 0) {
+				return { kind: "unknown", reason: "transcript shrank while it was read for the call" };
+			}
+			position += bytesRead;
+			const data =
+				carry.length === 0
+					? chunk.subarray(0, bytesRead)
+					: Buffer.concat([carry, chunk.subarray(0, bytesRead)]);
+			let from = 0;
+			for (let end = data.indexOf(0x0a); end !== -1; end = data.indexOf(0x0a, from)) {
+				const found = callInLine(data.subarray(from, end), agentId, toolUseId, needle);
+				if (found !== null) return found;
+				from = end + 1;
+			}
+			carry = Buffer.from(data.subarray(from));
+			if (carry.length > MAX_LINE_BYTES) {
+				return {
+					kind: "unknown",
+					reason: `a transcript line over ${MAX_LINE_BYTES >> 20} MiB, not read for the call`,
+				};
+			}
+		}
+		if (carry.includes(needle)) {
+			return { kind: "unknown", reason: "the call's transcript entry is still being written" };
+		}
+		return { kind: "absent" };
+	} catch (err) {
+		return { kind: "unknown", reason: `transcript unreadable (${err?.code ?? "error"})` };
+	} finally {
+		await handle.close().catch(() => {});
+	}
+}
+
+/** One transcript line's answer for `responseOfCall`: found, unknown, or null (not this call's). */
+function callInLine(line, agentId, toolUseId, needle) {
+	if (!line.includes(needle)) return null;
+	let entry;
+	try {
+		entry = JSON.parse(line.toString("utf-8"));
+	} catch {
+		return { kind: "unknown", reason: "a transcript line that names the call is not JSON" };
+	}
+	const message = entry?.message;
+	if (entry?.type !== "assistant" || entry?.agentId !== agentId) return null;
+	if (!Array.isArray(message?.content)) return null;
+	if (!message.content.some((block) => block?.type === "tool_use" && block.id === toolUseId)) {
+		return null;
+	}
+	const id = message.id;
+	if (typeof id !== "string" || id === "" || id.length > MAX_ID_CHARS) {
+		return { kind: "unknown", reason: "the call's response has no usable message id" };
+	}
+	return { kind: "found", id };
+}
+
+/**
+ * The once-per-agent gap record of an agent recorded at the estimate because its transcript did
+ * not exist (`MISSING_TRANSCRIPT`), did not hold a call that waited for it
+ * (`UNSEEN_CALL_TRANSCRIPT`), or held a response a call that waited for it claimed for its
+ * estimate (`CLAIMED_CALL_TRANSCRIPT`), whose transcript exists now. Its lines are never posted: the
+ * calls it covers were charged at the estimate, and posting them would charge them twice. So
+ * what they hold reaches the ledger only as that estimate, which this record says. Once: a
+ * marker under <state>/transcripts/late-transcript/, removed if the record could not be written.
+ * Never throws.
+ */
+async function noteLateTranscript({ where, sessionId, agentId, recorded, hook }) {
+	if (
+		recorded !== MISSING_TRANSCRIPT &&
+		recorded !== UNSEEN_CALL_TRANSCRIPT &&
+		recorded !== CLAIMED_CALL_TRANSCRIPT
+	) {
+		return;
+	}
+	if (where.transcriptPath === undefined) return;
+	try {
+		await stat(where.transcriptPath);
+		const marker = join(
+			dirname(dirname(where.estimatePath)),
+			LATE_TRANSCRIPT_DIR,
+			basename(where.estimatePath),
+		);
+		await mkdir(dirname(marker), { recursive: true, mode: 0o700 });
+		await writeFile(marker, "", { flag: "wx", mode: 0o600 });
+		const written = await recordWatchEvent({
+			kind: "gap",
+			mode: guardMode(),
+			phase: "late-transcript",
+			session: sessionId,
+			agent: agentId,
+			hook: typeof hook === "string" ? hook : "unknown",
+			reason:
+				recorded === MISSING_TRANSCRIPT
+					? "its transcript appeared after the agent was settled at the estimate; its lines are not posted, so nothing is charged twice"
+					: recorded === UNSEEN_CALL_TRANSCRIPT
+						? "its transcript did not hold a call that waited for it, so the agent was settled at the estimate; its lines are not posted, so nothing is charged twice"
+						: "a call that waited for its transcript was charged at the estimate, so the agent was settled at the estimate; its lines are not posted, so nothing is charged twice",
+			started: null,
+		});
+		if (!written) await unlink(marker).catch(() => {});
+	} catch {
+		// ENOENT: still missing. EEXIST: recorded already. Anything else: not this time.
 	}
 }
 
@@ -1994,12 +3110,23 @@ export async function prepareWindow({
 	jobs = null,
 	holdKey = "none",
 }) {
-	const opened = await openAgent({ sessionId, agentId, input, mayEstimate: true });
+	const opened = await openAgent({
+		sessionId,
+		agentId,
+		input,
+		hook: "PreToolUse",
+		mayEstimate: true,
+	});
 	if (opened.kind === "estimate" || opened.kind === "unavailable") {
-		return { mode: opened.kind, reason: opened.reason, becameSticky: opened.becameSticky === true };
+		return {
+			mode: opened.kind,
+			reason: opened.reason,
+			becameSticky: opened.becameSticky === true,
+			awaitingTranscript: opened.awaitingTranscript === true,
+		};
 	}
 	const none = async () => {};
-	const empty = (lastModel, agentType) => ({
+	const empty = (lastModel, agentType, readBefore) => ({
 		mode: "transcript",
 		window: null,
 		key: null,
@@ -2007,6 +3134,7 @@ export async function prepareWindow({
 		agentTypeRaw: agentType.raw,
 		principal: principalFor(sessionId, agentId, agentType.raw),
 		lastModel,
+		readBefore,
 		commit: none,
 		settledElsewhere: none,
 		abandon: none,
@@ -2016,6 +3144,7 @@ export async function prepareWindow({
 		return empty(
 			opened.lastModel,
 			await agentTypeFor(opened.transcriptPath, agentId, agentTypeHint),
+			opened.readBefore,
 		);
 	}
 	const { cursor } = opened;
@@ -2044,7 +3173,7 @@ export async function prepareWindow({
 	} catch (err) {
 		await opened.release();
 		say(`usertrust: transcript window skipped — ${errText(err)}`);
-		return empty(cursor.lastModel, agentType);
+		return empty(cursor.lastModel, agentType, cursor.byteOffset > 0);
 	}
 	let decided = false;
 	const key = window === null ? null : vehicleKey(sessionId, agentId, window.ids);
@@ -2056,6 +3185,7 @@ export async function prepareWindow({
 		agentTypeRaw: agentType.raw,
 		principal: principalFor(sessionId, agentId, agentType.raw),
 		lastModel: cursor.lastModel,
+		readBefore: cursor.byteOffset > 0,
 		async commit(transferId) {
 			if (window === null || decided) return;
 			decided = true;
@@ -2073,7 +3203,7 @@ export async function prepareWindow({
 			// outcome, which the next lock holder writes off all the same.
 			if (window === null || decided) return;
 			decided = true;
-			accountIds(cursor, window.ids);
+			postIds(cursor, window.ids);
 			await opened.save().catch((err) => {
 				say(`usertrust: cursor not updated — ${errText(err)}`);
 			});
@@ -2180,7 +3310,25 @@ async function settleBody(transferId, counts, labels) {
 	};
 }
 
-async function settleAt(transferId, counts, { keyed, labels = {} }) {
+async function settleAt(transferId, counts, { keyed, labels = {}, expiresAt }) {
+	// Judged at the moment the settle could arrive: one sent with less life left than its own
+	// timeout could land after the ledger's pending timeout.
+	if (
+		holdExpired({ expiresAt }, Date.now() + callTimeout()) &&
+		(await endExpiredHold(transferId, callTimeout())) !== null
+	) {
+		// Past its recorded life, and given back with the server's confirmation (lib.mjs
+		// `endExpiredHold`): no settle is sent, so nothing posted through it, under a key or not.
+		// Its window is released to a later settle point, as an unkeyed gone answer releases it,
+		// and a keyed window, whose key its ids derive, is posted there under the same key.
+		// Unconfirmed, the settle below is sent as before.
+		return {
+			outcome: "released",
+			reason: "the hold is past its life, so no settle was sent",
+			holdEnded: true,
+			unknownTransfer: true,
+		};
+	}
 	let settle;
 	try {
 		const body = await settleBody(transferId, counts, labels);
@@ -2248,7 +3396,7 @@ async function settleOutcome(transferId, settle, keyed) {
  * server no longer has (a 404 `unknown transferId`: it expired, or another hook
  * ended it) is gone already, and carried nothing: returned, either way.
  */
-async function returnEmptyHold(transferId) {
+async function returnEmptyHold(transferId, expiresAt) {
 	const capabilities = await serverCapabilities();
 	if (capabilities === null || capabilities.has("release")) {
 		try {
@@ -2278,7 +3426,7 @@ async function returnEmptyHold(transferId) {
 		}
 	}
 	const zero = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
-	const result = await settleAt(transferId, zero, { keyed: false });
+	const result = await settleAt(transferId, zero, { keyed: false, expiresAt });
 	if (result.outcome === "settled" || result.unknownTransfer === true)
 		return { outcome: "returned" };
 	// The settle at zero stands in for a release, so it ends as one: a give-back that did not end
@@ -2311,7 +3459,7 @@ export async function settleTranscriptHold(sessionId, entry, { keepUnendedClaim 
 	if (callTimeout() < minCall()) return { outcome: "deferred", reason: "out of time" };
 	const ids = entry.assignedIds ?? [];
 	if (ids.length === 0) {
-		const result = await returnEmptyHold(entry.transferId);
+		const result = await returnEmptyHold(entry.transferId, entry.expiresAt);
 		await clearPending(entry.path);
 		return result;
 	}
@@ -2348,7 +3496,11 @@ export async function settleTranscriptHold(sessionId, entry, { keepUnendedClaim 
 		return { outcome: "deferred", reason: `hold could not be claimed (${err?.code ?? "error"})` };
 	}
 	const keyed = typeof entry.idempotencyKey === "string";
-	const result = await settleAt(entry.transferId, counts, { keyed, labels: jobHoldFields(entry) });
+	const result = await settleAt(entry.transferId, counts, {
+		keyed,
+		labels: jobHoldFields(entry),
+		expiresAt: entry.expiresAt,
+	});
 	if (result.outcome === "deferred" && result.unsent === true) {
 		// The preflight above passed but the capabilities went unknown before the body was built. A claimed hold must not be
 		// journalled as done for a settle that never went out: hand the file back so a later settle point retries it.
@@ -2656,7 +3808,14 @@ async function remainderOf(
 		left.agent = "the server stopped answering, so this agent's usage was not posted";
 		return { skipped: "the server stopped answering" };
 	}
-	const opened = await openAgent({ sessionId, agentId, input, waitMs: lockWaitMs });
+	const opened = await openAgent({
+		sessionId,
+		agentId,
+		input,
+		hook,
+		waitMs: lockWaitMs,
+		lastChance: hook === "SubagentStop" || hook === "SessionEnd",
+	});
 	if (opened.kind === "estimate") return { skipped: opened.reason };
 	if (opened.kind === "unavailable") {
 		left.agent = `transcript state unavailable (${opened.reason}), so this agent's usage was not posted`;
@@ -2744,7 +3903,7 @@ async function remainderOf(
 			});
 			if (result.outcome !== "unresolved") cursor.unresolved.delete(key);
 			if (result.outcome === "settled") {
-				accountIds(cursor, vehicle.ids);
+				postIds(cursor, vehicle.ids);
 				summary.posted += vehicle.ids.length;
 			} else if (result.outcome === "denied") {
 				denyIds(cursor, vehicle.ids);
@@ -2844,7 +4003,8 @@ async function remainderOf(
 			});
 			// An unresolved vehicle stays parked; any other outcome is final for it.
 			if (key !== undefined && result.outcome !== "unresolved") cursor.unresolved.delete(key);
-			if (result.outcome === "settled" || result.outcome === "claimed") accountIds(cursor, ids);
+			if (result.outcome === "settled") postIds(cursor, ids);
+			else if (result.outcome === "claimed") accountIds(cursor, ids);
 			else if (result.outcome === "denied") denyIds(cursor, ids);
 			else if (result.outcome !== "unresolved") releaseIds(cursor, ids);
 			if (result.outcome === "settled") summary.posted += ids.length;
@@ -2960,6 +4120,9 @@ async function postGroup({
 		);
 	}
 	let auth;
+	// The clock just before the authorize: its hold's life counts from no earlier (lib.mjs
+	// `holdExpiresAt`).
+	const sentAt = Date.now();
 	try {
 		auth = await serverRequest(
 			"/v1/authorize",
@@ -3001,6 +4164,14 @@ async function postGroup({
 				? "shadow mode (not recorded)"
 				: `authorize returned ${auth.status}`,
 		);
+	}
+	// A server with a short pending timeout can grant a hold whose life ends before its settle could
+	// arrive. Settled, it could only fail, as a 410 the server records as spend it never charged
+	// (lib.mjs `holdExpired`): the hold is given back instead, and the group left for a later settle
+	// point.
+	if (holdExpired({ expiresAt: holdExpiresAt(sentAt, auth.json) }, Date.now() + timeoutMs)) {
+		await hygieneRelease(transferId, "hold's life ends before its settle could arrive");
+		return unsettled("the hold's life ends before its settle could arrive, so it was given back");
 	}
 	let settle;
 	try {

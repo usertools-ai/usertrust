@@ -305,7 +305,7 @@ interface AuditEvent {
 }
 ```
 
-Each event's `hash` covers the `previousHash`, forming an append-only chain. The first event chains from `GENESIS_HASH` (64 zero characters). Tampering with any event breaks all subsequent hashes.
+Each event's `hash` covers the `previousHash`, forming an append-only chain. The first event chains from `GENESIS_HASH` (64 zero characters). Editing an event makes verification fail at that event; hiding the edit means recomputing every later hash.
 
 ---
 

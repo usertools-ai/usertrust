@@ -7,6 +7,112 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-10-27
+
+### Added
+
+- **A long tool call's hold is asked to outlive it.** A hold lived five minutes, so a Bash command or
+  a subagent that ran longer lost its reservation partway through, and in enforce mode concurrent
+  calls could spend into that budget. Against a server that honours `hold-ttl`, PreToolUse now asks
+  for a longer life (`holdTtlMs`), never above the server's stated ceiling: a Bash or PowerShell call
+  its own `timeout` (else `BASH_DEFAULT_TIMEOUT_MS`) plus a grace, and an Agent or Task call the
+  ceiling. A new setting, `holdGraceMs` (`UT_CC_HOLD_GRACE_MS`, default 60 000 ms), sets the grace.
+  An older server is sent nothing new. The hold records what it asked for, so a crashed hook's
+  `.settling` record of it is read as abandoned only once that life has passed too.
+
+### Fixed
+
+- **A named subagent is charged from its own transcript, not at an estimate.** Once any agent
+  of a session settled at the per-call estimate, every subagent of that session did too, for
+  the rest of the session: the rule exists because a FORK's transcript begins with a copy of
+  its ancestor's responses, but it caught every subagent. The first such agent was usually
+  one whose transcript did not exist yet. In one measured lab, subagents settled this way were
+  charged about 9% of what their own transcripts held, at the ledger's own rates, while the
+  parent sessions, priced the same way, came to 104%. Now only a fork inherits the
+  estimate mode, and so does a subagent whose type nothing states, since it may be a fork; a
+  named subagent (`general-purpose`, `Explore`, a custom agent) reads its own transcript.
+  Either inherits only while none of its transcript has been read: one whose reads are under
+  way goes on reading, so a call held while it read is never left uncharged by a sibling
+  switching before the call settled. A response of its copy that the ancestor settled at the
+  estimate is claimed under the same message id, so the fork does not post it again.
+  One edge is declared: an ancestor whose transcript cannot be read at a call's PreToolUse
+  claims nothing, so a fork that is reading posts its copy of that response, and each call that
+  response made is charged its estimate as well. The overcharge is one estimate for each call that
+  response made (its tool input and output), never a missed charge.
+  And a subagent's transcript that does not exist yet at its first hook, before any of it was
+  read, no longer switches it to the estimate for good: that call's PostToolUse decides, from the
+  call's own response, found in the subagent's transcript by the call's id.
+  A response no window claimed yet, before any of the transcript was read, is claimed for the
+  call, which is charged at the estimate and never posted from the transcript; the claim
+  switches the subagent to the estimate from then on. An estimate prices one call, never the
+  response, so one response that makes two calls is charged two estimates, one per call (a call
+  whose response another call's estimate claimed is charged its own), while a response posted
+  from the transcript covers all of its calls. A response posted by the subagent's own reads in
+  a settle the server confirmed gives the hold back; an unclaimed one, once some of the
+  transcript was read, is left to those reads, with a gap naming the call; and any other claim
+  is a gap.
+  A transcript still missing, or holding no such response before any of it was
+  read, switches the subagent there, and the call is charged at the estimate, so no call goes
+  uncharged for want of a transcript. What cannot be told (some of the transcript read without
+  the response, a transcript over the read bound, an unfinished or unparseable line naming the
+  call) gives the hold back uncharged with one gap record naming the call. A call that never reaches its PostToolUse is
+  decided at the subagent's SubagentStop. After the switch the transcript is
+  not read (its calls were charged at the estimate): one gap record says so. The parent's
+  missing transcript switches it at once, as before. The parent's own `agent_type`, which a
+  session-wide Stop carries, is never taken as a subagent's type. An agent that already recorded its estimate mode keeps it, so nothing it settled
+  at the estimate is posted again. A subagent id that names no type and has no transcript is
+  now written down once, as a `no-transcript-agent` watch record (hook and tool, no content),
+  so such agents can be counted; it is never a gap.
+- **A hold names the session's own model, never `claude-sonnet-4-6`.** A hold with no
+  transcript window named `UT_CC_MODEL`, else a built-in `claude-sonnet-4-6`, whatever the
+  session ran. An Opus session's estimate holds, and the holds of a tool call with nothing new
+  before it, read as Sonnet 4.6 on the ledger and were priced at its rate: the budget check
+  before the call was sized too small, and an agent that settles at the estimate (a forked
+  subagent, say) was charged at that rate too. Such a hold now names the model of the newest
+  response in its agent's transcript; with none to read, and only for the main agent before it
+  has read anything, the model of the session's latest switch, else the one Claude Code reported
+  at SessionStart; and otherwise `unknown`, which usertrust-server prices at the dearest rate it
+  publishes. The transcript can lag the conversation, so a new `PostModelSwitch` hook records
+  each switch of the session's model, and a newest response from before it that names another
+  model is `unknown`. Each run keeps its own record, and switches recorded within 10 seconds of
+  the newest are read together: two that name different models are ambiguous, and `unknown`. That hook is registered in its own file, `hooks/model-switch.json`: a Claude
+  Code before v2.1.251 does not know the event and rejects a whole hooks file that names it, so
+  it loses only this hook. Estimate mode (`UT_CC_USAGE=estimate`) now reads the
+  transcript tail for the model id only, so a model switched to mid-session is held and settled
+  at its own rate; its usage is still always estimated. Responses written before the session was metered now count
+  toward the model too, though they are still never billed. PostToolUse's fresh hold for an
+  estimate hold that expired is authorized at the expired hold's model. Each authorize says
+  which source it used, in `params.modelSource`.
+
+- **A hold past its life is never settled.** A tool call that outlives its hold (a Bash command
+  or a permission prompt longer than the server's five minutes) found the hold voided by the
+  ledger's pending timeout. Its settle could only fail, as a 410 `settlement_unrecoverable`, which
+  the server records as spend it never charged, although the plugin then charged that usage
+  itself. PreToolUse now records when each hold's life ends, from the authorize answer's
+  `expiresInMs` (`hold-expiry`), counted from the clock read before the authorize was sent. Past
+  it, or once a settle could arrive after it, PostToolUse gives the hold back first (the server counts it against the budget until its
+  own sweep, so a replacement beside it could be refused). Once the server confirms it ended, no
+  settle is sent, and the hold takes the path a gone answer takes; unconfirmed, the settle is
+  sent as before. An estimate
+  hold's call is charged once on a fresh hold. A transcript hold's window goes back to a later
+  settle point, or, under a key, is retried under it. An older server states no life, and nothing
+  changes.
+- **A fresh hold too short for its own settle is never settled either.** The hold that replaces
+  one past its life, and the hold a transcript window is authorized on, were settled without
+  reading the life the server stated for them. On a server whose pending timeout is shorter than
+  a settle's own wait, that settle could arrive after the ledger had voided the hold, as a 410,
+  and the call went uncharged. Each is now judged the same way: if its life could end before its
+  settle arrives, it is given back, never settled. The estimate call is recorded as one that ran
+  without a charge; the window goes back to a later settle point.
+
+### Removed
+
+- **`UT_CC_MODEL` and the config file's `model`.** The model is the session's own, so nothing
+  configured can price a hold below it. Either one still set is ignored, never an error, and
+  SessionStart says so: `usertrust: UT_CC_MODEL is ignored: model is no longer configurable,
+  and the session's own model is used.` A config file whose `model` is not a valid id is no
+  longer refused for it.
+
 ## [3.0.3] - 2026-10-17
 
 ### Fixed

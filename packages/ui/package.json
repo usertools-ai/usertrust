@@ -1,6 +1,6 @@
 {
 	"name": "usertrust-ui",
-	"version": "5.1.0",
+	"version": "5.2.0",
 	"description": "Local web UI for usertrust vaults: filterable audit ledger, live tail, trends, verification.",
 	"license": "Apache-2.0",
 	"author": "Usertools, Inc. <hello@usertools.ai> (https://usertrust.ai)",
@@ -37,8 +37,8 @@
 		"NOTICE"
 	],
 	"dependencies": {
-		"usertrust": "5.1.0",
-		"usertrust-verify": "5.1.0"
+		"usertrust": "5.2.0",
+		"usertrust-verify": "5.2.0"
 	},
 	"devDependencies": {
 		"@tailwindcss/vite": "^4.0.0",
