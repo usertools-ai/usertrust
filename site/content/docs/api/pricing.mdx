@@ -12,7 +12,7 @@ A budget of `100_000` UT equals $10.00. A budget of `1_000_000` UT equals $100.0
 ## Pricing Table
 
 The SDK includes a 42-model pricing table in `ledger/pricing.ts`, current as of
-`PRICING_TABLE_VERSION = "2026-10-11"` (see [PRICING_TABLE_VERSION](#pricing_table_version)).
+`PRICING_TABLE_VERSION = "2026-10-28"` (see [PRICING_TABLE_VERSION](#pricing_table_version)).
 Rates are in usertokens per 1,000 LLM tokens, across **four tiers**: input (fresh prompt tokens),
 output, cache-read (cache-hit prompt tokens), and cache-write (cache-creation prompt tokens). A
 `—` means the provider publishes no rate for that tier — it is **not** free; see
@@ -123,7 +123,7 @@ cacheWrite1h.tokens x cacheWrite1h.ratePer1k`.
 | `gpt-5.4` | 25 | 150 | 2.5 | — |
 | `o3` | 20 | 80 | 5 | — |
 | `o4-mini` | 11 | 44 | 2.75 | — |
-| `gpt-5.6-sol` | 50 | 300 | 5 | 62.5 |
+| `gpt-5.6-sol` (promotional price, "at least through November 21, 2026") | 40 | 200 | 4 | 50 |
 
 The cached-input discount varies **within** the OpenAI family — `gpt-5.4` reads at 0.1x, `o3`/
 `o4-mini` at 0.25x — so there is no single family-level multiplier. OpenAI publishes no separate
@@ -149,7 +149,7 @@ client — that is the client SHAPE, and it does not change which rates apply.
 |-------|------:|-------:|-----------:|------------:|
 | `gemini-2.5-flash` | 3 | 25 | 0.3 | — |
 | `gemini-2.5-pro` | 12.5 | 100 | 1.25 | — |
-| `gemini-3.1-pro` | 20 | 120 | 2 | — |
+| `gemini-3.1-pro-preview` | 20 | 120 | 2 | — |
 
 Context-cache reads are 0.1x base input. Cache *creation* bills as ordinary input plus an hourly
 storage charge this per-token model doesn't carry, so `cacheWritePer1k` is omitted rather than
