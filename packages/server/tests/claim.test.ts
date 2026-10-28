@@ -123,10 +123,11 @@ function postOnFreshConnection(
 
 describe("claim refuses an entry that is no longer the one in pending", () => {
 	it("a settle that lands mid-shutdown is charged once and is never released under, nor put back", async () => {
-		// close() snapshots `pending` and releases [A, B, C] one at a time (each void takes 150 ms). A
-		// client settles B in that window; B's settle is slow. When the loop reaches B it must find B
-		// claimed already: a second claim would release B under the settle, and a failed settle would
-		// then restore B into `pending` on a closing server (usage neither charged nor recorded).
+		// A client settles B, and B's settle is slow and still in flight when close() snapshots `pending`
+		// and releases [A, B, C] all at once (each release is parked here until the test lets it go). B
+		// is claimed by its settle already: a second claim would release B under the settle, and a
+		// failed settle would then restore B into `pending` on a closing server (usage neither charged
+		// nor recorded).
 		//
 		// The order is driven by the governor's own signals, never by timers: each step waits for the
 		// one before it to have STARTED. (A 30 ms timer here raced shutdown's closeAllConnections and cut
@@ -169,8 +170,6 @@ describe("claim refuses an entry that is no longer the one in pending", () => {
 			releaseStarted.set(id, deferred());
 			releaseGo.set(id, deferred());
 		}
-		const closing = server.close();
-		await releaseStarted.get(a)?.promise; // the loop is parked on A's release
 		// On a connection of its own, so it never rides a keep-alive socket shutdown may cut.
 		const settle = postOnFreshConnection(port, "/v1/settle", {
 			transferId: b,
@@ -178,10 +177,13 @@ describe("claim refuses an entry that is no longer the one in pending", () => {
 			outputTokens: 5,
 		});
 		await settleStarted.promise; // B is claimed by the settle, which is in flight
-		releaseGo.get(a)?.resolve();
-		await releaseStarted.get(c)?.promise; // the loop has passed B while B's settle is still running
+		const closing = server.close();
+		// Both other releases have started: close() does not wait for A before it reaches C.
+		await releaseStarted.get(a)?.promise;
+		await releaseStarted.get(c)?.promise;
 		settleGo.resolve();
-		const settled = await settle; // answered before the loop can reach closeAllConnections
+		const settled = await settle; // answered before close() can reach closeAllConnections
+		releaseGo.get(a)?.resolve();
 		releaseGo.get(c)?.resolve();
 		await closing;
 		server = undefined;

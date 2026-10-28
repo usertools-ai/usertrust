@@ -73,7 +73,7 @@
 		"\\bdetect(s|ed)?\\b",
 		"\\bguarantee"
 	],
-	"pendingCeiling": 15,
+	"pendingCeiling": 14,
 	"claims": [
 		{
 			"id": "tamper-evident",
@@ -995,19 +995,31 @@
 		{
 			"id": "gap-signal-release",
 			"kind": "caveat",
-			"claim": "A server stopped by SIGINT or SIGTERM may leave a hold's release off the chain.",
+			"claim": "A server stopped by SIGINT or SIGTERM records each pending hold's release before it exits, and may leave one off the chain only when its void does not finish within eight seconds.",
 			"statements": [
 				{
 					"file": "LIMITATIONS.md",
-					"text": "A hold whose void had not reached the ledger stays reserved until the ledger's 300-second hold timeout, and a release can be missing from the chain."
+					"text": "A hold whose void had not reached the ledger by then stays reserved until the ledger's 300-second hold timeout, and a release can be missing from the chain; the server says so on stderr."
 				},
 				{
 					"file": "packages/server/README.md",
-					"text": "its release may not be recorded on the chain: a known issue in 5.0.0"
+					"text": "its release may not be recorded on the chain; the server says so on stderr"
 				}
 			],
-			"proofs": [],
-			"pending": "record gap: needs a signal-shutdown harness"
+			"proofs": [
+				{
+					"file": "packages/server/tests/cli.test.ts",
+					"test": "ends the hold, records it as 'server shutdown', and exits 0 inside the shutdown bound"
+				},
+				{
+					"file": "packages/server/tests/shutdown.test.ts",
+					"test": "close() waits for a teardown another caller already began: the record has landed when it resolves"
+				},
+				{
+					"file": "packages/server/tests/shutdown-bound.test.ts",
+					"test": "answers 'timed out' once the bound passes, and 'closed' for a close that finishes"
+				}
+			]
 		},
 		{
 			"id": "gap-auxiliary-record",

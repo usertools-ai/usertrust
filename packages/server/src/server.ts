@@ -40,6 +40,11 @@ import {
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const SERVER_NAME = "usertrust-server";
+/** What an authorize gets once `close()` has begun: no new hold is taken, and none is delivered. */
+const SHUTTING_DOWN = {
+	error: "shutting_down",
+	reason: "the server is shutting down and takes no new holds",
+} as const;
 /** Reported by /healthz — read from this package's own manifest so the
  * version can never drift from the published package again (Addendum D5). */
 const SERVER_VERSION = (createRequire(import.meta.url)("../package.json") as { version: string })
@@ -1733,6 +1738,15 @@ export function createUsertrustServer(opts: {
 			releaseLate(tenant.id, governor, auth, "unused");
 			return;
 		}
+		// close() began while this authorize was in flight (it passed the check at the route, then waited
+		// on its body, the governor or the ledger): its hold missed close()'s walk over the pending holds,
+		// so it is not delivered. Nothing ran under it, so it is given back, and the caller is told why.
+		if (closeStarted) {
+			if (gone()) leave("abandoned");
+			else if (leave("answered")) sendJson(res, 503, SHUTTING_DOWN);
+			releaseLate(tenant.id, governor, auth, "unused");
+			return;
+		}
 		// The client may be gone without its close event having run yet: then nothing is delivered.
 		if (gone()) {
 			leave("abandoned");
@@ -2261,6 +2275,13 @@ export function createUsertrustServer(opts: {
 				url === "/v1/abort" ||
 				url === "/v1/release")
 		) {
+			// Once close() has begun, no NEW hold: it would miss close()'s walk over the pending holds and
+			// be voided under a caller that may already be spending it. Settles, aborts and releases stay
+			// served, so a call already in flight can still report back.
+			if (closeStarted && url === "/v1/authorize") {
+				sendJson(res, 503, SHUTTING_DOWN);
+				return;
+			}
 			const raw = await readBody(req);
 			if (raw === null) {
 				// The rest of the oversized body is never read — close the
@@ -2424,18 +2445,22 @@ export function createUsertrustServer(opts: {
 			// and the ledger stay consistent; Governor.destroy() voids at the ledger
 			// layer as the backstop.
 			const remaining = [...pending.entries()];
-			for (const [transferId, entry] of remaining) {
-				const outcome = await releaseEntry(transferId, entry, "shutdown", "server shutdown");
-				// Announced only when the governor says it released the hold: one it no
-				// longer held, or could not be asked about, was not released here.
-				if (outcome?.released !== true) continue;
-				bus.publish(entry.tenantId, {
-					type: "released",
-					transferId,
-					reason: "server shutdown",
-					at: new Date().toISOString(),
-				});
-			}
+			// All at once, not one after another: a hold whose void never answers must not keep the
+			// others from being voided and recorded (the command line bounds how long close() may take).
+			await Promise.allSettled(
+				remaining.map(async ([transferId, entry]) => {
+					const outcome = await releaseEntry(transferId, entry, "shutdown", "server shutdown");
+					// Announced only when the governor says it released the hold: one it no
+					// longer held, or could not be asked about, was not released here.
+					if (outcome?.released !== true) return;
+					bus.publish(entry.tenantId, {
+						type: "released",
+						transferId,
+						reason: "server shutdown",
+						at: new Date().toISOString(),
+					});
+				}),
+			);
 			await new Promise<void>((resolve) => {
 				if (!httpServer) return resolve();
 				httpServer.closeAllConnections();

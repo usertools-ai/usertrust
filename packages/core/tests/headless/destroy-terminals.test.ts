@@ -829,3 +829,108 @@ describe("destroy() records a release still in flight with the class the release
 		await ending;
 	});
 });
+
+describe("destroy() is ONE teardown: a second caller waits for the first caller's void and records", () => {
+	it("a hold's second destroy() does not settle until the first teardown has voided and recorded it", async () => {
+		const voids = gate();
+		const { engine, mutations } = ledgerEngine({ void: voids.wait });
+		const gov = await governor(engine);
+		const auth = await hold(gov, "session");
+		events.length = 0;
+		const first = gov.destroy();
+		let secondSettled = false;
+		const second = gov.destroy().then(() => {
+			secondSettled = true;
+		});
+		await sleep(50);
+		// mutant: `if (destroyed) return;` → the second call resolves at once, mid-teardown
+		expect(secondSettled).toBe(false);
+		expect(recordsOf(auth.transferId)).toHaveLength(0);
+		voids.open();
+		await second;
+		expect(mutations).toEqual([`void:${auth.transferId}`]);
+		expect(events).toEqual([destroyRecord(auth, "session", "governor destroyed")]);
+		await first;
+	});
+
+	it("dry run: the second destroy() waits for the record's append", async () => {
+		const gov = await governor(undefined);
+		const auth = await hold(gov, "session");
+		events.length = 0;
+		const append = gate();
+		writer.nextAppendWaits = append.wait;
+		const first = gov.destroy();
+		let secondSettled = false;
+		const second = gov.destroy().then(() => {
+			secondSettled = true;
+		});
+		await sleep(50);
+		expect(secondSettled).toBe(false);
+		append.open();
+		await second;
+		expect(events).toEqual([destroyRecord(auth, "session", "governor destroyed")]);
+		await first;
+	});
+
+	it("both callers get the same promise, and a later call after it settled still resolves", async () => {
+		const { engine } = ledgerEngine();
+		const gov = await governor(engine);
+		await hold(gov, "session");
+		const first = gov.destroy();
+		expect(gov.destroy()).toBe(first);
+		await first;
+		await expect(gov.destroy()).resolves.toBeUndefined();
+	});
+});
+
+describe("installSignalHandlers: who owns the process signals", () => {
+	const SIGNALS = ["SIGTERM", "SIGINT", "beforeExit"] as const;
+	const counts = () => SIGNALS.map((name) => process.listenerCount(name));
+
+	/** Create a governor and take back the listeners it added, whatever the test found. */
+	async function listenersAdded(opts: { installSignalHandlers?: boolean }): Promise<number[]> {
+		const before = SIGNALS.map((name) => process.listeners(name));
+		const gov = await createGovernor({
+			budget: 1_000_000,
+			vaultBase,
+			parentUserId: "acme",
+			dryRun: true,
+			_audit: audit(),
+			...opts,
+		});
+		governors.push(gov);
+		const added = SIGNALS.map((name, i) => {
+			const extra = process.listeners(name).filter((l) => !before[i]?.includes(l));
+			for (const listener of extra) process.off(name, listener);
+			return extra.length;
+		});
+		return added;
+	}
+
+	it("by default the governor adds its own once-listeners for SIGTERM, SIGINT and beforeExit", async () => {
+		const start = counts();
+		expect(await listenersAdded({})).toEqual([1, 1, 1]);
+		expect(counts()).toEqual(start);
+	});
+
+	it("installSignalHandlers: false adds none: the host owns shutdown", async () => {
+		// mutant: the option is ignored → one of each is added
+		expect(await listenersAdded({ installSignalHandlers: false })).toEqual([0, 0, 0]);
+	});
+
+	it("installSignalHandlers: true is the default spelled out", async () => {
+		expect(await listenersAdded({ installSignalHandlers: true })).toEqual([1, 1, 1]);
+	});
+
+	it("anything but a boolean is refused at creation", async () => {
+		await expect(
+			createGovernor({
+				budget: 1_000_000,
+				vaultBase,
+				dryRun: true,
+				_audit: audit(),
+				installSignalHandlers: "false" as unknown as boolean,
+			}),
+		).rejects.toThrow(/installSignalHandlers must be true or false/);
+	});
+});
