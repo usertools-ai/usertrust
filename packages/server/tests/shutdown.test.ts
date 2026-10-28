@@ -40,8 +40,18 @@ function gatedLedger() {
 		openStuck = resolve;
 	});
 	const stuckIds = new Set<string>();
+	// The reserve of ONE authorize, held open by the test: an authorize in flight across close().
+	let openReserve = (): void => {};
+	const reserveGate = new Promise<void>((resolve) => {
+		openReserve = resolve;
+	});
+	const gates = { reserveNext: false };
 	const engine = {
 		spendPending: vi.fn(async (p: { transferId: string }) => {
+			if (gates.reserveNext) {
+				gates.reserveNext = false;
+				await reserveGate;
+			}
 			pending.add(p.transferId);
 			return { transferId: p.transferId };
 		}),
@@ -60,7 +70,7 @@ function gatedLedger() {
 		lookupBalances: vi.fn(async (ids: bigint[]) => new Map(ids.map((id) => [id, 5_000]))),
 		destroy: vi.fn(),
 	};
-	return { engine, voided, openVoid: open, openStuck, stuckIds };
+	return { engine, voided, openVoid: open, openStuck, stuckIds, gates, openReserve };
 }
 
 /** Let everything already queued run: microtasks and one macrotask turn, no timer. */
@@ -76,7 +86,7 @@ afterEach(async () => {
 
 async function ledgerServer(opts: { holdVoid?: boolean } = {}) {
 	const stateDir = await mkdtemp(join(tmpdir(), "utsrv-shutdown-"));
-	const { engine, voided, openVoid, openStuck, stuckIds } = gatedLedger();
+	const { engine, voided, openVoid, openStuck, stuckIds, gates, openReserve } = gatedLedger();
 	if (opts.holdVoid !== true) openVoid();
 	const seen: Array<Record<string, unknown>> = [];
 	server = createUsertrustServer({
@@ -117,7 +127,19 @@ async function ledgerServer(opts: { holdVoid?: boolean } = {}) {
 			headers: { "content-type": "application/json", authorization: `Bearer ${KEY}` },
 			body: JSON.stringify(body),
 		});
-	return { authorize, post, voided, seen, chain, engine, openVoid, openStuck, stuckIds };
+	return {
+		authorize,
+		post,
+		voided,
+		seen,
+		chain,
+		engine,
+		openVoid,
+		openStuck,
+		stuckIds,
+		gates,
+		openReserve,
+	};
 }
 
 describe("shutdown with a pending hold, ledger mode (dryRun false)", () => {
@@ -190,6 +212,37 @@ describe("while close() is running", () => {
 		openVoid();
 		await closing;
 		expect(chain().filter((e) => e.kind === "hold_released")).toHaveLength(1);
+	});
+
+	it("an authorize that was in flight when close() began is answered 503, and its hold is given back with a record", async () => {
+		const { authorize, post, engine, chain, voided, openVoid, gates, openReserve } =
+			await ledgerServer({ holdVoid: true });
+		const held = await authorize();
+		// A second authorize that passed the route check and is waiting on the ledger's reserve.
+		gates.reserveNext = true;
+		const inFlight = post("/v1/authorize", AUTHORIZE);
+		for (let i = 0; i < 20 && engine.spendPending.mock.calls.length < 2; i += 1) await turn();
+		expect(engine.spendPending.mock.calls.length).toBe(2);
+		// close() is parked on the first hold's void, so the connection is still open when the reserve lands.
+		const closing = (server as UsertrustServer).close();
+		server = undefined;
+		for (let i = 0; i < 5; i += 1) await turn();
+		openReserve();
+		const res = await inFlight;
+		// mutant: no recheck after governor.authorize() → the hold is delivered with a 200 and missed close()'s walk
+		expect(res.status).toBe(503);
+		expect(await res.json()).toEqual({
+			error: "shutting_down",
+			reason: "the server is shutting down and takes no new holds",
+		});
+		openVoid();
+		await closing;
+		const released = chain()
+			.filter((e) => e.kind === "hold_released")
+			.map((e) => e.data.transferId);
+		expect(released).toHaveLength(2);
+		expect(released).toContain(held);
+		expect([...voided].sort()).toEqual([...released].sort());
 	});
 
 	it("one hold whose void never answers does not keep the other hold from being voided and recorded", async () => {
