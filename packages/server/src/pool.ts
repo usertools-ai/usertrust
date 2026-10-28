@@ -87,6 +87,10 @@ export class GovernorPool {
 			// ceiling, so a hold's ledger timeout and its sweep life agree. Never below core's default
 			// hold life, which createGovernor() refuses.
 			maxHoldTtlMs: Math.max(maxHoldLife(this.config), DEFAULT_HOLD_LIFE_MS),
+			// The server's own shutdown (`close()`, run by the command line's signal handler) ends every
+			// hold and awaits it. A governor that also listened for the signal would start its teardown
+			// first and leave `close()` waiting on a teardown it did not start.
+			installSignalHandlers: false,
 		};
 		if (tenant.budget !== undefined) opts.budget = tenant.budget;
 		if (tenant.tier !== undefined) opts.tier = tenant.tier;
