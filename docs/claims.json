@@ -25,9 +25,7 @@
 				"ext": ".mdx"
 			}
 		],
-		"exclude": [
-			"site/content/docs/policy/pii.mdx"
-		],
+		"exclude": ["site/content/docs/policy/pii.mdx"],
 		"denied": [
 			{
 				"file": "CHANGELOG.md",
@@ -70,7 +68,7 @@
 		"\\bVERIFIED\\b",
 		"\\bprove[sn]?\\b",
 		"every (governed )?(LLM )?call",
-		"\\b(cannot|can ?not|can[’']?t|could ?n[o’']t|won[’']?t|never|no(?: |-)?one can|nobody can|nothing can|no \\w+ (?:has|have|can|could|will))( ever)?( \\w+ly)?( be(en)?| have been| has been)?( \\w+ly)? (re-?writ|modif|alter|chang|edit|delet|eras|overwrit|forg|falsif|remov)",
+		"\\b(cannot|can ?not|can[\u2019']?t|could ?n[o\u2019']t|won[\u2019']?t|never|no(?: |-)?one can|nobody can|nothing can|no \\w+ (?:has|have|can|could|will))( ever)?( \\w+ly)?( be(en)?| have been| has been)?( \\w+ly)? (re-?writ|modif|alter|chang|edit|delet|eras|overwrit|forg|falsif|remov)",
 		"unalterab|unchangeab|unmodifiab|indelib|unforgeab|incorruptib|write-once|\\bpermanent|\\bforever\\b",
 		"\\bdetect(s|ed)?\\b",
 		"\\bguarantee"
