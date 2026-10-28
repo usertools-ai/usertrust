@@ -394,6 +394,12 @@ function isScript() {
 	}
 }
 
+/** End the process once stdout and stderr have taken what was written (their callbacks). */
+function endWhenFlushed() {
+	const flushed = (stream) => new Promise((resolve) => stream.write("", resolve));
+	return Promise.all([flushed(process.stdout), flushed(process.stderr)]).then(() => process.exit());
+}
+
 if (isScript()) {
 	const hook = process.argv[2];
 	if (!HOOKS.has(hook) && !(hook === PROBE && process.argv.includes(CHILD))) {
@@ -408,6 +414,12 @@ if (isScript()) {
 		process.on("unhandledRejection", failed);
 		try {
 			await parent(hook);
+			// SessionStart's probe, in an environment session, runs in THIS process, and its 1.5 s
+			// abort does not end a TLS handshake that stalls: the socket keeps the process alive past
+			// the hook's 5 s kill. Everything the hook does is awaited by now, so end once the
+			// banner is flushed (a bare exit can cut a pipe write short). A configured session's
+			// probe runs in a child that exits itself.
+			if (hook === "session-start") await endWhenFlushed();
 		} catch (err) {
 			await launcherFailed(hook, err);
 		}

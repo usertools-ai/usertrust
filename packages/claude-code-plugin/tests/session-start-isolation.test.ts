@@ -437,6 +437,21 @@ describe("a configured session's SessionStart request is made from its isolated 
 			if (!gone) process.kill(child, "SIGKILL");
 			expect(gone, "the probe child did not end by itself").toBe(true);
 		});
+
+		it("an environment session against a stalled TLS handshake: the launcher ends well inside the hook's 5 s", async () => {
+			const port = await staller();
+			const r = await start({
+				UT_SERVER_URL: `https://127.0.0.1:${port}`,
+				UT_SERVER_KEY: "k",
+				UT_CC_STATE_DIR: await mkdtemp(join(tmpdir(), "utcc-iso-state-")),
+			});
+			// mutant: the launcher does not end after SessionStart → the stalled handshake keeps it
+			// alive past the hook's 5 s kill
+			expect(r.ms).toBeLessThan(3_500);
+			expect(r.code).toBe(0);
+			expect(Object.keys(JSON.parse(r.stdout))).toEqual(["systemMessage"]);
+			expect(count(r.stdout, BANNER)).toBe(1);
+		});
 	});
 });
 
