@@ -17,6 +17,7 @@ import { PASSWD_HOME_PRELOAD, passwdHomeFor, runHook } from "./helpers/run-hook.
 
 // Every test here spawns hook processes (some several): a loaded machine needs more than
 // the 5 s default, and a timeout is not what these tests are about.
+// timing: 30 s budget; the slowest test in this file took 1.6 s, slowest of 3 runs on a loaded runner
 vi.setConfig({ testTimeout: 30_000 });
 
 const HOOKS = join(import.meta.dirname, "..", "hooks");
@@ -504,6 +505,7 @@ function healthServer(health: { status?: number; body?: string; delayMs?: number
 	return new Promise((resolve) => {
 		const server = createServer((req, res) => {
 			requests.push({ method: req.method ?? "", path: req.url ?? "" });
+			// timing: delays the answer on purpose, 1.8 s or 60 s (the hook gives up at 1.5 s); the test asserts the hook's own bound, so the delay has no headroom to lose
 			setTimeout(() => {
 				res.writeHead(health.status ?? 200, { "content-type": "application/json" });
 				res.end(health.body ?? "{}");
@@ -519,6 +521,7 @@ function healthServer(health: { status?: number; body?: string; delayMs?: number
 const caps = (...list: string[]) => JSON.stringify({ status: "ok", capabilities: list });
 
 async function sessionStart(env: Record<string, string>, source = "startup") {
+	// timing: reports the hook's wall time; the only bound asserted on it is 4.5 s, and the slowest run took 1.6 s, slowest of 3 runs on a loaded runner
 	const began = Date.now();
 	const result = await runHook(
 		join(HOOKS, "session-start.mjs"),
@@ -1290,6 +1293,7 @@ describe("hold labels: what the authorize SENT is what the hold records and the 
 						logLine(Date.now() + 5, "start", "job-b", { type: "docs", typeSource: "explicit" }),
 					].join(""),
 				);
+				// timing: a 30 ms pause so the next log line's clock is later than the last; nothing is raced against it
 				await new Promise((r) => setTimeout(r, 30));
 				capabilities = ["job", "principal", "release", "idempotency-key"];
 				await run("stop.mjs", base());

@@ -19,6 +19,7 @@ import {
 	runHook,
 } from "./helpers/run-hook.js";
 
+// timing: 30 s budget; the slowest test in this file took 5.1 s, slowest of 3 runs on a loaded runner
 vi.setConfig({ testTimeout: 30_000 });
 
 const HOOKS = join(import.meta.dirname, "..", "hooks");
@@ -119,6 +120,7 @@ const start = (
 	options: { hooksDir?: string } = {},
 	session = "sess-iso",
 ) => {
+	// timing: reports the hook's wall time; asserted against bounds of 2.5 s, 3.5 s and 4.8 s; the slowest test in this file, three session starts, took 5.1 s, slowest of 3 runs on a loaded runner
 	const began = Date.now();
 	return runHook(
 		SESSION_START,
@@ -335,6 +337,7 @@ describe("a configured session's SessionStart request is made from its isolated 
 				return false;
 			}
 		};
+		// timing: a 25 ms poll interval inside goneWithin; the deadlines it serves are 0.5 s to 2.3 s
 		const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 		const childOf = (pid: number): number | null => {
 			try {
@@ -377,6 +380,7 @@ describe("a configured session's SessionStart request is made from its isolated 
 			return { launcher, child: child as number };
 		}
 		const goneWithin = async (pid: number, ms: number) => {
+			// timing: deadlines of 0.5 s, 1 s and 2.3 s for a process that must already be ending; the slowest test in this file took 5.1 s, slowest of 3 runs on a loaded runner
 			const until = Date.now() + ms;
 			while (alive(pid) && Date.now() < until) await sleep(25);
 			return !alive(pid);
@@ -524,6 +528,7 @@ describe("SessionStart's probe and the host's circuit breaker", () => {
 				"a /v1/health that answers in 1.7 s",
 				() =>
 					createHttp((_req, res) => {
+						// timing: answers at 1.7 s on purpose, just past the probe's 1.5 s bound; the test asserts the bound is not counted against the breaker, so the delay has no headroom to lose
 						setTimeout(() => {
 							res.writeHead(200, { "content-type": "application/json" });
 							res.end(CAPS);
