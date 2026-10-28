@@ -239,6 +239,8 @@ non-numeric suffix, `-fast`, and Bedrock `anthropic.…:0` / Vertex `…@…` id
 stricter on purpose: it checks for an exact key (or custom rate) only, so a dated snapshot meters
 at its base row but is not "priced" for a caller that must refuse what it cannot price exactly.
 
+For an endpoint classified as cloud, an id written the way a gateway or cloud platform writes it (Bedrock, Vertex, OpenRouter, a `-latest` alias without a row of its own, or another case such as `GPT-4o`) is priced at the fallback rate, so its hold is larger too and a small budget can refuse the call. To refuse such a call instead, set `unknownModelPolicy` to `"deny"`. To price one, set `pricing` to `"custom"` and add the exact id to `customRates`; a local endpoint ignores `customRates` and uses `local.models` and `local.defaultRate`. See [LIMITATIONS.md](https://github.com/usertools-ai/usertrust/blob/master/LIMITATIONS.md) section 16.
+
 ```typescript
 getModelRates("claude-fable-5")           // exact match → { 100, 500 }
 getModelRates("claude-fable-5-20260301")  // dated snapshot → claude-fable-5 → { 100, 500 }

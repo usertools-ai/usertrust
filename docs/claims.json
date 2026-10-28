@@ -298,7 +298,7 @@
 				},
 				{
 					"file": "packages/verify/README.md",
-					"text": "Result states: `ANCHORED_VERIFIED`, `UNANCHORED` (legacy vaults — valid, weaker, labeled), `ANCHOR_UNVERIFIABLE`, `ANCHOR_STALE`, and the hard failures `ANCHOR_INVALID` / `ANCHOR_MISMATCH` (rewrite, rollback, deletion, or fork against the signed checkpoints — always exit 1)."
+					"text": "Result states: `ANCHORED_VERIFIED`, `UNANCHORED` (ordinary verification without an anchor flag, or anchored verification that finds no anchor records, whether supplied or in the vault's own mirror: valid, but the chain is checked only against itself), `ANCHOR_UNVERIFIABLE`, `ANCHOR_STALE`, and the hard failures `ANCHOR_INVALID` / `ANCHOR_MISMATCH` (rewrite, rollback, deletion, or fork against the signed checkpoints — always exit 1)."
 				}
 			],
 			"proofs": [
@@ -1101,6 +1101,47 @@
 					"test": "hard-refuses a sequential over-budget call pre-spend and keeps the real ledger consistent"
 				}
 			]
+		},
+		{
+			"id": "tail-removal-passes-unanchored",
+			"kind": "caveat",
+			"claim": "Without anchors an audit log whose newest events were removed can verify as valid (UNANCHORED) when its .meta sidecar was deleted or rewritten to match, or after the next append from a new process; verification against an anchor with a pinned key, or against retained receipts, catches it.",
+			"statements": [
+				{
+					"file": "README.md",
+					"text": "an audit log whose newest events were removed can read as verified. Without anchors the chain is checked only against itself, so a vault whose newest events were cut, and whose `.meta` file was deleted or rewritten to match, passes `usertrust verify` and `usertrust-verify` (exit 0, `UNANCHORED`). If the `.meta` file is left alone, the cut is reported only until the next governed call from a freshly started process; after that, verification passes over the shortened chain. To detect a removal, enable anchoring and run with `--anchors <file>` and `--pubkey <pem>`: a rollback below an anchor then fails with `ANCHOR_MISMATCH`. Without `--pubkey` the anchors are not checked, and the vault still passes as `ANCHOR_UNVERIFIABLE`. `usertrust verify --receipts <file>` also fails (exit 1, `INCOMPLETE`) when a receipt you kept names an event the log no longer holds. An anchor catches the deletion of the records it covers (those up to the tree size it recorded); records appended after the last anchor are still unanchored. Emptying `events.jsonl` while its `.meta` sidecar remains is not silent: the next append continues from the sidecar's hash and verification reports the gap. Enable [external anchoring](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md) if the chain is your evidence. See `LIMITATIONS.md` section 8."
+				},
+				{
+					"file": "docs/anchoring.md",
+					"text": "An audit log whose newest events were removed can read as verified. Without anchors the chain is checked only against itself, so a vault whose newest events were cut, and whose `.meta` file was deleted or rewritten to match, passes `usertrust verify` (exit 0, `UNANCHORED`). If the `.meta` file is left alone, the cut is reported only until the next governed call from a freshly started process, after which verification passes over the shortened chain. To detect a removal, verify with `--anchors <file>` (fetched from your anchor sink) and `--pubkey <pem>` (your pinned genesis key): a rollback below an anchor then fails with `ANCHOR_MISMATCH`. Without `--pubkey` the anchors are not checked and the vault passes as `ANCHOR_UNVERIFIABLE`. `usertrust verify --receipts <file>` also fails (exit 1, `INCOMPLETE`) when a receipt you kept names an event the log no longer holds. An anchor covers only the records up to the tree size it recorded; records appended after the last anchor are still unanchored. Emptying `events.jsonl` while its `.meta` sidecar remains is not silent: the next append continues from the sidecar's hash and verification reports the gap. See [`LIMITATIONS.md`](../LIMITATIONS.md) section 8."
+				},
+				{
+					"file": "LIMITATIONS.md",
+					"text": "An audit log whose newest events were removed can read as verified. Without anchors the chain is checked only against itself, so a vault whose newest events were cut, and whose `.meta` file was deleted or rewritten to match, passes `usertrust verify` and `usertrust-verify` (exit 0, `UNANCHORED`). The usertrust-ui dashboard does not check anchors (its Anchor file cell says only whether the file exists): a dashboard opened after the cut reads Integrity `verified` for such a vault, and for an anchored vault rolled back below its anchor, while one already running when the events are removed reports the removal. To detect a removal, enable anchoring and run `usertrust verify` or `usertrust-verify` with `--anchors <file>` (the anchor history, fetched from your anchor sink) and `--pubkey <pem>` (your pinned genesis key): a rollback below an anchor then fails with `ANCHOR_MISMATCH`. Without `--pubkey` the anchors are not checked, and the vault still passes as `ANCHOR_UNVERIFIABLE`. `usertrust verify --receipts <file>` also fails (exit 1, `INCOMPLETE`) when a receipt you kept names an event the log no longer holds."
+				},
+				{
+					"file": "LIMITATIONS.md",
+					"text": "More detail. The `.meta` sidecar that records the chain's head lives in the vault beside the log, which is why rewriting it defeats it. If only the events were deleted and the sidecar was left alone, verification fails, but only until the next governed call from a freshly started process: that call appends after whatever tail it finds and rewrites the vault's sidecar, after which verification passes over the shortened chain. An anchor catches the deletion of the records it covers (those up to the tree size it recorded); records appended after the last anchor are still unanchored. Editing a record, deleting a record from the middle of the chain, and re-hashing the whole chain against a published anchor are all detected. Emptying `events.jsonl` while its `.meta` sidecar remains is not a silent tail deletion: the next append continues from the sidecar's hash and verification reports the gap. The bypass applies to a tail deletion that also deletes or rewrites the sidecar, or that is followed by an append from a new process."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/harden/integrity-claims-pins.test.ts",
+					"test": "a log cut short whose .meta is rewritten to match verifies as valid"
+				},
+				{
+					"file": "packages/core/tests/harden/integrity-claims-pins.test.ts",
+					"test": "a log cut short whose .meta is deleted verifies as valid"
+				},
+				{
+					"file": "packages/core/tests/harden/integrity-claims-pins.test.ts",
+					"test": "a cut log is reported until a new writer appends after the cut, which rewrites .meta; then the shorter chain verifies"
+				},
+				{
+					"file": "packages/core/tests/harden/integrity-claims-pins.test.ts",
+					"test": "emptying events.jsonl while .meta remains: the next append continues from the sidecar, and verification reports the gap"
+				}
+			]
 		}
 	],
 	"nonclaims": [
@@ -1463,6 +1504,21 @@
 			"file": "site/content/docs/schemas.mdx",
 			"text": "Once published, a versioned schema never changes meaning.",
 			"why": "schema versioning policy"
+		},
+		{
+			"file": "LIMITATIONS.md",
+			"text": "What a snapshot never holds, and so a restore never brings back: `tigerbeetle/`, `snapshots/`, `dlq/`, `effective-budget.json`, `audit/anchors/` and the audit-writer lock. Anchoring state is monotonic and is never rolled back. The ledger is the same: a restore rolls the audit chain and the spend ledger back and leaves TigerBeetle where it is.",
+			"why": "describes what snapshot restore does and refuses to do, not a property of the audit chain"
+		},
+		{
+			"file": "LIMITATIONS.md",
+			"text": "A restore refuses in these cases, among others, each printed as `Restore refused: <message>` (or `\"success\":false` under `--json`) and each with exit code 0, because the command sets no exit code for them: the snapshot rolls back the audit chain but has no `spend-ledger.json`; a live TigerBeetle ledger is present (`--force` acknowledges that it cannot be rolled back, and is the only thing it bypasses); the audit writer lock is held; the snapshot name is invalid (a path separator or `..`); and the snapshot file does not exist or cannot be read. A restore or create with no name prints a usage line and also exits 0. There is no `--yes` and no prompt.",
+			"why": "describes what snapshot restore does and refuses to do, not a property of the audit chain"
+		},
+		{
+			"file": "LIMITATIONS.md",
+			"text": "Detecting a rollback after the fact needs evidence held outside the vault, an anchor or receipts you kept (section 8): a restore that takes the log below an anchor shows as `ANCHOR_MISMATCH` when you verify with the anchors and your pinned key (see [docs/anchoring.md](docs/anchoring.md)). Without either, the restored vault is checked only against itself. Verification reads every audit segment in the directory, so a segment the snapshot lacked can make the restored vault fail with duplicate sequences or a count mismatch.",
+			"why": "describes what snapshot restore does and refuses to do, not a property of the audit chain"
 		}
 	],
 	"denied": [
