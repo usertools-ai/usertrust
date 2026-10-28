@@ -72,6 +72,7 @@ const HOOKS = new Set([
 	"stop",
 	"subagent-stop",
 	"session-end",
+	"post-model-switch",
 ]);
 const CHILD = "--ut-child";
 /** The probe child (session-probe.mjs): not a hook of hooks.json, so only ever started as a child. */
@@ -322,7 +323,9 @@ async function parent(hook) {
 		// The parent prints SessionStart's banner; only the request leaves, and from the child.
 		setChildProbe(childUnsupported() === null ? await probeInChild(session, home) : false);
 	}
-	if (configured && hook !== "session-start") {
+	// Neither sends anything: each only records, locally.
+	const sends = hook !== "session-start" && hook !== "post-model-switch";
+	if (configured && sends) {
 		const unsupported = childUnsupported();
 		if (unsupported !== null) await childFailed(hook, session.settings, input, unsupported);
 		else await runInChild(hook, text, input, session, home);

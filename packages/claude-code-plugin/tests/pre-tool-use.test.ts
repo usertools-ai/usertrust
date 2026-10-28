@@ -83,8 +83,11 @@ interface HookOutput {
 describe("pre-tool-use hook", () => {
 	it("lets a 200 through with NO decision, and records the reservation as a per-hold state file", async () => {
 		const port = await startFake((body) => {
-			expect((body as { model: string }).model).toBe("claude-sonnet-4-6");
+			// No transcript and no SessionStart model: `unknown`, which the server prices at its
+			// dearest rate, never a default model (transcript.mjs `holdModelFor`).
+			expect((body as { model: string }).model).toBe("unknown");
 			expect((body as { params: { tool_name: string } }).params.tool_name).toBe("Bash");
+			expect((body as { params: { modelSource: string } }).params.modelSource).toBe("unknown");
 			return {
 				status: 200,
 				json: { transferId: "tx_1", estimatedCost: 3, model: "m", createdAt: 1 },
@@ -124,6 +127,8 @@ describe("pre-tool-use hook", () => {
 			// The session as given: a session id can contain the file name's `__` separator.
 			sessionId: "sess1",
 			estimatedInputTokens: 4,
+			// The model it was authorized at: an expired hold's replacement is authorized at it.
+			holdModel: "unknown",
 			// When the call was received: kept on every hold, whatever the server honours.
 			startedAt: expect.any(String),
 			serverUrl: `http://127.0.0.1:${port}`,

@@ -57,6 +57,7 @@ describe("HTTP control plane", () => {
 			"capabilities",
 			"ledger",
 			"logLinesDropped",
+			"maxHoldTtlMs",
 			"name",
 			"ok",
 			"version",
@@ -118,6 +119,7 @@ describe("HTTP control plane", () => {
 				"job-type",
 				"settle-unrecoverable",
 				"refused",
+				"hold-ttl",
 			]);
 			await server?.close();
 			server = undefined;

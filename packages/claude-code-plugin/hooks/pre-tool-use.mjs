@@ -74,13 +74,14 @@ import {
 	breakerOpen,
 	claimForRelease,
 	claimForSettle,
-	defaultModel,
 	estimateTokens,
 	giveBack,
 	giveBackInvalid,
 	guardMode,
 	HoldNameTaken,
+	holdExpiresAt,
 	holdOfCall,
+	holdTtlFor,
 	hookStartedAt,
 	isAlreadySettled,
 	isTransferId,
@@ -112,15 +113,16 @@ import {
 	authorizeLabels,
 	estimatePrincipalFor,
 	holdEstimate,
+	holdModelFor,
 	isoOf,
 	OUTCOME_NOTES,
 	prepareWindow,
 	reconcileAgent,
 	recordHoldOutcome,
-	STALE_SETTLING_MS,
 	safeName,
 	settlesAtEstimate,
 	settleTranscriptHold,
+	staleSettlingAfter,
 	stampFirstRun,
 } from "./transcript.mjs";
 
@@ -372,7 +374,7 @@ async function keepForRelease(entry, claim, outcome) {
 /**
  * End a `.settling` record made under ANOTHER server or key, or an unknown one,
  * without this tenant's journal ever deciding it. Only a STALE one
- * (`STALE_SETTLING_MS`) is ended: a fresh one's settle may still be in flight, so
+ * (`staleSettlingAfter`) is ended: a fresh one's settle may still be in flight, so
  * the call is refused instead. It is abandoned through its own name: claimed by an
  * exclusive rename, then deleted. Nothing about it is sent to this hook's server,
  * and nothing is parked for a retry. Any window it carried is accounted by the
@@ -382,8 +384,20 @@ async function keepForRelease(entry, claim, outcome) {
  * the record goes, as Stop writes it (lib.mjs `cleanup`). Returns false when the
  * record is fresh, or another hook took it first.
  */
+/**
+ * The hold's life as its record keeps it (`holdTtlMs`, read by transcript.mjs `staleSettlingAfter`):
+ * the longer of what it asked for and what the server's answer states it has left (`expiresInMs`).
+ * The server can grant more than was asked (its `pendingTtlMs` is a floor), so the request alone
+ * could read a live hold's record as stale. Nothing when neither is known.
+ */
+function holdLifeField(asked, json) {
+	const stated = Number.isSafeInteger(json?.expiresInMs) ? json.expiresInMs : 0;
+	const life = Math.max(asked ?? 0, stated);
+	return life > 0 ? { holdTtlMs: life } : {};
+}
+
 async function abandonSettling(entry) {
-	if (!(Date.now() - entry.mtimeMs > STALE_SETTLING_MS)) return false;
+	if (!(Date.now() - entry.mtimeMs > staleSettlingAfter(entry))) return false;
 	const taken = `${entry.path}.abandoned.${process.pid}.${Math.random().toString(36).slice(2)}`;
 	try {
 		await rename(entry.path, taken);
@@ -578,16 +592,23 @@ async function reserve(input) {
 			`usertrust: ${prepared.reason}; this agent now settles at the ESTIMATE for the rest of the session`,
 		);
 	}
-	if (prepared.mode === "unavailable") {
+	// A subagent whose transcript is not written yet (transcript.mjs `notWrittenYet`): its hold is
+	// an estimate hold that this call's PostToolUse rules on (`resolveAwaitingHold`).
+	const awaitingTranscript = prepared.mode === "unavailable" && prepared.awaitingTranscript;
+	if (awaitingTranscript) {
+		say(
+			`usertrust: ${prepared.reason}; this tool's hold is ruled on at its PostToolUse: given back if the transcript exists by then (the transcript posts the usage), else settled at the estimate`,
+		);
+	} else if (prepared.mode === "unavailable") {
 		say(
 			`usertrust: transcript usage unavailable for now (${prepared.reason}); this tool's hold will be given back, not settled at the estimate — the usage stays in the transcript for a later settle point`,
 		);
 	}
 	try {
 		const transcriptMode = prepared.mode === "transcript";
-		// Only an estimate-mode hold settles at the estimate. Every other one is a
-		// transcript hold: settled at its window's counts, or given back.
-		const settlesAtEstimate = prepared.mode === "estimate";
+		// Only an estimate-mode hold, or one awaiting its transcript, settles at the estimate.
+		// Every other one is a transcript hold: settled at its window's counts, or given back.
+		const settlesAtEstimate = prepared.mode === "estimate" || awaitingTranscript;
 		// What the server honours decides what this hold may carry (see lib.mjs).
 		// Unknown (a failed probe) reads as absent here: a key is sent only to a server
 		// known to honour it, and a principal — on either path, in one shape — only to
@@ -618,15 +639,31 @@ async function reserve(input) {
 						),
 						...(window?.usageTo === undefined ? {} : { usageTo: window.usageTo }),
 					};
-		const fallbackModel = prepared.lastModel ?? defaultModel();
+		// The model when no window names one (transcript.mjs `holdModelFor`): never a default.
+		const fallback = await holdModelFor({
+			sessionId,
+			agentId,
+			input,
+			lastModel: prepared.lastModel,
+			readBefore: prepared.readBefore === true,
+		});
+		const holdModel = () => window?.model ?? fallback.model;
+		const modelSource = () => (window ? "transcript" : fallback.source);
 		// Never past the hook's own budget: a hook killed mid-call leaves the tool
 		// ungoverned and this agent's lock held.
 		const callTimeout = () => Math.min(5_000, timeLeft() - 500);
-		const authorizeOnce = () =>
-			serverRequest(
+		// How long this call's hold should live (lib.mjs `holdTtlFor`): a long Bash or a subagent
+		// asks for its hold to outlive it, so its budget stays reserved until it settles.
+		const holdTtlMs = await holdTtlFor(toolName, input.tool_input);
+		// The clock just before the authorize whose answer is used: its hold's life counts from no
+		// earlier (lib.mjs `holdExpiresAt`).
+		let sentAt;
+		const authorizeOnce = () => {
+			sentAt = Date.now();
+			return serverRequest(
 				"/v1/authorize",
 				{
-					model: window?.model ?? fallbackModel,
+					model: holdModel(),
 					// Both legs: a 1-token output hold under-debited every large tool result
 					// because settle prices the whole response. A window's usage is
 					// ADDED, so the pre-call budget check still covers the upcoming tool.
@@ -644,19 +681,22 @@ async function reserve(input) {
 								agent_id: agentId,
 								agent_type: prepared.agentType,
 								messages: window.ids.length,
+								modelSource: modelSource(),
 							}
-						: { hook: "PreToolUse", tool_name: toolName },
+						: { hook: "PreToolUse", tool_name: toolName, modelSource: modelSource() },
 					actor: window
 						? `claude-code:${sessionId}:${prepared.agentType}:${safeName(agentId, "main")}`
 						: `claude-code:${sessionId}`,
 					messages: [{ role: "user", content }],
 					...(window && keyed ? { idempotencyKey: prepared.key } : {}),
 					...(principal === undefined ? {} : { principal }),
+					...(holdTtlMs === undefined ? {} : { holdTtlMs }),
 					...authorizeLabels(holdAuthorizeLabels()),
 				},
 				// Past the server's own deadline, so its 503 is received (`AUTHORIZE_TIMEOUT_MS`).
 				{ timeoutMs: Math.min(AUTHORIZE_TIMEOUT_MS, timeLeft() - 500) },
 			);
+		};
 		// A 503 `ledger_unavailable` (an outage, or a burst past what the server answers in time) is
 		// tried once more, after a short wait, when the hook's budget leaves room for both
 		// (`authorizeRetryWait`); a second miss is the outage it was, below. A refusal is a decision
@@ -698,11 +738,17 @@ async function reserve(input) {
 					transferId: json.transferId,
 					startedAt: new Date(callMs).toISOString(),
 					estimatedInputTokens,
+					// The model the hold was authorized at: a replacement of an expired estimate hold is
+					// authorized at it too (post-tool-use.mjs `settleEstimateHold`).
+					holdModel: holdModel(),
+					...holdLifeField(holdTtlMs, json),
+					expiresAt: holdExpiresAt(sentAt, json),
 					...(settlesAtEstimate
-						? {}
+						? awaitingTranscript
+							? { awaitingTranscript: true }
+							: {}
 						: {
 								usage: "transcript",
-								holdModel: window?.model ?? fallbackModel,
 								assignedIds: window?.ids ?? [],
 								...(window?.counts ?? {}),
 								...(window && keyed

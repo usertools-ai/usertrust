@@ -48,11 +48,13 @@ import {
 	breakerOpen,
 	callStart,
 	claimForSettle,
-	defaultModel,
+	endExpiredHold,
 	estimateTokens,
 	failureOutcome,
 	giveBack,
 	giveBackInvalid,
+	holdExpired,
+	holdExpiresAt,
 	holdUsageStart,
 	isGated,
 	isSettleGone,
@@ -80,8 +82,10 @@ import {
 	authorizeLabels,
 	estimatePrincipalFor,
 	estimateReasonFor,
+	holdModelFor,
 	OUTCOME_NOTES,
 	recordHoldOutcome,
+	resolveAwaitingHold,
 	settleLabels,
 	settleTranscriptHold,
 	stampFirstRun,
@@ -106,6 +110,19 @@ async function estimateUsageTo(sessionId, entry) {
 	}
 	return new Date(Math.max(end, from)).toISOString();
 }
+
+/**
+ * The longest a refused replacement waits for a sweep's void of the hold it replaces
+ * (`endExpiredHold`): usertrust-server's own bound on that void, its `RELEASE_WAIT_MAX_MS` (30 s),
+ * which a settle racing the sweep waits for too. The server does not state it, so it is copied here.
+ */
+const RELEASE_WAIT_MAX_MS = 30_000;
+/** What a replacement's retry keeps of the hook's budget past its wait, for its own authorize. */
+const RETRY_AUTHORIZE_RESERVE_MS = 1_500;
+/** ...and for the fresh hold's settle, which no replacement authorize can take (`replacementTimeout`). */
+const RETRY_SETTLE_RESERVE_MS = 1_500;
+/** A wait shorter than this is no wait: the retry is skipped. */
+const RETRY_WAIT_FLOOR_MS = 50;
 
 /** One request of the expired-hold chain: 5 s at most, and never past the hook's budget. */
 function withinBudget() {
@@ -205,13 +222,23 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 		return;
 	}
 	const at = { sessionId, agentId, entry };
-	const response = await settleOnce(at, { transferId: entry.transferId, ...usage });
-	if (response.status === 200) {
+	// Past its recorded life the hold is given back first (lib.mjs `endExpiredHold`). Once the
+	// server confirms it ended, no settle is sent, and it takes the path a gone answer takes,
+	// below. Sent, the settle could only fail, as a 410 the server records as spend it never
+	// charged, though the call is charged here, once. Unconfirmed, the settle is sent as before.
+	const endedAs = holdExpired(entry, Date.now() + withinBudget().timeoutMs)
+		? await endExpiredHold(entry.transferId, withinBudget().timeoutMs)
+		: null;
+	const expired = endedAs !== null;
+	const response = expired
+		? null
+		: await settleOnce(at, { transferId: entry.transferId, ...usage });
+	if (response?.status === 200) {
 		await noteIfAmbiguous(at, response, entry.transferId);
 		await unlink(claimed).catch(() => {});
 		return;
 	}
-	if (!holdIsGone(response)) {
+	if (!expired && !holdIsGone(response)) {
 		say(
 			`usertrust: settle ${entry.transferId} returned ${response.status}; hold kept for Stop cleanup`,
 		);
@@ -224,14 +251,15 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 		return;
 	}
 	if (!isGated(entry)) {
+		const answer = expired ? "is past its life" : "returned 404";
 		say(
-			`usertrust: settle ${entry.transferId} returned 404, but the hold was not recorded under the settle-attempt gate, so it may have been charged already; hold kept for Stop cleanup`,
+			`usertrust: settle ${entry.transferId} ${answer}, but the hold was not recorded under the settle-attempt gate, so it may have been charged already; hold kept for Stop cleanup`,
 		);
 		await settleGap({
 			...at,
 			transferId: entry.transferId,
 			outcome: "failed",
-			reason: "settle returned 404 for a hold recorded without the settle-attempt gate",
+			reason: `settle ${answer} for a hold recorded without the settle-attempt gate`,
 		});
 		return;
 	}
@@ -247,12 +275,24 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 	const carried = jobHoldFields(
 		capabilities !== null && !capabilities.has("job-type") ? withoutJobType(entry) : entry,
 	);
-	let auth;
-	try {
-		auth = await serverRequest(
+	// The replacement is the SAME call's charge, at the model its hold was authorized at; an
+	// older record that names none resolves as a fresh hold would (transcript.mjs `holdModelFor`).
+	const { model, source: modelSource } =
+		typeof entry.holdModel === "string" && entry.holdModel !== ""
+			? { model: entry.holdModel, source: entry.holdModel === "unknown" ? "unknown" : "hold" }
+			: await holdModelFor({ sessionId, agentId, input });
+	// Every replacement authorize, first or retried, leaves the fresh hold's settle its share of the
+	// hook's budget: a hold granted with no time left to settle it would leave the call uncharged.
+	const replacementTimeout = () => Math.min(5000, timeLeft() - RETRY_SETTLE_RESERVE_MS);
+	// The clock just before the replacement authorize whose answer is used: the fresh hold's life
+	// counts from no earlier (lib.mjs `holdExpiresAt`).
+	let replacementSentAt;
+	const authorizeReplacement = (request = { timeoutMs: replacementTimeout() }) => {
+		replacementSentAt = Date.now();
+		return serverRequest(
 			"/v1/authorize",
 			{
-				model: defaultModel(),
+				model,
 				...(typeof usage.inputTokens === "number"
 					? { estimatedInputTokens: usage.inputTokens }
 					: {}),
@@ -261,6 +301,7 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 					hook: "PostToolUse",
 					tool_name: input.tool_name ?? "unknown",
 					replaces: entry.transferId,
+					modelSource,
 				},
 				actor: `claude-code:${sessionId}`,
 				...(principal === undefined ? {} : { principal }),
@@ -268,8 +309,42 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 				// and usage start, not whatever job is open now.
 				...authorizeLabels(carried),
 			},
-			withinBudget(),
+			request,
 		);
+	};
+	if (replacementTimeout() < RETRY_WAIT_FLOOR_MS) {
+		// No room for an authorize and its settle: the call RAN and nothing will charge it, a gap,
+		// written before its settle-attempted marker goes (evidence first).
+		await recordUnconfirmedCall(sessionId, { ...entry, agentId }, "call-ran");
+		await unlink(claimed).catch(() => {});
+		say(
+			`usertrust: hold ${entry.transferId} expired before its settle, and no time is left to charge this call on a fresh hold; this call's estimate is not recorded`,
+		);
+		return;
+	}
+	let auth;
+	try {
+		auth = await authorizeReplacement();
+		// A hold the server called `gone` may be one its sweep is still voiding, its funds still
+		// reserved: a replacement refused for the budget then waits for that void once, and asks
+		// again. The wait is the server's own bound on one (`RELEASE_WAIT_MAX_MS`), within what the
+		// hook has left past the retry's authorize AND the fresh hold's settle; too little left, and no
+		// retry. The retried authorize is capped so the settle's share stays out of its reach: a hold
+		// granted with no time left to settle it would leave the call uncharged. A second refusal is
+		// final (below).
+		const wait = Math.min(
+			RELEASE_WAIT_MAX_MS,
+			timeLeft() - RETRY_AUTHORIZE_RESERVE_MS - RETRY_SETTLE_RESERVE_MS,
+		);
+		if (
+			endedAs === "gone" &&
+			auth.status === 402 &&
+			auth.json?.error === "budget_exceeded" &&
+			wait >= RETRY_WAIT_FLOOR_MS
+		) {
+			await new Promise((resolve) => setTimeout(resolve, wait));
+			auth = await authorizeReplacement();
+		}
 	} catch (err) {
 		// No answer. The call RAN and nothing will charge it, as when the fresh hold is refused (below):
 		// its gap is written now, before its settle-attempted marker goes (evidence first). A hold
@@ -309,6 +384,26 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 		);
 		return;
 	}
+	// The fresh hold's own life, as its authorize states it: a server with a short pending timeout
+	// can grant one that ends before its settle could arrive. Settled, it could only fail, as a 410
+	// the server records as spend it never charged (lib.mjs `holdExpired`). So no settle is sent:
+	// the call RAN and nothing will charge it, a gap, written first (evidence first), and the fresh
+	// hold is given back, never recorded.
+	const freshExpiresAt = holdExpiresAt(replacementSentAt, auth.json);
+	if (holdExpired({ expiresAt: freshExpiresAt }, Date.now() + withinBudget().timeoutMs)) {
+		await recordUnconfirmedCall(sessionId, { ...entry, agentId }, "call-ran");
+		const givenBack = await giveBack(
+			transferId,
+			"replacement hold's life ends before its settle could arrive",
+			Math.max(250, Math.min(5000, timeLeft())),
+			"call-ran",
+		);
+		await unlink(claimed).catch(() => {});
+		say(
+			`usertrust: hold ${entry.transferId} expired before its settle, and its fresh hold ${transferId}'s own life ends before a settle could reach it; ${givenBack ? `${transferId} was given back` : `${transferId} is left to the server's TTL sweep`}, and this call's estimate is not recorded`,
+		);
+		return;
+	}
 	// The fresh hold is settle-attempted from birth: it replaces the expired one's
 	// marker, so a settle of it that goes unanswered leaves it to Stop, never to a
 	// second settle.
@@ -324,6 +419,7 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 				...(typeof entry.estimatedInputTokens === "number"
 					? { estimatedInputTokens: entry.estimatedInputTokens }
 					: {}),
+				...(freshExpiresAt === undefined ? {} : { expiresAt: freshExpiresAt }),
 				// The replacement is the SAME call's charge: it keeps the expired hold's job and usage
 				// start, so a Stop that finds it unanswered places its gap by when the call began.
 				...carried,
@@ -373,6 +469,96 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 			reason: `settle returned ${settle.status}`,
 		});
 	}
+}
+
+/**
+ * Settle an estimate hold at this call's estimate: the authorize-time input estimate and the
+ * tool's response, priced as both legs.
+ */
+async function settleAtEstimate({ sessionId, agentId, entry, input }) {
+	// Price both legs. The authorize-time input estimate is persisted on the
+	// pending file; if an older file lacks it, re-estimate from tool_input
+	// when the host still sends it.
+	const inputTokens =
+		typeof entry.estimatedInputTokens === "number"
+			? entry.estimatedInputTokens
+			: input.tool_input != null
+				? estimateTokens(JSON.stringify(input.tool_input).slice(0, MAX_CONTENT_CHARS))
+				: undefined;
+	const usage = {
+		...(inputTokens != null ? { inputTokens } : {}),
+		// Same 16 KiB cap as the output hold so a content-cap result cannot
+		// price above the reservation.
+		outputTokens: estimateTokens(
+			JSON.stringify(input.tool_response ?? "").slice(0, MAX_CONTENT_CHARS),
+		),
+		usageSource: "estimated",
+		// A hold authorized under the `job` capability names its job again, and says when
+		// its usage ended (now). The usage START is the authorize capture's alone.
+		...(typeof entry.usageFrom === "string"
+			? settleLabels({ ...entry, usageTo: await estimateUsageTo(sessionId, entry) })
+			: {}),
+	};
+	await settleEstimateHold({ sessionId, agentId, entry, usage, input });
+}
+
+/** How long PostToolUse waits for the agent's lock to rule on an awaiting hold. */
+const AWAITING_LOCK_WAIT_MS = 1_000;
+
+/**
+ * A hold made while the subagent's transcript was not written yet (transcript.mjs
+ * `resolveAwaitingHold`): given back as `unused` when a post claimed the call's response
+ * already; settled at the estimate when this hold claimed it, or when nothing of the transcript
+ * was read and the agent sticks first; else given back as a call that ran uncharged, with one
+ * gap that names the call (its tool_use_id) and why, so the call can be priced later.
+ */
+async function settleAwaitingHold({ sessionId, agentId, entry, input }) {
+	const ruling = await resolveAwaitingHold({
+		sessionId,
+		agentId,
+		input,
+		waitMs: Math.max(0, Math.min(AWAITING_LOCK_WAIT_MS, timeLeft() - 1_500)),
+	});
+	if (ruling.kind === "estimate") {
+		say(`usertrust: settling at the ESTIMATE — ${ruling.reason}`);
+		await settleAtEstimate({ sessionId, agentId, entry, input });
+		return;
+	}
+	const claimed = await claimForSettle(entry.path);
+	if (claimed === null) {
+		say(`usertrust: hold ${entry.transferId} is being settled by another hook`);
+		return;
+	}
+	const unused = ruling.kind === "transcript";
+	if (!unused) {
+		await recordSettleGap({
+			phase: "settle",
+			outcome: "failed",
+			session: sessionId,
+			agent: agentId,
+			transferId: entry.transferId,
+			reason: `whether this call's response is posted could not be told (${ruling.reason}); it is not charged`,
+			started: callStart(entry),
+			releaseClass: "call-ran",
+			toolUseId: typeof input.tool_use_id === "string" ? input.tool_use_id.slice(0, 256) : null,
+		});
+	}
+	const givenBack = await giveBack(
+		entry.transferId,
+		unused
+			? "this call's response was claimed by the post that charges it"
+			: "the call's charge could not be ruled on",
+		Math.max(250, Math.min(5000, timeLeft())),
+		unused ? "unused" : "call-ran",
+	);
+	await unlink(claimed).catch(() => {});
+	say(
+		`usertrust: hold ${entry.transferId} ${givenBack ? "given back" : "left to the server's TTL sweep"}: ${
+			unused
+				? "this call's response was claimed by the post that charges it"
+				: `this call is not charged (${ruling.reason}; recorded as a gap)`
+		}`,
+	);
 }
 
 try {
@@ -439,6 +625,9 @@ try {
 			);
 		}
 		await recordHoldOutcome(sessionId, entry, result);
+	} else if (entry?.awaitingTranscript === true) {
+		// Ruled whatever the usage setting says now (`resolveAwaitingHold`).
+		await settleAwaitingHold({ sessionId, agentId, entry, input });
 	} else if (entry) {
 		if (usageMode() === "transcript") {
 			const reason = await estimateReasonFor({ sessionId, agentId, input });
@@ -446,30 +635,7 @@ try {
 				`usertrust: settling at the ESTIMATE — ${reason ?? "the hold was reserved in estimate mode"}`,
 			);
 		}
-		// Price both legs. The authorize-time input estimate is persisted on the
-		// pending file; if an older file lacks it, re-estimate from tool_input
-		// when the host still sends it.
-		const inputTokens =
-			typeof entry.estimatedInputTokens === "number"
-				? entry.estimatedInputTokens
-				: input.tool_input != null
-					? estimateTokens(JSON.stringify(input.tool_input).slice(0, MAX_CONTENT_CHARS))
-					: undefined;
-		const usage = {
-			...(inputTokens != null ? { inputTokens } : {}),
-			// Same 16 KiB cap as the output hold so a content-cap result cannot
-			// price above the reservation.
-			outputTokens: estimateTokens(
-				JSON.stringify(input.tool_response ?? "").slice(0, MAX_CONTENT_CHARS),
-			),
-			usageSource: "estimated",
-			// A hold authorized under the `job` capability names its job again, and says when
-			// its usage ended (now). The usage START is the authorize capture's alone.
-			...(typeof entry.usageFrom === "string"
-				? settleLabels({ ...entry, usageTo: await estimateUsageTo(sessionId, entry) })
-				: {}),
-		};
-		await settleEstimateHold({ sessionId, agentId, entry, usage, input });
+		await settleAtEstimate({ sessionId, agentId, entry, input });
 	}
 } catch (err) {
 	say(

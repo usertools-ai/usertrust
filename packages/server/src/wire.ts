@@ -76,6 +76,11 @@ export const AuthorizeRequestSchema = z
 		// prices anything.
 		jobType: z.enum(JOB_TYPES).optional(),
 		typeSource: z.enum(TYPE_SOURCES).optional(),
+		// Capability `hold-ttl`: how long the hold should live, in ms, for a call expected to run
+		// past the default. Clamped by the server to [pendingTtlMs, maxPendingTtlMs]. An older
+		// server strips the key, and the hold keeps the default life: a client sends it only to a
+		// server that lists `hold-ttl`.
+		holdTtlMs: z.number().int().positive().optional(),
 	})
 	.refine((r) => r.job === undefined || r.jobState === undefined, {
 		message: "jobState cannot accompany a job",

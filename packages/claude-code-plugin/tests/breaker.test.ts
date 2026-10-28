@@ -519,6 +519,64 @@ describe("under an open breaker, every hook sends nothing and touches nothing", 
 		});
 	});
 
+	it("PreToolUse with a sibling at the estimate: a named subagent's call is deferred, a fork's or an untyped one's a gap", async () => {
+		await writeTranscript();
+		await mkdir(join(stateDir, "transcripts", "estimate"), { recursive: true, mode: 0o700 });
+		await writeFile(join(stateDir, "transcripts", "estimate", `${SESSION}__a0`), "estimate mode");
+		await openBreaker();
+		const sub = (call: string, agent: string, type?: string) => ({
+			...preInput(call),
+			agent_id: agent,
+			...(type === undefined ? {} : { agent_type: type }),
+		});
+		await run("pre-tool-use", sub("tu_1", "g1", "general-purpose"));
+		await run("pre-tool-use", sub("tu_2", "f1", "fork"));
+		await run("pre-tool-use", sub("tu_3", "x1"));
+		expect(seen).toEqual([]);
+		expect((await records()).map((r) => [r.agent, r.kind])).toEqual([
+			["g1", "deferred"],
+			["f1", "gap"],
+			["x1", "gap"],
+		]);
+	});
+
+	it("PreToolUse with a sibling at the estimate: a fork whose reads are under way inherits nothing, so its call is deferred; a fork with nothing read yet is a gap", async () => {
+		await writeTranscript();
+		const subagents = join(projectDir, SESSION, "subagents");
+		await mkdir(subagents, { recursive: true });
+		const prompt = (agent: string) =>
+			JSON.stringify({
+				type: "user",
+				sessionId: SESSION,
+				agentId: agent,
+				isSidechain: true,
+				message: { role: "user", content: "synthetic" },
+			});
+		await writeFile(join(subagents, "agent-f1.jsonl"), `${prompt("f1")}\n`);
+		await writeFile(join(subagents, "agent-f2.jsonl"), `${prompt("f2")}\n`);
+		const fork = (agent: string) => ({ agent_id: agent, agent_type: "fork" });
+		// f1 reads its copied prompt while the server answers: its reads are under way.
+		await run("pre-tool-use", { ...preInput("tu_0"), ...fork("f1") });
+		await run("post-tool-use", { ...postInput("tu_0"), ...fork("f1") });
+		const cursor = JSON.parse(
+			await readFile(join(stateDir, "transcripts", `${SESSION}__f1.json`), "utf-8"),
+		) as { byteOffset: number };
+		expect(cursor.byteOffset).toBeGreaterThan(0);
+		await mkdir(join(stateDir, "transcripts", "estimate"), { recursive: true, mode: 0o700 });
+		await writeFile(join(stateDir, "transcripts", "estimate", `${SESSION}__a0`), "estimate mode");
+		await openBreaker();
+		const sent = seen.length;
+		await run("pre-tool-use", { ...preInput("tu_1"), ...fork("f1") });
+		await run("pre-tool-use", { ...preInput("tu_2"), ...fork("f2") });
+		expect(seen).toHaveLength(sent);
+		expect(
+			(await records()).filter((r) => r.reason === "breaker-open").map((r) => [r.agent, r.kind]),
+		).toEqual([
+			["f1", "deferred"],
+			["f2", "gap"],
+		]);
+	});
+
 	it("PostToolUse leaves the state dir byte-identical but for its record and the first-run time, and the first Stop after the close settles that hold ONCE", async () => {
 		await seedHold("tu_1", "tx_1", WINDOW);
 		await openBreaker();

@@ -31,7 +31,7 @@ node --env-file=.usertrust/.env app.mjs
 
 or `export ANTHROPIC_API_KEY=...` yourself first.
 
-That's it. One function wraps any supported LLM client. Every call is metered, audited, and policy-checked.
+That's it. One function wraps any supported LLM client. Every governed call is metered, policy-checked and recorded on the audit chain; a call whose record could not be written says so on its receipt (`auditDegraded`, see [LIMITATIONS.md, section 5](https://github.com/usertools-ai/usertrust/blob/master/LIMITATIONS.md#5-one-audit-writer-per-vault-one-process-at-a-time)).
 
 ### Expected Output
 
@@ -75,6 +75,8 @@ The `receipt` returned from every governed call:
   }
 }
 ```
+
+For an endpoint classified as cloud, a model id written the way a gateway or cloud platform writes it (a Bedrock, Vertex or OpenRouter id, a `-latest` alias without a row of its own, or an id in another case) is priced at the fallback rate, the table's dearest, and reports, exports and the dashboard can show its provider as `unknown`. To refuse such a call instead, set `unknownModelPolicy` to `"deny"`. See [LIMITATIONS.md](https://github.com/usertools-ai/usertrust/blob/master/LIMITATIONS.md) section 16 for how to price such an id.
 
 ## Install
 
@@ -192,6 +194,8 @@ usertrust tb            # TigerBeetle process management
 usertrust completions   # Shell completions (bash, zsh, fish)
 ```
 
+`usertrust snapshot restore <name>` writes the snapshot's files over the live ones, so events appended after the snapshot are dropped, with no warning and no backup, and exits 0 even when it refuses; `snapshot create` takes no writer lock. Stop every usertrust process that writes the vault before you create or restore a snapshot. Read the `Snapshot restored:` line, or parse the `--json` output and test `.success === true`, not the exit code. See [LIMITATIONS.md](https://github.com/usertools-ai/usertrust/blob/master/LIMITATIONS.md) section 15.
+
 ### JSON output
 
 Every command supports `--json` for scripting and CI:
@@ -267,7 +271,7 @@ const config = defineConfig({
 
 **Merkle proofs (RFC 6962)** — Inclusion and consistency proofs for public verifiability. Any third party can verify a specific event existed in the chain.
 
-**External anchoring** — Ed25519-signed chain-head checkpoints pushed to an append-only store the vault operator cannot rewrite (S3 Object Lock, protected git branch, SIEM). Even a fully re-hashed, internally-consistent rewrite fails verification against the externally-held root. Ships a native SigV4 S3 sink (no AWS SDK), an experimental [Rekor](https://docs.sigstore.dev/logging/overview/) transparency-log witness that publishes digests only, `anchor doctor` to probe whether the writer identity can actually delete or overwrite in the store, and `anchor export-bundle` to hand an auditor the records and receipts in one file. See the [anchoring guide](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md).
+**External anchoring** — Ed25519-signed chain-head checkpoints pushed to an append-only store the vault operator cannot rewrite (S3 Object Lock, protected git branch, SIEM). Even a fully re-hashed, internally-consistent rewrite of the events an anchor covers fails verification against the externally-held root; events appended after the last anchor are covered only by the next one. Ships a native SigV4 S3 sink (no AWS SDK), an experimental [Rekor](https://docs.sigstore.dev/logging/overview/) transparency-log witness that publishes digests only, `anchor doctor` to probe whether the writer identity can actually delete or overwrite in the store, and `anchor export-bundle` to hand an auditor the records and receipts in one file. See the [anchoring guide](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md).
 
 **Policy engine** — 12 field operators (`eq`, `gt`, `in`, `regex`, etc.) with soft/hard enforcement. Block specific models, cap costs, require approvals.
 
@@ -335,7 +339,7 @@ npx usertrust-verify .usertrust
 ```
 
 ```
-Vault integrity: VERIFIED
+Vault integrity: VERIFIED (UNANCHORED — internal consistency only)
 Chain length: 847 events
 Merkle root: a3f8c1...d92b
 Hash algorithm: SHA-256
@@ -348,9 +352,9 @@ The verify package has zero runtime dependencies. It reads JSONL, recomputes SHA
 
 `usertrust-verify` takes the path to the `.usertrust` directory; `usertrust verify` takes the project root that contains it. Giving `usertrust-verify` the project root reports a missing audit directory, not a tampered chain.
 
-**Known issue in 4.1.0:** on a vault with no external anchor, deleting the most recent records is reported only until the next governed call from a freshly started process; after that, verification passes over the shortened chain. An anchor catches the deletion of the records it covers (those up to the tree size it recorded); records appended after the last anchor are still unanchored. Emptying `events.jsonl` while its `.meta` sidecar remains is not silent: the next append continues from the sidecar's hash and verification reports the gap. More generally, someone who can rewrite both the vault file and its sidecar can only be caught by evidence held outside the vault: an external anchor, or receipts you retained. Enable [external anchoring](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md) if the chain is your evidence. See `LIMITATIONS.md` section 8.
+**Known issue, present in current releases (first documented in 4.1.0):** an audit log whose newest events were removed can read as verified. Without anchors the chain is checked only against itself, so a vault whose newest events were cut, and whose `.meta` file was deleted or rewritten to match, passes `usertrust verify` and `usertrust-verify` (exit 0, `UNANCHORED`). If the `.meta` file is left alone, the cut is reported only until the next governed call from a freshly started process; after that, verification passes over the shortened chain. To detect a removal, enable anchoring and run with `--anchors <file>` and `--pubkey <pem>`: a rollback below an anchor then fails with `ANCHOR_MISMATCH`. Without `--pubkey` the anchors are not checked, and the vault still passes as `ANCHOR_UNVERIFIABLE`. `usertrust verify --receipts <file>` also fails (exit 1, `INCOMPLETE`) when a receipt you kept names an event the log no longer holds. An anchor catches the deletion of the records it covers (those up to the tree size it recorded); records appended after the last anchor are still unanchored. Emptying `events.jsonl` while its `.meta` sidecar remains is not silent: the next append continues from the sidecar's hash and verification reports the gap. Enable [external anchoring](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md) if the chain is your evidence. See `LIMITATIONS.md` section 8.
 
-With [external anchoring](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md) enabled, verification goes further: the auditor fetches signed checkpoints from an append-only store the operator cannot rewrite and pins the public key out-of-band — so even a fully re-hashed rewrite of the vault fails:
+With [external anchoring](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md) enabled, verification goes further: the auditor fetches signed checkpoints from an append-only store the operator cannot rewrite and pins the public key out-of-band — so even a fully re-hashed rewrite of the events an anchor covers fails:
 
 ```bash
 usertrust anchor init                                     # once: mint identity, pin the key
