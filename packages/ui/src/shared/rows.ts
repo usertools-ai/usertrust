@@ -73,7 +73,7 @@ export const UNRECOGNIZED = "unrecognized";
  * authorized the job. usertrust cannot tell a person from an agent, and an agent-declared type can be wrong or chosen
  * by a prompt. It selects no account, enters no policy and prices nothing.
  */
-export const JOB_TYPE_CAVEAT = "declared, not verified";
+export const JOB_TYPE_CAVEAT = "declared by the caller, not checked";
 
 /** The row's job type bucket: its declared type, or `untyped`. */
 export function jobTypeOf(row: Pick<LedgerRow, "jobType">): string {

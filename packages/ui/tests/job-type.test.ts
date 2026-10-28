@@ -3,7 +3,7 @@
 
 /**
  * Job types in the dashboard. A type is what the caller DECLARED when it authorized the job; the dashboard shows it,
- * filters on it and totals by it, and says "declared, not verified" wherever it does.
+ * filters on it and totals by it, and says "declared by the caller, not checked" wherever it does.
  *
  * Pinned here:
  *  - rows copy `job`, `jobType` and `typeSource` from the record, and a record without them stays without them;
@@ -164,24 +164,24 @@ describe("cost by declared job type", () => {
 });
 
 describe("the caveat is on every surface that shows a type", () => {
-	it("is 'declared, not verified'", () => {
-		expect(JOB_TYPE_CAVEAT).toBe("declared, not verified");
+	it("is 'declared by the caller, not checked'", () => {
+		expect(JOB_TYPE_CAVEAT).toBe("declared by the caller, not checked");
 	});
 
 	it("the CSV columns are named for it and keep the earlier columns where they were", () => {
 		expect(CSV_HEADERS.slice(-3)).toEqual([
 			"job",
-			"job_type_declared_not_verified",
+			"job_type_declared_not_checked",
 			"type_declared_by",
 		]);
 		const csv = toCsv(mixed());
 		const header = csv.split("\r\n")[0]?.split(",") ?? [];
 		const line = csv.split("\r\n")[1]?.split(",") ?? [];
 		expect(line[header.indexOf("job")]).toBe("j1");
-		expect(line[header.indexOf("job_type_declared_not_verified")]).toBe("feature");
+		expect(line[header.indexOf("job_type_declared_not_checked")]).toBe("feature");
 		expect(line[header.indexOf("type_declared_by")]).toBe("explicit");
 		const untyped = csv.split("\r\n")[5]?.split(",") ?? [];
-		expect(untyped[header.indexOf("job_type_declared_not_verified")]).toBe("");
+		expect(untyped[header.indexOf("job_type_declared_not_checked")]).toBe("");
 	});
 
 	it("the trends card, the facet chip and the row panel all carry it", async () => {

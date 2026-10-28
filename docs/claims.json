@@ -1159,16 +1159,6 @@
 	"nonclaims": [
 		{
 			"file": "CHANGELOG.md",
-			"text": "every place that shows one says \"declared, not verified\"",
-			"why": "says a job type is a caller's declaration; it makes no statement about the audit chain"
-		},
-		{
-			"file": "packages/ui/README.md",
-			"text": "The job type is what the caller declared when it authorized the job (declared, not verified)",
-			"why": "says a job type is a caller's declaration; it makes no statement about the audit chain"
-		},
-		{
-			"file": "CHANGELOG.md",
 			"text": "Each of these statements is now listed in `docs/claims.json` with the test that proves it, and a test fails when the documentation states an integrity claim the list does not hold (see `docs/CLAIMS.md`). ",
 			"why": "a dated record of a documentation fix"
 		},
