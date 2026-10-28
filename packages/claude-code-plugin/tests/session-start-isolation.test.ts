@@ -128,7 +128,7 @@ const start = (
 		env,
 		[],
 		options,
-	).then((r) => ({ ...r, ms: Date.now() - began }));
+	).then((r) => ({ ...r, ms: Date.now() - began })); // timing: bounds 2.5 s to 4.8 s asserted; slowest test 5.1 s, 3 runs on a loaded runner
 };
 const count = (haystack: string, needle: string) => haystack.split(needle).length - 1;
 const contextOf = (stdout: string) =>
@@ -382,7 +382,7 @@ describe("a configured session's SessionStart request is made from its isolated 
 		const goneWithin = async (pid: number, ms: number) => {
 			// timing: deadlines of 0.5 s, 1 s and 2.3 s for a process that must already be ending; the slowest test in this file took 5.1 s, slowest of 3 runs on a loaded runner
 			const until = Date.now() + ms;
-			while (alive(pid) && Date.now() < until) await sleep(25);
+			while (alive(pid) && Date.now() < until) await sleep(25); // timing: deadlines 0.5 s to 2.3 s; slowest test 5.1 s, 3 runs on a loaded runner
 			return !alive(pid);
 		};
 

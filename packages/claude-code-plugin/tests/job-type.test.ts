@@ -528,7 +528,7 @@ async function sessionStart(env: Record<string, string>, source = "startup") {
 		{ hook_event_name: "SessionStart", source, session_id: SESSION },
 		{ UT_CC_STATE_DIR: state, UT_SERVER_KEY: "k", ...env },
 	);
-	return { ...result, ms: Date.now() - began };
+	return { ...result, ms: Date.now() - began }; // timing: bound 4.5 s asserted; slowest run 1.6 s, 3 runs on a loaded runner
 }
 /** The WHOLE stdout as ONE JSON document, or the parse failure: two writes would fail here. */
 function wholeJson(stdout: string): Record<string, unknown> {
