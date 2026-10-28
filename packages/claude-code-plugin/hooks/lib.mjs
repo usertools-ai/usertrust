@@ -242,9 +242,25 @@ export function say(text, max = MAX_NOTE_CHARS) {
  * (shown in the user's terminal) is sanitized, then clipped, as `say`'s lines are.
  * JSON escaping alone would leave DEL and C1 (U+007F-U+009F) raw.
  */
-export function announce(text, max = MAX_NOTE_CHARS) {
-	process.stdout.write(JSON.stringify({ systemMessage: sanitizeThenClip(text, max) }));
+export function announce(text, options = MAX_NOTE_CHARS) {
+	// A number is the old call form (`announce(text, max)`), kept working.
+	const { max = MAX_NOTE_CHARS, additionalContext } =
+		typeof options === "number" ? { max: options } : (options ?? {});
+	const out = { systemMessage: sanitizeThenClip(text, max) };
+	// SessionStart's context for the AGENT (not the user), in the SAME object: stdout is JSON only
+	// when it is exactly one object, so a second write would be a parse failure and drop both.
+	// Sanitized and clipped like the message; the caller passes fixed text, never user data.
+	if (additionalContext !== undefined) {
+		out.hookSpecificOutput = {
+			hookEventName: "SessionStart",
+			additionalContext: sanitizeThenClip(additionalContext, MAX_CONTEXT_CHARS),
+		};
+	}
+	process.stdout.write(JSON.stringify(out));
 }
+
+/** The longest `additionalContext` `announce` writes (the host's own cap is 10,000). */
+export const MAX_CONTEXT_CHARS = 2000;
 
 /**
  * Whether the plugin may block a tool call. It never grants one, in either mode
@@ -1612,6 +1628,20 @@ let capabilitiesRead;
 /** The longest hold the server lets an authorize ask for (`/v1/health` `maxHoldTtlMs`), or null. */
 let healthMaxHoldTtlMs = null;
 
+/** The capability sets built from a health answer whose list was not a list of strings. */
+const MALFORMED_LISTS = new WeakSet();
+
+/**
+ * Whether the health answer `capabilities` came from carried a `capabilities` value that was
+ * not a list of strings (a non-list, or a list with a non-string in it). The Set itself holds
+ * only the strings that were readable, so a caller that must not act on a half-readable answer
+ * (`job-log.mjs` `probeJobType`) asks this first. A missing list is an older server's, not
+ * malformed.
+ */
+export function capabilityListMalformed(capabilities) {
+	return MALFORMED_LISTS.has(capabilities);
+}
+
 /**
  * Read the capabilities AGAIN, discarding a cached UNKNOWN. serverCapabilities() caches
  * its answer for the hook process, which is right for a settled answer but wrong for a
@@ -1626,16 +1656,47 @@ export async function refreshUnknownServerCapabilities() {
 }
 
 /**
+ * The closed list of job types (usertrust-server's `job-type` capability; core's `JOB_TYPES`):
+ * what KIND of work a job was. A label like the job itself, never a payer. A new type is a
+ * deliberate change here, in core and in the CHANGELOG, never free text.
+ */
+export const JOB_TYPES = [
+	"feature",
+	"bugfix",
+	"review",
+	"test",
+	"docs",
+	"ops",
+	"research",
+	"other",
+];
+/** Who declared a type: `explicit` (a person ran the command) or `agent` (the agent did, on the plugin's instruction). */
+export const TYPE_SOURCES = ["explicit", "agent"];
+
+/**
  * Which job labels a record carries, off a hold's entry or its file: strings only,
  * so a corrupt file can never put a non-string into a request. Absent keys stay
  * absent (a hold authorized without the `job` capability records none).
+ * A type is carried only as the server would accept it: on a job, from the closed list;
+ * a source only beside a type. A file that says otherwise loses the type, never the job.
+ * An older hold file has no type fields and reads exactly as before.
  */
 export function jobHoldFields(entry) {
 	const out = {};
 	for (const key of ["job", "jobState", "usageFrom", "usageTo"]) {
 		if (typeof entry?.[key] === "string" && entry[key] !== "") out[key] = entry[key];
 	}
+	if (out.job !== undefined && JOB_TYPES.includes(entry?.jobType)) {
+		out.jobType = entry.jobType;
+		if (TYPE_SOURCES.includes(entry?.typeSource)) out.typeSource = entry.typeSource;
+	}
 	return out;
+}
+
+/** `labels` without a job type or its source: what a server that does not list `job-type` is sent. */
+export function withoutJobType(labels) {
+	const { jobType: _jobType, typeSource: _typeSource, ...rest } = labels ?? {};
+	return rest;
 }
 
 // Under jobs/, beside the logs: the state dir's top level lists holds, and a server that
@@ -1658,7 +1719,37 @@ export async function writeFileAtomic(path, text, { mode = 0o600, beforeCommit }
 }
 
 const JOB_CAPABILITY_FILE = join("jobs", "capability.json");
+const JOB_TYPE_CAPABILITY_FILE = join("jobs", "type-capability.json");
 let jobCapableRead;
+let jobTypeCapableRead;
+
+/**
+ * One capability bit, remembered per server URL under jobs/ (`file`): `capabilities` as
+ * `serverCapabilities` resolved them (null when the probe failed, then the remembered bit
+ * answers). A probe that ANSWERS always overwrites the remembered bit.
+ */
+async function rememberedCapability(file, name, capabilities) {
+	const path = join(stateDir(), file);
+	const url = serverBase();
+	let known = {};
+	try {
+		const parsed = JSON.parse(await readRegular(path, READ_BOUND.record));
+		if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) known = parsed;
+	} catch {
+		// unreadable or absent: nothing remembered
+	}
+	if (capabilities === null) return known[url] === true;
+	const honoured = capabilities.has(name);
+	if (known[url] !== honoured && (honoured || known[url] !== undefined)) {
+		try {
+			await mkdir(join(stateDir(), "jobs"), { recursive: true, mode: 0o700 });
+			await writeFileAtomic(path, JSON.stringify({ ...known, [url]: honoured }));
+		} catch {
+			// the bit is a convenience: a failed write loses only the memory
+		}
+	}
+	return honoured;
+}
 
 /**
  * Whether the server honours the `job` capability (job, jobState, usageFrom, usageTo).
@@ -1672,29 +1763,20 @@ let jobCapableRead;
  * A probe that ANSWERS always overwrites the remembered bit.
  */
 export function jobCapable(capabilities) {
-	jobCapableRead ??= (async () => {
-		const file = join(stateDir(), JOB_CAPABILITY_FILE);
-		const url = serverBase();
-		let known = {};
-		try {
-			const parsed = JSON.parse(await readRegular(file, READ_BOUND.record));
-			if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) known = parsed;
-		} catch {
-			// unreadable or absent: nothing remembered
-		}
-		if (capabilities === null) return known[url] === true;
-		const honoured = capabilities.has("job");
-		if (known[url] !== honoured && (honoured || known[url] !== undefined)) {
-			try {
-				await mkdir(join(stateDir(), "jobs"), { recursive: true, mode: 0o700 });
-				await writeFileAtomic(file, JSON.stringify({ ...known, [url]: honoured }));
-			} catch {
-				// the bit is a convenience: a failed write loses only the memory
-			}
-		}
-		return honoured;
-	})();
+	jobCapableRead ??= rememberedCapability(JOB_CAPABILITY_FILE, "job", capabilities);
 	return jobCapableRead;
+}
+
+/**
+ * Whether the server honours `job-type` (jobType, typeSource beside a job). Remembered per URL
+ * exactly as `jobCapable`'s bit, in its own file, for the same reason: a type sent to a server
+ * that strips it is harmless (the record is untyped), and a probe that timed out must not drop
+ * the type of a job the server would have recorded. It is a SEPARATE bit: a server may honour
+ * `job` and not `job-type`, and then the job is sent and the type is not.
+ */
+export function jobTypeCapable(capabilities) {
+	jobTypeCapableRead ??= rememberedCapability(JOB_TYPE_CAPABILITY_FILE, "job-type", capabilities);
+	return jobTypeCapableRead;
 }
 
 /**
@@ -1712,9 +1794,9 @@ export function jobCapable(capabilities) {
  * they do not know. It would accept an `idempotencyKey` and drop it in silence —
  * and a settle retried "safely" under that key would then post twice.
  */
-export function serverCapabilities() {
+export function serverCapabilities({ maxMs = 2_000, count = true } = {}) {
 	capabilitiesRead ??= (async () => {
-		const timeoutMs = Math.min(2_000, budgetShare(0.2), timeLeft());
+		const timeoutMs = Math.min(maxMs, budgetShare(0.2), timeLeft());
 		const unknown = async (why, { cache = true } = {}) => {
 			principalCachedAt = cache ? await cachedPrincipal() : null;
 			say(
@@ -1738,13 +1820,24 @@ export function serverCapabilities() {
 			const json = JSON.parse(text);
 			const list = Array.isArray(json?.capabilities) ? json.capabilities : [];
 			const capabilities = new Set(list.filter((c) => typeof c === "string"));
+			// Existing decisions (job, principal, keys) keep reading the strings that are there;
+			// a decision that must not trust a half-readable list asks `capabilityListMalformed`.
+			if (
+				json?.capabilities !== undefined &&
+				!(Array.isArray(json.capabilities) && list.every((c) => typeof c === "string"))
+			) {
+				MALFORMED_LISTS.add(capabilities);
+			}
 			const max = json?.maxHoldTtlMs;
 			healthMaxHoldTtlMs = Number.isSafeInteger(max) && max > 0 ? max : null;
 			principalCachedAt = null;
 			await rememberCapabilities(capabilities);
 			return capabilities;
 		} catch (err) {
-			if (controller.signal.aborted) timedOut(timeoutMs);
+			// `count: false` is SessionStart's optional probe: a slow health answer there is not the
+			// server's silence toward a governed call, and three session starts must never open the
+			// breaker that every watch-mode hook then obeys. Every other probe counts, as before.
+			if (controller.signal.aborted && count) timedOut(timeoutMs);
 			return unknown(err instanceof Error ? err.message : String(err));
 		} finally {
 			clearTimeout(timeout);

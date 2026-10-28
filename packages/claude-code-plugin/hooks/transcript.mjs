@@ -156,6 +156,7 @@ import {
 	isUnknownTransfer,
 	jobCapable,
 	jobHoldFields,
+	jobTypeCapable,
 	LINKLESS,
 	listPending,
 	NO_TRANSCRIPT_AGENT,
@@ -452,6 +453,10 @@ export function isoOf(ms) {
 export function authorizeLabels(labels) {
 	return {
 		...(labels.job === undefined ? {} : { job: labels.job }),
+		// The job's type and who declared it, when the caller's labels carry them: the caller
+		// puts them there only for a server that lists `job-type` (job-log.mjs `resolveJob`).
+		...(labels.jobType === undefined ? {} : { jobType: labels.jobType }),
+		...(labels.typeSource === undefined ? {} : { typeSource: labels.typeSource }),
 		...(labels.jobState === undefined ? {} : { jobState: labels.jobState }),
 		...(labels.usageFrom === undefined ? {} : { usageFrom: labels.usageFrom }),
 	};
@@ -465,6 +470,10 @@ export function authorizeLabels(labels) {
 export function settleLabels(labels) {
 	return {
 		...(labels.job === undefined ? {} : { job: labels.job }),
+		// The type again, only as the authorize SENT it (the hold file records what was sent): a
+		// settle never names a type its authorize omitted. The server checks it against the hold's.
+		...(labels.jobType === undefined ? {} : { jobType: labels.jobType }),
+		...(labels.typeSource === undefined ? {} : { typeSource: labels.typeSource }),
 		...(labels.jobState === undefined ? {} : { jobState: labels.jobState }),
 		...(labels.usageTo === undefined ? {} : { usageTo: labels.usageTo }),
 	};
@@ -3946,7 +3955,11 @@ async function remainderOf(
 		// What this session's job log says NOW, read once per remainder: a message's job
 		// is the one open at the message's OWN time, so a remainder spanning a switch
 		// settles once per job.
-		const jobs = (await jobCapable(capabilities)) ? await resolveJob(sessionId) : null;
+		// The type rides only to a server that lists `job-type`; `labels` below is what is SENT, and
+		// is what an unresolved vehicle keeps for its retry.
+		const jobs = (await jobCapable(capabilities))
+			? await resolveJob(sessionId, { types: await jobTypeCapable(capabilities) })
+			: null;
 		const groups = groupByModel(
 			fresh,
 			jobs === null ? undefined : (m) => labelsFor(jobs, m.ts).key,
@@ -4074,6 +4087,9 @@ async function reportDenied(agentType, agentId, reason, ids, model, counts, extr
 			error: extra.error,
 			reason: sanitizeReason(reason),
 			...(extra.labels.job === undefined ? {} : { job: extra.labels.job }),
+			// Beside the job, as the chain will carry it, so a report built on watch data agrees.
+			...(extra.labels.jobType === undefined ? {} : { jobType: extra.labels.jobType }),
+			...(extra.labels.typeSource === undefined ? {} : { typeSource: extra.labels.typeSource }),
 			...(extra.labels.jobState === undefined ? {} : { jobState: extra.labels.jobState }),
 			model,
 			tokens: { ...counts },

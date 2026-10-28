@@ -15,13 +15,60 @@ import { principalFieldRefusal } from "./principal.js";
  * - `job`      — an opaque job id (1-128 of `[A-Za-z0-9._:-]`).
  * - `jobState` — `"invalid"` when the caller's job log could not be trusted, so the
  *                absence of a `job` says "unknown", not "no job". Exclusive with `job`.
+ * - `jobType`  — which KIND of work the job was, from the closed `JOB_TYPES` list. A second
+ *                label on the same spend, with the same standing as `job`: it selects no
+ *                account, enters no policy context and prices nothing. Only ever with a
+ *                `job` (a type labels a job), never with `jobState`.
+ * - `typeSource` — who DECLARED the type: `"explicit"` (a person ran the command) or
+ *                `"agent"` (the agent did, on the plugin's instruction). Only ever with a
+ *                `jobType`. It is a declaration, not evidence: nothing here can tell a
+ *                person from an agent, so a reader must not treat `explicit` as proof.
  * - `usageFrom` / `usageTo` — the window of USAGE the record covers (ISO-8601 UTC),
  *                never the time the record was appended.
  */
 export interface JobCapture {
 	readonly job?: string;
+	readonly jobType?: JobType;
+	readonly typeSource?: TypeSource;
 	readonly jobState?: "invalid";
 	readonly usageFrom?: string;
+}
+
+/**
+ * The kinds of work a job can be, as a CLOSED list. There is no free text and no inference
+ * from names, branches or paths: a new type is a deliberate change here (and a CHANGELOG
+ * line), never something a caller can mint. Capability `job-type` on usertrust-server.
+ */
+export const JOB_TYPES = [
+	"feature",
+	"bugfix",
+	"review",
+	"test",
+	"docs",
+	"ops",
+	"research",
+	"other",
+] as const;
+export type JobType = (typeof JOB_TYPES)[number];
+
+/** Who declared a job's type. No other value: there is deliberately no `"inferred"`. */
+export const TYPE_SOURCES = ["explicit", "agent"] as const;
+export type TypeSource = (typeof TYPE_SOURCES)[number];
+
+/** Why `value` is not a job type, or `undefined` when it is (or is absent). */
+export function jobTypeRefusal(value: unknown): string | undefined {
+	if (value === undefined) return undefined;
+	return (JOB_TYPES as readonly unknown[]).includes(value)
+		? undefined
+		: `jobType must be one of ${JOB_TYPES.join(", ")}`;
+}
+
+/** Why `value` is not a type source, or `undefined` when it is (or is absent). */
+export function typeSourceRefusal(value: unknown): string | undefined {
+	if (value === undefined) return undefined;
+	return (TYPE_SOURCES as readonly unknown[]).includes(value)
+		? undefined
+		: `typeSource must be one of ${TYPE_SOURCES.join(", ")}`;
 }
 
 /**
@@ -102,13 +149,23 @@ function usageTime(field: string, value: unknown): string | undefined {
  */
 export function captureJob(input: {
 	job?: unknown;
+	jobType?: unknown;
+	typeSource?: unknown;
 	jobState?: unknown;
 	usageFrom?: unknown;
 }): JobCapture {
 	const job = input.job;
+	const jobType = input.jobType;
+	const typeSource = input.typeSource;
 	const jobState = input.jobState;
 	const usageFrom = usageTime("usageFrom", input.usageFrom);
-	const out: { job?: string; jobState?: "invalid"; usageFrom?: string } = {};
+	const out: {
+		job?: string;
+		jobType?: JobType;
+		typeSource?: TypeSource;
+		jobState?: "invalid";
+		usageFrom?: string;
+	} = {};
 	if (job !== undefined) {
 		const refusal = principalFieldRefusal(job);
 		if (refusal !== undefined) throw new TypeError(`job ${refusal}`);
@@ -118,6 +175,21 @@ export function captureJob(input: {
 		if (jobState !== "invalid") throw new TypeError('jobState must be "invalid"');
 		if (out.job !== undefined) throw new TypeError("jobState cannot accompany a job");
 		out.jobState = "invalid";
+	}
+	if (jobType !== undefined) {
+		const refusal = jobTypeRefusal(jobType);
+		if (refusal !== undefined) throw new TypeError(refusal);
+		// A type labels a JOB. With `jobState: "invalid"` there is no job to label, and a
+		// type beside an untrustworthy log would read as a fact about work nobody can name.
+		if (out.jobState !== undefined) throw new TypeError("jobState cannot accompany a jobType");
+		if (out.job === undefined) throw new TypeError("jobType requires a job");
+		out.jobType = jobType as JobType;
+	}
+	if (typeSource !== undefined) {
+		const refusal = typeSourceRefusal(typeSource);
+		if (refusal !== undefined) throw new TypeError(refusal);
+		if (out.jobType === undefined) throw new TypeError("typeSource requires a jobType");
+		out.typeSource = typeSource as TypeSource;
 	}
 	if (usageFrom !== undefined) out.usageFrom = usageFrom;
 	return Object.freeze(out);

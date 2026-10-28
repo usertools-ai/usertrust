@@ -6,7 +6,15 @@
 // (https://code.claude.com/docs/en/hooks: "To surface a message to the user on
 // any platform, return `systemMessage` in JSON output", and SessionStart
 // decision control: "Claude Code adds stdout it treats as plain text to
-// Claude's context"). No network call: the hook must be fast and cannot fail.
+// Claude's context"). The hook must be fast and cannot fail.
+//
+// Its one request, and only that: a single `/v1/health` probe of at most 1.5 s, asking whether
+// the server lists `job-type` (job-log.mjs `jobTypeInstruction`), so the agent is told to type
+// its jobs only where a type is recorded. For a configured session it is made by the isolated
+// child, as every other hook's request is (launch.mjs `probeInChild`); an environment session
+// makes it here. It NEVER counts toward the circuit breaker (a timeout or failure there is not a
+// strike), it is skipped while the breaker is open, and any failure leaves the banner below,
+// announced once, with no instruction. The banner and the warnings are local.
 //
 // It also warns of tool calls the server REJECTED for their key since the last session start
 // (key-rejected.mjs `rejectedSinceLastStart`): read from watch.jsonl, locally and bounded. Any
@@ -16,7 +24,7 @@
 // omit): what a hold names before any response of its agent says one (transcript.mjs
 // `holdModelFor`). And it says so when a model is still configured: that is ignored.
 import { ignoredModelNote } from "./config.mjs";
-import { writeSessionStart } from "./job-log.mjs";
+import { jobTypeInstruction, writeSessionStart } from "./job-log.mjs";
 import { rejectedSinceLastStart, warningText } from "./key-rejected.mjs";
 import {
 	announce,
@@ -81,4 +89,10 @@ if (peerWarning !== null) warning = warning === null ? peerWarning : `${peerWarn
 // A model still configured is ignored, and said; after the warnings, which matter more.
 const modelNote = ignoredModelNote();
 if (modelNote !== null) warning = warning === null ? modelNote : `${warning} ${modelNote}`;
-announce(warning === null ? modeAnnouncement() : `${warning} ${modeAnnouncement()}`);
+// The banner and, for a server that lists `job-type`, the agent's instruction to type its jobs
+// (`jobTypeInstruction`: bounded probe, null on any failure): ONE announce, so ONE JSON object.
+const typeInstruction = await jobTypeInstruction();
+announce(
+	warning === null ? modeAnnouncement() : `${warning} ${modeAnnouncement()}`,
+	typeInstruction === null ? undefined : { additionalContext: typeInstruction },
+);

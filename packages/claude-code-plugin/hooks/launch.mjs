@@ -3,8 +3,10 @@
 // THE PARENT, the process Claude Code starts, reads the hook's input and resolves its
 // session's settings from the session's pin (session.mjs, which makes the pin when
 // the session has none). Then:
-// - An `environment` session, a refused one, and SessionStart (which sends nothing)
-//   run the hook here, in this process.
+// - An `environment` session and a refused one run the hook here, in this process. So does
+//   SessionStart, which makes no governed request itself: its one probe (does the server list
+//   `job-type`?) is made, for a configured session, by a child of the kind below
+//   (`probeInChild`, session-probe.mjs), and the answer is a token the child writes to a pipe.
 // - A `configured` session's other hooks, all of which can send, run as a CHILD that
 //   sends: `node launch.mjs <hook> --ut-child ...`, with no node options, the
 //   working directory `/`, and nothing of the environment but the host variables a
@@ -50,6 +52,7 @@ import {
 	settings as resolvedSettings,
 	useSession,
 } from "./config.mjs";
+import { PROBE_READ_MAX, PROBE_TOKEN, setChildProbe } from "./job-log.mjs";
 import { launch, readStdin, recordWatchEvent, say } from "./lib.mjs";
 import {
 	alsoEnabledWarning,
@@ -72,6 +75,10 @@ const HOOKS = new Set([
 	"post-model-switch",
 ]);
 const CHILD = "--ut-child";
+/** The probe child (session-probe.mjs): not a hook of hooks.json, so only ever started as a child. */
+const PROBE = "session-probe";
+/** The longest the parent waits for the probe child: the probe's own bound (1.5 s) plus its start. */
+const PROBE_KILL_MS = 3_000;
 /** A child's exit when it will not run: its environment or its pin is not what it was given. */
 export const CHILD_REFUSED = 3;
 
@@ -230,6 +237,74 @@ async function warnOfPeer(input) {
 	else if (peer.state === "unknown") setPeerWarning(unknownWarning(peer.why));
 }
 
+/**
+ * SessionStart's one request, for a configured session, from the same isolated child its other
+ * hooks send from: no node options, cwd `/`, nothing of the environment. Resolves to whether the
+ * server lists `job-type`. A child that cannot run, fails, is refused or outlives the bound is
+ * `false` (no instruction), and the banner is the parent's, announced once either way. Its
+ * stdout is not the parent's (SessionStart prints one JSON object, from here), and the answer
+ * is the token it writes to a pipe (session-probe.mjs), read here with exit 0, never relayed.
+ */
+export function probeInChild(session, home) {
+	return new Promise((resolve) => {
+		let child;
+		let output = "";
+		let over = false;
+		// The probe child dies with this launcher, as `runInChild`'s does: a signal to the
+		// launcher is forwarded, and the launcher's own exit takes the child with it.
+		const forward = (signal) => child?.kill(signal);
+		const onExit = () => child?.kill("SIGKILL");
+		const signals = ["SIGTERM", "SIGINT", "SIGHUP"];
+		const cleanup = () => {
+			clearTimeout(timer);
+			for (const signal of signals) process.off(signal, handlers[signal]);
+			process.off("exit", onExit);
+		};
+		const handlers = Object.fromEntries(signals.map((s) => [s, () => forward(s)]));
+		let timer;
+		try {
+			child = spawn(
+				process.execPath,
+				[
+					LAUNCH,
+					PROBE,
+					CHILD,
+					`--ut-started=${Date.now()}`,
+					`--ut-pin=${session.path}`,
+					...(home === null ? [] : [`--ut-home=${home}`]),
+				],
+				{ ...childOptions(), stdio: ["ignore", "pipe", "inherit"] },
+			);
+		} catch {
+			resolve(false);
+			return;
+		}
+		for (const signal of signals) process.on(signal, handlers[signal]);
+		process.on("exit", onExit);
+		timer = setTimeout(() => child.kill("SIGKILL"), PROBE_KILL_MS);
+		// A bounded read, never relayed: SessionStart's stdout is one JSON object, this process's.
+		child.stdout.setEncoding("utf-8");
+		child.stdout.on("data", (chunk) => {
+			if (over) return;
+			if (output.length + chunk.length > PROBE_READ_MAX) {
+				// More than the token can be: not an answer. Stop reading and stop the child.
+				over = true;
+				child.kill("SIGKILL");
+			} else output += chunk;
+		});
+		child.stdout.on("error", () => {});
+		child.on("error", () => {
+			cleanup();
+			resolve(false);
+		});
+		child.on("close", (code, signal) => {
+			cleanup();
+			// ONLY a clean exit 0 together with exactly the token line is "listed".
+			resolve(code === 0 && signal === null && !over && output === `${PROBE_TOKEN}\n`);
+		});
+	});
+}
+
 /** The parent: resolve the session, then run the hook here or as a child. */
 async function parent(hook) {
 	const text = await readStdin();
@@ -243,9 +318,14 @@ async function parent(hook) {
 	known.settings = session.settings;
 	if (session.path !== null) touchPin(session.path);
 	if (hook === "session-start") sweep({ passwdHome: home, uid });
+	const configured = session.kind === "configured" && session.settings.refused === null;
+	if (hook === "session-start" && configured) {
+		// The parent prints SessionStart's banner; only the request leaves, and from the child.
+		setChildProbe(childUnsupported() === null ? await probeInChild(session, home) : false);
+	}
 	// Neither sends anything: each only records, locally.
 	const sends = hook !== "session-start" && hook !== "post-model-switch";
-	if (session.kind === "configured" && session.settings.refused === null && sends) {
+	if (configured && sends) {
 		const unsupported = childUnsupported();
 		if (unsupported !== null) await childFailed(hook, session.settings, input, unsupported);
 		else await runInChild(hook, text, input, session, home);
@@ -314,9 +394,15 @@ function isScript() {
 	}
 }
 
+/** End the process once stdout and stderr have taken what was written (their callbacks). */
+function endWhenFlushed() {
+	const flushed = (stream) => new Promise((resolve) => stream.write("", resolve));
+	return Promise.all([flushed(process.stdout), flushed(process.stderr)]).then(() => process.exit());
+}
+
 if (isScript()) {
 	const hook = process.argv[2];
-	if (!HOOKS.has(hook)) {
+	if (!HOOKS.has(hook) && !(hook === PROBE && process.argv.includes(CHILD))) {
 		say("usertrust: launch.mjs runs a hook: session-start, pre-tool-use, ...");
 		process.exitCode = 1;
 	} else if (process.argv.includes(CHILD)) {
@@ -328,6 +414,12 @@ if (isScript()) {
 		process.on("unhandledRejection", failed);
 		try {
 			await parent(hook);
+			// SessionStart's probe, in an environment session, runs in THIS process, and its 1.5 s
+			// abort does not end a TLS handshake that stalls: the socket keeps the process alive past
+			// the hook's 5 s kill. Everything the hook does is awaited by now, so end once the
+			// banner is flushed (a bare exit can cut a pipe write short). A configured session's
+			// probe runs in a child that exits itself.
+			if (hook === "session-start") await endWhenFlushed();
 		} catch (err) {
 			await launcherFailed(hook, err);
 		}

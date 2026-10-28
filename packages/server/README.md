@@ -110,6 +110,20 @@ written and the hold stays settleable. A settle that states `usageFrom` is a `40
 one source of a usage start. A server that honours these lists `"job"` in `capabilities`; an older one
 strips them in silence, so a client checks the list first.
 
+`/v1/authorize` also accepts `jobType` and `typeSource`: which KIND of work the job was, and who said so.
+`jobType` is one of a closed list, `feature`, `bugfix`, `review`, `test`, `docs`, `ops`, `research`,
+`other` (exported as `JOB_TYPES`); `typeSource` is `explicit` (a person declared it) or `agent` (the
+agent did, on a plugin's instruction). A type labels a job, so `jobType` without a `job` is a `400`,
+`typeSource` without a `jobType` is a `400`, and `jobState: "invalid"` excludes both. Both are recorded
+verbatim on every audit record that carries `job`, and are absent on an untyped call's records. A type
+is a DECLARATION, not evidence: nothing here can tell a person from an agent, and an agent-declared
+type can be wrong. Like the job it selects no wallet, enters no policy decision and prices nothing.
+`/v1/settle` may repeat `jobType` and/or `typeSource`, alone or without `job`, only to be checked against
+the hold's: a different one, or any type on an untyped hold, is a `400` (`settle job type differs from the
+hold's`) with nothing written and the hold still settleable. A settle for a hold this server does not
+hold ignores them, as it ignores `job`. A server that honours these lists `"job-type"` in
+`capabilities`; an older one strips them in silence, so a client checks the list first.
+
 A `200` from `/v1/authorize` carries `expiresInMs`: the longest the hold can still be pending, in whole
 milliseconds. That is the shorter of `pendingTtlMs` and the ledger's pending timeout (5 min; in dryRun,
 `pendingTtlMs` alone), counted from when the request arrived. No expiry ends the hold sooner; a settle,

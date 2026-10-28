@@ -1114,7 +1114,7 @@ describe("a refused config: watch-only and key-less, and nothing sent", () => {
 /**
  * `process` members a hook may use; anything else (env above all) is config.mjs's
  * alone. launch.mjs starts the child (`argv`, `execPath`), passes on its exit
- * (`exitCode`) and its signals (`on`): none of them is the environment.
+ * (`exitCode`) and its signals (`on`, `off`): none of them is the environment.
  */
 const PROCESS_MEMBERS = new Set([
 	"stdin",
@@ -1127,6 +1127,7 @@ const PROCESS_MEMBERS = new Set([
 	"execPath",
 	"exitCode",
 	"on",
+	"off",
 ]);
 
 interface EnvUse {

@@ -130,6 +130,9 @@ export type {
 // Headless governance (non-SDK integrations)
 export {
 	createGovernor,
+	JOB_TYPES,
+	type JobType,
+	jobTypeRefusal,
 	type Principal,
 	type PrincipalLedgerTags,
 	principalFieldRefusal,
@@ -137,6 +140,9 @@ export {
 	RELEASE_CLASSES,
 	type ReleaseClass,
 	sanitizeReleaseReason,
+	TYPE_SOURCES,
+	type TypeSource,
+	typeSourceRefusal,
 	usageTimeRefusal,
 } from "./headless.js";
 // The ledger client is the required first argument of every budget entry point

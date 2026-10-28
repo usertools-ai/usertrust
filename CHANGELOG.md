@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A job can say what KIND of work it was: `jobType` and `typeSource`, capability `job-type`.** `AuthorizeParams` takes `jobType`, one of a closed list exported as `JOB_TYPES` (`feature`, `bugfix`, `review`, `test`, `docs`, `ops`, `research`, `other`), and `typeSource`, who declared it (`explicit` or `agent`, exported as `TYPE_SOURCES`). Both are captured once at authorize beside `job` and spread onto every record that carries `job` (`llm_call`, `llm_call_failed`, `hold_released`, `settlement_ambiguous`, `settlement_shortfall`, `usage_implausible`, `policy_denied`, `ledger_rejected` and the rotated receipt); an untyped call's records are unchanged, the keys are absent. A type needs a `job`, `typeSource` needs a `jobType`, and `jobState: "invalid"` excludes both; any violation, or a value outside the list, is a `TypeError` before any I/O. `SettleParams` takes neither: the type is fixed at authorize. The closed list is deliberate: a new type is a change to `JOB_TYPES` with its own changelog line, and nothing is inferred from names, branches or paths. **A type is a declaration, not evidence:** the governor cannot tell a person from an agent, and an agent-declared type can be wrong or chosen by a prompt. It selects no account, enters no policy context and prices nothing. usertrust-server accepts both on `POST /v1/authorize` (same refusals, as `400`), lets `POST /v1/settle` repeat either only to be checked against the hold's (a different one is a `400`, `settle job type differs from the hold's`, nothing written, hold still settleable), and lists `"job-type"` in `/v1/health` `capabilities`; an older server strips the keys in silence, so a client sends them only to a server that lists it. `JOB_TYPES`, `TYPE_SOURCES`, `jobTypeRefusal`, `typeSourceRefusal` and their types are exported from the package entry and `usertrust/headless`.
+
+
 ## [5.2.0] - 2026-10-26
 
 ### Read before upgrading

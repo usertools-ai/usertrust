@@ -658,6 +658,10 @@ describe("under an open breaker, every hook sends nothing and touches nothing", 
 		async (hook, input) => {
 			// Another session made the state's time earlier; this session's first hook is the skip.
 			await run("session-start", { session_id: "another-session", source: "startup" });
+			// SessionStart now probes the server's capabilities once (a bounded GET /v1/health) to decide
+			// whether to tell the agent to type its jobs. That is SESSION START's request, made before the
+			// breaker opened: what this test pins is that the SKIPPED hook below sends nothing.
+			seen = [];
 			await new Promise((resolve) => setTimeout(resolve, 5));
 			await openBreaker();
 			await run(hook, input());
