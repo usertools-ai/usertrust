@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import { costView, transferView, usageView } from "../shared/display.js";
 import { formatUtc } from "../shared/format.js";
-import { type LedgerRow, statusOf } from "../shared/rows.js";
+import { JOB_TYPE_CAVEAT, type LedgerRow, statusOf } from "../shared/rows.js";
 import { type Held, heldFor, type VerifyOutcome, verifyOutcome } from "../shared/verify-view.js";
 import { STATUS_TONE } from "./audit-table.js";
 
@@ -236,6 +236,24 @@ export function RowPanel(props: {
 						<>
 							<dt>Source</dt>
 							<dd>{row.source}</dd>
+						</>
+					)}
+					{row.job !== undefined && (
+						<>
+							<dt>Job</dt>
+							<dd className="m">{row.job}</dd>
+						</>
+					)}
+					{row.jobType !== undefined && (
+						<>
+							<dt>Job type</dt>
+							<dd>
+								{row.jobType}{" "}
+								<span className="ut-sub mono">
+									({JOB_TYPE_CAVEAT}
+									{row.typeSource !== undefined && `; declared by ${row.typeSource}`})
+								</span>
+							</dd>
 						</>
 					)}
 					{row.error !== undefined && (

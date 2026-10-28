@@ -3,7 +3,13 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { EMPTY_FILTERS, type FilterState, isFiltering } from "../shared/filters.js";
-import { type LedgerRow, statusOf } from "../shared/rows.js";
+import {
+	JOB_TYPE_CAVEAT,
+	jobTypeOf,
+	type LedgerRow,
+	statusOf,
+	typeSourceOf,
+} from "../shared/rows.js";
 
 /** Each distinct value with the number of rows carrying it, by value. */
 function counted(values: Array<string | undefined>): Array<{ value: string; n: number }> {
@@ -125,6 +131,8 @@ export function FilterBar(props: {
 	const models = useMemo(() => counted(rows.map((r) => r.model)), [rows]);
 	const actors = useMemo(() => counted(rows.map((r) => r.actor)), [rows]);
 	const statuses = useMemo(() => counted(rows.map((r) => statusOf(r))), [rows]);
+	const jobTypes = useMemo(() => counted(rows.map(jobTypeOf)), [rows]);
+	const typeSources = useMemo(() => counted(rows.map(typeSourceOf)), [rows]);
 
 	const chips: Array<{ label: string; clear(): void }> = [];
 	if (filters.search.trim() !== "")
@@ -151,6 +159,17 @@ export function FilterBar(props: {
 		chips.push({
 			label: `status: ${s}`,
 			clear: () => onChange({ ...filters, statuses: filters.statuses.filter((x) => x !== s) }),
+		});
+	for (const t of filters.jobTypes)
+		chips.push({
+			label: `job type: ${t} (${JOB_TYPE_CAVEAT})`,
+			clear: () => onChange({ ...filters, jobTypes: filters.jobTypes.filter((x) => x !== t) }),
+		});
+	for (const t of filters.typeSources)
+		chips.push({
+			label: `type declared by: ${t}`,
+			clear: () =>
+				onChange({ ...filters, typeSources: filters.typeSources.filter((x) => x !== t) }),
 		});
 	if (filters.from)
 		chips.push({
@@ -203,6 +222,18 @@ export function FilterBar(props: {
 					options={statuses}
 					selected={filters.statuses}
 					onChange={(v) => onChange({ ...filters, statuses: v })}
+				/>
+				<Facet
+					label="job type (declared)"
+					options={jobTypes}
+					selected={filters.jobTypes}
+					onChange={(v) => onChange({ ...filters, jobTypes: v })}
+				/>
+				<Facet
+					label="type declared by"
+					options={typeSources}
+					selected={filters.typeSources}
+					onChange={(v) => onChange({ ...filters, typeSources: v })}
 				/>
 				<span className="ut-sep" aria-hidden="true" />
 				{/* The filters compare the UTC date, the date each row shows: the pickers say so. */}

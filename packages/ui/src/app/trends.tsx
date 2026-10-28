@@ -4,15 +4,16 @@
 import { useMemo, useState } from "react";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import {
+	costByJobType,
 	costByKind,
 	costByModel,
-	type KeyTotal,
 	spendOverTime,
 	statTiles,
 	timeWindow,
 } from "../shared/aggregate.js";
 import { formatUsd, formatUt, formatUtcMinute } from "../shared/format.js";
-import type { LedgerRow } from "../shared/rows.js";
+import { JOB_TYPE_CAVEAT, type LedgerRow } from "../shared/rows.js";
+import { BarList } from "./bar-list.js";
 
 type Granularity = "day" | "hour";
 
@@ -45,32 +46,6 @@ function Tile(props: {
 			<span className="ut-tile-h">{props.label}</span>
 			<span className={`ut-tile-main${props.tone ? ` ${props.tone}` : ""}`}>{props.value}</span>
 			<span className="ut-sub">{props.sub}</span>
-		</div>
-	);
-}
-
-function BarList(props: { title: string; totals: KeyTotal[] }): React.JSX.Element {
-	const max = props.totals[0]?.costUt ?? 1;
-	return (
-		<div className="ut-card">
-			<span className="ut-tile-h">{props.title}</span>
-			<div className="ut-blist">
-				{props.totals.slice(0, 8).map((t) => (
-					<div key={t.key} style={{ display: "contents" }}>
-						<span className="k" title={t.key}>
-							{t.key}
-						</span>
-						<span className="v">
-							{formatUt(t.costUt)} · {t.count}×
-						</span>
-						<div className="ut-meter">
-							<i style={{ width: `${max > 0 ? (t.costUt / max) * 100 : 0}%` }} />
-						</div>
-					</div>
-				))}
-			</div>
-			{props.totals.length > 8 && <span className="ut-sub">top 8 of {props.totals.length}</span>}
-			{props.totals.length === 0 && <span className="ut-why">No costed records in view.</span>}
 		</div>
 	);
 }
@@ -218,6 +193,14 @@ export function Trends(props: {
 			<div className="ut-split">
 				<BarList title="Cost by kind" totals={costByKind(props.rows)} />
 				<BarList title="Cost by model" totals={costByModel(props.rows)} />
+			</div>
+			<div className="ut-split">
+				<BarList
+					title={`Cost by job type (${JOB_TYPE_CAVEAT})`}
+					note={`The type each caller declared when it authorized the job. "untyped": no type was declared. Every bucket is listed, and together they add up to the total in view.`}
+					totals={costByJobType(props.rows)}
+					limit={Number.POSITIVE_INFINITY}
+				/>
 			</div>
 			<div className="ut-sub mono">
 				{props.rows.length.toLocaleString()} records {scope}

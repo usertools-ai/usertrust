@@ -112,7 +112,8 @@ describe("the row window and the usage source in Export", () => {
 	it("red-first (an estimated cost exported like a reported one): each row says where its usage came from", () => {
 		const at = (csv: string) =>
 			csv.split("\r\n")[1]?.split(",")[CSV_HEADERS.indexOf("usage_source")];
-		expect(CSV_HEADERS.at(-1)).toBe("usage_source");
+		// Columns added later go after it, so this one keeps its position.
+		expect(CSV_HEADERS.indexOf("usage_source")).toBe(14);
 		expect(at(toCsv([row({ usageSource: "estimated" })]))).toBe("estimated");
 		expect(at(toCsv([row({ usageSource: "provider" })]))).toBe("provider");
 		expect(at(toCsv([row()]))).toBe("");
