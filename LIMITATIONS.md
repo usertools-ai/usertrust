@@ -690,7 +690,7 @@ it never completes, they keep failing fast until it does: the fail-closed direct
   the client.
 
 A ledger-backed server stopped by SIGINT or SIGTERM ends each pending hold, and waits for
-the void and the record before it exits, for at most 5 seconds. A hold whose void had not
+the void and the record before it exits, for at most 8 seconds. A hold whose void had not
 reached the ledger by then stays reserved until the ledger's 300-second hold timeout, and a
 release can be missing from the chain; the server says so on stderr. Earlier releases (5.2.0
 and before) did not wait at all: a signal could end the process while the first teardown had

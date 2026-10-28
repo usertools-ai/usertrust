@@ -995,7 +995,7 @@
 		{
 			"id": "gap-signal-release",
 			"kind": "caveat",
-			"claim": "A server stopped by SIGINT or SIGTERM records each pending hold's release before it exits, and may leave one off the chain only when its void does not finish within five seconds.",
+			"claim": "A server stopped by SIGINT or SIGTERM records each pending hold's release before it exits, and may leave one off the chain only when its void does not finish within eight seconds.",
 			"statements": [
 				{
 					"file": "LIMITATIONS.md",

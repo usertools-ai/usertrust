@@ -345,11 +345,11 @@ is `404` with `"reason": "unknown route"` instead, which is how a client that co
 `capabilities` tells an older server apart. The sweep and shutdown release, too: an expired hold is not a
 failure. The SSE stream announces each release as `released`, with the reason the chain recorded. A server
 stopped by SIGINT or SIGTERM ends each pending hold with the reason `server shutdown`, in ledger mode as in
-dry run, and waits for the void and the record before it exits, for at most 5 seconds. A hold whose void
+dry run, and waits for the void and the record before it exits, for at most 8 seconds. A hold whose void
 had not reached the ledger by then may stay reserved until the ledger's 300 s timeout, and its release may
 not be recorded on the chain; the server says so on stderr. The command line owns the process signals: the
-governors it builds are created with `installSignalHandlers: false`. An embedder that runs
-`createUsertrustServer` itself owns the signals too, and calls `close()`. See the repository's
+governors it builds are created with `installSignalHandlers: false`. While `close()` runs, `POST /v1/authorize` answers `503 shutting_down`; settle, abort and release are
+still served. An embedder that runs `createUsertrustServer` itself owns the signals too, and calls `close()`. See the repository's
 `LIMITATIONS.md`.
 
 `/v1/abort` keeps the same rule: `200 { "aborted": true, "transferId": "…" }` (plus `voidError`) only

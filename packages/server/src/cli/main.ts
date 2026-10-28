@@ -7,7 +7,7 @@ import { probeLedger } from "../ledger-probe.js";
 import { secureTenantVaults } from "../pool.js";
 import { createUsertrustServer } from "../server.js";
 import { scrubForStderr } from "./scrub.js";
-import { closeWithin, SHUTDOWN_BOUND_MS } from "./shutdown.js";
+import { SHUTDOWN_BOUND_MS, shutdownExitCode } from "./shutdown.js";
 
 function argValue(flag: string): string | undefined {
 	const index = process.argv.indexOf(flag);
@@ -31,13 +31,13 @@ async function main(): Promise<void> {
 	// kills the process. close() is safe on a server that is not listening yet.
 	const shutdown = async (): Promise<void> => {
 		process.stderr.write("usertrust-server shutting down — voiding pending holds\n");
-		const outcome = await closeWithin(() => server.close(), SHUTDOWN_BOUND_MS);
-		if (outcome === "timed out") {
-			process.stderr.write(
-				`usertrust-server: shutdown did not finish within ${SHUTDOWN_BOUND_MS} ms; holds not yet voided expire at the ledger's pending timeout\n`,
-			);
-		}
-		process.exit(0);
+		const code = await shutdownExitCode(
+			() => server.close(),
+			SHUTDOWN_BOUND_MS,
+			(line) => process.stderr.write(line),
+			scrubForStderr,
+		);
+		process.exit(code);
 	};
 	process.on("SIGINT", () => void shutdown());
 	process.on("SIGTERM", () => void shutdown());

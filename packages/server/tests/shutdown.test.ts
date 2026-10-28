@@ -34,6 +34,12 @@ function gatedLedger() {
 	const voidGate = new Promise<void>((resolve) => {
 		open = resolve;
 	});
+	// One hold whose void never answers until the test lets it: a terminal that is stuck.
+	let openStuck = (): void => {};
+	const stuckGate = new Promise<void>((resolve) => {
+		openStuck = resolve;
+	});
+	const stuckIds = new Set<string>();
 	const engine = {
 		spendPending: vi.fn(async (p: { transferId: string }) => {
 			pending.add(p.transferId);
@@ -41,6 +47,7 @@ function gatedLedger() {
 		}),
 		postPendingSpend: vi.fn(async () => {}),
 		voidPendingSpend: vi.fn(async (transferId: string) => {
+			if (stuckIds.has(transferId)) await stuckGate;
 			await voidGate;
 			if (pending.delete(transferId)) voided.push(transferId);
 		}),
@@ -53,7 +60,7 @@ function gatedLedger() {
 		lookupBalances: vi.fn(async (ids: bigint[]) => new Map(ids.map((id) => [id, 5_000]))),
 		destroy: vi.fn(),
 	};
-	return { engine, voided, openVoid: open };
+	return { engine, voided, openVoid: open, openStuck, stuckIds };
 }
 
 /** Let everything already queued run: microtasks and one macrotask turn, no timer. */
@@ -69,7 +76,7 @@ afterEach(async () => {
 
 async function ledgerServer(opts: { holdVoid?: boolean } = {}) {
 	const stateDir = await mkdtemp(join(tmpdir(), "utsrv-shutdown-"));
-	const { engine, voided, openVoid } = gatedLedger();
+	const { engine, voided, openVoid, openStuck, stuckIds } = gatedLedger();
 	if (opts.holdVoid !== true) openVoid();
 	const seen: Array<Record<string, unknown>> = [];
 	server = createUsertrustServer({
@@ -104,7 +111,13 @@ async function ledgerServer(opts: { holdVoid?: boolean } = {}) {
 			kind: string;
 			data: Record<string, unknown>;
 		}>;
-	return { authorize, voided, seen, chain, engine, openVoid };
+	const post = (path: string, body: unknown) =>
+		fetch(`http://127.0.0.1:${port}${path}`, {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: `Bearer ${KEY}` },
+			body: JSON.stringify(body),
+		});
+	return { authorize, post, voided, seen, chain, engine, openVoid, openStuck, stuckIds };
 }
 
 describe("shutdown with a pending hold, ledger mode (dryRun false)", () => {
@@ -147,5 +160,60 @@ describe("shutdown with a pending hold, ledger mode (dryRun false)", () => {
 		await authorize();
 		// mutant: the pool omits it → the governor's own SIGTERM/SIGINT listeners race the server's
 		expect(seen.map((o) => o.installSignalHandlers)).toEqual([false]);
+	});
+});
+
+describe("while close() is running", () => {
+	it("a new authorize is refused 503 and creates no hold; the other routes are not gated", async () => {
+		const { authorize, post, engine, chain, openVoid } = await ledgerServer({ holdVoid: true });
+		await authorize();
+		const reserved = engine.spendPending.mock.calls.length;
+		let closed = false;
+		const closing = (server as UsertrustServer).close().then(() => {
+			closed = true;
+		});
+		server = undefined;
+		for (let i = 0; i < 5; i += 1) await turn();
+		expect(closed).toBe(false);
+		const refused = await post("/v1/authorize", AUTHORIZE);
+		// mutant: no check while closing → the authorize is granted (200) and its hold misses close()'s walk
+		expect(refused.status).toBe(503);
+		expect(await refused.json()).toEqual({
+			error: "shutting_down",
+			reason: "the server is shutting down and takes no new holds",
+		});
+		expect(engine.spendPending.mock.calls.length).toBe(reserved);
+		// The other terminals are not gated: an abort for a hold the server does not have is the
+		// ordinary 404, never the shutdown 503.
+		const aborted = await post("/v1/abort", { transferId: "tx_unknown_while_closing" });
+		expect(aborted.status).toBe(404);
+		openVoid();
+		await closing;
+		expect(chain().filter((e) => e.kind === "hold_released")).toHaveLength(1);
+	});
+
+	it("one hold whose void never answers does not keep the other hold from being voided and recorded", async () => {
+		const { authorize, voided, chain, openStuck, stuckIds } = await ledgerServer();
+		const stuck = await authorize();
+		const other = await authorize();
+		stuckIds.add(stuck);
+		const closing = (server as UsertrustServer).close();
+		server = undefined;
+		for (let i = 0; i < 10; i += 1) await turn();
+		// mutant: the holds are released one after another → the stuck one blocks the other's record
+		expect(voided).toEqual([other]);
+		expect(
+			chain()
+				.filter((e) => e.kind === "hold_released")
+				.map((e) => e.data.transferId),
+		).toEqual([other]);
+		openStuck();
+		await closing;
+		expect(
+			chain()
+				.filter((e) => e.kind === "hold_released")
+				.map((e) => e.data.transferId)
+				.sort(),
+		).toEqual([stuck, other].sort());
 	});
 });

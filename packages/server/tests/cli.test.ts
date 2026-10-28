@@ -293,10 +293,10 @@ describe("usertrust-server CLI: SIGTERM with a pending hold", () => {
 		const signalled = Date.now();
 		proc.kill("SIGTERM");
 		const code = await exit;
-		const took = Date.now() - signalled; // timing: shutdown bound 5000 ms; measured 30-40 ms in 3 runs on a loaded runner
+		const took = Date.now() - signalled; // timing: shutdown bound 8000 ms; measured 30-40 ms in 3 runs on a loaded runner
 
 		expect(code).toBe(0);
-		expect(took).toBeLessThan(5_000); // timing: the bound is SHUTDOWN_BOUND_MS (5000); measured 30-40 ms
+		expect(took).toBeLessThan(8_000); // timing: the bound is SHUTDOWN_BOUND_MS (8000); measured 30-40 ms
 		const released = (
 			readLedgerEvents(join(dirname(configPath), "state", "acme", ".usertrust")) as Array<{
 				kind: string;
