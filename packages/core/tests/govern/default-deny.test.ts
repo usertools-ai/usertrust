@@ -1411,9 +1411,20 @@ function sdkMethodPaths(raw: Loose): string[] {
 	return [...new Set(out)].sort();
 }
 
+/**
+ * The backstop for the sweep below, which calls every SDK method that is not free through the
+ * governed client, one after another. What the case proves is structural (every such method is
+ * refused with PolicyDeniedError, none reaches the SDK, nothing is reserved); the time only keeps a
+ * hung case from hanging the run. The 5 s default was the real assertion by accident: the sweep takes
+ * 0.9 s (anthropic) and 1.8 s (openai) alone, but up to 9.1 s and 16.9 s when twelve runs of this
+ * file share a machine, and it failed the full suite under that load.
+ */
+// timing: bound 60000 ms; measured 0.9-1.8 s alone and up to 9.1-16.9 s with 12 concurrent runs, 3.5x headroom over the loaded worst case
+const SWEEP_BACKSTOP_MS = 60_000;
+
 describe("every other SDK method that is not free is refused: no trap outside GOVERNED_PATHS", () => {
 	for (const provider of ["anthropic", "openai"] as const) {
-		it(provider, async () => {
+		it(provider, { timeout: SWEEP_BACKSTOP_MS }, async () => {
 			const { client, raw, engine } = provider === "anthropic" ? await anthropic() : await openai();
 			const paths = sdkMethodPaths(raw).filter(
 				(p) => !GOVERNED_PATHS[provider].has(p) && !FREE_METHODS[provider].has(p),
