@@ -4,6 +4,7 @@
 import { useMemo, useState } from "react";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import {
+	costByJobType,
 	costByKind,
 	costByModel,
 	type KeyTotal,
@@ -12,7 +13,7 @@ import {
 	timeWindow,
 } from "../shared/aggregate.js";
 import { formatUsd, formatUt, formatUtcMinute } from "../shared/format.js";
-import type { LedgerRow } from "../shared/rows.js";
+import { JOB_TYPE_CAVEAT, type LedgerRow } from "../shared/rows.js";
 
 type Granularity = "day" | "hour";
 
@@ -49,11 +50,17 @@ function Tile(props: {
 	);
 }
 
-function BarList(props: { title: string; totals: KeyTotal[] }): React.JSX.Element {
+function BarList(props: {
+	title: string;
+	totals: KeyTotal[];
+	/** A line under the title, for a list whose keys need a caveat. */
+	note?: string;
+}): React.JSX.Element {
 	const max = props.totals[0]?.costUt ?? 1;
 	return (
 		<div className="ut-card">
 			<span className="ut-tile-h">{props.title}</span>
+			{props.note !== undefined && <span className="ut-sub">{props.note}</span>}
 			<div className="ut-blist">
 				{props.totals.slice(0, 8).map((t) => (
 					<div key={t.key} style={{ display: "contents" }}>
@@ -218,6 +225,13 @@ export function Trends(props: {
 			<div className="ut-split">
 				<BarList title="Cost by kind" totals={costByKind(props.rows)} />
 				<BarList title="Cost by model" totals={costByModel(props.rows)} />
+			</div>
+			<div className="ut-split">
+				<BarList
+					title={`Cost by job type (${JOB_TYPE_CAVEAT})`}
+					note={`The type each caller declared when it authorized the job. "untyped": no type was declared. The rows add up to the total in view.`}
+					totals={costByJobType(props.rows)}
+				/>
 			</div>
 			<div className="ut-sub mono">
 				{props.rows.length.toLocaleString()} records {scope}

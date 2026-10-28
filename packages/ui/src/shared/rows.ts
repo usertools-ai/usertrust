@@ -27,6 +27,15 @@ export interface LedgerRow {
 	error?: string;
 	transferId?: string;
 	usageSource?: "provider" | "estimated";
+	/** The job the record belongs to, when it carries one. */
+	job?: string;
+	/**
+	 * What KIND of work the job was, as DECLARED when it was authorized (see `JOB_TYPE_CAVEAT`). One of
+	 * `JOB_TYPES`, or `UNRECOGNIZED` for a value outside that list. Absent on a record that carries none.
+	 */
+	jobType?: string;
+	/** Who declared the type: one of `TYPE_SOURCES`, or `UNRECOGNIZED`. Absent when the record carries none. */
+	typeSource?: string;
 	/**
 	 * The row's status, set by the SERVER from its transfer's verdict (`transferVerdict` in usertrust-verify, the one
 	 * classification `usertrust-verify --tx` prints). Absent only on a row built without one; `statusOf` then falls
@@ -36,6 +45,50 @@ export interface LedgerRow {
 	hash: string;
 	previousHash: string;
 	integrity: RowIntegrity;
+}
+
+/**
+ * The closed list of job types core accepts (`JOB_TYPES`) and of who may declare one (`TYPE_SOURCES`). Mirrored here
+ * because the browser bundle cannot import core at runtime; `tests/job-type.test.ts` fails when either list drifts.
+ */
+export const JOB_TYPES = [
+	"feature",
+	"bugfix",
+	"review",
+	"test",
+	"docs",
+	"ops",
+	"research",
+	"other",
+] as const;
+export const TYPE_SOURCES = ["explicit", "agent"] as const;
+
+/** A record with no job type: written before typed jobs, or by a caller that declared none. */
+export const UNTYPED = "untyped";
+/** A job type or source outside the closed lists: shown as found, never dropped, never counted as a listed type. */
+export const UNRECOGNIZED = "unrecognized";
+
+/**
+ * Wherever a job-type total or a job type is shown, it carries this: a type is what the caller DECLARED when it
+ * authorized the job. usertrust cannot tell a person from an agent, and an agent-declared type can be wrong or chosen
+ * by a prompt. It selects no account, enters no policy and prices nothing.
+ */
+export const JOB_TYPE_CAVEAT = "declared, not verified";
+
+/** The row's job type bucket: its declared type, or `untyped`. */
+export function jobTypeOf(row: Pick<LedgerRow, "jobType">): string {
+	return row.jobType ?? UNTYPED;
+}
+
+/** Who declared the row's type: `explicit`, `agent`, `unrecognized`, or `untyped` for a record with no type. */
+export function typeSourceOf(row: Pick<LedgerRow, "jobType" | "typeSource">): string {
+	return row.typeSource ?? (row.jobType === undefined ? UNTYPED : "not stated");
+}
+
+function closed(value: unknown, list: readonly string[]): string | undefined {
+	const v = str(value);
+	if (v === undefined) return undefined;
+	return list.includes(v) ? v : UNRECOGNIZED;
 }
 
 /** Core's fixed rate (`ledger/pricing.ts`): 1 usertoken is $0.0001. */
@@ -106,6 +159,12 @@ export function toLedgerRows(
 		const transferId = str(e.data.transferId);
 		if (transferId !== undefined) row.transferId = transferId;
 		if (usageSource !== undefined) row.usageSource = usageSource;
+		const job = str(e.data.job);
+		if (job !== undefined) row.job = job;
+		const jobType = closed(e.data.jobType, JOB_TYPES);
+		if (jobType !== undefined) row.jobType = jobType;
+		const typeSource = closed(e.data.typeSource, TYPE_SOURCES);
+		if (typeSource !== undefined) row.typeSource = typeSource;
 		row.status = statusFor(e.kind, e.data, verdictOf?.(e));
 		return row;
 	});
