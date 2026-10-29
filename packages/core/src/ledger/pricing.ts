@@ -314,13 +314,18 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 	// Base was 5.5/22 before the 2026-08-08 audit — exactly half the published
 	// standard rate. Corrected upward; understatement is the dangerous direction.
 	"o4-mini": { inputPer1k: 11, outputPer1k: 44, cacheReadPer1k: 2.75 },
-	// Retrieved 2026-08-09 from OpenAI's published model page
-	// (developers.openai.com/api/docs/models/gpt-5.6-sol): $5 input, $30 output,
-	// $0.50 cached input per MTok, and — the reason the comment above demands it
-	// — an explicit cache-WRITE rate at 1.25x uncached input ($6.25/MTok). Rates
-	// are the standard short-context tier; the >272k long-context uplift (2x in /
-	// 1.5x out) is a documented approximation this per-token model does not carry.
-	"gpt-5.6-sol": { inputPer1k: 50, outputPer1k: 300, cacheReadPer1k: 5, cacheWritePer1k: 62.5 },
+	// Retrieved 2026-10-28 from OpenAI's published model page
+	// (developers.openai.com/api/docs/models/gpt-5.6-sol) and the Standard table at
+	// developers.openai.com/api/docs/pricing: $4 input, $20 output, $0.40 cached
+	// input per MTok, and — the reason the comment above demands it — an explicit
+	// cache-WRITE rate at 1.25x uncached input ($5.00/MTok, the table's "30m write"
+	// column). The page calls this promotional pricing, "available at least through
+	// November 21, 2026"; re-check the row then. (Until 2026-10-28 this row held the
+	// earlier $5 / $30 / $0.50 / $6.25 price, overstating every call by 25% on input
+	// and 50% on output.) Rates are the standard short-context tier; the >272k
+	// long-context uplift (2x in / 1.5x out) is a documented approximation this
+	// per-token model does not carry, and so is the 12-hour write tier (2.5x input).
+	"gpt-5.6-sol": { inputPer1k: 40, outputPer1k: 200, cacheReadPer1k: 4, cacheWritePer1k: 50 },
 
 	// ── Moonshot AI ──
 	// Retrieved 2026-08-09 from Moonshot's published price list
@@ -337,7 +342,11 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 	// <=200k-prompt tier; long-context uplifts are a documented approximation.
 	"gemini-2.5-flash": { inputPer1k: 3, outputPer1k: 25, cacheReadPer1k: 0.3 },
 	"gemini-2.5-pro": { inputPer1k: 12.5, outputPer1k: 100, cacheReadPer1k: 1.25 },
-	"gemini-3.1-pro": { inputPer1k: 20, outputPer1k: 120, cacheReadPer1k: 2 },
+	// Google publishes this model only as `gemini-3.1-pro-preview` ("Gemini 3.1 Pro
+	// Preview" on ai.google.dev/gemini-api/docs/pricing, retrieved 2026-10-28). Until
+	// 2026-10-28 the key was `gemini-3.1-pro`, an id no request carries, so a real call
+	// matched no row and was metered at FALLBACK_RATE.
+	"gemini-3.1-pro-preview": { inputPer1k: 20, outputPer1k: 120, cacheReadPer1k: 2 },
 
 	// ── Mistral ──
 	// `mistral-large-latest` resolves to Mistral Large 3, listed at $0.50 in /
@@ -380,7 +389,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
  * Bump on every entry change; recorded on receipts so a metered cost can be
  * reproduced against the exact table that priced it.
  */
-export const PRICING_TABLE_VERSION = "2026-10-11";
+export const PRICING_TABLE_VERSION = "2026-10-28";
 
 /**
  * Reduce a model id to its base table key. Strips EXACTLY ONE trailing date

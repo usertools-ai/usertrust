@@ -406,7 +406,9 @@ describe("PRICING_TABLE_VERSION", () => {
 		// label two different tables.
 		// 2026-10-11: Claude Haiku 5.5 is priced per request by prompt length; its row gained
 		// the up-to-100,000-token tier and carries the higher tier as `longPrompt`.
-		expect(PRICING_TABLE_VERSION).toBe("2026-10-11");
+		// 2026-10-28: gpt-5.6-sol corrected to its published $4 / $20 / $0.40 / $5.00 write;
+		// Gemini 3.1 Pro keyed by its published id, `gemini-3.1-pro-preview`.
+		expect(PRICING_TABLE_VERSION).toBe("2026-10-28");
 	});
 });
 
@@ -625,8 +627,9 @@ const AUDITED_RATES: Record<string, ModelRates> = {
 	"o4-mini": { inputPer1k: 11, outputPer1k: 44, cacheReadPer1k: 2.75 },
 	// gpt-5.6+ DOES publish a cache-write rate (1.25x uncached input), so this
 	// entry carries one where every older OpenAI row above omits it.
-	// $5 in / $30 out / $0.50 cached input / $6.25 cache write per MTok.
-	"gpt-5.6-sol": { inputPer1k: 50, outputPer1k: 300, cacheReadPer1k: 5, cacheWritePer1k: 62.5 },
+	// $4 in / $20 out / $0.40 cached input / $5.00 cache write per MTok (promotional
+	// pricing, "at least through November 21, 2026"; retrieved 2026-10-28).
+	"gpt-5.6-sol": { inputPer1k: 40, outputPer1k: 200, cacheReadPer1k: 4, cacheWritePer1k: 50 },
 
 	// Moonshot AI — $3 cache-miss input / $0.30 cache hit / $15 out per MTok.
 	// No cache-CREATION rate is published (the price list has two input columns,
@@ -638,7 +641,7 @@ const AUDITED_RATES: Record<string, ModelRates> = {
 	// (D6), so cacheWritePer1k is omitted rather than guessed.
 	"gemini-2.5-flash": { inputPer1k: 3, outputPer1k: 25, cacheReadPer1k: 0.3 },
 	"gemini-2.5-pro": { inputPer1k: 12.5, outputPer1k: 100, cacheReadPer1k: 1.25 },
-	"gemini-3.1-pro": { inputPer1k: 20, outputPer1k: 120, cacheReadPer1k: 2 },
+	"gemini-3.1-pro-preview": { inputPer1k: 20, outputPer1k: 120, cacheReadPer1k: 2 },
 
 	// No published cache pricing for these models — both cache fields omitted.
 	"mistral-large": { inputPer1k: 5, outputPer1k: 15 },
