@@ -1309,14 +1309,30 @@ export function refuseWrites<T extends object>(
 }
 
 /**
- * True when `value` holds no function at any depth (bounded), reached through own data properties
- * only: no accessor is run, and an accessor counts as a function.
+ * True when `value` is deeply frozen plain data: no function at any depth, and nothing a caller
+ * could change through the reference it is handed. It runs no user code: no accessor, no Proxy
+ * trap and no prototype method is invoked. Every object on the way must be
+ *   - not a Proxy (its traps would run on any inspection);
+ *   - frozen, so a read hands out nothing writable (a frozen property protects the reference, not
+ *     the contents: a pinned mutable object, or a frozen one with a mutable child, is not inert);
+ *   - plain: its prototype is, by identity, `Object.prototype`, `null`, or (for an array)
+ *     `Array.prototype`. A custom prototype is never walked, because what it carries (an inherited
+ *     object, a symbol-keyed method) would be reachable from the value.
+ * Every own key, symbols included, must be a data property whose value is itself inert.
  */
 function isInertData(value: unknown, depth = 0): boolean {
 	if (typeof value === "function") return false;
 	if (value === null || typeof value !== "object") return true;
-	if (utilTypes.isProxy(value) || depth > 8) return false;
-	if (hasFunctionMember(value)) return false;
+	if (utilTypes.isProxy(value) || depth > 8 || !Object.isFrozen(value)) return false;
+	const proto = Object.getPrototypeOf(value) as object | null;
+	if (
+		!(
+			proto === null ||
+			proto === Object.prototype ||
+			(Array.isArray(value) && proto === Array.prototype)
+		)
+	)
+		return false;
 	for (const name of Reflect.ownKeys(value)) {
 		const d = Object.getOwnPropertyDescriptor(value, name);
 		if (d === undefined || !("value" in d)) return false;
@@ -1329,7 +1345,8 @@ function isInertData(value: unknown, depth = 0): boolean {
  * Whether reading `prop` off `target` must return `value` UNCHANGED: the property is a data
  * property the raw object pins (non-configurable and non-writable), so the Proxy invariants forbid
  * answering with anything but the same value, and the value carries no function (a frozen config
- * object such as the SDK's `openTelemetry` option), so returning it hands out no method to call.
+ * object such as the SDK's `openTelemetry` option), so returning it hands out no method to call
+ * and nothing to write.
  * A pinned value that DOES carry a function is not passed through here: it stays on the
  * wrapping path, whose invariant error refuses the read, which is the safe direction.
  */

@@ -1845,6 +1845,49 @@ describe("the boundary is inert to inspection and serialization", () => {
 		expect(hits).toEqual([]);
 	});
 
+	// A pinned PROPERTY protects the reference, not what the value holds. Each of these values must
+	// stay behind the boundary: a read hands out nothing writable and nothing callable.
+	it("a pinned object that is not frozen is not passed through: a write cannot reach the raw client", async () => {
+		const pinned = { baseURL: "https://anthropic.test" };
+		const { client } = await anthropic({}, (r: Loose) => {
+			Object.defineProperty(r, "pinnedMutable", { value: pinned, enumerable: true });
+			Object.defineProperty(r, "_authState", { value: pinned, enumerable: true });
+		});
+		expect(() => {
+			client._authState.baseURL = "https://changed.test";
+		}).toThrow();
+		expect(() => {
+			client.messages._client.pinnedMutable.baseURL = "https://changed.test";
+		}).toThrow();
+		expect(pinned.baseURL).toBe("https://anthropic.test");
+	});
+
+	it("a shallow-frozen pinned object with a mutable child is not passed through", async () => {
+		const pinned = Object.freeze({ child: { n: 1 } });
+		const { client } = await anthropic({}, (r: Loose) => {
+			Object.defineProperty(r, "pinnedShallow", { value: pinned, enumerable: true });
+		});
+		expect(() => {
+			client.messages._client.pinnedShallow.child.n = 2;
+		}).toThrow();
+		expect(pinned.child.n).toBe(1);
+	});
+
+	it("a pinned object whose PROTOTYPE carries an object or a symbol-keyed method is not passed through", async () => {
+		let calls = 0;
+		const sym = Symbol("send");
+		const inherited = Object.freeze(Object.create({ nested: { send: () => calls++ } }));
+		const symbolic = Object.freeze(Object.create({ [sym]: () => calls++ }));
+		const { client } = await anthropic({}, (r: Loose) => {
+			Object.defineProperty(r, "pinnedInherited", { value: inherited, enumerable: true });
+			Object.defineProperty(r, "pinnedSymbolic", { value: symbolic, enumerable: true });
+		});
+		expect(() => client.messages._client.pinnedInherited.nested.send()).toThrow();
+		expect(() => client.messages._client.pinnedSymbolic[sym]()).toThrow();
+		expect(calls).toBe(0);
+		expect(hits).toEqual([]);
+	});
+
 	it("symbols and Object.prototype members pass", async () => {
 		const { client, raw } = await anthropic();
 		expect(client[Symbol.toStringTag]).toBe(raw[Symbol.toStringTag]);
