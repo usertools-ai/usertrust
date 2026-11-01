@@ -349,7 +349,10 @@ const SDK_PACKAGES = { anthropic: "@anthropic-ai/sdk", openai: "openai" } as con
 function installedSdkVersion(pkg: string): string {
 	return (
 		JSON.parse(
-			readFileSync(join(import.meta.dirname, `../../../../node_modules/${pkg}/package.json`), "utf8"),
+			readFileSync(
+				join(import.meta.dirname, `../../../../node_modules/${pkg}/package.json`),
+				"utf8",
+			),
 		) as { version: string }
 	).version;
 }
@@ -1363,8 +1366,9 @@ describe("the SDK peer floors are the versions the free list was classified on",
 				),
 			) as { version: string }
 		).version;
-	const classified = (defaultDeny as { CLASSIFIED_SDK_VERSIONS?: Record<string, readonly string[]> })
-		.CLASSIFIED_SDK_VERSIONS;
+	const classified = (
+		defaultDeny as { CLASSIFIED_SDK_VERSIONS?: Record<string, readonly string[]> }
+	).CLASSIFIED_SDK_VERSIONS;
 
 	it.each([
 		["openai", "openai"],
@@ -1375,7 +1379,10 @@ describe("the SDK peer floors are the versions the free list was classified on",
 		const floor = /^>=(\d+\.\d+\.\d+)$/.exec(corePkg.peerDependencies[pkgName] ?? "")?.[1];
 		expect(floor, `${pkgName}'s peer range is a plain >= floor`).toBeDefined();
 		const lines = classified?.[key] as readonly string[] | undefined;
-		expect(Array.isArray(lines) && lines.length > 0, `${key}: a non-empty list of classified versions`).toBe(true);
+		expect(
+			Array.isArray(lines) && lines.length > 0,
+			`${key}: a non-empty list of classified versions`,
+		).toBe(true);
 		// The list is oldest first, so the first entry is the floor and every later line is newer.
 		for (let i = 1; i < (lines?.length ?? 0); i++)
 			expect(compareVersions(lines?.[i] as string, lines?.[i - 1] as string)).toBeGreaterThan(0);
@@ -1485,6 +1492,7 @@ describe("every other SDK method that is not free is refused: no trap outside GO
 			expect(engine.spendPending).not.toHaveBeenCalled();
 			// One refusal (an audit event each) per SDK method: SDK 1.x has about three times as many as
 			// 0.116, which does not fit the default 5 s.
+			// timing: 60 s budget; on a loaded 14-core host the Anthropic row took 6.0 s on SDK 1.3.0 and 2.7 s on 0.116
 		}, 60_000);
 	}
 });
@@ -1890,13 +1898,16 @@ describe("a method keeps its identity across reads", () => {
 	} as const;
 
 	for (const [provider, c] of Object.entries(CASES)) {
-		it.skipIf(!c.refusedPresent)(`${provider}: free, listed and refused methods are the same function on every read`, async () => {
-			const { client } = await c.build({ allowUngoverned: [c.listed] });
-			for (const path of [c.free, c.listed, c.refused]) {
-				const { holder, name } = resolveMember(client, path);
-				expect(holder[name], path).toBe(resolveMember(client, path).holder[name]);
-			}
-		});
+		it.skipIf(!c.refusedPresent)(
+			`${provider}: free, listed and refused methods are the same function on every read`,
+			async () => {
+				const { client } = await c.build({ allowUngoverned: [c.listed] });
+				for (const path of [c.free, c.listed, c.refused]) {
+					const { holder, name } = resolveMember(client, path);
+					expect(holder[name], path).toBe(resolveMember(client, path).holder[name]);
+				}
+			},
+		);
 
 		it(`${provider}: the same raw function at two paths gets two wrappers, each deciding by its own path`, async () => {
 			const { client, raw, engine } = await c.build({}, (r: Loose) => {
@@ -1912,21 +1923,24 @@ describe("a method keeps its identity across reads", () => {
 			expect(chainEvents().map((e) => e.kind)).toEqual(["policy_denied"]);
 		});
 
-		it.skipIf(!c.refusedPresent)(`${provider}: two calls of one cached refused wrapper give two errors, each with its own event`, async () => {
-			const { client } = await c.build();
-			const { holder, name } = resolveMember(client, c.refused);
-			const refused = holder[name];
-			const first = await refused(...c.refusedArgs).catch((e: unknown) => e);
-			const second = await refused(...c.refusedArgs).catch((e: unknown) => e);
-			expect(first).toBeInstanceOf(PolicyDeniedError);
-			expect(second).toBeInstanceOf(PolicyDeniedError);
-			expect(first).not.toBe(second);
-			const events = chainEvents() as unknown as Array<{ kind: string; hash: string }>;
-			expect(events.map((e) => e.kind)).toEqual(["policy_denied", "policy_denied"]);
-			expect((first as PolicyDeniedError).auditEventHash).toBe(events[0]?.hash);
-			expect((second as PolicyDeniedError).auditEventHash).toBe(events[1]?.hash);
-			expect(events[0]?.hash).not.toBe(events[1]?.hash);
-		});
+		it.skipIf(!c.refusedPresent)(
+			`${provider}: two calls of one cached refused wrapper give two errors, each with its own event`,
+			async () => {
+				const { client } = await c.build();
+				const { holder, name } = resolveMember(client, c.refused);
+				const refused = holder[name];
+				const first = await refused(...c.refusedArgs).catch((e: unknown) => e);
+				const second = await refused(...c.refusedArgs).catch((e: unknown) => e);
+				expect(first).toBeInstanceOf(PolicyDeniedError);
+				expect(second).toBeInstanceOf(PolicyDeniedError);
+				expect(first).not.toBe(second);
+				const events = chainEvents() as unknown as Array<{ kind: string; hash: string }>;
+				expect(events.map((e) => e.kind)).toEqual(["policy_denied", "policy_denied"]);
+				expect((first as PolicyDeniedError).auditEventHash).toBe(events[0]?.hash);
+				expect((second as PolicyDeniedError).auditEventHash).toBe(events[1]?.hash);
+				expect(events[0]?.hash).not.toBe(events[1]?.hash);
+			},
+		);
 	}
 });
 
