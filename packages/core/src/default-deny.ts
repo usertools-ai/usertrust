@@ -149,15 +149,22 @@ export interface MethodBoundary {
 }
 
 /**
- * The SDK versions the free list below was classified on, and so the floors of the
- * `peerDependencies` in packages/core/package.json: the supported range IS the verified range.
- * An older SDK exposes method names the classification never saw. `default-deny.test.ts` fails
- * when a floor and this constant disagree, so neither moves without re-running the classification.
+ * The SDK versions the free list below was classified on, per provider, oldest first. The FIRST
+ * entry is the floor of the `peerDependencies` range in packages/core/package.json: the supported
+ * range IS the verified range, and an older SDK exposes method names the classification never saw.
+ * `default-deny.test.ts` fails when a floor and the first entry disagree, so neither moves without
+ * re-running the classification.
+ *
+ * A list, so one SDK line can be classified after another: a new line is appended here only once
+ * its methods have been classified into the free list. An installed SDK that is NOT listed still
+ * runs the whole suite, with one difference: a free-list entry that SDK does not have is skipped
+ * (it is a method the line removed or never had) instead of failing, whereas on a listed version a
+ * missing entry is classification drift and fails.
  */
 export const CLASSIFIED_SDK_VERSIONS = {
-	openai: "7.4.0",
-	anthropic: "0.116.0",
-	google: "1.52.0",
+	openai: ["7.4.0"],
+	anthropic: ["0.116.0"],
+	google: ["1.52.0"],
 } as const;
 
 // ── The free list ──
@@ -1302,6 +1309,38 @@ export function refuseWrites<T extends object>(
 }
 
 /**
+ * True when `value` holds no function at any depth (bounded), reached through own data properties
+ * only: no accessor is run, and an accessor counts as a function.
+ */
+function isInertData(value: unknown, depth = 0): boolean {
+	if (typeof value === "function") return false;
+	if (value === null || typeof value !== "object") return true;
+	if (utilTypes.isProxy(value) || depth > 8) return false;
+	if (hasFunctionMember(value)) return false;
+	for (const name of Reflect.ownKeys(value)) {
+		const d = Object.getOwnPropertyDescriptor(value, name);
+		if (d === undefined || !("value" in d)) return false;
+		if (!isInertData(d.value, depth + 1)) return false;
+	}
+	return true;
+}
+
+/**
+ * Whether reading `prop` off `target` must return `value` UNCHANGED: the property is a data
+ * property the raw object pins (non-configurable and non-writable), so the Proxy invariants forbid
+ * answering with anything but the same value, and the value carries no function (a frozen config
+ * object such as the SDK's `openTelemetry` option), so returning it hands out no method to call.
+ * A pinned value that DOES carry a function is not passed through here: it stays on the
+ * wrapping path, whose invariant error refuses the read, which is the safe direction.
+ */
+function isPinnedInert(target: object, prop: string | symbol, value: unknown): boolean {
+	const own = Reflect.getOwnPropertyDescriptor(target, prop);
+	if (own === undefined || !("value" in own)) return false;
+	if (own.configurable !== false || own.writable !== false) return false;
+	return isInertData(value);
+}
+
+/**
  * A read-only view of a transport object: reads pass (nested objects as further views), writes
  * throw. A property the raw object pins (non-configurable and non-writable) is returned as it is,
  * as the Proxy invariants require; a pinned property cannot be written anyway.
@@ -1355,6 +1394,7 @@ export function guardedGet(
 	// `this.getNextGenClient()` and cache on `this`, which through the proxy would be refused.
 	const value: unknown = Reflect.get(target, prop, google ? target : receiver);
 	if (typeof prop === "symbol" || isInertName(prop)) return value;
+	if (isPinnedInert(target, prop, value)) return value;
 	const at = path === "" ? prop : `${path}.${prop}`;
 	// The raw transports, by name, before the shape test: they have function members too.
 	if (
@@ -1469,6 +1509,7 @@ export function rawClientStandIn(
 			if (typeof prop === "string" && Object.hasOwn(own, prop)) return own[prop];
 			const value: unknown = Reflect.get(target, prop, target);
 			if (typeof prop === "symbol" || isInertName(prop)) return value;
+			if (isPinnedInert(target, prop, value)) return value;
 			if (typeof value === "function") {
 				return (...args: unknown[]) => boundary.refuse(path, args, makeError());
 			}
