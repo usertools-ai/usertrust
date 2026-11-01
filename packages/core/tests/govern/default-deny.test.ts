@@ -1888,6 +1888,28 @@ describe("the boundary is inert to inspection and serialization", () => {
 		expect(hits).toEqual([]);
 	});
 
+	// Plain here means `Object.prototype` or `null` by identity: an array is not, so a pinned frozen
+	// array is not handed out as the raw reference, and a method inside it cannot be reached.
+	it("a pinned frozen array is not passed through as the raw reference", async () => {
+		let calls = 0;
+		const plain = Object.freeze([1, 2]);
+		const withMethod = Object.freeze([Object.freeze({ send: () => calls++ })]);
+		const { client } = await anthropic({}, (r: Loose) => {
+			Object.defineProperty(r, "pinnedArray", { value: plain, enumerable: true });
+			Object.defineProperty(r, "pinnedArrayFn", { value: withMethod, enumerable: true });
+		});
+		let got: unknown;
+		try {
+			got = client.messages._client.pinnedArray;
+		} catch {
+			got = undefined;
+		}
+		expect(got).not.toBe(plain);
+		expect(() => client.messages._client.pinnedArrayFn[0].send()).toThrow();
+		expect(calls).toBe(0);
+		expect(hits).toEqual([]);
+	});
+
 	it("symbols and Object.prototype members pass", async () => {
 		const { client, raw } = await anthropic();
 		expect(client[Symbol.toStringTag]).toBe(raw[Symbol.toStringTag]);

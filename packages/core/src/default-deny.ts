@@ -1315,9 +1315,10 @@ export function refuseWrites<T extends object>(
  *   - not a Proxy (its traps would run on any inspection);
  *   - frozen, so a read hands out nothing writable (a frozen property protects the reference, not
  *     the contents: a pinned mutable object, or a frozen one with a mutable child, is not inert);
- *   - plain: its prototype is, by identity, `Object.prototype`, `null`, or (for an array)
- *     `Array.prototype`. A custom prototype is never walked, because what it carries (an inherited
- *     object, a symbol-keyed method) would be reachable from the value.
+ *   - plain: its prototype is, by identity, `Object.prototype` or `null`. A custom prototype is
+ *     never walked, because what it carries (an inherited object, a symbol-keyed method) would be
+ *     reachable from the value. An array is not plain here, so a pinned array takes the wrapping
+ *     path.
  * Every own key, symbols included, must be a data property whose value is itself inert.
  */
 function isInertData(value: unknown, depth = 0): boolean {
@@ -1325,14 +1326,7 @@ function isInertData(value: unknown, depth = 0): boolean {
 	if (value === null || typeof value !== "object") return true;
 	if (utilTypes.isProxy(value) || depth > 8 || !Object.isFrozen(value)) return false;
 	const proto = Object.getPrototypeOf(value) as object | null;
-	if (
-		!(
-			proto === null ||
-			proto === Object.prototype ||
-			(Array.isArray(value) && proto === Array.prototype)
-		)
-	)
-		return false;
+	if (!(proto === null || proto === Object.prototype)) return false;
 	for (const name of Reflect.ownKeys(value)) {
 		const d = Object.getOwnPropertyDescriptor(value, name);
 		if (d === undefined || !("value" in d)) return false;
