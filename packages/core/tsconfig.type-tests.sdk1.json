@@ -1,0 +1,4 @@
+{
+	"extends": "./tsconfig.type-tests.json",
+	"exclude": ["tests/policy/pii-content-sdk-types.test-d.ts"]
+}

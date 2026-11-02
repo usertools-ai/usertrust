@@ -67,6 +67,7 @@ env:
     typecheck
     test
     scan-linear
+    sdk-1x
     openclaw-contract
     tb-integration
     site-build

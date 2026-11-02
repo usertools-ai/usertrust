@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The `@anthropic-ai/sdk` peer range is now `>=0.116.0 <2`, and CI runs the suite on both lines.** The floor (0.116.0) and the 1.x line classified in `CLASSIFIED_SDK_VERSIONS` (1.3.0) are each type-checked and tested in the `sdk-1x` job. A 1.x request method the free list does not name is refused by default; a 2.x SDK is outside the range until it is classified.
+
 ## [5.3.0] - 2026-11-01
 
 ### Added
