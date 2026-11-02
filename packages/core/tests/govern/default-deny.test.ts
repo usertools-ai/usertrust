@@ -336,6 +336,45 @@ const MP = {
 };
 const CP = { model: "gpt-4o", messages: [{ role: "user", content: "hi" }] };
 
+// ── Which SDK line is installed ──
+// The suite runs on every classified SDK line and on newer ones. A free-list entry the installed SDK
+// does not have is a failure on a CLASSIFIED version (the list drifted from what was verified) and a
+// skip on any other (the line removed or never had that method); a line becomes classified by being
+// appended to CLASSIFIED_SDK_VERSIONS once its methods are in the free list.
+const PROBE_CLIENTS: Record<"anthropic" | "openai", Loose> = {
+	anthropic: new Anthropic({ apiKey: "k" }),
+	openai: new OpenAI({ apiKey: "k" }),
+};
+const SDK_PACKAGES = { anthropic: "@anthropic-ai/sdk", openai: "openai" } as const;
+function installedSdkVersion(pkg: string): string {
+	return (
+		JSON.parse(
+			readFileSync(
+				join(import.meta.dirname, `../../../../node_modules/${pkg}/package.json`),
+				"utf8",
+			),
+		) as { version: string }
+	).version;
+}
+function sdkIsClassified(provider: "anthropic" | "openai"): boolean {
+	const list = defaultDeny.CLASSIFIED_SDK_VERSIONS[provider] as readonly string[];
+	return list.includes(installedSdkVersion(SDK_PACKAGES[provider]));
+}
+function memberPresent(root: Loose, path: string): boolean {
+	let at: Loose | undefined = root;
+	for (const segment of path.split(".")) {
+		if (at === undefined || at === null) return false;
+		at = at[segment];
+	}
+	return typeof at === "function";
+}
+/** True when `path` is missing from the installed SDK AND that SDK line is not a classified one. */
+function absentOnUnclassifiedSdk(provider: "anthropic" | "openai", path: string): boolean {
+	return !memberPresent(PROBE_CLIENTS[provider], path) && !sdkIsClassified(provider);
+}
+/** The legacy Text Completions resource: SDK 1.x removed it. */
+const HAS_ANTHROPIC_COMPLETIONS = memberPresent(PROBE_CLIENTS.anthropic, "completions.create");
+
 // ── Refusal families ──
 
 describe("Anthropic: every ungoverned SDK method is refused", () => {
@@ -363,10 +402,14 @@ describe("Anthropic: every ungoverned SDK method is refused", () => {
 			(c) => c.beta.messages.toolRunner({ ...MP, tools: [], max_iterations: 1 }),
 		],
 	];
-	it.each(rows)("%s", async (path, call) => {
-		const { client, engine } = await anthropic();
-		await expectRefused(path, () => call(client), engine);
-	});
+	for (const [path, call] of rows) {
+		// SDK 1.x has no `completions` resource (the legacy Text Completions API was removed), so there
+		// is nothing to refuse there; on 0.116 the row runs.
+		it.skipIf(path === "completions.create" && !HAS_ANTHROPIC_COMPLETIONS)(path, async () => {
+			const { client, engine } = await anthropic();
+			await expectRefused(path, () => call(client), engine);
+		});
+	}
 });
 
 describe("OpenAI: every ungoverned SDK method is refused", () => {
@@ -1323,8 +1366,9 @@ describe("the SDK peer floors are the versions the free list was classified on",
 				),
 			) as { version: string }
 		).version;
-	const classified = (defaultDeny as { CLASSIFIED_SDK_VERSIONS?: Record<string, string> })
-		.CLASSIFIED_SDK_VERSIONS;
+	const classified = (
+		defaultDeny as { CLASSIFIED_SDK_VERSIONS?: Record<string, readonly string[]> }
+	).CLASSIFIED_SDK_VERSIONS;
 
 	it.each([
 		["openai", "openai"],
@@ -1334,8 +1378,16 @@ describe("the SDK peer floors are the versions the free list was classified on",
 		expect(classified, "CLASSIFIED_SDK_VERSIONS is exported").toBeDefined();
 		const floor = /^>=(\d+\.\d+\.\d+)$/.exec(corePkg.peerDependencies[pkgName] ?? "")?.[1];
 		expect(floor, `${pkgName}'s peer range is a plain >= floor`).toBeDefined();
+		const lines = classified?.[key] as readonly string[] | undefined;
+		expect(
+			Array.isArray(lines) && lines.length > 0,
+			`${key}: a non-empty list of classified versions`,
+		).toBe(true);
+		// The list is oldest first, so the first entry is the floor and every later line is newer.
+		for (let i = 1; i < (lines?.length ?? 0); i++)
+			expect(compareVersions(lines?.[i] as string, lines?.[i - 1] as string)).toBeGreaterThan(0);
 		// A floor moved without re-classifying the free list (or the reverse) fails here.
-		expect(floor).toBe(classified?.[key]);
+		expect(floor).toBe(lines?.[0]);
 		// The SDK this suite runs against is inside the supported range.
 		expect(compareVersions(installed(pkgName), floor as string)).toBeGreaterThanOrEqual(0);
 	});
@@ -1438,7 +1490,10 @@ describe("every other SDK method that is not free is refused: no trap outside GO
 			expect(notRefused).toEqual([]);
 			expect(hits, "a refused method reached the SDK").toEqual([]);
 			expect(engine.spendPending).not.toHaveBeenCalled();
-		});
+			// One refusal (an audit event each) per SDK method: SDK 1.x has about three times as many as
+			// 0.116, which does not fit the default 5 s.
+			// timing: 60 s budget; on a loaded 14-core host the Anthropic row took 6.0 s on SDK 1.3.0 and 2.7 s on 0.116
+		}, 60_000);
 	}
 });
 
@@ -1647,7 +1702,15 @@ describe("every free method sends only GET or DELETE, unless it is a named free 
 		}
 	});
 
-	it.each(Object.keys(REFUSED_DESPITE_GET_OR_DELETE))(
+	// On an SDK line that is not classified, an entry the SDK does not have is skipped (and listed as
+	// a skipped row); on a classified line it still runs and fails its "exists" assertion.
+	const rowKeyAbsent = (key: string): boolean => {
+		const [provider, path] = key.split(":") as ["anthropic" | "openai", string];
+		return absentOnUnclassifiedSdk(provider, path);
+	};
+	for (const key of Object.keys(REFUSED_DESPITE_GET_OR_DELETE).filter(rowKeyAbsent))
+		it.skip(`${key} is absent from the installed (unclassified) SDK`, () => {});
+	it.each(Object.keys(REFUSED_DESPITE_GET_OR_DELETE).filter((k) => !rowKeyAbsent(k)))(
 		"%s is refused despite its verb (the category in REFUSED_DESPITE_GET_OR_DELETE)",
 		async (key) => {
 			const [provider, path] = key.split(":") as ["anthropic" | "openai", string];
@@ -1662,11 +1725,12 @@ describe("every free method sends only GET or DELETE, unless it is a named free 
 		},
 	);
 
-	it.each(
-		providers.flatMap((provider) =>
-			(methods[provider] ?? []).map((path) => [`${provider}:${path}`, provider, path] as const),
-		),
-	)("%s", async (key, provider, path) => {
+	const freeRows = providers.flatMap((provider) =>
+		(methods[provider] ?? []).map((path) => [`${provider}:${path}`, provider, path] as const),
+	);
+	for (const [key] of freeRows.filter(([k]) => rowKeyAbsent(k)))
+		it.skip(`${key} is absent from the installed (unclassified) SDK`, () => {});
+	it.each(freeRows.filter(([k]) => !rowKeyAbsent(k)))("%s", async (key, provider, path) => {
 		const c = clients[provider] as { governed: Loose; raw: Loose; requests: string[] };
 		c.requests.length = 0;
 		const eventsBefore = auditText(provider);
@@ -1740,6 +1804,112 @@ describe("the boundary is inert to inspection and serialization", () => {
 		expect(outcome(client.beta)).toBe(outcome(raw.beta));
 	});
 
+	// SDK 1.x's `openTelemetry` option is a deeply frozen config object. A frozen property is
+	// non-configurable and non-writable, and a Proxy must answer such a read with the same value, so
+	// wrapping it (as every other object read is wrapped) throws a TypeError instead of returning it.
+	it("a pinned (frozen) config object reads through every governed layer unchanged", async () => {
+		const pinned = Object.freeze({
+			traces: Object.freeze({ enabled: true, contentMode: "off" }),
+			propagation: false,
+		});
+		const { client, raw } = await anthropic({}, (r: Loose) => {
+			Object.defineProperty(r, "pinnedConfig", { value: pinned, enumerable: true });
+		});
+		expect(raw.pinnedConfig).toBe(pinned);
+		// the client root (guardedGet)
+		expect(client.pinnedConfig).toBe(pinned);
+		expect(client.pinnedConfig.traces).toEqual({ enabled: true, contentMode: "off" });
+		// behind a resource's _client (the raw-client stand-in)
+		expect(client.messages._client.pinnedConfig).toBe(pinned);
+		expect(client.messages._client.pinnedConfig.traces.contentMode).toBe("off");
+		// and JSON.stringify of the stand-in layer walks it without an invariant error
+		expect(() => JSON.stringify(client.messages._client.pinnedConfig)).not.toThrow();
+		expect(hits).toEqual([]);
+	});
+
+	it("a pinned object that carries a function is NOT passed through: its method cannot be reached", async () => {
+		let called = false;
+		// A resource (it carries `_client`, as every SDK resource does) with a frozen method on it.
+		const pinned = Object.freeze({
+			_client: {},
+			send: () => {
+				called = true;
+			},
+		});
+		const { client } = await anthropic({}, (r: Loose) => {
+			Object.defineProperty(r, "pinnedWithMethod", { value: pinned, enumerable: true });
+		});
+		expect(() => client.pinnedWithMethod.send()).toThrow();
+		expect(() => client.messages._client.pinnedWithMethod.send()).toThrow();
+		expect(called).toBe(false);
+		expect(hits).toEqual([]);
+	});
+
+	// A pinned PROPERTY protects the reference, not what the value holds. Each of these values must
+	// stay behind the boundary: a read hands out nothing writable and nothing callable.
+	it("a pinned object that is not frozen is not passed through: a write cannot reach the raw client", async () => {
+		const pinned = { baseURL: "https://anthropic.test" };
+		const { client } = await anthropic({}, (r: Loose) => {
+			Object.defineProperty(r, "pinnedMutable", { value: pinned, enumerable: true });
+			Object.defineProperty(r, "_authState", { value: pinned, enumerable: true });
+		});
+		expect(() => {
+			client._authState.baseURL = "https://changed.test";
+		}).toThrow();
+		expect(() => {
+			client.messages._client.pinnedMutable.baseURL = "https://changed.test";
+		}).toThrow();
+		expect(pinned.baseURL).toBe("https://anthropic.test");
+	});
+
+	it("a shallow-frozen pinned object with a mutable child is not passed through", async () => {
+		const pinned = Object.freeze({ child: { n: 1 } });
+		const { client } = await anthropic({}, (r: Loose) => {
+			Object.defineProperty(r, "pinnedShallow", { value: pinned, enumerable: true });
+		});
+		expect(() => {
+			client.messages._client.pinnedShallow.child.n = 2;
+		}).toThrow();
+		expect(pinned.child.n).toBe(1);
+	});
+
+	it("a pinned object whose PROTOTYPE carries an object or a symbol-keyed method is not passed through", async () => {
+		let calls = 0;
+		const sym = Symbol("send");
+		const inherited = Object.freeze(Object.create({ nested: { send: () => calls++ } }));
+		const symbolic = Object.freeze(Object.create({ [sym]: () => calls++ }));
+		const { client } = await anthropic({}, (r: Loose) => {
+			Object.defineProperty(r, "pinnedInherited", { value: inherited, enumerable: true });
+			Object.defineProperty(r, "pinnedSymbolic", { value: symbolic, enumerable: true });
+		});
+		expect(() => client.messages._client.pinnedInherited.nested.send()).toThrow();
+		expect(() => client.messages._client.pinnedSymbolic[sym]()).toThrow();
+		expect(calls).toBe(0);
+		expect(hits).toEqual([]);
+	});
+
+	// Plain here means `Object.prototype` or `null` by identity: an array is not, so a pinned frozen
+	// array is not handed out as the raw reference, and a method inside it cannot be reached.
+	it("a pinned frozen array is not passed through as the raw reference", async () => {
+		let calls = 0;
+		const plain = Object.freeze([1, 2]);
+		const withMethod = Object.freeze([Object.freeze({ send: () => calls++ })]);
+		const { client } = await anthropic({}, (r: Loose) => {
+			Object.defineProperty(r, "pinnedArray", { value: plain, enumerable: true });
+			Object.defineProperty(r, "pinnedArrayFn", { value: withMethod, enumerable: true });
+		});
+		let got: unknown;
+		try {
+			got = client.messages._client.pinnedArray;
+		} catch {
+			got = undefined;
+		}
+		expect(got).not.toBe(plain);
+		expect(() => client.messages._client.pinnedArrayFn[0].send()).toThrow();
+		expect(calls).toBe(0);
+		expect(hits).toEqual([]);
+	});
+
 	it("symbols and Object.prototype members pass", async () => {
 		const { client, raw } = await anthropic();
 		expect(client[Symbol.toStringTag]).toBe(raw[Symbol.toStringTag]);
@@ -1777,6 +1947,7 @@ describe("a method keeps its identity across reads", () => {
 			free: "models.list",
 			listed: "messages.batches.create",
 			refused: "completions.create",
+			refusedPresent: HAS_ANTHROPIC_COMPLETIONS, // SDK 1.x removed the resource: those rows skip
 			refusedArgs: [{ model: "claude-2.1", max_tokens_to_sample: 8, prompt: "\n\nHuman: hi" }],
 			listGet: "GET /v1/models",
 		},
@@ -1785,19 +1956,23 @@ describe("a method keeps its identity across reads", () => {
 			free: "models.list",
 			listed: "embeddings.create",
 			refused: "images.generate",
+			refusedPresent: true,
 			refusedArgs: [{ model: "gpt-image-1", prompt: "a cat" }],
 			listGet: "GET /v1/models",
 		},
 	} as const;
 
 	for (const [provider, c] of Object.entries(CASES)) {
-		it(`${provider}: free, listed and refused methods are the same function on every read`, async () => {
-			const { client } = await c.build({ allowUngoverned: [c.listed] });
-			for (const path of [c.free, c.listed, c.refused]) {
-				const { holder, name } = resolveMember(client, path);
-				expect(holder[name], path).toBe(resolveMember(client, path).holder[name]);
-			}
-		});
+		it.skipIf(!c.refusedPresent)(
+			`${provider}: free, listed and refused methods are the same function on every read`,
+			async () => {
+				const { client } = await c.build({ allowUngoverned: [c.listed] });
+				for (const path of [c.free, c.listed, c.refused]) {
+					const { holder, name } = resolveMember(client, path);
+					expect(holder[name], path).toBe(resolveMember(client, path).holder[name]);
+				}
+			},
+		);
 
 		it(`${provider}: the same raw function at two paths gets two wrappers, each deciding by its own path`, async () => {
 			const { client, raw, engine } = await c.build({}, (r: Loose) => {
@@ -1813,21 +1988,24 @@ describe("a method keeps its identity across reads", () => {
 			expect(chainEvents().map((e) => e.kind)).toEqual(["policy_denied"]);
 		});
 
-		it(`${provider}: two calls of one cached refused wrapper give two errors, each with its own event`, async () => {
-			const { client } = await c.build();
-			const { holder, name } = resolveMember(client, c.refused);
-			const refused = holder[name];
-			const first = await refused(...c.refusedArgs).catch((e: unknown) => e);
-			const second = await refused(...c.refusedArgs).catch((e: unknown) => e);
-			expect(first).toBeInstanceOf(PolicyDeniedError);
-			expect(second).toBeInstanceOf(PolicyDeniedError);
-			expect(first).not.toBe(second);
-			const events = chainEvents() as unknown as Array<{ kind: string; hash: string }>;
-			expect(events.map((e) => e.kind)).toEqual(["policy_denied", "policy_denied"]);
-			expect((first as PolicyDeniedError).auditEventHash).toBe(events[0]?.hash);
-			expect((second as PolicyDeniedError).auditEventHash).toBe(events[1]?.hash);
-			expect(events[0]?.hash).not.toBe(events[1]?.hash);
-		});
+		it.skipIf(!c.refusedPresent)(
+			`${provider}: two calls of one cached refused wrapper give two errors, each with its own event`,
+			async () => {
+				const { client } = await c.build();
+				const { holder, name } = resolveMember(client, c.refused);
+				const refused = holder[name];
+				const first = await refused(...c.refusedArgs).catch((e: unknown) => e);
+				const second = await refused(...c.refusedArgs).catch((e: unknown) => e);
+				expect(first).toBeInstanceOf(PolicyDeniedError);
+				expect(second).toBeInstanceOf(PolicyDeniedError);
+				expect(first).not.toBe(second);
+				const events = chainEvents() as unknown as Array<{ kind: string; hash: string }>;
+				expect(events.map((e) => e.kind)).toEqual(["policy_denied", "policy_denied"]);
+				expect((first as PolicyDeniedError).auditEventHash).toBe(events[0]?.hash);
+				expect((second as PolicyDeniedError).auditEventHash).toBe(events[1]?.hash);
+				expect(events[0]?.hash).not.toBe(events[1]?.hash);
+			},
+		);
 	}
 });
 
