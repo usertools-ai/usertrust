@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The `@anthropic-ai/sdk` peer range is now `>=0.116.0 <2`, and CI runs the suite on both lines.** The floor (0.116.0) and the 1.x line classified in `CLASSIFIED_SDK_VERSIONS` (1.3.0) are each type-checked and tested in the `sdk-1x` job. A 1.x request method the free list does not name is refused by default; a 2.x SDK is outside the range until it is classified. On 1.3.0 the PII content schema does not yet name seven of the SDK's request additions, so `pii-content-sdk-types.test-d.ts` reports seven known diagnostics there; the 1.x leg pins exactly those seven by assertion name and location (any other, or a missing one, fails), and a field in one of them is covered by the fail-closed behaviour in LIMITATIONS section 11. Classifying them removes the pin.
+
 ### Fixed
 
 - **`usertrust init` hides the key as you type it, takes Enter at the budget prompt, and always leaves a key file.** The key prompt echoed every character; it is now masked. Enter at the budget prompt was refused (the default was applied only after validation); the prompt now offers $5 (50,000 usertokens) as a real value and calls the amount a total for the project that does not reset, not a monthly one. When no key was typed, or there is no terminal (`--json`, a pipe, CI), `init` creates `.usertrust/.env` as an owner-only template of commented lines instead of leaving none, and leaves a `.env` that exists as it is; a reconfigure that types a key keeps every other line and comment byte for byte, replaces the line of the same variable rather than adding a second, and writes the file owner-only through a rename. Running `init` again over an existing vault now exits 0 and keeps its config (`--json` reports `success: true` with `created: false`; it reported `success: false`).

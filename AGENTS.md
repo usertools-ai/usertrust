@@ -1785,7 +1785,7 @@ reference, including a specifier held in a variable. The reason: usertrust never
 unverified `Models` before authorization; the SDK exports no request converters or transport hook,
 so its own pipeline is the only way to build the exact request it sends.
 `@anthropic-ai/sdk`, `openai` and `@google/genai` are **optional** peer dependencies. Their floors
-(`>=0.116.0`, `>=7.4.0`, `>=1.52.0`) are `CLASSIFIED_SDK_VERSIONS` in `default-deny.ts`: the
+(`>=0.116.0 <2`, `>=7.4.0`, `>=1.52.0`; the anthropic range is two-sided, and CI runs the suite on both the 0.116 floor and the 1.x line named in `CLASSIFIED_SDK_VERSIONS`) are `CLASSIFIED_SDK_VERSIONS` in `default-deny.ts`: the
 versions the default-deny free list was classified on. Moving a floor means re-running that
 classification against the new SDK, and `default-deny.test.ts` fails if the floor and the
 constant disagree.
