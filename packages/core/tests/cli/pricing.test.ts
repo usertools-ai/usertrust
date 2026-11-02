@@ -127,6 +127,50 @@ describe("usertrust pricing", () => {
 		expect(line).not.toContain("(1h");
 	});
 
+	it("a long-prompt tier shows a 1-hour rate only when its row has one (Haiku does, the xAI rows do not), human and --json", async () => {
+		const vaultPath = join(tempDir, ".usertrust");
+		mkdirSync(vaultPath, { recursive: true });
+		writeFileSync(
+			join(vaultPath, "usertrust.config.json"),
+			JSON.stringify({
+				budget: 50_000,
+				pricing: "recommended",
+				providers: [
+					{ name: "anthropic", models: ["claude-haiku-5-5"] },
+					{ name: "xai", models: ["grok-4.7"] },
+				],
+			}),
+			"utf-8",
+		);
+		await run(tempDir, { json: true });
+		const jsonCall = vi.mocked(console.log).mock.calls.find((c) => {
+			try {
+				JSON.parse(c[0] as string);
+				return true;
+			} catch {
+				return false;
+			}
+		});
+		const parsed = JSON.parse(jsonCall?.[0] as string);
+		// The base tier and the long tier agree on whether a 1-hour rate exists.
+		expect(parsed.rates["grok-4.7"].cacheWrite1hPerM).toBeNull();
+		expect(parsed.rates["grok-4.7"].longPrompt.cacheWrite1hPerM).toBeNull();
+		expect(parsed.rates["claude-haiku-5-5"].longPrompt.cacheWrite1hPerM).toBe(1);
+		vi.mocked(console.log).mockClear();
+		await run(tempDir);
+		const lines = vi.mocked(console.log).mock.calls.map((c) => String(c[0]));
+		const at = (id: string) => lines.findIndex((l) => l.includes(id));
+		const xai = at("grok-4.7");
+		expect(xai).toBeGreaterThanOrEqual(0);
+		// Its own line and the long-tier line after it: neither advertises a 1-hour tier.
+		expect(lines[xai]).not.toContain("(1h");
+		expect(lines[xai + 1]).toContain("cache-write");
+		expect(lines[xai + 1]).not.toContain("(1h");
+		const haiku = at("claude-haiku-5-5");
+		expect(haiku).toBeGreaterThanOrEqual(0);
+		expect(lines[haiku + 1]).toContain("(1h $");
+	});
+
 	it("shows an operator's explicit 1-hour rate, and the derived one when a custom row omits it", async () => {
 		const vaultPath = join(tempDir, ".usertrust");
 		mkdirSync(vaultPath, { recursive: true });
