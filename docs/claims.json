@@ -1503,6 +1503,11 @@
 			"why": "the error a caller sees when a denial event fails to append"
 		},
 		{
+			"file": "site/content/docs/api/errors.mdx",
+			"text": "**Docs URL:** `https://usertrust.ai/docs/errors/anomaly-detected` — note the slug is `anomaly-detected`, not the class name.",
+			"why": "the page slug the SDK prints for AnomalyError; the word is part of a URL, not a claim about the chain"
+		},
+		{
 			"file": "site/content/docs/concepts/local-models.mdx",
 			"text": "Renaming a local model (`ollama cp llama3.2 gpt-4o`) cannot change the regime in either direction.",
 			"why": "pricing regime of local models"
