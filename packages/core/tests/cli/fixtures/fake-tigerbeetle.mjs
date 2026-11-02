@@ -6,7 +6,9 @@
 //  - "healthy": every request answers;
 //  - "evict-after-read": a client answers one read, then learns the cluster evicted it while idle,
 //    and fails every request after that "closed";
-//  - "evicted": every client fails every request "closed" from the start.
+//  - "evicted": every client fails every request "closed" from the start;
+//  - "hang": a request is never answered (something listens, but it is not a usertrust ledger, or a
+//    cluster of another id): the client holds the event loop until it is destroyed and never fails.
 // Each client holds the event loop until it is destroyed, as a native client does, and destroying
 // an evicted one aborts the process (SIGABRT), as tigerbeetle-node 0.17.9 does.
 const mode = process.env.FAKE_TB_MODE ?? "healthy";
@@ -19,6 +21,7 @@ export function createClient() {
 	const hold = setInterval(() => {}, 60_000);
 	const request = async (ids) => {
 		if (!open || evicted) throw closed();
+		if (mode === "hang") return await new Promise(() => {});
 		if (mode === "evict-after-read" && ids.length > 0) evicted = true;
 		return [{ id: 1n, credits_posted: 750n, debits_posted: 0n, debits_pending: 0n }].slice(
 			0,

@@ -44,6 +44,9 @@ vi.mock("tigerbeetle-node", () => ({
 	amount_max: (1n << 128n) - 1n,
 }));
 
+// The native client is faked, so there is no listener to reach: the TCP preflight is stood down.
+vi.mock("../../src/ledger/preflight.js", () => ({ preflightLedger: async () => {} }));
+
 // The constant at a value the client would never default to (300 s): the timeout the
 // ledger is handed, and the one the handle publishes, must both come from it.
 vi.mock(import("../../src/shared/constants.js"), async (importOriginal) => ({

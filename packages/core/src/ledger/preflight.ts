@@ -1,0 +1,114 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
+/**
+ * A governor with no ledger behind it must fail within seconds and say how to fix it. The native
+ * TigerBeetle client cannot do that: it retries a refused connection forever and imposes no request
+ * timeout, so a `trust()` call against a ledger that is not running waits indefinitely, and the
+ * process never gets to print a hint.
+ *
+ * `preflightLedger` is the cheap first step. It opens a plain TCP connection to each configured
+ * replica address, before any native client exists. A refused connection is a ledger that is not
+ * running, and says so at once. It proves nothing about what answered: a listener that is not a
+ * usertrust ledger is `TrustTBClient.connectDeadline`'s to find.
+ */
+
+import { connect } from "node:net";
+import { LedgerUnavailableError } from "../shared/errors.js";
+
+/** How long one TCP attempt may take before the address counts as not answering. */
+const CONNECT_ATTEMPT_MS = 1_000;
+
+export interface PreflightOptions {
+	/** The configured cluster id, named in the fix for an explicit non-loopback address. */
+	clusterId?: number | bigint;
+	/** Per-address TCP attempt budget. Default 1 s. */
+	attemptMs?: number;
+}
+
+export interface ParsedAddress {
+	host: string;
+	port: number;
+}
+
+/**
+ * Parse one replica address as TigerBeetle writes it: `3000` (loopback), `host:port` or
+ * `[v6]:port`. Returns `undefined` for anything else, which `preflightLedger` leaves to the native
+ * client rather than refusing on a form it does not know.
+ */
+export function parseLedgerAddress(address: string): ParsedAddress | undefined {
+	const text = address.trim();
+	if (/^\d{1,5}$/.test(text)) return validPort(text, "127.0.0.1");
+	const v6 = /^\[([^\]]+)\]:(\d{1,5})$/.exec(text);
+	if (v6) return validPort(v6[2] as string, v6[1] as string);
+	const v4 = /^([^:[\]\s]+):(\d{1,5})$/.exec(text);
+	if (v4) return validPort(v4[2] as string, v4[1] as string);
+	return undefined;
+}
+
+function validPort(text: string, host: string): ParsedAddress | undefined {
+	const port = Number(text);
+	return port >= 1 && port <= 65_535 ? { host, port } : undefined;
+}
+
+/** Loopback hosts: the ledger this machine would start itself. */
+export function isLoopbackHost(host: string): boolean {
+	return host === "localhost" || host === "::1" || host === "127.0.0.1" || host.startsWith("127.");
+}
+
+/** Resolves true when a TCP connection to the address is accepted, false when it is refused or silent. */
+function reachable(target: ParsedAddress, attemptMs: number): Promise<boolean> {
+	return new Promise((resolve) => {
+		const socket = connect({ host: target.host, port: target.port });
+		let settled = false;
+		const finish = (answered: boolean) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			socket.destroy();
+			resolve(answered);
+		};
+		const timer = setTimeout(() => finish(false), attemptMs);
+		socket.once("connect", () => finish(true));
+		socket.once("error", () => finish(false));
+	});
+}
+
+/**
+ * Throws `LedgerUnavailableError` when no configured address accepts a TCP connection. Passes when
+ * at least one does, and when an address is in a form this cannot read (the native client is then
+ * the judge). Opens no native client, and leaves no socket or timer behind.
+ */
+export async function preflightLedger(
+	addresses: readonly string[],
+	options: PreflightOptions = {},
+): Promise<void> {
+	const attemptMs = options.attemptMs ?? CONNECT_ATTEMPT_MS;
+	const targets: ParsedAddress[] = [];
+	for (const address of addresses) {
+		const parsed = parseLedgerAddress(address);
+		// An address this cannot read is not provably down: leave the verdict to the client.
+		if (parsed === undefined) return;
+		targets.push(parsed);
+	}
+	if (targets.length === 0) return;
+
+	const answers = await Promise.all(targets.map((t) => reachable(t, attemptMs)));
+	if (answers.some(Boolean)) return;
+
+	const shown = targets.map((t) =>
+		t.host.includes(":") ? `[${t.host}]:${t.port}` : `${t.host}:${t.port}`,
+	);
+	const allLoopback = targets.every((t) => isLoopbackHost(t.host));
+	const where = shown.join(", ");
+	const fix = allLoopback
+		? "npx usertrust tb start"
+		: `start the ledger at ${where}${
+				options.clusterId !== undefined ? ` (cluster ${String(options.clusterId)})` : ""
+			}, or change tigerbeetle.addresses`;
+	throw new LedgerUnavailableError(`No ledger is running at ${where}. Fix: ${fix}`, where, {
+		hint: allLoopback
+			? "Run `npx usertrust tb start`, or pass { dryRun: true } to skip the ledger."
+			: `Start TigerBeetle at ${where}, or pass { dryRun: true } to skip the ledger.`,
+	});
+}
