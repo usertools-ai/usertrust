@@ -371,19 +371,21 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 	// $1.25 / $0.20 / $2.50; grok-build-0.1 $1.00 / $0.20 / $2.00. xAI publishes no cache-WRITE
 	// price (cacheWritePer1k omitted: writes price at input, D1). Every model has a 200,000-token
 	// long-context tier at exactly 2x each category, cached input included; it is carried as
-	// `longPrompt` (a prompt longer than 200,000 tokens pays the doubled rates; exactly 200,000
-	// is the lower tier, as in this table's other per-request tiers).
-	// Retired slugs: xAI's "Grok Model Retirement on May 15, 2026" notice says they continue to
-	// resolve and are billed at the pricing of the model they run on. grok-3 and the four grok-4*
-	// slugs run on grok-4.3 and carry its row (including its tier); grok-code-fast-1 is routed to
-	// grok-build-0.1 and carries that row. grok-3-mini and bare grok-4 are not on that notice and
-	// are not priced here.
+	// `longPrompt`. xAI's long-context rates apply once the prompt REACHES 200,000 tokens (>=), and
+	// `longPrompt` is "strictly greater than thresholdTokens", so these rows set the threshold to
+	// 199_999: a 199,999-token prompt pays the rates below, a 200,000-token prompt the doubled ones.
+	// Retired slugs: xAI's "Grok Model Retirement on May 15, 2026" notice says requests to any
+	// deprecated slug are billed at grok-4.3 pricing, so each of these carries the grok-4.3 row
+	// (including its tier). grok-code-fast-1 is routed to grok-build-0.1, but routing is not
+	// billing: where the notice's pricing paragraph ($1.25 / $2.50, grok-4.3) and its routing note
+	// differ, the higher price is metered (D1); this can drop to grok-build-0.1's row if xAI says
+	// so. grok-3-mini and bare grok-4 are not on that notice and are not priced here.
 	"grok-3": {
 		inputPer1k: 12.5,
 		outputPer1k: 25,
 		cacheReadPer1k: 2,
 		longPrompt: {
-			thresholdTokens: 200_000,
+			thresholdTokens: 199_999,
 			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
 		},
 	},
@@ -392,7 +394,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		outputPer1k: 25,
 		cacheReadPer1k: 2,
 		longPrompt: {
-			thresholdTokens: 200_000,
+			thresholdTokens: 199_999,
 			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
 		},
 	},
@@ -401,7 +403,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		outputPer1k: 25,
 		cacheReadPer1k: 2,
 		longPrompt: {
-			thresholdTokens: 200_000,
+			thresholdTokens: 199_999,
 			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
 		},
 	},
@@ -410,7 +412,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		outputPer1k: 25,
 		cacheReadPer1k: 2,
 		longPrompt: {
-			thresholdTokens: 200_000,
+			thresholdTokens: 199_999,
 			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
 		},
 	},
@@ -419,7 +421,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		outputPer1k: 25,
 		cacheReadPer1k: 2,
 		longPrompt: {
-			thresholdTokens: 200_000,
+			thresholdTokens: 199_999,
 			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
 		},
 	},
@@ -428,17 +430,17 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		outputPer1k: 25,
 		cacheReadPer1k: 2,
 		longPrompt: {
-			thresholdTokens: 200_000,
+			thresholdTokens: 199_999,
 			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
 		},
 	},
 	"grok-code-fast-1": {
-		inputPer1k: 10,
-		outputPer1k: 20,
+		inputPer1k: 12.5,
+		outputPer1k: 25,
 		cacheReadPer1k: 2,
 		longPrompt: {
-			thresholdTokens: 200_000,
-			rates: { inputPer1k: 20, outputPer1k: 40, cacheReadPer1k: 4 },
+			thresholdTokens: 199_999,
+			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
 		},
 	},
 	"grok-4.7": {
@@ -446,7 +448,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		outputPer1k: 60,
 		cacheReadPer1k: 5,
 		longPrompt: {
-			thresholdTokens: 200_000,
+			thresholdTokens: 199_999,
 			rates: { inputPer1k: 40, outputPer1k: 120, cacheReadPer1k: 10 },
 		},
 	},
@@ -455,7 +457,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		outputPer1k: 60,
 		cacheReadPer1k: 5,
 		longPrompt: {
-			thresholdTokens: 200_000,
+			thresholdTokens: 199_999,
 			rates: { inputPer1k: 40, outputPer1k: 120, cacheReadPer1k: 10 },
 		},
 	},
@@ -464,7 +466,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		outputPer1k: 60,
 		cacheReadPer1k: 3,
 		longPrompt: {
-			thresholdTokens: 200_000,
+			thresholdTokens: 199_999,
 			rates: { inputPer1k: 40, outputPer1k: 120, cacheReadPer1k: 6 },
 		},
 	},
@@ -473,7 +475,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		outputPer1k: 25,
 		cacheReadPer1k: 2,
 		longPrompt: {
-			thresholdTokens: 200_000,
+			thresholdTokens: 199_999,
 			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
 		},
 	},
@@ -482,7 +484,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		outputPer1k: 25,
 		cacheReadPer1k: 2,
 		longPrompt: {
-			thresholdTokens: 200_000,
+			thresholdTokens: 199_999,
 			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
 		},
 	},
@@ -491,7 +493,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		outputPer1k: 25,
 		cacheReadPer1k: 2,
 		longPrompt: {
-			thresholdTokens: 200_000,
+			thresholdTokens: 199_999,
 			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
 		},
 	},
@@ -500,7 +502,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		outputPer1k: 25,
 		cacheReadPer1k: 2,
 		longPrompt: {
-			thresholdTokens: 200_000,
+			thresholdTokens: 199_999,
 			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
 		},
 	},
@@ -509,7 +511,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		outputPer1k: 20,
 		cacheReadPer1k: 2,
 		longPrompt: {
-			thresholdTokens: 200_000,
+			thresholdTokens: 199_999,
 			rates: { inputPer1k: 20, outputPer1k: 40, cacheReadPer1k: 4 },
 		},
 	},

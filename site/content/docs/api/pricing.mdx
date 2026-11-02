@@ -160,8 +160,10 @@ guessed — see [Documented approximations](#documented-approximations).
 Rates are xAI's published model pricing, retrieved 2026-11-02. xAI publishes a cached-input price
 and no cache-write price, so the cache-write column is `—` (writes price at the input rate). Every
 model below also has a 200,000-token long-context tier at exactly double each rate, cached input
-included: a prompt longer than 200,000 tokens pays the doubled rates for every category, and a
-prompt of exactly 200,000 tokens pays the rates shown.
+included: xAI applies it once the prompt reaches 200,000 tokens, so a prompt of 200,000 tokens or more
+pays the doubled rates for every category, and a prompt of 199,999 tokens or fewer pays the rates shown.
+The table cannot see a request's endpoint: xAI bills calls to its US regional endpoint at 1.1x these
+rates, which the estimate does not include.
 
 | Model | Input | Output | Cache read | Cache write |
 |-------|------:|-------:|-----------:|------------:|
@@ -179,12 +181,13 @@ prompt of exactly 200,000 tokens pays the rates shown.
 | `grok-4-1-fast-non-reasoning` | 12.5 | 25 | 2 | — |
 | `grok-4-fast-reasoning` | 12.5 | 25 | 2 | — |
 | `grok-4-fast-non-reasoning` | 12.5 | 25 | 2 | — |
-| `grok-code-fast-1` | 10 | 20 | 2 | — |
+| `grok-code-fast-1` | 12.5 | 25 | 2 | — |
 
-The last seven rows are xAI's retired slugs. xAI's "Grok Model Retirement on May 15, 2026" notice says they
-continue to resolve and are billed at the pricing of the model they run on: `grok-3` and the four `grok-4*` slugs
-run on `grok-4.3`, and `grok-code-fast-1` is routed to `grok-build-0.1`, so each carries that model's rates and
-its long-context tier. `grok-3-mini` and bare `grok-4` are not on that notice and have no row.
+The last seven rows are xAI's retired slugs. xAI's "Grok Model Retirement on May 15, 2026" notice says
+requests to a deprecated slug are billed at `grok-4.3` pricing, so each carries that row and its
+long-context tier. That includes `grok-code-fast-1`, which the notice routes to `grok-build-0.1`: routing is
+not billing, and where the notice's pricing paragraph and its routing note differ the higher price is
+metered. `grok-3-mini` and bare `grok-4` are not on that notice and have no row.
 
 ### Other Providers
 
