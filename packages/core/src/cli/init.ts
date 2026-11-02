@@ -574,13 +574,13 @@ const ENV_TEMPLATE = `# usertrust provider keys, read by usertrust when it runs 
 const GITIGNORE_ENTRIES = ["tigerbeetle/", "*.tigerbeetle", "dlq/", ".env", ".env.*.tmp"];
 
 /**
- * Make sure the vault's .gitignore IGNORES every entry in GITIGNORE_ENTRIES, appending to what is
- * there and keeping every existing line. Git applies the LAST pattern that matches a path, so an
- * entry that is present but followed by a negation (`!*`, `!.env`) ignores nothing: such an entry
- * counts as missing, and is written again at the end, after the negation. Vaults made by trust() or
- * createGovernor() have no .gitignore at all; one made by an older init may lack the key file's
- * temp pattern. Written as createVault always wrote it: a plain owner-only write, ahead of the key
- * file.
+ * Make sure the vault's .gitignore ENDS with the exact block in GITIGNORE_ENTRIES, appending it when
+ * it does not and keeping every existing line. Git applies the LAST pattern that matches a path, so
+ * the only way to be sure nothing undoes the block is that nothing follows it: an earlier line that
+ * is indented (git keeps the space), negated (`!*`, `!.env`) or escaped can no longer matter. A file
+ * that already ends with the block is left byte for byte, so a re-run changes nothing. Vaults made by
+ * trust() or createGovernor() have no .gitignore at all. Written as createVault always wrote it: a
+ * plain owner-only write, ahead of the key file.
  */
 function ensureGitignore(vaultPath: string): void {
 	const file = join(vaultPath, ".gitignore");
@@ -590,15 +590,17 @@ function ensureGitignore(vaultPath: string): void {
 	} catch (err) {
 		if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
 	}
-	const lines = existing.split("\n").map((l) => l.trim());
-	const effective = (entry: string): boolean => {
-		const at = lines.lastIndexOf(entry);
-		return at !== -1 && !lines.slice(at + 1).some((l) => l.startsWith("!"));
-	};
-	const missing = GITIGNORE_ENTRIES.filter((e) => !effective(e));
-	if (missing.length === 0) return;
+	const lines = existing.split("\n");
+	if (lines[lines.length - 1] === "") lines.pop();
+	const tail = lines.slice(-GITIGNORE_ENTRIES.length);
+	if (
+		tail.length === GITIGNORE_ENTRIES.length &&
+		tail.every((l, i) => l === GITIGNORE_ENTRIES[i])
+	) {
+		return;
+	}
 	const base = existing === "" || existing.endsWith("\n") ? existing : `${existing}\n`;
-	writeFileSync(file, `${base}${missing.join("\n")}\n`, {
+	writeFileSync(file, `${base}${GITIGNORE_ENTRIES.join("\n")}\n`, {
 		encoding: "utf-8",
 		mode: PRIVATE_FILE_MODE,
 	});

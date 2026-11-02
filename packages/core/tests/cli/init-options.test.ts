@@ -248,11 +248,19 @@ describe("running init over a vault that already exists", () => {
 		writeFileSync(vault(".gitignore"), "mine/\n.env", { mode: 0o600 }); // no trailing newline
 		await run(dir, { json: true });
 		await run(dir, { json: true });
-		const lines = readFileSync(vault(".gitignore"), "utf-8").split("\n").filter(Boolean);
+		const text = readFileSync(vault(".gitignore"), "utf-8");
+		const lines = text.split("\n").filter(Boolean);
 		expect(lines.slice(0, 2)).toEqual(["mine/", ".env"]);
-		expect(lines.filter((l) => l === ".env").length).toBe(1);
-		expect(lines).toContain(".env.*.tmp");
-		expect(lines.length).toBe(new Set(lines).size);
+		// The block ends the file, so nothing after it can undo it; a re-run adds nothing.
+		expect(lines.slice(-5)).toEqual([
+			"tigerbeetle/",
+			"*.tigerbeetle",
+			"dlq/",
+			".env",
+			".env.*.tmp",
+		]);
+		await run(dir, { json: true });
+		expect(readFileSync(vault(".gitignore"), "utf-8")).toBe(text);
 	});
 
 	it.skipIf(process.platform === "win32")(
@@ -287,14 +295,16 @@ describe("a .gitignore that names the key file but then un-ignores it", () => {
 			},
 		}).status === 0;
 
-	for (const negation of ["!*", "!.*", "!.env", "!.env.*.tmp"]) {
+	for (const negation of ["!*", "!.*", "!.env", "!.env.*.tmp", " .env", "\\!.env"]) {
 		it(`${negation} after .env: re-running init makes the key file and its temp files ignored again`, async () => {
 			spawnSync("git", ["init", "-q"], {
 				cwd: dir,
 				env: { PATH: process.env.PATH ?? "", HOME: dir },
 			});
 			mkdirSync(vault(), { recursive: true, mode: 0o700 });
-			const seed = `mine/\n.env\n.env.*.tmp\n${negation}\n`;
+			const seed = negation.startsWith("!")
+				? `mine/\n.env\n.env.*.tmp\n${negation}\n`
+				: `mine/\n${negation}\n`;
 			writeFileSync(vault(".gitignore"), seed, { mode: 0o600 });
 			// Positive control: git, not this code, says the seeded file leaves the key stageable.
 			const tmp = ".usertrust/.env.abc123.tmp";
@@ -306,6 +316,7 @@ describe("a .gitignore that names the key file but then un-ignores it", () => {
 			// Custom lines are kept in place, and the protection comes after the negation.
 			const after = readFileSync(vault(".gitignore"), "utf-8");
 			expect(after.startsWith(seed)).toBe(true);
+			expect(after.endsWith("tigerbeetle/\n*.tigerbeetle\ndlq/\n.env\n.env.*.tmp\n")).toBe(true);
 
 			// A second run changes nothing.
 			await run(dir, { json: true });
