@@ -1,3 +1,4 @@
 {
-	"extends": "./tsconfig.type-tests.json"
+	"extends": "./tsconfig.type-tests.json",
+	"include": ["tests/**/*.test-d.ts", "tests/policy/pii-sdk1-exact-gaps.sdk1-d.ts"]
 }

@@ -13,6 +13,11 @@
  * name, file, line, column, code and message: any other diagnostic, and any pinned one that is gone,
  * fails. The rule therefore stays live on the line the README installs. Classifying the seven
  * fields removes the pin.
+ *
+ * The pin works per assertion, so it cannot see a NEW key inside one of the seven that already
+ * fail: the diagnostic would not change. `pii-sdk1-exact-gaps.sdk1-d.ts` (compiled by the same 1.x
+ * project) states each failing assertion's exact key sets, so a key the SDK adds changes a set and
+ * fails the compile. The second positive control below proves that.
  */
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -166,6 +171,30 @@ describe.skipIf(!is1x)("on the 1.x line: the real compile", () => {
 		expect(r.missing).toEqual([]);
 		expect(r.unexpected).toHaveLength(1);
 		expect(r.unexpected[0]).toContain("UnlistedRequestField");
+		// timing: 180 s budget for one tsc compile of the core type-test project; each took 1.3 s on a 14-core test host (3 runs, 1.28-1.33 s), so the bound is over 100x the measured time.
+	}, 180_000);
+
+	it("second positive control: a new key INSIDE an already-failing pinned assertion turns the leg red", () => {
+		// The pin alone cannot see this: the assertion already fails, with the same line and column.
+		// `pii-sdk1-exact-gaps.sdk1-d.ts` states each failing assertion's exact key set, and the fixture
+		// is that file's Anthropic request assertion with `thread` left out, as if the SDK had just added it.
+		const dir = mkdtempSync(join(tmpdir(), "pii-sdk1-control-key-"));
+		const project = join(dir, "tsconfig.json");
+		writeFileSync(
+			project,
+			JSON.stringify({
+				extends: join(root, "packages/core/tsconfig.type-tests.json"),
+				include: [
+					join(root, "packages/core/tests/**/*.test-d.ts"),
+					join(root, "packages/core/tests/policy/pii-sdk1-exact-gaps.sdk1-d.ts"),
+					join(root, "packages/core/tests/policy/fixtures/pii-sdk1-extra-key.fixture-d.ts"),
+				],
+			}),
+		);
+		const r = compare(tsc(project), PIN);
+		expect(r.missing).toEqual([]);
+		expect(r.unexpected).toHaveLength(1);
+		expect(r.unexpected[0]).toContain("UnaccountedKeyInsidePinnedAssertion");
 		// timing: 180 s budget for one tsc compile of the core type-test project; each took 1.3 s on a 14-core test host (3 runs, 1.28-1.33 s), so the bound is over 100x the measured time.
 	}, 180_000);
 });
