@@ -5,7 +5,7 @@ description: How usertrust uses banking-style authorization holds for every LLM 
 
 Every governed LLM call in usertrust follows a two-phase spend lifecycle. This is the same pattern banks use for credit card authorization holds: reserve funds first, settle or release after the outcome is known.
 
-No LLM call executes without a pending hold. No budget can be overspent.
+Outside `dryRun`, no LLM call executes without a pending hold, and the ledger can never be overdrawn: settlement posts at most the amount that was held. When actual usage exceeds the estimate the hold was sized from, the difference is not charged to the ledger — it is written to the audit chain as a `settlement_shortfall` event and the receipt carries `postedCost` beside `cost`, so the provider's bill can exceed the budget by that shortfall.
 
 ## The Banking Analogy
 
@@ -28,8 +28,8 @@ try {
   // 2. Forward to LLM SDK
   const response = await originalFn.apply(thisArg, args);
   // 3. POST — settle the hold
-  await engine.postPendingSpend(transferId);
-  return { response, governance: receipt };
+  await engine.postPendingSpend(transferId, actualCost);
+  return { response, receipt };
 } catch (err) {
   // 4. VOID — release the hold
   await engine.voidPendingSpend(transferId);
@@ -41,14 +41,14 @@ try {
 |------|----------------------|---------------|
 | PENDING | Create pending transfer | Tokens reserved (debited from available) |
 | Forward | None (pure LLM call) | No change |
-| POST | Post pending transfer | Hold becomes permanent spend |
+| POST | Post pending transfer | Actual cost posted (capped at the hold); any remainder is released |
 | VOID | Void pending transfer | Reserved tokens returned to available |
 
 ## Five Failure Modes
 
-The two-phase lifecycle must handle every combination of success and failure across the LLM call, the ledger, and the audit chain. These are defined in Spec Section 15 and are exhaustively tested.
+The two-phase lifecycle must handle every combination of success and failure across the LLM call, the ledger, and the audit chain. Spec Section 15 defines five modes, 15.1–15.5; all five are tested (`packages/core/tests/govern/failure-modes.test.ts`) and all five are described below. A process that dies between PENDING and POST/VOID is not one of the five: that case is covered by the hold's timeout (default 5 minutes) — the reservation simply expires in TigerBeetle. The streaming path is handled and tested separately.
 
-### 15.1 -- LLM Succeeds, POST Fails
+### 15.1 — LLM Succeeds, POST Fails
 
 The LLM returned a valid response, but the ledger failed to settle the hold. The response is still returned to the caller with `settled: false` on the receipt. A `settlement_ambiguous` event is written to the audit chain.
 
@@ -58,7 +58,7 @@ The hold remains pending in TigerBeetle and will eventually expire.
 
 The LLM provider returned an error (rate limit, server error, etc.). The pending hold is released by a void request sent before the original error is passed on. The void is best-effort, so if the ledger refuses it or cannot be reached, the hold stays reserved until it expires, up to 300 seconds (the ledger's hold timeout). Once voided, the tokens return to the available budget. The original error is propagated to the caller.
 
-### 15.3 -- Audit Write Fails After POST
+### 15.3 — Audit Write Fails After POST
 
 The LLM call and ledger settlement both succeeded, but the audit chain write failed. The response is returned with `auditDegraded: true` on the receipt (except that a failed warn-mode `injection_detected` append is swallowed without marking the call or its receipt). The failed audit event is written to the dead-letter queue when that write succeeds.
 
@@ -66,25 +66,29 @@ The LLM call and ledger settlement both succeeded, but the audit chain write fai
 By default, usertrust does not fail a call because the audit write degraded: if the LLM call succeeded and the ledger settled, the response is returned. With `audit.failClosed: true`, a `trust()` client refuses the call with `AuditDegradedError`: a non-stream call throws it instead of returning the response, and a streamed call raises it through the stream (a `messages.stream()` call only through its `.receipt`, so await it); see the AuditDegradedError entry on the [Errors](/docs/api/errors) page for when such a call may still have been charged.
 </Callout>
 
-### 15.4 -- TigerBeetle Unreachable
+### 15.4 — TigerBeetle Unreachable
 
-The ledger is unreachable before the LLM call starts. usertrust throws a `LedgerUnavailableError` and does **not** forward the request to the provider. No tokens are at risk because no hold was placed.
+The ledger is unreachable before the LLM call starts: creating the ledger engine at `trust()` startup fails, or a ledger operation fails before the call. usertrust throws a `LedgerUnavailableError` and does **not** forward the request to the provider. No tokens are at risk because no hold was placed. An address with nothing listening is a different case: the TigerBeetle client has no request timeout, so a request nobody answers stays queued, and `trust()` waits on its first ledger request.
+
+### 15.5 — Multiple Failures Combine
+
+POST fails and the audit write fails too. The response is still returned; the receipt carries `settled: false` and `auditDegraded: true`.
 
 ### Streaming Failure
 
-The LLM stream starts successfully but errors mid-stream, and its iteration throws (a cut connection, or an error event the SDK throws). The pending hold is voided, and the governance promise rejects. Partial stream content may have already been consumed by the caller. A throw from the caller's own loop body is not a streaming failure: the early exit settles the consumed usage, and it is charged. See [Streaming](/docs/api/trust#streaming) for the cases that are charged.
+The LLM stream starts successfully but errors mid-stream, and its iteration throws (a cut connection, or an error event the SDK throws). The pending hold is voided, and the stream's `.receipt` promise rejects. Partial stream content may have already been consumed by the caller. A throw from the caller's own loop body is not a streaming failure: the early exit settles the consumed usage, and it is charged. See [Streaming](/docs/api/trust#streaming) for the cases that are charged.
 
 ## The TigerBeetle Ledger
 
-usertrust uses TigerBeetle for real double-entry accounting -- not a simple counter. Nine transfer codes model the full range of financial operations:
+usertrust uses TigerBeetle for real double-entry accounting — not a simple counter. Nine transfer codes are defined; the SDK currently emits four of them (`SPEND`, `ALLOCATION`, `BUDGET_GRANT`, `BUDGET_RECLAIM`):
 
 | Code | Purpose |
 |------|---------|
-| `PURCHASE` | Initial budget allocation (fund an account) |
+| `PURCHASE` | A purchase of usertokens into a wallet (a sale). Defined but not emitted by the SDK — the session budget wallet is funded with `ALLOCATION` |
 | `SPEND` | Standard governed LLM call cost |
 | `TRANSFER` | Move tokens between accounts |
-| `REFUND` | Return tokens after a voided or failed call |
-| `ALLOCATION` | Reserve tokens for a sub-budget or scope |
+| `REFUND` | Reverses a `PURCHASE`. A voided or failed call does not write one — the pending hold is released with a TigerBeetle `void_pending_transfer` (code 0) |
+| `ALLOCATION` | Funds a wallet from the treasury — the immediate transfer that seeds the session budget wallet |
 | `TOOL_CALL` | Cost attributed to an LLM tool/function call |
 | `A2A_DELEGATION` | Tokens delegated to an agent-to-agent call |
 | `BUDGET_GRANT` | Budget delegated into a cost-center envelope |
@@ -96,8 +100,8 @@ Every transfer is a double-entry operation: one account is debited, another is c
 
 The two-phase lifecycle provides two guarantees that simple balance checks cannot:
 
-1. **Atomic budget enforcement** -- The PENDING hold reserves tokens before the LLM call starts. Even if multiple concurrent calls race against the same budget, TigerBeetle's transfer atomicity prevents over-spend.
+1. **Atomic budget enforcement** -- The PENDING hold reserves tokens before the LLM call starts. Even if multiple concurrent calls race against the same budget, TigerBeetle's transfer atomicity prevents the ledger from being overdrawn. Settlement is capped at the hold, so the provider's bill can still exceed the budget by a `settlement_shortfall` when actual usage is above the estimate the hold was sized from.
 
-2. **Failure-safe accounting** -- Every failure path (provider error, ledger error, audit error, stream error) has a defined recovery. Tokens are never lost in limbo -- they are either settled or voided.
+2. **Failure-safe accounting** -- Every failure path (provider error, ledger error, audit error, stream error) has a defined recovery. A provider error voids the hold. If the POST fails, or the ledger refuses a void, the hold stays pending until it expires (up to 300 seconds by default), so tokens can sit reserved for that long, but they are not lost.
 
 Without two-phase spend, a naive "check balance then call" approach is vulnerable to time-of-check-to-time-of-use (TOCTOU) races. Two concurrent calls could both pass the balance check and both succeed, spending more than the budget allows.
