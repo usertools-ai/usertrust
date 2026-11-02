@@ -112,7 +112,7 @@ interface TransactionVerificationResult {
 }
 ```
 
-`verifyTransaction` accepts an optional third argument, `anchorParams?: AnchorVerifyParams` (the same object `verifyVaultWithAnchors` takes). Without it the receipt claims chain consistency only; with it the anchor state machine runs over the whole vault first, and inclusion is proven against the signed external anchor root only when an anchor covers the transaction and `trust` pins the key. A transaction after the latest anchor is labelled `IN UNANCHORED TAIL` in the receipt, and `valid: true` there means chain consistency, not anchoring. An empty `txId` matches nothing and returns `found: false`; the transaction is looked up by `data.transferId` across every audit segment (a `settlement_unrecoverable` record, which stores only the hash of its id, is matched by that hash).
+`verifyTransaction` accepts an optional third argument, `anchorParams?: AnchorVerifyParams` (the same object `verifyVaultWithAnchors` takes). Without it the receipt claims chain consistency only; with it the anchor state machine runs over the whole vault first, and inclusion is checked against the signed external anchor root only when an anchor covers the transaction and `trust` pins the key. A transaction after the latest anchor is labelled `IN UNANCHORED TAIL` in the receipt, and `valid: true` there means chain consistency, not anchoring. An empty `txId` matches nothing and returns `found: false`; the transaction is looked up by `data.transferId` across every audit segment (a `settlement_unrecoverable` record, which stores only the hash of its id, is matched by that hash).
 
 ### verifyVaultWithAnchors
 
