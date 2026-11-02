@@ -145,6 +145,7 @@ describe.skipIf(!is1x)("on the 1.x line: the real compile", () => {
 	it("the core type-test project produces exactly the pinned diagnostics", () => {
 		const r = compare(tsc("packages/core/tsconfig.type-tests.sdk1.json"), PIN);
 		expect(r).toEqual({ unexpected: [], missing: [] });
+		// timing: 180 s budget for one tsc compile of the core type-test project; each took 1.3 s on a 14-core test host (3 runs, 1.28-1.33 s), so the bound is over 100x the measured time.
 	}, 180_000);
 
 	it("positive control: one more request field the schema does not name turns the leg red", () => {
@@ -165,5 +166,6 @@ describe.skipIf(!is1x)("on the 1.x line: the real compile", () => {
 		expect(r.missing).toEqual([]);
 		expect(r.unexpected).toHaveLength(1);
 		expect(r.unexpected[0]).toContain("UnlistedRequestField");
+		// timing: 180 s budget for one tsc compile of the core type-test project; each took 1.3 s on a 14-core test host (3 runs, 1.28-1.33 s), so the bound is over 100x the measured time.
 	}, 180_000);
 });
