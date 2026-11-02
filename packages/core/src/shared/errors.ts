@@ -179,8 +179,14 @@ export class LedgerUnavailableError extends Error {
 	public readonly docsUrl: string;
 
 	/** `address` is the ledger the governor was configured with, when the thrower knows it. */
-	constructor(reason: string, address: string = DEFAULT_TIGERBEETLE_ADDRESS) {
-		const hint = `Start TigerBeetle 0.17.x (tigerbeetle format … then tigerbeetle start --addresses=${address}) or use { dryRun: true } to skip the ledger.`;
+	constructor(
+		reason: string,
+		address: string = DEFAULT_TIGERBEETLE_ADDRESS,
+		options?: { hint?: string },
+	) {
+		const hint =
+			options?.hint ??
+			`Start TigerBeetle 0.17.x (tigerbeetle format … then tigerbeetle start --addresses=${address}) or use { dryRun: true } to skip the ledger.`;
 		const docsUrl = "https://usertrust.ai/docs/errors/ledger-unavailable";
 		super(`Ledger unavailable: ${reason}\n\n  Hint: ${hint}\n  Docs: ${docsUrl}`);
 		this.name = "LedgerUnavailableError";

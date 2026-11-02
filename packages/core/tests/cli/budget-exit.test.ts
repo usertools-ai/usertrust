@@ -19,10 +19,11 @@
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 const ROOT = resolve(import.meta.dirname, "../../../..");
 const MAIN = join(ROOT, "packages", "core", "src", "cli", "main.ts");
@@ -109,6 +110,23 @@ async function runHeldDrainChild(bytes: number): Promise<Run & { resumedBy: stri
 	});
 }
 
+/**
+ * The fake native client has no network, but the command checks that something accepts a TCP
+ * connection at the configured address before it builds a client: this listener is that something.
+ */
+let listener: Server;
+let ledgerPort = 0;
+beforeAll(async () => {
+	listener = createServer((socket) => socket.destroy());
+	await new Promise<void>((resolve) => listener.listen(0, "127.0.0.1", resolve));
+	const address = listener.address();
+	if (address === null || typeof address === "string") throw new Error("no port");
+	ledgerPort = address.port;
+});
+afterAll(async () => {
+	await new Promise<void>((resolve) => listener.close(() => resolve()));
+});
+
 const dirs: string[] = [];
 afterEach(() => {
 	for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -122,7 +140,7 @@ function vault(): string {
 		join(dir, ".usertrust", "usertrust.config.json"),
 		JSON.stringify({
 			budget: 50_000,
-			tigerbeetle: { addresses: ["127.0.0.1:3001"], clusterId: 0 },
+			tigerbeetle: { addresses: [`127.0.0.1:${ledgerPort}`], clusterId: 0 },
 		}),
 	);
 	return dir;
