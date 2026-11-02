@@ -55,19 +55,25 @@ const contentLines = (s) => s.body.filter((l) => l.trim() !== "");
 const KNOWN_ISSUES = "### Known issues";
 
 /**
- * Greedy in-order match of `wanted` into `lines`: the Set of indexes of `lines` that carry `wanted`, or null when some
- * wanted line is missing or out of order.
+ * Greedy in-order match of `wanted` into `lines`: the indexes of `lines` that carry `wanted`, in order, or null when
+ * some wanted line is missing or out of order.
  */
 function matchInOrder(wanted, lines) {
-	const used = new Set();
+	const used = [];
 	let at = 0;
 	for (const w of wanted) {
 		while (at < lines.length && lines[at] !== w) at++;
 		if (at === lines.length) return null;
-		used.add(at);
+		used.push(at);
 		at++;
 	}
 	return used;
+}
+
+/** The nearest `### ` heading at or above line `i`, or null before the first one. */
+function headingAt(lines, i) {
+	for (let k = i; k >= 0; k--) if (lines[k].startsWith("### ")) return lines[k];
+	return null;
 }
 
 /** True when every line of `wanted` is in `lines`, in order. */
@@ -157,7 +163,19 @@ export function check(baseText, mergedText) {
 			continue;
 		}
 		const region = knownIssuesRegion(mergedLines);
-		const stray = mergedLines.findIndex((_, i) => !matched.has(i) && !region.has(i));
+		// An existing line keeps its heading: a new `### Known issues` above it would relabel it a known issue.
+		const baseLines = contentLines(b);
+		const moved = baseLines.findIndex(
+			(_, j) => headingAt(baseLines, j) !== headingAt(mergedLines, matched[j]),
+		);
+		if (moved !== -1) {
+			problems.push(
+				`an existing line of the released section [${b.key}] now sits under a different heading: ${baseLines[moved].slice(0, 60)}`,
+			);
+			continue;
+		}
+		const kept = new Set(matched);
+		const stray = mergedLines.findIndex((_, i) => !kept.has(i) && !region.has(i));
 		if (stray !== -1) {
 			problems.push(
 				`a line was added to the released section [${b.key}] outside "${KNOWN_ISSUES}": ${mergedLines[stray].slice(0, 60)}`,

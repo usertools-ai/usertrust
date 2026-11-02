@@ -203,6 +203,33 @@ describe("a known issue recorded in a released section", () => {
 		assert.equal(r.code, 1);
 		assert.match(r.out, /outside "### Known issues"/);
 	});
+	test("is refused: a block inserted above existing lines of a plain-list section relabels them", () => {
+		const plain = log("\n", "## [1.1.0] - 2026-01-01\n\n- plain entry x\n- plain entry y\n");
+		const merged = log(
+			"\n",
+			"## [1.1.0] - 2026-01-01\n\n### Known issues\n\n- ki 1\n\n- plain entry x\n- plain entry y\n",
+		);
+		const r = pair(plain, merged);
+		assert.equal(r.code, 1);
+		assert.match(r.out, /different heading/);
+	});
+	test("is refused: a block inserted mid-list pulls the lines after it under Known issues", () => {
+		const base = log("\n", "## [1.1.0] - 2026-01-01\n\n### Added\n\n- feature a\n- feature b\n");
+		const merged = log(
+			"\n",
+			"## [1.1.0] - 2026-01-01\n\n### Added\n\n- feature a\n\n### Known issues\n\n- ki 1\n\n- feature b\n",
+		);
+		assert.equal(pair(base, merged).code, 1);
+	});
+	test("is allowed: a block at the end of a plain-list section", () => {
+		const plain = log("\n", "## [1.1.0] - 2026-01-01\n\n- plain entry x\n- plain entry y\n");
+		const merged = log(
+			"\n",
+			"## [1.1.0] - 2026-01-01\n\n- plain entry x\n- plain entry y\n\n### Known issues\n\n- ki 1\n",
+		);
+		const r = pair(plain, merged);
+		assert.equal(r.code, 0, r.out);
+	});
 	test("is refused: a line added after the Known issues block ends", () => {
 		const withBlock = CUT.replace(
 			"- Feature B.\n",
@@ -368,12 +395,22 @@ describe("mutants: each rule, switched off, lets its refused row through", () =>
 		assert.equal(pair(...editReleased, guard).code, 0);
 	});
 	test("M2: without the Known issues limit, a line added anywhere in a released section is allowed", () => {
-		const guard = mutate("!matched.has(i) && !region.has(i)", "false");
+		const guard = mutate("!kept.has(i) && !region.has(i)", "false");
 		assert.equal(pair(...addOutsideKnownIssues, guard).code, 0);
 	});
 	test("M3: without the every-entry rule, a cut that drops an entry is allowed", () => {
 		const guard = mutate("return matchInOrder(wanted, lines) !== null;", "return true;");
 		assert.equal(pair(...dropsAnEntry, guard).code, 0);
+	});
+	test("M5: without the heading check, a block inserted above existing lines relabels them", () => {
+		const guard = mutate("headingAt(baseLines, j) !== headingAt(mergedLines, matched[j])", "false");
+		const plain = log("\n", "## [1.1.0] - 2026-01-01\n\n- plain entry x\n- plain entry y\n");
+		const merged = log(
+			"\n",
+			"## [1.1.0] - 2026-01-01\n\n### Known issues\n\n- ki 1\n\n- plain entry x\n- plain entry y\n",
+		);
+		assert.equal(pair(plain, merged).code, 1);
+		assert.equal(pair(plain, merged, guard).code, 0);
 	});
 	test("M4: without the emptied-Unreleased rule, a cut that leaves entries behind is allowed", () => {
 		const guard = mutate(

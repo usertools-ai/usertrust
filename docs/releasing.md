@@ -86,7 +86,7 @@ result against the base it merges into, and enforces three rules. (1) A cut adds
 dated section right after `[Unreleased]`; that section holds every line of the base's `[Unreleased]`,
 verbatim and in order, and may add lines (upgrade notes, a known issue); `[Unreleased]` is left empty
 and stays the first section. No entry is dropped, reworded or reordered. (2) In a released section no
-existing line ever changes, is removed or is reordered; lines may only be added, and only under a
+existing line ever changes, is removed, is reordered or ends up under a different `###` heading; lines may only be added, and only under a
 `### Known issues` heading inside that section (created if absent), which is how a problem found after
 shipping is recorded. (3) Everything else is added under `[Unreleased]`, whose heading stays exactly
 `## [Unreleased]`. Blank lines are not compared. Notes for a release are best written under
