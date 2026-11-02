@@ -225,6 +225,38 @@ jobs:
       - run: npm ci
       - run: npx vitest run packages/core/tests/harden/scan-linear.test.ts
 
+  sdk-1x:
+    name: sdk-1x
+    # Same-repo branches and pushes run on Blacksmith; a FORK pull request stays on a
+    # GitHub-hosted runner (fork workflows still need maintainer approval per repo policy).
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2204' || 'ubuntu-latest' }}
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
+    # The second SDK line. Every other job runs on the 0.116 floor (the lockfile's @anthropic-ai/sdk);
+    # this one installs the 1.x line the peer range `>=0.116.0 <2` also promises, and runs the build,
+    # the type-test projects and the whole suite against it. packages/core/tests/govern/sdk-lines.test.ts
+    # pins this pin to CLASSIFIED_SDK_VERSIONS.anthropic and to the peer range.
+    # Stated gap: the PII content schema lacks seven of the 1.x request additions, so
+    # pii-content-sdk-types.test-d.ts has seven diagnostics on 1.3.0. The core type-test project is
+    # NOT left without that file: tests/policy/pii-sdk1-pin.test.ts compiles it and requires exactly
+    # those seven (pii-sdk1-known-diagnostics.json), so any other diagnostic, or a missing one, fails.
+    # The typecheck-tests ratchet is not run, its baseline being frozen against the floor.
+    env:
+      SDK_1X_VERSION: 1.3.0
+      USERTRUST_SDK_LINE: "1x"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm install --no-save --no-audit --no-fund --ignore-scripts "@anthropic-ai/sdk@${SDK_1X_VERSION}"
+      - run: npx tsc -b
+      - run: npx vitest run packages/core/tests/policy/pii-sdk1-pin.test.ts
+      - run: npx tsc -p packages/openclaw/tsconfig.type-tests.json
+      - run: npx tsc -p packages/openshell/tsconfig.type-tests.json
+      - run: npx vitest run --exclude packages/core/tests/harden/scan-linear.test.ts
+
   openclaw-contract:
     name: openclaw-contract
     # Same-repo branches and pushes run on Blacksmith; a FORK pull request stays on a
@@ -438,7 +470,7 @@ jobs:
   # scripts/tested-tree.test.mjs pins this job, the candidate trigger and folds, and the cancel rule.
   tested-tree:
     name: tested-tree
-    needs: [agent-config, lint, typecheck, test, scan-linear, openclaw-contract, tb-integration, site-build]
+    needs: [agent-config, lint, typecheck, test, scan-linear, sdk-1x, openclaw-contract, tb-integration, site-build]
     if: always() && !cancelled() && !(github.event_name == 'pull_request' && github.event.pull_request.draft)
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2204' || 'ubuntu-latest' }}
     steps:
@@ -451,5 +483,5 @@ jobs:
         env:
           RESULTS: ${{ toJSON(needs) }}
           TESTED_SHA: ${{ github.sha }}
-          REQUIRED: agent-config lint typecheck test scan-linear openclaw-contract tb-integration site-build
+          REQUIRED: agent-config lint typecheck test scan-linear sdk-1x openclaw-contract tb-integration site-build
         run: node scripts/tested-tree-verdict.mjs
