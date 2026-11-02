@@ -244,6 +244,20 @@ function redactedNative(r: Outcome): unknown[] {
 	);
 }
 
+/**
+ * The native body with every string that IS the e-mail replaced by redaction's placeholder in the prompt
+ * (`contents`) only: every other field is a control field, which pii "redact" sends as written.
+ */
+function promptRedactedNative(r: Outcome): unknown[] {
+	return r.raw.requests.map((q) => {
+		const body = structuredClone(q.body) as Loose;
+		body["contents"] = JSON.parse(
+			JSON.stringify(body["contents"]).replaceAll(`"${EMAIL}"`, `"${REDACTED}"`),
+		) as unknown;
+		return body;
+	});
+}
+
 /** The SDK's own local rejection: the native error, rethrown as it is, audited as a refusal, no request. */
 function expectSdkError(r: Outcome): void {
 	expect(r.rawError).toBeInstanceOf(Error);
@@ -989,7 +1003,7 @@ describe("serialization hooks run as natively, and their output is what is check
 					["clean hook output", "fromHook"],
 					["hook output holding PII", EMAIL],
 				] as const) {
-					it(`${method} on ${backend}, pii "redact", a hidden toJSON on ${place} (${label}): governed == native after redaction, the hook run as often`, async () => {
+					it(`${method} on ${backend}, pii "redact", a hidden toJSON on ${place} (${label}): governed == native with the prompt redacted, the hook run as often`, async () => {
 						const runs = { native: { n: 0 }, governed: { n: 0 } };
 						const r = await nativeThenGoverned(
 							method,
@@ -997,8 +1011,10 @@ describe("serialization hooks run as natively, and their output is what is check
 							{ vertex, pii: "redact" },
 						);
 						expect(r.govResult).toBe(r.rawResult);
-						expect(r.gov.requests.map((q) => q.body)).toEqual(redactedNative(r));
-						expect(JSON.stringify(r.gov.requests)).not.toContain(EMAIL);
+						expect(r.gov.requests.map((q) => q.body)).toEqual(promptRedactedNative(r));
+						expect(
+							JSON.stringify(r.gov.requests.map((q) => (q.body as Loose)["contents"])),
+						).not.toContain(EMAIL);
 						expect(runs.governed.n).toBe(runs.native.n);
 					});
 				}
@@ -1049,12 +1065,14 @@ describe('an own "__proto__" key (as JSON.parse makes one) on a config beside to
 				expect(JSON.stringify(r.raw.requests[0]?.body)).toContain("be brief");
 			});
 
-			it(`${method} on ${backend}, pii "redact": governed == native after redaction (the key survives redaction)`, async () => {
+			it(`${method} on ${backend}, pii "redact": governed == native with the prompt redacted (the key, a control field, is sent as written)`, async () => {
 				const r = await nativeThenGoverned(method, same(make(EMAIL)), { vertex, pii: "redact" });
 				expect(r.govResult).toBe(r.rawResult);
-				expect(r.gov.requests.map((q) => q.body)).toEqual(redactedNative(r));
+				expect(r.gov.requests.map((q) => q.body)).toEqual(promptRedactedNative(r));
 				expect(JSON.stringify(r.gov.requests)).toContain(REDACTED);
-				expect(JSON.stringify(r.gov.requests)).not.toContain(EMAIL);
+				expect(
+					JSON.stringify(r.gov.requests.map((q) => (q.body as Loose)["contents"])),
+				).not.toContain(EMAIL);
 			});
 		}
 	}

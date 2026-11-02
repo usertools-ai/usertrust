@@ -59,8 +59,10 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import {
+	DEFAULT_HOLD_GRACE_MS,
 	environment,
 	environmentKey,
+	isHoldGrace,
 	keyHash,
 	namesConfig,
 	refusedSettings,
@@ -134,10 +136,14 @@ function parsePin(text) {
 		typeof s.stateDir === "string" &&
 		s.stateDir !== "" &&
 		USAGES.includes(s.usage) &&
-		typeof s.model === "string" &&
+		// A pin made before the model stopped being a setting holds one (`pinnedSettings` drops it).
+		(s.model === undefined || typeof s.model === "string") &&
+		(s.ignoredModel === undefined || typeof s.ignoredModel === "boolean") &&
 		typeof s.sendContent === "boolean" &&
 		optionalString(s.unit) &&
 		optionalString(s.role) &&
+		// A pin made before the setting existed has none: the default.
+		(s.holdGraceMs === undefined || isHoldGrace(s.holdGraceMs)) &&
 		optionalString(s.unrecognizedMode);
 	if (!valid) return null;
 	if (value.kind === "configured" && typeof s.key === "string" && s.keyHash === undefined) {
@@ -189,18 +195,18 @@ export function readPin(path, { uid, fs = REAL_FS }) {
  * hash, never the key.
  */
 function pinOf(resolved, kind, now) {
-	const { url, key, mode, unrecognizedMode, failOpen, stateDir, usage, model, sendContent } =
-		resolved;
+	const { url, key, mode, unrecognizedMode, failOpen, stateDir, usage, sendContent } = resolved;
 	const shared = {
 		url,
 		mode,
 		failOpen,
 		stateDir,
 		usage,
-		model,
+		ignoredModel: resolved.ignoredModel === true,
 		sendContent,
 		unit: resolved.unit,
 		role: resolved.role,
+		holdGraceMs: resolved.holdGraceMs,
 		unrecognizedMode,
 	};
 	return {
@@ -218,8 +224,15 @@ function pinOf(resolved, kind, now) {
  * an enforce session blocks rather than stop enforcing.
  */
 export function pinnedSettings(pin, env, passwdHome) {
-	const { key, keyHash: pinned, ...rest } = pin.settings;
-	const base = { refused: null, unrecognizedMode: undefined, unit: undefined, role: undefined };
+	// An older pin's `model` is dropped: the model a hold names is never a setting (config.mjs).
+	const { key, keyHash: pinned, model: _model, ...rest } = pin.settings;
+	const base = {
+		refused: null,
+		unrecognizedMode: undefined,
+		unit: undefined,
+		role: undefined,
+		holdGraceMs: DEFAULT_HOLD_GRACE_MS,
+	};
 	if (pin.kind === "configured") return { ...base, ...rest, configured: true, key };
 	const current = environmentKey(env);
 	if (keyHash(current) !== pinned) {

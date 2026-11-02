@@ -76,7 +76,7 @@ the kit first, never committed here.
 | Ledger | `ledger/{client,engine,pricing}.ts` |
 | Audit | `audit/{chain,canonical,merkle,verify,read,dead-letters,rotation,entropy,quarantine}.ts` |
 | Anchoring | `audit/{anchor,anchor-verify,anchor-doctor,rekor,rekor-verify,sigv4}.ts` |
-| Policy | `policy/{gate,default-rules,pii,injection,canary,decay}.ts` |
+| Policy | `policy/{gate,default-rules,pii,pii-content,injection,canary,decay}.ts` |
 | Board | `board/{board,director,concerns}.ts` |
 | Budget | `budget/{allocation,attribution,context,runway}.ts` |
 | Runtime | `resilience/{circuit,scope}.ts`, `memory/patterns.ts`, `snapshot/checkpoint.ts` |
@@ -828,6 +828,25 @@ expiry take no input of their own and inherit the hold's labels from the capture
 *Prevents:* a caller relabelling a spend between the two phases through its own object or handle,
 and a release or expiry record losing the job its hold was reserved for.
 
+*A job's TYPE is a second label with the same standing (capability `job-type`).* `jobType` is one of
+the CLOSED list `JOB_TYPES` (`feature | bugfix | review | test | docs | ops | research | other`) and
+`typeSource` is `explicit` or `agent` (`TYPE_SOURCES`); a new type is a deliberate change to that list
+with a CHANGELOG line, never free text and never inferred. `captureJob` captures both ONCE with `job`;
+a type needs a `job`, `typeSource` needs a `jobType`, `jobState: "invalid"` excludes both (a
+`TypeError` before any I/O). Every record that spreads `capture.jobAudit` carries them, and BOTH
+denial builders in `audit/denial-events.ts` list them by name (they select fields; they do not spread),
+so `DenialEventFields` carries them too. The keys are ABSENT when untyped: an untyped record serializes
+exactly as it did. `SettleParams` has NO job or type fields: a settle cannot relabel a hold, and
+`Authorization.jobType` / `.typeSource` (like `.job`) are ordinary writable properties on the handle:
+reporting copies of the frozen capture. Assigning to them changes only the handle, never any record,
+because the governor reads its own internal capture and never the handle. Over HTTP a
+settle may repeat `jobType` / `typeSource` (alone, without `job`) only to be CHECKED against the server's
+own authorize copy (`PendingEntry.labels`), refused 400 BEFORE the claim on a difference, and the echoes
+are taken out of the usage passed on, exactly as `job` / `jobState` are; a settle for an unknown hold
+ignores them. A type is a DECLARATION, not evidence: `agent` is a claim by whatever called the CLI.
+*Prevents:* a type read from the caller's handle or a later settle relabelling spend; a typed record
+that the denial builders silently dropped; and `explicit` being read as proof that a person chose it.
+
 *usertrust-server's rules (capability `job`).* `/v1/authorize` accepts `job`, `jobState` and
 `usageFrom`; `/v1/settle` accepts `usageTo`, and `job` / `jobState` only to CHECK them. The server
 keeps its own copy of the authorize labels and refuses (400, nothing written, the hold still
@@ -901,11 +920,15 @@ log, which reads as none (job tagging is off for that session; it fails honest, 
 at once can lose one bit, which yields untagged calls and so gaps, never a false clean.
 
 **A hold's life is published, as a duration on one clock.** Both `createTBEngine` factories pass
-`LEDGER_HOLD_TIMEOUT_MS` as the pending transfer's `timeout` explicitly, and a headless
-`Authorization` publishes the same value as `holdTimeoutMs` (absent in dry run).
+the pending transfer's `timeout` explicitly: the life the authorize asked for (`holdTtlMs`, clamped to
+[`LEDGER_HOLD_TIMEOUT_MS`, the governor's `maxHoldTtlMs`] and rounded up to whole seconds, never past
+the ceiling, which is itself in whole seconds), else `LEDGER_HOLD_TIMEOUT_MS`. A headless
+`Authorization` publishes the value used as `holdTimeoutMs` (absent in dry run).
 `usertrust-server` answers every authorize with `expiresInMs` (capability `hold-expiry`): the longest
-the hold can still be pending, the shorter of its `pendingTtlMs` sweep and that timeout, minus the
-hold's age (`remainingLifeMs`). A settle, a void or a restart can end the hold sooner; no expiry can.
+the hold can still be pending, the shorter of its own sweep life (`pendingTtlMs`, or the life its
+authorize asked for, capability `hold-ttl`, clamped to the server's ceiling) and that timeout, minus
+the hold's age (`remainingLifeMs`). The server's clamp, its `/v1/health` `maxHoldTtlMs` and each
+tenant's governor share one ceiling (`maxHoldLife`), so the ledger and the sweep agree. A settle, a void or a restart can end the hold sooner; no expiry can.
 - The sweep ends a hold when that life reaches 0, so the sweep and the answer are one rule.
 - A ledger hold whose handle does not state its timeout gets NO `expiresInMs` (an absence is never read
   as "no limit"), and the sweep falls back to `pendingTtlMs` for it.
@@ -1334,7 +1357,7 @@ a reader shows no remaining figure for them. Wherever a budget is SHOWN, its pro
 record that outlived a failed removal reads as old, never as current); a config budget says "not confirmed as
 enforced". The ledger UI, `inspect`, `health` and `report` all read it; never add a reader that parses the config file
 alone, or a surface that shows the figure without its provenance.
-The governor registers LAST in both constructors, once it has fully started (a failed start enforces nothing), and every step of the record's failure path is non-throwing. The record is PUBLISHED only while this process holds the vault's audit writer lock, which a governor takes lazily at its first append (`AuditWriter.lockOwner`, `openSharedAuditWriter`'s `onAppended`): before the first successful append nothing is published (`unpublished`), and a second process, whose appends fail on the lock, never overwrites the holder's record. Several live governors on one vault are aggregated in-process (`registerEnforcedBudget`): the record is the agreed budget, or `budget: null` with the governor count when they differ, which every reader shows as unknown (`source: "several"`); it is rewritten on every start and every destroy while the lock is held, and again when a new writer takes the lock, never stored as a flag. Readers stat the record before opening it (a FIFO would block them). The ledger UI re-reads it when it or the vault config changes. Snapshots do not capture the record: it is derived, and a restore must not bring back an older run's budget.
+The governor registers LAST in both constructors, once it has fully started (a failed start enforces nothing), and every step of the record's failure path is non-throwing. An existing record is REPLACED only while this process holds the vault's audit writer lock, which a governor takes lazily at its first append (`AuditWriter.lockOwner`, `openSharedAuditWriter`'s `onAppended`), so a second process, whose appends fail on the lock, never overwrites the holder's record. Before its first append a governor publishes WITHOUT the lock, at its start, but only into an EMPTY slot (no record at all: a new vault, or one only 5.0.0 wrote, which never published one), and only while NO writer lock file (`audit/.audit-writer.lock`) exists: a lock this process does not hold is another writer's, possibly a 5.0.0 process enforcing a budget of its own that it never publishes, so nothing is published beside it and readers stay `unpublished` (a stale lock counts too; the first append sorts it out). The lock is checked last, right before the link; declared residual: a writer that takes the lock after that check, which includes an older-release process already running but not yet appended (it takes the lock lazily), is not seen. That publish stages the record whole and LINKS it into place (a hard link fails if a record appeared meanwhile; never a rename, which would replace one), never moves, replaces or removes anything at the path, even this process's own record, and never warns. An existing record (an earlier run's, a lock holder's, or an unlocked one) stands, read "as of" its `writtenAt`, until the lock holder's first append replaces it. So a vault reads `unpublished` only while no governor of a release that writes the record has started on it. Several live governors on one vault are aggregated in-process (`registerEnforcedBudget`): the record is the agreed budget, or `budget: null` with the governor count when they differ, which every reader shows as unknown (`source: "several"`); it is rewritten on every start and every destroy while the lock is held, and again when a new writer takes the lock, never stored as a flag. Readers stat the record before opening it (a FIFO would block them). The ledger UI re-reads it when it or the vault config changes. Snapshots do not capture the record: it is derived, and a restore must not bring back an older run's budget.
 
 **`vaultPath` means two different directories.** `createAuditWriter(vaultPath)` joins
 `vaultPath/.usertrust/audit` — it takes the **project root**. `verifyVault`, `readLedgerEvents`,
@@ -1529,10 +1552,20 @@ audit payload, because the proof must not become a channel for credentials or pr
 invariant is only as strong as the event shapes themselves: the DLQ persists whatever an event
 carried, verbatim (see the DLQ note above).
 
-**`redactPII` is pure.** It deep-clones and never mutates the caller's object. That is what makes
-`pii: "redact"` safe: PII the prompt scan finds never egresses: the outbound request is a redacted
-clone (fields the scan does not read are not redacted unless the prompt scan fired; see LIMITATIONS §11). `"block"`
-throws before any egress; `"warn"` forwards verbatim and redacts only the audit copy.
+**Redaction never mutates the caller's object, and it rewrites content only.** `redactPII` deep-clones;
+`redactContent` (`policy/pii-content.ts`) copies only the containers on the way to a replaced value and
+passes everything else by reference. `"block"` decides on BOTH scans: `detectPII` over every string in the
+prompt fields, control values included (`extractPromptParts`), and the content scan, which reads
+what the SDK sends (decoded JSON `arguments`, hidden Google text parts); never drop either, or
+`"block"` lets out what one of them refuses. A closed per-provider schema in
+`policy/pii-content.ts` names the content fields `"redact"` rewrites; every control field
+(credentials, headers, ids, `metadata`, tool declarations, replayed reasoning) is sent as written,
+and a field the schema does not name is not rewritten and is reported once per governor under
+`USERTRUST_PII_UNLISTED_FIELD`. That is what makes `pii: "redact"` safe: the copy is scanned again,
+and PII the scan still finds in it (a value redaction leaves as written) refuses the call as
+`"block"` does, so PII the scan finds never egresses (see LIMITATIONS.md, section 11). A field added to a provider's request type
+belongs in that schema, and `tests/policy/pii-content-sdk-types.test-d.ts` fails until it is there.
+`"block"` throws before any egress; `"warn"` forwards verbatim and redacts only the audit copy.
 
 **Signature trust is anchored by the operator's publisher→key registry, never by the embedded key.**
 A key embedded in a skill manifest is accepted only if it is in `config.supplyChain.publisherKeys`
@@ -1549,7 +1582,7 @@ first, clip second.
 repaint the terminal of the auditor running the command — forging a passing verdict, which is the
 entire product for a verification tool.
 
-There are **nineteen** sanitizers, in two variants: **thirteen** neutralise C1 and **six** do not. Do
+There are **twenty** sanitizers, in two variants: **fourteen** neutralise C1 and **six** do not. Do
 not consolidate them onto the weaker one — and note that the two counts are pinned SEPARATELY,
 because swapping a stronger sanitizer for a weaker one moves both by one and leaves the total
 untouched. A total is not an inventory.
@@ -1680,6 +1713,13 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   branch does not append the character back. It missed it at first, because an `if` was a
   residual the guard argued was safe (removing one would make the total read low) and that is
   true only of one already counted.
+- The stronger variant in the PII scan: `scrubForWarning` in `core/src/policy/pii-content.ts`
+  (a local function of the same name as the audit writer's), applied to the field path in the
+  `USERTRUST_PII_UNLISTED_FIELD` warning, which goes to `console.warn` and `process.emitWarning`.
+  The path is built from the caller's request, so it substitutes `?` for C0, DEL and C1, and does
+  not clip. A key or type tag in the path is shown only when it is identifier-shaped (at most 64
+  characters) and holds no PII, and is otherwise replaced by `<not shown>`, so the scrub is a
+  second line behind that rule rather than the only one.
 
 **THE INVENTORY'S SCOPE IS DECLARED HERE, and the guard matches this sentence.** It covers
 `packages/*/src` — the TypeScript build inputs, which are what `files: ["dist"]` publishes — plus
@@ -1745,7 +1785,7 @@ reference, including a specifier held in a variable. The reason: usertrust never
 unverified `Models` before authorization; the SDK exports no request converters or transport hook,
 so its own pipeline is the only way to build the exact request it sends.
 `@anthropic-ai/sdk`, `openai` and `@google/genai` are **optional** peer dependencies. Their floors
-(`>=0.116.0`, `>=7.4.0`, `>=1.52.0`) are `CLASSIFIED_SDK_VERSIONS` in `default-deny.ts`: the
+(`>=0.116.0 <2`, `>=7.4.0`, `>=1.52.0`; the anthropic range is two-sided, and CI runs the suite on both the 0.116 floor and the 1.x line named in `CLASSIFIED_SDK_VERSIONS`) are `CLASSIFIED_SDK_VERSIONS` in `default-deny.ts`: the
 versions the default-deny free list was classified on. Moving a floor means re-running that
 classification against the new SDK, and `default-deny.test.ts` fails if the floor and the
 constant disagree.
@@ -1987,12 +2027,19 @@ this.
 
 There is no root `build` script; each package builds itself (`npm run build -w usertrust`, etc.).
 
-**CI** (`.github/workflows/ci.yml`) runs seven jobs on Node 22, on every push to `master` and every
-**non-draft** PR: `agent-config` (the agent-config check, described below), `lint`, `typecheck`,
-`test` (coverage, with the thresholds above), `openclaw-contract` (the host contract, described
-below), `tb-integration` (a real single-node TigerBeetle cluster, sha256-pinned binary), and
-`site-build` (the site's own install, tests and production build). There is **no path filter** —
-every non-draft PR runs all seven regardless of what changed. A draft PR runs `agent-config` alone.
+**CI** (`.github/workflows/ci.yml`) runs nine jobs on Node 22, on every push to `master`, every push to a
+`candidate/**` branch and every **non-draft** PR: `agent-config` (the agent-config check, described below), `lint`, `typecheck`,
+`test` (coverage, with the thresholds above), `scan-linear` (the detectors' linearity timings in
+`packages/core/tests/harden/scan-linear.test.ts`, run alone and without coverage; `test` excludes
+that file), `openclaw-contract` (the host contract, described below), `tb-integration` (a real
+single-node TigerBeetle cluster, sha256-pinned binary), and `site-build` (the site's own install,
+tests and production build), then `tested-tree`, which needs the other eight and, only when all of them
+passed, stamps the run with one annotation, `tested-tree <the commit it tested>`
+(`scripts/tested-tree-verdict.mjs`). A `candidate/**` branch holds a merge commit of master and a pull
+request (or a stack of them) that a merge tool tests before merging, so the tree that lands is a tree
+whose run passed; it is graded like that pull request's merge commit. A pull request's superseded run is
+cancelled; a push run never is. There is **no path filter**: every non-draft PR runs all nine
+regardless of what changed. A draft PR runs `agent-config` alone.
 
 The TigerBeetle server version in CI is pinned to match `tigerbeetle-node` in `packages/core` and
 must be bumped in lockstep — **never `latest`**. The client must never be newer than the server. The

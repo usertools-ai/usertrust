@@ -30,7 +30,7 @@ node --env-file=.usertrust/.env app.mjs
 
 or `export ANTHROPIC_API_KEY=...` yourself first.
 
-That's it. One function wraps any supported LLM client. Every call is metered, audited, and policy-checked.
+That's it. One function wraps any supported LLM client. Every governed call is metered, policy-checked and recorded on the audit chain; a call whose record could not be written says so on its receipt (`auditDegraded`, see [LIMITATIONS.md, section 5](https://github.com/usertools-ai/usertrust/blob/master/LIMITATIONS.md#5-one-audit-writer-per-vault-one-process-at-a-time)).
 
 ### Expected Output
 
@@ -217,7 +217,7 @@ const config = defineConfig({
 
 **Merkle proofs (RFC 6962)** — Inclusion and consistency proofs for public verifiability. Any third party can verify a specific event existed in the chain.
 
-**External anchoring** — Ed25519-signed chain-head checkpoints pushed to an append-only store the vault operator cannot rewrite (S3 Object Lock, protected git branch, SIEM). Even a fully re-hashed, internally-consistent rewrite fails verification against the externally-held root. Ships a native SigV4 S3 sink (no AWS SDK), an experimental [Rekor](https://docs.sigstore.dev/logging/overview/) transparency-log witness that publishes digests only, `anchor doctor` to probe whether the writer identity can actually delete or overwrite in the store, and `anchor export-bundle` to hand an auditor the records and receipts in one file. See the [anchoring guide](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md).
+**External anchoring** — Ed25519-signed chain-head checkpoints pushed to an append-only store the vault operator cannot rewrite (S3 Object Lock, protected git branch, SIEM). Even a fully re-hashed, internally-consistent rewrite of the events an anchor covers fails verification against the externally-held root; events appended after the last anchor are covered only by the next one. Ships a native SigV4 S3 sink (no AWS SDK), an experimental [Rekor](https://docs.sigstore.dev/logging/overview/) transparency-log witness that publishes digests only, `anchor doctor` to probe whether the writer identity can actually delete or overwrite in the store, and `anchor export-bundle` to hand an auditor the records and receipts in one file. See the [anchoring guide](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md).
 
 **Policy engine** — 12 field operators (`eq`, `gt`, `in`, `regex`, etc.) with soft/hard enforcement. Block specific models, cap costs, require approvals.
 
@@ -265,7 +265,7 @@ npx usertrust-verify .usertrust
 ```
 
 ```
-Vault integrity: VERIFIED
+Vault integrity: VERIFIED (UNANCHORED — internal consistency only)
 Chain length: 847 events
 Merkle root: a3f8c1...d92b
 Hash algorithm: SHA-256
@@ -276,7 +276,7 @@ All hashes: valid (847/847)
 
 The verify package has zero runtime dependencies. It reads JSONL, recomputes SHA-256 hashes, and checks the chain. Anyone can verify a vault without trusting the usertrust SDK.
 
-With [external anchoring](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md) enabled, verification goes further: the auditor fetches signed checkpoints from an append-only store the operator cannot rewrite and pins the public key out-of-band — so even a fully re-hashed rewrite of the vault fails:
+With [external anchoring](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md) enabled, verification goes further: the auditor fetches signed checkpoints from an append-only store the operator cannot rewrite and pins the public key out-of-band — so even a fully re-hashed rewrite of the events an anchor covers fails:
 
 ```bash
 usertrust anchor init                                     # once: mint identity, pin the key

@@ -18,6 +18,9 @@ export default defineConfig({
 		// which every exit-code reader takes for green. Pinned by
 		// packages/core/tests/harden/vitest-no-tests-fails.test.ts.
 		passWithNoTests: false,
+		// Before each test file: none of the claude-code-plugin's variables (UT_CC_CONFIG and every
+		// setting) survives from the host, so no test reads or writes a live plugin state dir.
+		setupFiles: ["packages/claude-code-plugin/tests/helpers/isolate-env.ts"],
 		coverage: {
 			provider: "v8",
 			include: ["packages/*/src/**/*.ts"],

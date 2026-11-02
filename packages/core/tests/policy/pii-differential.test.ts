@@ -528,6 +528,8 @@ describe("PII detector differential: 5.0.4 beside the current detector", () => {
 		expect(notGained).toEqual([]);
 	});
 
+	// 15 s, not the 5 s default: both detectors over every generated input take 1.3-1.6 s alone (longest in 34 runs, plain and
+	// under coverage, idle 14-core host) and CI runs about twice as slow. It asserts what is flagged, never how long it took.
 	it("normalized view: every gain on text the view changes is what 5.0.4 reads in that view", () => {
 		// The view, written here from its rule, not imported: format characters removed; a character
 		// replaced by its NFKC form if that is ASCII and the character is a fullwidth form (U+FF01 to
@@ -567,7 +569,7 @@ describe("PII detector differential: 5.0.4 beside the current detector", () => {
 		expect(unexplained).toEqual([]);
 		// Positive control: the rows above hold such gains, so the rule is exercised.
 		expect(explained).toBeGreaterThanOrEqual(20);
-	});
+	}, 15_000);
 
 	it("secrets: every format each provider documents that 5.0.4 missed is a gained positive", () => {
 		const notGained = GAINED.filter(([kind, token]) => !(!before(kind)(token) && now(kind)(token)));
@@ -628,6 +630,8 @@ describe("PII detector differential: 5.0.4 beside the current detector", () => {
 		}
 	});
 
+	// 15 s, not the 5 s default: 0.5-0.6 s alone (longest in 34 runs), and the file shares a worker with the 3.5 s table row.
+	// It asserts what is flagged, never how long it took.
 	it("card: on lists of numbers, the current check flags exactly what 5.0.4 flagged", () => {
 		// Spans of groups count only in a card's layout, so lists whose groups never fall in one add
 		// nothing: space-separated pairs, a printed bit vector, four-digit numbers one per line.
@@ -694,7 +698,7 @@ describe("PII detector differential: 5.0.4 beside the current detector", () => {
 			const differ = texts.filter((t) => before("credit_card")(t) !== now("credit_card")(t));
 			expect(differ.slice(0, 3), name).toEqual([]);
 		}
-	});
+	}, 15_000);
 
 	it("phone: spaced with any whitespace character, the two detectors agree", () => {
 		// 5.0.4 removed every \s before matching, so a narrower whitespace class in the current check

@@ -46,7 +46,8 @@ agent call → OpenClaw → usertrust wrapStreamFn
   3. Forward to the real stream, accumulating token usage from each chunk.
   4. POST settles the actual cost (or VOID on error); an early consumer
      `break` still settles and releases the hold — no leaked reservation.
-  5. Every call is written to the tamper-evident audit chain.
+  5. The call is recorded on the tamper-evident audit chain; if that write fails,
+     a `USERTRUST_AUDIT_DEGRADED` warning reports it and the event is dead-lettered.
 ```
 
 ## Config

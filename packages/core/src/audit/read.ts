@@ -117,9 +117,9 @@ export function readLedgerEvents(
  * - `several`: the vault's live governors enforce different budgets, so the budget is UNKNOWN;
  * - `unreadable`: the record exists but cannot be read (`reason` says why). UNKNOWN, never the config's figure: the
  *   config file may not be what the governor enforced;
- * - `unpublished`: no record and no config budget. UNKNOWN: a governor publishes its budget only once it holds the
- *   vault's writer lock (its first append), so a vault whose governor has not yet appended has none to read. Never
- *   "no budget configured": every governor enforces one, the built-in default at least.
+ * - `unpublished`: no record and no config budget. UNKNOWN: a governor publishes its budget when it starts, so no
+ *   governor of a release that writes the record has started on this vault since it was created (or since a failed
+ *   write removed the record). Never "no budget configured": every governor enforces one, the built-in default at least.
  * For the three unknown sources `budget` is 0 only as a placeholder: a reader must not compute a remaining figure from it.
  */
 export type BudgetSource = "governor" | "config" | "several" | "unreadable" | "unpublished";

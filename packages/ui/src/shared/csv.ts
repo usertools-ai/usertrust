@@ -30,6 +30,11 @@ export const CSV_HEADERS = [
 	"previous_hash",
 	// Last, so the columns before it keep their positions: where the usage behind the cost came from.
 	"usage_source",
+	// Last three: the job, the type its caller DECLARED and who declared it. The header says "declared, not checked"
+	// (`JOB_TYPE_CAVEAT` in rows.ts): the type is a declaration, and it prices nothing.
+	"job",
+	"job_type_declared_not_checked",
+	"type_declared_by",
 ] as const;
 
 /** Leading =,+,-,@ make a cell executable in Excel/Sheets — defang with a quote. */
@@ -70,6 +75,9 @@ export function toCsv(rows: LedgerRow[]): string {
 				cell(r.hash),
 				cell(r.previousHash),
 				cell(r.usageSource),
+				cell(r.job),
+				cell(r.jobType),
+				cell(r.typeSource),
 			].join(","),
 		);
 	}

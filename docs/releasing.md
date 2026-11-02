@@ -81,6 +81,17 @@ Before dispatching a release, a pull request cuts them:
 3. Merge that pull request, and dispatch the release on `master`, at that commit, once CI has
    passed on it, with the bump from step 1.
 
+`scripts/changelog-guard.mjs` (a step of the `lint` job in `ci.yml`) grades every pull request's merge
+result against the base it merges into, and enforces three rules. (1) A cut adds exactly one new
+dated section right after `[Unreleased]`; that section holds every line of the base's `[Unreleased]`,
+verbatim and in order, and may add lines (upgrade notes, a known issue); `[Unreleased]` is left empty
+and stays the first section. No entry is dropped, reworded or reordered. (2) In a released section no
+existing line ever changes, is removed, is reordered or ends up under a different `###` heading; lines may only be added, and only under a
+`### Known issues` heading inside that section (created if absent), which is how a problem found after
+shipping is recorded. (3) Everything else is added under `[Unreleased]`, whose heading stays exactly
+`## [Unreleased]`. Blank lines are not compared. Notes for a release are best written under
+`[Unreleased]` in their own pull request before the cut; the cut may still add them.
+
 The release commit then changes only the six `package.json` files, as it always has: the
 CHANGELOG already says what the release holds, at the commit CI tested. A pull request that
 merges between the cut and the dispatch adds its entries under the new `[Unreleased]`, for the
@@ -122,7 +133,7 @@ repository or mint an OIDC token for provenance:
       commit and tag (`git bundle`), and uploads both as an artifact named after the leg. These
       tarballs are never published: the publish job reads them as data (below).
 3. **publish**, in the `npm-publish` environment, so it waits for the approval (token:
-   `contents: write`, `id-token: write`, `actions: read`; `NPM_TOKEN` in one step). It installs
+   `contents: write`, `id-token: write`, `actions: read`; `NPM_TOKEN` in two steps: the token check and the publish). It installs
    nothing and runs no dependency code: only git, gh, jq, python3, node, the npm that ships
    with node, and GitHub's own checkout, setup-node and download-artifact actions. **It builds
    nothing**: every byte it publishes was built by the build job, on Node 22 (the runtime CI
@@ -206,6 +217,19 @@ repository or mint an OIDC token for provenance:
       alone it could stop a release part-way; the check above runs for all six first.
       Versions are major.minor.patch only: this workflow does not support prereleases (one
       would publish under `backfill`).
+      **Then it proves the npm token, before anything is pushed** (`release.sh preflight-token`,
+      the step "Prove the npm token before anything is pushed", in every mode: a dry run
+      included). `npm whoami` must answer, and for each of the six packages `npm access list
+      collaborators <name> --json` must list that user as `read-write`. It only reads. Why: a
+      dead `NPM_TOKEN` fails the publish step with E404 *after* the push, and the repository
+      would then record a version the registry lacks (see "Recovering a failed release"); a
+      token that fails here fails the run with `master` untouched, so **a dry-run dispatch is
+      how to learn, without risk, that the token still works**. The token reaches npm by
+      reference in the user config, as in the publish step, and whatever npm prints is filtered
+      for its value. Not proven: that the token is scoped to publish these packages (the list
+      shows the user's access, not the token's scope) or that provenance will be accepted. A
+      user whose access is only through a team is not listed by name and fails; add the user
+      directly. A package not yet on npm has no list and fails too.
    4. **Pushes the release commit and tag** to `master`, atomically, and only while `master`
       is still the dispatched commit (see "Why the commit and tag are pushed before
       publishing"). The tag is annotated in this job, on the verified commit, with the version
@@ -554,8 +578,15 @@ The workflow names these; it cannot create or configure them.
   unless its first successful publish happens within 2 days**; an expired one cannot be used
   or edited, only deleted and made again. So add it shortly before a release is dispatched.
   After the first release that publishes through OIDC, set each package's publishing access to "Require two-factor
-  authentication and disallow tokens", which npm recommends once trusted publishing works, and
-  delete the `NPM_TOKEN` secret. Source: <https://docs.npmjs.com/trusted-publishers>.
+  authentication and disallow tokens", which npm recommends once trusted publishing works. **First
+  set the repository variable `NPM_PUBLISH_AUTH` to `oidc`, as a step of this setup; only then
+  delete the `NPM_TOKEN` secret, never before.** The step that proves the npm token before the
+  push (step 3) refuses an empty token, so deleting the secret first would fail every release at
+  it, dry runs included. `oidc` skips the check with a warning that neither a token nor who may
+  publish each package is proven (npm lists a package's collaborators only to an authenticated
+  token, so there is nothing tokenless to read): trusted publishing can then only be shown to work
+  by the publish step itself, after the push. Unset, or `token`, is the default and proves the
+  token. Source: <https://docs.npmjs.com/trusted-publishers>.
 - **Branch protection on `master`**: requiring the CI checks on `master` would also apply to
   the workflow's own push of the release commit, which never gets a CI run, so that push
   would be refused (safely: before anything is published). Before requiring checks, give the

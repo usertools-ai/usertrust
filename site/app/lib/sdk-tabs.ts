@@ -87,7 +87,7 @@ export const PROVIDER_TABS: ProviderTab[] = [
 			{ key: "gap-2", text: "", changed: false },
 			{ key: "call-open", text: "const { response, receipt } =", changed: false },
 			{ key: "method-google", text: "  await client.models.generateContent({", changed: true },
-			{ key: "model-google", text: '    model: "gemini-3.1-pro",', changed: true },
+			{ key: "model-google", text: '    model: "gemini-3.1-pro-preview",', changed: true },
 			{ key: "params-google", text: '    contents: "...",', changed: true },
 			{ key: "call-close", text: "  });", changed: false },
 		],

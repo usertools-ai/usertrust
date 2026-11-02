@@ -146,7 +146,7 @@ Use dry-run in CI, tests, and local development.
 
 ## Verify the Chain
 
-Every governed call appends a SHA-256-hashed event to `.usertrust/audit/events.jsonl`. The standalone verifier checks the whole chain — it has zero runtime dependencies and works without usertrust installed:
+Every governed call appends a SHA-256-hashed event to `.usertrust/audit/events.jsonl` (a call whose event could not be written says so on its receipt, as `auditDegraded`). The standalone verifier checks the whole chain — it has zero runtime dependencies and works without usertrust installed:
 
 ```bash
 npx usertrust-verify .usertrust

@@ -3,11 +3,11 @@ title: Audit Trail
 description: SHA-256 hash-chained, append-only audit log for every governed LLM call.
 ---
 
-Every governed LLM call produces an immutable audit event. Events are written to an append-only JSONL file where each event's SHA-256 hash covers the previous event's hash, forming a tamper-evident chain.
+Every governed LLM call produces an audit event; a call whose event could not be written says so on its receipt (see [Dead-Letter Queue](#dead-letter-queue)). Events are appended to a JSONL file where each event's SHA-256 hash covers the previous event's hash, forming a tamper-evident chain. Tamper-evident is not tamper-proof: the file can be rewritten, and [Verification](#verification) says what checking the chain does and does not catch.
 
 ## Hash Chain Mechanics
 
-Each audit event contains a `previousHash` field pointing to the hash of the preceding event. The event's own `hash` is computed over the deterministic canonicalization of the entire event (including `previousHash`). This creates a linear chain where modifying any event invalidates every subsequent hash.
+Each audit event contains a `previousHash` field pointing to the hash of the preceding event. The event's own `hash` is computed over the deterministic canonicalization of the entire event (including `previousHash`). This creates a linear chain: modifying an event changes its hash, so its stored `hash` or the next event's `previousHash` no longer matches and verification fails there. Hiding the edit means recomputing every later hash.
 
 ```
 Event 0: hash = SHA-256(canonical({ ...data, previousHash: GENESIS_HASH }))
@@ -102,7 +102,7 @@ npx usertrust verify
 npx usertrust-verify .usertrust
 ```
 
-Both tools re-compute every hash from GENESIS_HASH forward and confirm each event's `hash` matches the expected value. Editing an event, reordering events, or deleting one from the middle of the chain breaks it. Deleting the most recent events is the exception on a vault with no external anchor: it is reported only until a freshly started process next appends (see the known issue in `LIMITATIONS.md` section 8).
+Both tools re-compute every hash from GENESIS_HASH forward and confirm each event's `hash` matches the expected value. Editing an event, or deleting one from the middle of the chain, breaks it. Events are checked in `sequence` order, so moving lines around in the file without changing any event is not reported. Deleting the most recent events is the exception on a vault with no external anchor: if the `events.jsonl.meta` sidecar is deleted or rewritten to match, the vault passes (exit 0, `UNANCHORED`), and if it is left alone the deletion is reported only until a freshly started process next appends. (If `events.jsonl` is emptied entirely and the sidecar is unchanged, the next writer continues from the sidecar's old head and verification still reports the missing history.) Only an external anchor (`--anchors <file>` with `--pubkey <pem>`) or receipts you kept (`usertrust verify --receipts <file>` fails with `INCOMPLETE`) catch it (see the known issue in `LIMITATIONS.md` section 8).
 
 <Callout type="info">
 The standalone `usertrust-verify` package intentionally duplicates all canonicalization and hashing logic from `usertrust`. It has zero dependencies -- only Node built-ins (`node:crypto`, `node:fs`, `node:path`). This ensures the verifier cannot be compromised by a supply-chain attack on `usertrust` itself.

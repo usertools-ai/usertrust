@@ -96,7 +96,7 @@ try {
   await client.messages.create({ /* ... */ });
 } catch (err) {
   if (err instanceof PolicyDeniedError) {
-    // Quote this in your incident ticket; `usertrust verify` can find it.
+    // Quote this in your incident ticket: it is the hash of the denial's event on the audit chain.
     console.log(`denied, chain event ${err.auditEventHash ?? "(none)"}`);
   }
 }

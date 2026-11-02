@@ -17,6 +17,12 @@ export const DEFAULT_HOLD_TTL_MS = 5 * 60 * 1000; // 5 minutes
  * `tests/stale-settling.test.ts`.
  */
 export const LEDGER_HOLD_TIMEOUT_MS = 5 * 60 * 1000;
+/**
+ * The longest life an authorize may ask its hold for (`AuthorizeParams.holdTtlMs`) when the
+ * governor names no `maxHoldTtlMs`: one hour. A hold whose call never reports back keeps its
+ * budget reserved that long before the ledger's pending timeout voids it.
+ */
+export const DEFAULT_MAX_HOLD_TTL_MS = 60 * 60 * 1000;
 export const DEFAULT_BUDGET = 50_000;
 /** Where a governor looks for TigerBeetle when its config names no `tigerbeetle.addresses`. */
 export const DEFAULT_TIGERBEETLE_ADDRESS = "127.0.0.1:3001";

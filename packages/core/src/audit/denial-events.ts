@@ -105,6 +105,9 @@ export interface DenialEventFields {
 	 * capture. A label, never a payer; absent (no key) for an unlabelled call.
 	 */
 	job?: string | undefined;
+	/** The job's type and who declared it — captured with `job`, absent (no key) when untyped. */
+	jobType?: string | undefined;
+	typeSource?: string | undefined;
 	jobState?: "invalid" | undefined;
 	usageFrom?: string | undefined;
 }
@@ -226,6 +229,8 @@ function buildPolicyDeniedData(
 		...(fields.costCenter !== undefined ? { costCenter: fields.costCenter } : {}),
 		...(fields.principal !== undefined ? { principal: fields.principal } : {}),
 		...(fields.job !== undefined ? { job: fields.job } : {}),
+		...(fields.jobType !== undefined ? { jobType: fields.jobType } : {}),
+		...(fields.typeSource !== undefined ? { typeSource: fields.typeSource } : {}),
 		...(fields.jobState !== undefined ? { jobState: fields.jobState } : {}),
 		...(fields.usageFrom !== undefined ? { usageFrom: fields.usageFrom } : {}),
 		...(fields.endpointClass !== undefined ? { endpointClass: fields.endpointClass } : {}),
@@ -255,6 +260,8 @@ function buildLedgerRejectedData(
 		...(fields.costCenter !== undefined ? { costCenter: fields.costCenter } : {}),
 		...(fields.principal !== undefined ? { principal: fields.principal } : {}),
 		...(fields.job !== undefined ? { job: fields.job } : {}),
+		...(fields.jobType !== undefined ? { jobType: fields.jobType } : {}),
+		...(fields.typeSource !== undefined ? { typeSource: fields.typeSource } : {}),
 		...(fields.jobState !== undefined ? { jobState: fields.jobState } : {}),
 		...(fields.usageFrom !== undefined ? { usageFrom: fields.usageFrom } : {}),
 		...(fields.endpointClass !== undefined ? { endpointClass: fields.endpointClass } : {}),

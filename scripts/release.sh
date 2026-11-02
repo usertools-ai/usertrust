@@ -40,6 +40,11 @@
 #                                        assembles each package's publish tarball from both
 #                                        directories' build tarballs, and fails unless every
 #                                        pair is byte-identical (sha256)
+#   release.sh preflight-token           proves, before anything is pushed, that the token in
+#                                        NODE_AUTH_TOKEN authenticates (npm whoami) and that its
+#                                        user is a read-write collaborator on all six packages
+#                                        (npm access list collaborators). Read-only. See
+#                                        preflight_token.
 #   release.sh publish <dir> <commit> [--dry-run]
 #                                        assembles each package's publish tarball from
 #                                        <commit>'s files and the build tarball in <dir> (see
@@ -390,7 +395,7 @@ root_files() {
 # The lockstep version recorded in <commit>, read from git blobs only.
 version_at() {
 	local commit="$1" tmp dir v first="" firstdir=""
-	tmp=$(mktemp -d) || return 1
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/release.XXXXXX") || return 1
 	for dir in $(dirs); do
 		manifest_blob "$commit" "$dir" "${tmp}/${dir}.json" || return 1
 		v=$(manifest read "${tmp}/${dir}.json" "$(name_of "$dir")") || return 1
@@ -564,7 +569,7 @@ assert_bump() {
 	local bump="${1:-}" reason="${ALLOW_EARLY_MAJOR:-}" expected tmp out section required
 	local tags last="" last_n=-1 t n when now age
 	expected=$(expected_version "$bump") || return 1
-	tmp=$(mktemp -d) || return 1
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/release.XXXXXX") || return 1
 	if ! blob_to HEAD CHANGELOG.md "${tmp}/CHANGELOG.md"; then
 		rm -rf "$tmp"
 		return 1
@@ -639,7 +644,7 @@ assert_bump() {
 # "not published", because that would lead to publishing over it or skipping it blind.
 registry_has() {
 	local spec="$1" out rc errf
-	errf=$(mktemp)
+	errf=$(mktemp "${TMPDIR:-/tmp}/release.XXXXXX")
 	set +e
 	out=$(npm view "$spec" version --registry "$REGISTRY" 2>"$errf")
 	rc=$?
@@ -782,7 +787,7 @@ compare_builds() {
 		return 1
 	fi
 	version=$(version_at "$commit") || return 1
-	tmp=$(mktemp -d) || return 1
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/release.XXXXXX") || return 1
 	mkdir "${tmp}/release" "${tmp}/rebuild" || return 1
 	assemble_all "$tardir" "$commit" "$version" "${tmp}/release" "the build" || return 1
 	assemble_all "$redir" "$commit" "$version" "${tmp}/rebuild" "the rebuild" || return 1
@@ -847,7 +852,7 @@ publish() {
 	version=$(version_at "$commit") || return 1
 	tag=$(dist_tag "$version") || return 1
 	echo "npm dist-tag for ${version}: ${tag}"
-	tmp=$(mktemp -d) || return 1
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/release.XXXXXX") || return 1
 	assemble_all "$tardir" "$commit" "$version" "$tmp" "the build" || return 1
 	cfg="${tmp}/npmrc"
 	empty="${tmp}/empty-npmrc"
@@ -923,6 +928,135 @@ publish() {
 	rm -rf "$tmp"
 }
 
+# Proves, before the release commit and tag are pushed, that the token this job will publish
+# with works: `npm whoami` must answer (the token authenticates), and for each of the six
+# packages `npm access list collaborators <name> --json` must list that user as "read-write"
+# (the token's user can publish it). It writes nothing to npm or the registry, and it runs in
+# every mode, a dry run included, so a dry-run dispatch is the way to learn the token is dead
+# without touching master. Why it exists: a dead NPM_TOKEN fails the publish step (E404), which
+# comes AFTER the push, so the repository would already record a version the registry lacks
+# (docs/releasing.md, "Recovering a failed release"). A token that fails here fails the run
+# with nothing pushed.
+#
+# Same handling of the credential as publish: the token is not written to any file, the user
+# config holds a reference, ${NODE_AUTH_TOKEN}, that npm (not the shell) expands from this step's
+# environment; the global config is empty and the cache is a fresh private one, so no .npmrc
+# from the checkout applies. Nothing npm prints is echoed unfiltered: every line goes through
+# redact, which replaces the token's value, in case an npm error ever quotes it (GitHub also
+# masks the secret in the log). The token is UNEXPORTED at the start (`export -n`) and handed
+# only to the npm processes, as a prefix of their command, so mktemp, jq and rm never see it;
+# npm's stderr is read from a file in a private (0700) directory that every exit path removes,
+# and nothing npm answers (the user name, a permission) is printed unless it has the shape of
+# a user name or a permission word.
+#
+# NPM_PUBLISH_AUTH (a repository variable, default token) is the one switch: oidc skips this
+# check with a warning, for a repository that has deleted NPM_TOKEN and publishes through
+# trusted publishing. An empty NODE_AUTH_TOKEN in token mode is still an error: a missing
+# secret must not pass silently.
+#
+# What it does NOT prove, stated: that the token is scoped to publish (a granular token may be
+# limited to other packages: the access list shows the USER's access, not the token's scope), or
+# that npm will accept the provenance. A user whose access is only through a team is not listed
+# as a collaborator by name and fails here; add the user directly, or change this check on
+# purpose. A brand-new package (not yet on npm) fails too: it has no access list to read.
+redact() {
+	local line
+	while IFS= read -r line || [ -n "$line" ]; do
+		printf '%s\n' "${line//"$NODE_AUTH_TOKEN"/***}"
+	done
+}
+
+preflight_token() {
+	local cfg empty cache user out errf rc name perm bad="" shown
+	case "${NPM_PUBLISH_AUTH:-token}" in
+	token) ;;
+	oidc)
+		# The tokenless path (docs/releasing.md, Owner setup): the NPM_TOKEN secret has been deleted
+		# and npm exchanges the job's OIDC token (trusted publishing). There is no token to prove,
+		# and nothing here can prove the OIDC exchange short of publishing. Said plainly, never silent.
+		echo "::warning::NPM_PUBLISH_AUTH is oidc: no npm token is proven before the push, and neither is who may publish each package: npm lists a package's collaborators only to an authenticated token, and offers nothing tokenless to read it with. Trusted publishing is untested until the publish step runs, after the push."
+		return 0
+		;;
+	*)
+		err "NPM_PUBLISH_AUTH is '${NPM_PUBLISH_AUTH}', not token or oidc. Refusing; nothing was pushed."
+		return 1
+		;;
+	esac
+	if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+		err "NODE_AUTH_TOKEN is empty: the NPM_TOKEN secret is not set, or this job cannot read it. Nothing was pushed. Setting it is the package owner's act (docs/releasing.md, Owner setup)."
+		return 1
+	fi
+	export -n NODE_AUTH_TOKEN
+	umask 077
+	PREFLIGHT_TMP=$(mktemp -d "${TMPDIR:-/tmp}/release.XXXXXX") || return 1
+	# A global, not a local: a local would be gone when the trap runs. A signal ends the script
+	# (the EXIT trap then cleans up), instead of running on into the next npm call.
+	trap 'rm -rf "$PREFLIGHT_TMP"' EXIT
+	trap 'exit 129' HUP
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	cfg="${PREFLIGHT_TMP}/npmrc"
+	empty="${PREFLIGHT_TMP}/empty-npmrc"
+	cache="${PREFLIGHT_TMP}/cache"
+	mkdir -m 700 "$cache" || return 1
+	: >"$empty"
+	printf '//registry.npmjs.org/:_authToken=%s{NODE_AUTH_TOKEN}\n' '$' >"$cfg"
+	errf="${PREFLIGHT_TMP}/err"
+	set +e
+	user=$(NODE_AUTH_TOKEN="$NODE_AUTH_TOKEN" npm_config_cache="$cache" npm whoami --registry "$REGISTRY" --userconfig "$cfg" --globalconfig "$empty" 2>"$errf")
+	rc=$?
+	set -e
+	if [ "$rc" -ne 0 ]; then
+		err "The NPM_TOKEN did not authenticate (npm whoami exited ${rc}). Nothing was pushed. npm said:"
+		redact <"$errf" >&2
+		err "If the token has expired or was revoked, a new one is the package owner's to mint on npmjs.com; then update the NPM_TOKEN secret."
+		rm -rf "$PREFLIGHT_TMP"
+		return 1
+	fi
+	case "$user" in
+	"" | *[!A-Za-z0-9._-]* | *"$NODE_AUTH_TOKEN"*)
+		err "npm whoami answered something that is not an npm user name (${#user} characters). Refusing; nothing was pushed."
+		rm -rf "$PREFLIGHT_TMP"
+		return 1
+		;;
+	esac
+	echo "The NPM_TOKEN authenticates as ${user}."
+	for name in $(names); do
+		set +e
+		out=$(NODE_AUTH_TOKEN="$NODE_AUTH_TOKEN" npm_config_cache="$cache" npm access list collaborators "$name" --json --registry "$REGISTRY" --userconfig "$cfg" --globalconfig "$empty" 2>"$errf")
+		rc=$?
+		set -e
+		if [ "$rc" -ne 0 ]; then
+			err "Could not read who may publish ${name} (npm access exited ${rc}); the token's user cannot be shown to publish it. npm said:"
+			redact <"$errf" >&2
+			bad="${bad} ${name}"
+			continue
+		fi
+		if ! perm=$(printf '%s' "$out" | jq -er --arg u "$user" 'if type == "object" then (.[$u] // "none") else error("not an object") end' 2>/dev/null); then
+			err "npm access list collaborators ${name} answered something that is not a JSON object of user to permission."
+			bad="${bad} ${name}"
+			continue
+		fi
+		if [ "$perm" != "read-write" ]; then
+			shown="<not shown>"
+			case "$perm" in
+			"" | *[!a-z-]*) ;;
+			*) shown="$perm" ;;
+			esac
+			err "${user} has '${shown}' on ${name}, not read-write: a publish would be refused."
+			bad="${bad} ${name}"
+			continue
+		fi
+		echo "  ${name}: ${user} has read-write."
+	done
+	rm -rf "$PREFLIGHT_TMP"
+	if [ -n "$bad" ]; then
+		err "The token's user cannot be shown to publish:${bad}. Nothing was pushed or published."
+		return 1
+	fi
+	echo "The NPM_TOKEN's user can publish all six packages. Nothing was changed."
+}
+
 # Whether npm holds <name>@<version> (an explicit version, so no tag config applies) as exactly
 # the bytes of <tgz>: its dist.integrity must be the sha512 of <tgz> and its dist.shasum the
 # sha1. npm uploads a tarball spec's bytes unchanged (libnpmpack hands pacote's read of the file
@@ -957,7 +1091,7 @@ process.stdin.on("end", () => {
 
 same_on_npm() {
 	local spec="$1" tgz="$2" out rc errf
-	errf=$(mktemp) || return 1
+	errf=$(mktemp "${TMPDIR:-/tmp}/release.XXXXXX") || return 1
 	set +e
 	out=$(npm view "$spec" dist --json --registry "$REGISTRY" 2>"$errf")
 	rc=$?
@@ -983,7 +1117,7 @@ assert_protected() {
 		return 1
 	fi
 	: "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is not set}"
-	errf=$(mktemp)
+	errf=$(mktemp "${TMPDIR:-/tmp}/release.XXXXXX")
 	set +e
 	body=$(gh api "repos/${GITHUB_REPOSITORY}/environments/${env}" 2>"$errf")
 	rc=$?
@@ -1069,7 +1203,7 @@ verify_release_commit() {
 		err "v${version} (${commit}) sits on ${parent}, not on ${expected_parent}."
 		return 1
 	fi
-	tmp=$(mktemp -d) || return 1
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/release.XXXXXX") || return 1
 	raw="${tmp}/diff"
 	if ! git diff-tree -z -r --raw --no-renames --no-ext-diff --no-textconv "$parent" "$commit" >"$raw"; then
 		err "Could not diff ${parent}..${commit}."
@@ -1373,7 +1507,7 @@ newest_on_npm() {
 	local version="$1" entry pkg out rc errf list kind all=""
 	for entry in $PACKAGES; do
 		pkg="${entry##*:}"
-		errf=$(mktemp) || return 1
+		errf=$(mktemp "${TMPDIR:-/tmp}/release.XXXXXX") || return 1
 		set +e
 		out=$(npm view "$pkg" versions --json --tag latest --registry "$REGISTRY" 2>"$errf")
 		rc=$?
@@ -1587,11 +1721,12 @@ tag-release) tag_release "${2:-}" "${3:-}" ;;
 release-note) release_note "${2:-}" ;;
 dist-tag) dist_tag "${2:-}" ;;
 pack) pack "${2:-}" ;;
+preflight-token) preflight_token ;;
 publish) publish "${2:-}" "${3:-}" "${4:-}" ;;
 compare-builds) compare_builds "${2:-}" "${3:-}" "${4:-}" ;;
 gate) gate ;;
 *)
-	err "usage: release.sh dirs | names | version | pin-siblings | version-at <commit> | expected-version <bump> | assert-bump <bump> | assert-published | assert-unreleased | assert-protected <env> | assert-npm | gate | release-parent | verify-release <bundle> <version> | latest-flag <version> | tag-release <version> <commit> | release-note <version> | dist-tag <version> | pack <dir> | publish <dir> <commit> [--dry-run] | compare-builds <dir> <rebuild dir> <commit>"
+	err "usage: release.sh dirs | names | version | pin-siblings | version-at <commit> | expected-version <bump> | assert-bump <bump> | assert-published | assert-unreleased | assert-protected <env> | assert-npm | gate | release-parent | verify-release <bundle> <version> | latest-flag <version> | tag-release <version> <commit> | release-note <version> | dist-tag <version> | pack <dir> | preflight-token | publish <dir> <commit> [--dry-run] | compare-builds <dir> <rebuild dir> <commit>"
 	exit 2
 	;;
 esac

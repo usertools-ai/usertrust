@@ -2,7 +2,8 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { readLedgerEvents } from "usertrust";
 import { afterEach, describe, expect, it } from "vitest";
 import { hashKey } from "../src/config.js";
 
@@ -258,4 +259,53 @@ describe("usertrust-server CLI: ledger probe at start", () => {
 		const res = await fetch(`http://127.0.0.1:${port}/v1/health`);
 		expect(res.status).toBe(200);
 	}, 40_000);
+});
+
+describe("usertrust-server CLI: SIGTERM with a pending hold", () => {
+	it("ends the hold, records it as 'server shutdown', and exits 0 inside the shutdown bound", async () => {
+		const port = await freePort();
+		const ledgerPort = await freePort();
+		const configPath = await writeServerConfig({ dryRun: true, port, ledgerPort });
+		const { proc, stderr } = startCli(configPath);
+		const exit = new Promise<number | null>((resolve) => proc.once("exit", resolve));
+		// Listening is the CLI's own line: handlers are installed before it, so a signal sent now
+		// reaches the shutdown and never the default action.
+		await new Promise<void>((resolve) => {
+			if (stderr().includes("listening on")) return resolve();
+			proc.stderr?.on("data", () => {
+				if (stderr().includes("listening on")) resolve();
+			});
+			proc.once("exit", () => resolve());
+		});
+		expect(stderr()).toContain("listening on");
+		const res = await fetch(`http://127.0.0.1:${port}/v1/authorize`, {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: "Bearer ut_cli_key" },
+			body: JSON.stringify({
+				model: "claude-sonnet-4-6",
+				estimatedInputTokens: 10,
+				maxOutputTokens: 10,
+			}),
+		});
+		expect(res.status).toBe(200);
+		const { transferId } = (await res.json()) as { transferId: string };
+
+		const signalled = Date.now();
+		proc.kill("SIGTERM");
+		const code = await exit;
+		const took = Date.now() - signalled; // timing: shutdown bound 8000 ms; measured 30-40 ms in 3 runs on a loaded runner
+
+		expect(code).toBe(0);
+		expect(took).toBeLessThan(8_000); // timing: the bound is SHUTDOWN_BOUND_MS (8000); measured 30-40 ms
+		const released = (
+			readLedgerEvents(join(dirname(configPath), "state", "acme", ".usertrust")) as Array<{
+				kind: string;
+				data: Record<string, unknown>;
+			}>
+		).filter((e) => e.kind === "hold_released");
+		// mutant: the governor's own SIGTERM listener is live too → it ends the hold first, as 'governor destroyed'
+		expect(released.map((e) => [e.data.transferId, e.data.reason])).toEqual([
+			[transferId, "server shutdown"],
+		]);
+	}, 60_000); // timing: test timeout 60000 ms; the test runs in 0.4-0.5 s, the rest is room for compiling the CLI's sources on a cold runner (SLACK_MS 20000)
 });

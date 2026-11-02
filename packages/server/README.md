@@ -110,6 +110,20 @@ written and the hold stays settleable. A settle that states `usageFrom` is a `40
 one source of a usage start. A server that honours these lists `"job"` in `capabilities`; an older one
 strips them in silence, so a client checks the list first.
 
+`/v1/authorize` also accepts `jobType` and `typeSource`: which KIND of work the job was, and who said so.
+`jobType` is one of a closed list, `feature`, `bugfix`, `review`, `test`, `docs`, `ops`, `research`,
+`other` (exported as `JOB_TYPES`); `typeSource` is `explicit` (a person declared it) or `agent` (the
+agent did, on a plugin's instruction). A type labels a job, so `jobType` without a `job` is a `400`,
+`typeSource` without a `jobType` is a `400`, and `jobState: "invalid"` excludes both. Both are recorded
+verbatim on every audit record that carries `job`, and are absent on an untyped call's records. A type
+is a DECLARATION, not evidence: nothing here can tell a person from an agent, and an agent-declared
+type can be wrong. Like the job it selects no wallet, enters no policy decision and prices nothing.
+`/v1/settle` may repeat `jobType` and/or `typeSource`, alone or without `job`, only to be checked against
+the hold's: a different one, or any type on an untyped hold, is a `400` (`settle job type differs from the
+hold's`) with nothing written and the hold still settleable. A settle for a hold this server does not
+hold ignores them, as it ignores `job`. A server that honours these lists `"job-type"` in
+`capabilities`; an older one strips them in silence, so a client checks the list first.
+
 A `200` from `/v1/authorize` carries `expiresInMs`: the longest the hold can still be pending, in whole
 milliseconds. That is the shorter of `pendingTtlMs` and the ledger's pending timeout (5 min; in dryRun,
 `pendingTtlMs` alone), counted from when the request arrived. No expiry ends the hold sooner; a settle,
@@ -119,6 +133,14 @@ clock and the server's. (`createdAt` in the same answer is the server's wall-clo
 only.) A server that sends it lists `"hold-expiry"` in `capabilities`; an older one omits the field, and
 so does this one for a ledger hold whose timeout it cannot state. Without the field, treat the hold as
 one you cannot reuse.
+
+An authorize may ask its hold to live longer than the default, for a call expected to run past it:
+`holdTtlMs`, in milliseconds. The server clamps it to [`pendingTtlMs`, `maxPendingTtlMs`] (default one
+hour), and that life is both the ledger's pending timeout for the hold and the server's own sweep life
+for it; `expiresInMs` states it as usual. A server that honours it lists `"hold-ttl"` in `capabilities`
+and states the ceiling as `maxHoldTtlMs` on `/v1/health`; an older one strips the key, and the hold keeps
+the default life. The trade: a hold whose client crashes keeps its budget reserved for up to its life
+before the ledger voids it, so a longer ceiling holds a crashed client's reservation longer.
 
 ## Endpoints
 
@@ -136,7 +158,7 @@ Errors: `403 policy_denied`, `402 budget_exceeded`, `429 anomaly`, `401 unauthor
 `404 not_found` (unknown transferId on `/v1/abort` and `/v1/release`; for `/v1/settle` see the three codes below), `413 too_large` (1 MiB body cap),
 `503 ledger_unavailable` (`/v1/authorize` and `/v1/budget`; see below).
 Pending holds are swept and released when their advertised life runs out: `pendingTtlMs` (default 5 min),
-or the ledger's pending timeout when that comes first. The sweep reads hold ages on a monotonic clock, so
+or the life its authorize asked for (`holdTtlMs`), or the ledger's pending timeout when that comes first. The sweep reads hold ages on a monotonic clock, so
 no wall-clock step moves it, and it never ends a hold before its advertised life. Declared: after the host
 sleeps, a hold that was pending across the sleep can keep counting against the budget for at most one hold
 life (T, 300 s by default) plus up to one sweep interval (30 s) after wake. In enforce mode that can mean
@@ -148,7 +170,7 @@ A TigerBeetle-state probe for this case is a follow-up (#241).
 Unauthenticated, and always HTTP `200`. It answers:
 
 ```json
-{ "ok": true, "ledger": "reachable", "name": "usertrust-server", "version": "…", "capabilities": ["…"], "logLinesDropped": 0 }
+{ "ok": true, "ledger": "reachable", "name": "usertrust-server", "version": "…", "capabilities": ["…"], "maxHoldTtlMs": 3600000, "logLinesDropped": 0 }
 ```
 
 - **`ledger`**: whether the server can reach its ledger (see "Ledger reachability" below for how
@@ -168,6 +190,9 @@ Unauthenticated, and always HTTP `200`. It answers:
   `"off"` (the default for `createUsertrustServer()`) answers `ledger: "unknown"` and `ok: true`
   through an outage.
 - **`name`, `version` and `capabilities`**: what this server is and honours.
+- **`maxHoldTtlMs`**: the longest life an authorize may ask its hold for (`holdTtlMs`, capability
+  `hold-ttl`): the config's `maxPendingTtlMs` (an integer of at least 300 000; default 3 600 000, one
+  hour), never less than `pendingTtlMs`.
 - **`logLinesDropped`**: the number of log lines this server could write nowhere, because its log
   sink failed and its write to stderr failed too (a stderr whose reader has gone, say). It is `0`
   normally. It is process-wide, counted across every tenant and route, and names no tenant, route
@@ -318,10 +343,14 @@ pending timeout returns its funds. An unknown id, another tenant's id, or a hold
 aborted or released is `404 { "error": "not_found", "reason": "unknown transferId" }`. An unknown ROUTE
 is `404` with `"reason": "unknown route"` instead, which is how a client that could not read
 `capabilities` tells an older server apart. The sweep and shutdown release, too: an expired hold is not a
-failure. The SSE stream announces each release as `released`, with the reason the chain recorded, except
-at a signal shutdown. A server stopped by SIGINT or SIGTERM with a pending hold sends no `released` event
-for that hold. The hold may stay reserved until the ledger's 300 s timeout, and its release may not be
-recorded on the chain: a known issue in 5.0.0. See the repository's `LIMITATIONS.md`.
+failure. The SSE stream announces each release as `released`, with the reason the chain recorded. A server
+stopped by SIGINT or SIGTERM ends each pending hold with the reason `server shutdown`, in ledger mode as in
+dry run, and waits for the void and the record before it exits, for at most 8 seconds. A hold whose void
+had not reached the ledger by then may stay reserved until the ledger's 300 s timeout, and its release may
+not be recorded on the chain; the server says so on stderr. The command line owns the process signals: the
+governors it builds are created with `installSignalHandlers: false`. While `close()` runs, `POST /v1/authorize` answers `503 shutting_down`; settle, abort and release are
+still served. An embedder that runs `createUsertrustServer` itself owns the signals too, and calls `close()`. See the repository's
+`LIMITATIONS.md`.
 
 `/v1/abort` keeps the same rule: `200 { "aborted": true, "transferId": "…" }` (plus `voidError`) only
 when that request ended the hold, and the `aborted` event only then. A hold the controller no longer held

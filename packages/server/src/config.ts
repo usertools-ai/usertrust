@@ -16,12 +16,23 @@ const TenantSchema = z.object({
 	configPath: z.string().optional(),
 });
 
+/** The ledger's longest pending timeout: TigerBeetle's `Transfer.timeout` is a u32 count of seconds. */
+const MAX_LEDGER_TIMEOUT_MS = 4_294_967_295_000;
+
 const ServerConfigSchema = z.object({
 	host: z.string().default("127.0.0.1"),
 	port: z.number().int().min(1).max(65535).default(4519),
 	stateDir: z.string().default(".usertrust-server"),
 	enforcement: z.enum(["enforce", "evaluate_only"]).default("enforce"),
-	pendingTtlMs: z.number().int().positive().default(300_000),
+	pendingTtlMs: z.number().int().positive().max(MAX_LEDGER_TIMEOUT_MS).default(300_000),
+	/**
+	 * The longest life an authorize may ask its hold for (`holdTtlMs`, capability `hold-ttl`), in ms:
+	 * a request is clamped to [`pendingTtlMs`, this]. Unset means DEFAULT_MAX_PENDING_TTL_MS (one
+	 * hour). At least core's default hold life (300 000), since every hold's ledger timeout is at
+	 * least that. A longer one keeps a hold whose client crashed reserved for longer before the
+	 * ledger voids it.
+	 */
+	maxPendingTtlMs: z.number().int().min(300_000).max(MAX_LEDGER_TIMEOUT_MS).optional(),
 	dryRun: z.boolean().default(false),
 	/**
 	 * How long the start-up ledger probe waits for TigerBeetle to answer (ledger-probe.ts).
@@ -55,6 +66,28 @@ const ServerConfigSchema = z.object({
 
 /** `ledgerTimeoutMs` when the config leaves it unset. */
 export const DEFAULT_LEDGER_TIMEOUT_MS = 5_000;
+
+/** `maxPendingTtlMs` when the config leaves it unset: one hour. */
+export const DEFAULT_MAX_PENDING_TTL_MS = 3_600_000;
+
+/**
+ * The longest life an authorize may ask for, as the server applies it everywhere (the clamp,
+ * `/v1/health`'s `maxHoldTtlMs`, and each tenant's governor): `maxPendingTtlMs`, never less than
+ * `pendingTtlMs`, in whole seconds (the ledger's timeout is in seconds). A config built without
+ * the schema can lack either; then the default stands.
+ */
+export function maxHoldLife(config: {
+	pendingTtlMs?: number | undefined;
+	maxPendingTtlMs?: number | undefined;
+}): number {
+	const finite = (v: number | undefined) => (Number.isFinite(v) ? (v as number) : 0);
+	// The configured ceiling rounded down to whole seconds, but never below the sweep life, which is
+	// rounded UP: rounding it down would cap a hold below the life every hold already has.
+	return Math.max(
+		Math.floor((finite(config.maxPendingTtlMs) || DEFAULT_MAX_PENDING_TTL_MS) / 1000) * 1000,
+		Math.ceil(finite(config.pendingTtlMs) / 1000) * 1000,
+	);
+}
 
 export type TenantConfig = z.infer<typeof TenantSchema>;
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;

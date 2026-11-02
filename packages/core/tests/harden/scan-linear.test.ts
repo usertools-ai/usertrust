@@ -10,28 +10,134 @@
  * local-part characters with no `@`), the JWT pattern (`-eyJ-eyJ…`) and the triple-backtick
  * delimiter (a run of backticks with no keyword). 200k characters took 26 s on the email pattern.
  *
- * The time bound is a RATIO to a plain linear pass over the same string, measured in the same run,
- * never a number of milliseconds, so it holds on a slow or loaded machine: the baseline slows too.
- * Each input is scanned first at 1/16 of its full size, where a quadratic scan is already far past
- * the bound but still takes only seconds, and only then at the full 1M characters.
+ * The time bound is a RATIO, never a number of milliseconds, so it holds on a slow machine and
+ * through bursts of load: a scan of an input eight times as long takes about eight times as long if
+ * the scan is linear, and about 64 times if it is quadratic. Under sustained overload (more busy processes
+ * than cores) a linear scan can read over the bound on every measurement, so CI runs this file in a
+ * job of its own, without coverage, beside the test job rather than inside it; the detectors'
+ * coverage comes from other files.
  */
 
 import { describe, expect, it } from "vitest";
 import { detectInjection } from "../../src/policy/injection.js";
 import { detectPII, redactPII } from "../../src/policy/pii.js";
 
-const FULL = 1_000_000;
-const SIZES = [FULL / 16, FULL];
-/** Scan time over baseline time. A linear scan here measures well under it; a quadratic one, thousands of times over. */
+/** Walk time over baseline time, for the deep nesting below. A linear walk measures well under it. */
 const MAX_RATIO = 200;
+
+/**
+ * How much longer the second input is. A linear scan's time grows with it (8), a quadratic one's with
+ * its square (64). V8's time per character steps up once at some length for some inputs (up to about
+ * 1.95 times, measured on CI's runners for the normalized view), so a linear scan measured across a
+ * step reads up to about 16. Over two lengths only, linear reads 2 and quadratic 4, and one step put a
+ * linear scan over a bound of 3.
+ */
+const SPAN = 8;
+
+/** The bound on time at `SPAN` times the size over time at the size: 8^(5/3), half of quadratic's 64. */
+const BOUND = 32;
 
 let sink = 0;
 
-/** The linear baseline: one pass over every character. */
-function linearPass(s: string): void {
-	let sum = 0;
-	for (let i = 0; i < s.length; i++) sum = (sum + s.charCodeAt(i)) | 0;
-	sink ^= sum;
+/**
+ * `text` as one flat string, as a caller's text arrives (JSON.parse gives one). A string built with
+ * `+`, `repeat` or `slice` is a tree of parts. V8 flattens it on the first read, but keeps the tree
+ * as a pointer to the flat copy until a garbage collection the string survives replaces it with
+ * that copy. An input built once and kept for the whole measurement can then be flat at `n` and
+ * still the pointer at twice `n`, which reads slower in every sample.
+ */
+const flat = (text: string): string => JSON.parse(JSON.stringify(text));
+
+/** What reads `make(n)` with `scan`: the input is built once, flat, and kept. */
+function scanning(
+	scan: (s: string) => unknown,
+	make: (n: number) => string,
+): (n: number) => () => unknown {
+	return (n) => {
+		const input = flat(make(n));
+		expect(input.length).toBe(n);
+		return () => scan(input);
+	};
+}
+
+/** A ratio, then the same ratio with the times it comes from, for a message. */
+type Measured = [number, string];
+
+/**
+ * `make(n)` builds an input of size `n` and gives what reads it. `n` doubles (up to 64 times) until
+ * one read takes 15 ms. Both inputs, at that size and `SPAN` times it, are then built, read once, and kept,
+ * so each size is timed with the same heap. A sample makes the same number of reads at both sizes,
+ * enough for a sample at `n` to take 30 ms, so a garbage collection's pause is a small part of it.
+ * Samples alternate between the sizes, so a slow moment slows both, and each time is the least of
+ * five. `first` is the time at `SPAN` times the size over the time at the size; `again` measures it once
+ * more, from both inputs built anew.
+ */
+function linearRatio(
+	make: (n: number) => () => unknown,
+	n: number,
+): { first: Measured; again: () => Measured } {
+	const timed = (read: () => unknown, reads: number): number => {
+		const started = performance.now();
+		for (let i = 0; i < reads; i++) read();
+		return performance.now() - started;
+	};
+	let size = n;
+	let read = make(size);
+	read();
+	let one = timed(read, 1);
+	while (one < 15 && size < n * 64) {
+		size *= 2;
+		read = make(size);
+		read();
+		one = timed(read, 1);
+	}
+	const large = make(SPAN * size);
+	large();
+	let reads = Math.max(1, Math.ceil(30 / Math.max(one, 0.01)));
+	while (timed(read, reads) < 30) reads *= 2;
+	const ratio = (small: () => unknown, big: () => unknown): Measured => {
+		let once = Number.POSITIVE_INFINITY;
+		let twice = Number.POSITIVE_INFINITY;
+		for (let i = 0; i < 5; i++) {
+			once = Math.min(once, timed(small, reads));
+			twice = Math.min(twice, timed(big, reads));
+		}
+		const times = `${once.toFixed(1)} ms at ${size}, ${twice.toFixed(1)} ms at ${SPAN * size}, ${reads} reads a sample`;
+		return [twice / once, `${(twice / once).toFixed(2)} (${times})`];
+	};
+	const first = ratio(read, large);
+	return {
+		first,
+		again: () => {
+			const small = make(size);
+			small();
+			const big = make(SPAN * size);
+			big();
+			return ratio(small, big);
+		},
+	};
+}
+
+/**
+ * Reading `SPAN` times the input takes at most `BOUND` times as long: a linear reader takes about 8
+ * times, or about 16 across a step, and a quadratic one about 64. A ratio over the bound is measured
+ * again from both inputs built anew, up to twice, and the row fails only if all three are over it: a
+ * burst of load can slow two in a row, and a quadratic reader is over it each time. Each measurement taken again is printed, marked
+ * `[linear-confirm]`.
+ */
+function expectLinear(make: (n: number) => () => unknown, n: number): void {
+	const name = expect.getState().currentTestName;
+	const { first, again } = linearRatio(make, n);
+	if (first[0] <= BOUND) return;
+	let readings = first[1];
+	let last = first[0];
+	for (let i = 0; i < 2 && last > BOUND; i++) {
+		const [ratio, times] = again();
+		readings += `, then ${times}`;
+		last = ratio;
+	}
+	console.log(`[linear-confirm] ${name}: ${readings}`);
+	expect(last, `${name}: ${readings}`).toBeLessThanOrEqual(BOUND);
 }
 
 function timeMs(fn: () => void): number {
@@ -51,36 +157,6 @@ interface Verdict {
 	ratio: number;
 }
 
-/**
- * Whether `scan` stays within MAX_RATIO of the baseline at every size, stopping at the first size
- * that does not. A scan over the bound is measured once more and the faster time kept, so one
- * garbage-collection pause does not fail it.
- */
-function withinRatio(
-	scan: (s: string) => unknown,
-	make: (n: number) => string,
-	sizes: readonly number[] = SIZES,
-): Verdict {
-	let last: Verdict = { ok: true, size: 0, ratio: 0 };
-	for (const size of sizes) {
-		const s = make(size);
-		expect(s.length).toBe(size);
-		const baseline = Math.max(
-			median([1, 2, 3, 4, 5].map(() => timeMs(() => linearPass(s)))),
-			0.001,
-		);
-		let t = timeMs(() => scan(s));
-		if (t / baseline > MAX_RATIO)
-			t = Math.min(
-				t,
-				timeMs(() => scan(s)),
-			);
-		last = { ok: t / baseline <= MAX_RATIO, size, ratio: t / baseline };
-		if (!last.ok) return last;
-	}
-	return last;
-}
-
 /** `unit` repeated to exactly `n` characters, then `tail`. */
 function run(unit: string, tail = ""): (n: number) => string {
 	return (n) =>
@@ -92,8 +168,11 @@ function after(head: string, unit: string, tail = ""): (n: number) => string {
 	return (n) => head + run(unit, tail)(n - head.length);
 }
 
-/** Each pattern's worst plausible input: a run of its class with no terminator, or one that fails. */
-const WORST: ReadonlyArray<[string, (n: number) => string]> = [
+/**
+ * Each pattern's worst plausible input: a run of its class with no terminator, or one that fails.
+ * A third entry is the size measured from, where it is not 62,500.
+ */
+const WORST: ReadonlyArray<[string, (n: number) => string, number?]> = [
 	["email: local-part run, no @", run("x")],
 	["email: dots and plus, no @", run("a.b+c")],
 	["email: @ then a domain run with no TLD", after("x@", "x.")],
@@ -163,7 +242,12 @@ const WORST: ReadonlyArray<[string, (n: number) => string]> = [
 	["normalized view: a letter, then a zero-width joiner", run(`a${String.fromCodePoint(0x200d)}`)],
 	["normalized view: fullwidth digits", run(String.fromCodePoint(0xff11))],
 	["normalized view: fullwidth digits and spaces", run(`${String.fromCodePoint(0xff14)} `)],
-	["normalized view: U+FDFA, which NFKC expands to 18", run(String.fromCodePoint(0xfdfa))],
+	// detectInjection takes NFKC of the whole string, so this row's input grows 18 times. From 15,625,
+	// the size search stops by 64 times that, and the largest input, `SPAN` times the size, is at most
+	// 8 x 15,625 x 64 = 8,000,000 characters: 144,000,000 after NFKC, against V8's string limit of
+	// 536,870,888. From 62,500 it would be 576,000,000, which throws a RangeError on a runner fast
+	// enough to reach it.
+	["normalized view: U+FDFA, which NFKC expands to 18", run(String.fromCodePoint(0xfdfa)), 15_625],
 	[
 		"normalized view: a key prefix, then zero-width spaces",
 		after("sk-", String.fromCodePoint(0x200b)),
@@ -198,38 +282,43 @@ const WORST: ReadonlyArray<[string, (n: number) => string]> = [
 ];
 
 describe("PII and injection scanning is linear in the message", () => {
-	for (const [name, make] of WORST) {
+	for (const [name, make, from = 62_500] of WORST) {
 		it(`detectPII: ${name}`, () => {
-			const verdict = withinRatio(detectPII, make);
-			expect(verdict, `ratio ${verdict.ratio.toFixed(1)} at ${verdict.size}`).toMatchObject({
-				ok: true,
-			});
-		});
+			expectLinear(scanning(detectPII, make), from);
+		}, 60_000);
 		it(`detectInjection: ${name}`, () => {
-			const verdict = withinRatio(detectInjection, make);
-			expect(verdict, `ratio ${verdict.ratio.toFixed(1)} at ${verdict.size}`).toMatchObject({
-				ok: true,
-			});
-		});
+			expectLinear(scanning(detectInjection, make), from);
+		}, 60_000);
 	}
 
-	it("the harness sees a quadratic scan: the old patterns fail the bound", () => {
-		const OLD_EMAIL = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
-		const OLD_JWT = /\beyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b/;
-		const OLD_BACKTICK = /```[\s\S]*?(?:system|instruction|admin)/i;
-		const controls: Array<[RegExp, (n: number) => string]> = [
-			[OLD_EMAIL, run("x")],
-			[OLD_JWT, run("-eyJ")],
-			[OLD_BACKTICK, run("`")],
-		];
-		for (const [re, make] of controls) {
-			const verdict = withinRatio((s) => re.test(s), make);
-			// It fails at the first size, 62,500 characters: past the bound in a few seconds at most,
-			// where 1M characters would take minutes.
-			expect(verdict, String(re)).toMatchObject({ ok: false, size: FULL / 16 });
-		}
-		expect(sink).toBeTypeOf("number");
-	}, 120_000);
+	// Three patterns that were quadratic, one row each: at 64 times the cost, one read of a control's
+	// larger input takes 2 to 3.6 s on CI.
+	const QUADRATIC: Array<[string, RegExp, (n: number) => string]> = [
+		["the old email pattern", /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/, run("x")],
+		[
+			"the old JWT pattern",
+			/\beyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b/,
+			run("-eyJ"),
+		],
+		["the old backtick-fence pattern", /```[\s\S]*?(?:system|instruction|admin)/i, run("`")],
+	];
+	for (const [label, re, make] of QUADRATIC) {
+		it(`the harness sees a quadratic scan: ${label} fails the bound`, () => {
+			// Both measurements are taken, and one over the bound shows the harness can see the
+			// scan; a burst of load can pull one of them under.
+			const { first, again } = linearRatio(
+				scanning((s) => re.test(s), make),
+				2_000,
+			);
+			const [second, times] = again();
+			console.log(`[linear-control] ${re}: ${first[1]}, then ${times}`);
+			expect(Math.max(first[0], second), `${re}: ${first[1]}, then ${times}`).toBeGreaterThan(
+				BOUND,
+			);
+			// timing: 120 s for one control. In five CI runs, one control's samples added up to 24 to 36 s,
+			// and all three controls, then in one row, took 80 to 110 s: about 40 s each at most.
+		}, 120_000);
+	}
 });
 
 /** A seeded generator, so a failure names the same strings on every run. */
@@ -295,17 +384,15 @@ describe("long inputs: no detector throws, and the scans stay linear, up to 10M 
 	];
 	for (const [name, make] of LONG) {
 		it(`detectPII: ${name}`, () => {
-			const verdict = withinRatio(detectPII, make, [3_000_000, 10_000_000]);
-			expect(verdict, `ratio ${verdict.ratio.toFixed(1)} at ${verdict.size}`).toMatchObject({
-				ok: true,
-			});
+			expect(() => detectPII(make(10_000_000))).not.toThrow();
+			expectLinear(scanning(detectPII, make), 62_500);
 		}, 120_000);
 	}
 });
 
 describe("deep nesting: detection and redaction walk 100,000 levels, in time linear in the depth", () => {
 	// A recursive walk exhausted the call stack at about 10,000 levels (20 KB of JSON) and threw.
-	// The time bound is a ratio, as above, to a walk doing the same kinds of work per level in the
+	// The time bound is a ratio to a walk doing the same kinds of work per level in the
 	// same run: a frame, a path built from its parent's, a set lookup. At 6,250 levels and at
 	// 100,000, detection and redaction must stay within MAX_RATIO of it; a walk that rehashed its
 	// whole path at every level was more than a thousand times over.
@@ -384,6 +471,7 @@ describe("deep nesting: detection and redaction walk 100,000 levels, in time lin
 			expect(verdict, `ratio ${verdict.ratio.toFixed(1)} at depth ${verdict.size}`).toMatchObject({
 				ok: true,
 			});
+			expect(sink).toBeTypeOf("number");
 			const found = detectPII(make(100_000));
 			expect(found.types).toEqual(["email"]);
 			expect(found.paths).toHaveLength(1);
@@ -693,7 +781,7 @@ describe("long runs of letters or digits: no detector throws, up to 10.4M charac
 		["AIza", "b"],
 		["AKIA", "B"],
 	];
-	const SIZES_LONG = [3_000_000, 10_400_000];
+	const LONGEST = 10_400_000;
 	for (const [prefix, unit] of RUNS) {
 		const name = `${JSON.stringify(prefix)} then a run of ${JSON.stringify(unit)}`;
 		for (const [fn, scan] of [
@@ -701,19 +789,15 @@ describe("long runs of letters or digits: no detector throws, up to 10.4M charac
 			["redactPII", (s: string) => redactPII(s)],
 		] as const) {
 			it(`${fn}: ${name}`, () => {
-				const verdict = withinRatio(scan, after(prefix, unit), SIZES_LONG);
-				expect(verdict, `ratio ${verdict.ratio.toFixed(1)} at ${verdict.size}`).toMatchObject({
-					ok: true,
-				});
+				expect(() => scan(after(prefix, unit)(LONGEST))).not.toThrow();
+				expectLinear(scanning(scan, after(prefix, unit)), 62_500);
 			}, 120_000);
 		}
 	}
 	for (const unit of ["b", "A", "1", "+/"]) {
 		it(`detectInjection: a run of ${JSON.stringify(unit)}`, () => {
-			const verdict = withinRatio(detectInjection, run(unit), SIZES_LONG);
-			expect(verdict, `ratio ${verdict.ratio.toFixed(1)} at ${verdict.size}`).toMatchObject({
-				ok: true,
-			});
+			expect(() => detectInjection(run(unit)(LONGEST))).not.toThrow();
+			expectLinear(scanning(detectInjection, run(unit)), 62_500);
 		}, 120_000);
 	}
 });

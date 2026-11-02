@@ -121,6 +121,7 @@ export type {
 	Authorization,
 	AuthorizeParams,
 	Governor,
+	GovernorOpts,
 	ReleaseOutcome,
 	SettleParams,
 	UnheldSettlementOutcome,
@@ -129,6 +130,9 @@ export type {
 // Headless governance (non-SDK integrations)
 export {
 	createGovernor,
+	JOB_TYPES,
+	type JobType,
+	jobTypeRefusal,
 	type Principal,
 	type PrincipalLedgerTags,
 	principalFieldRefusal,
@@ -136,6 +140,9 @@ export {
 	RELEASE_CLASSES,
 	type ReleaseClass,
 	sanitizeReleaseReason,
+	TYPE_SOURCES,
+	type TypeSource,
+	typeSourceRefusal,
 	usageTimeRefusal,
 } from "./headless.js";
 // The ledger client is the required first argument of every budget entry point
@@ -189,6 +196,7 @@ export { detectInjection } from "./policy/injection.js";
 export type { PIIDetection } from "./policy/pii.js";
 // PII detection
 export { detectPII, UNSCANNABLE } from "./policy/pii.js";
+export { PII_UNLISTED_FIELD_WARNING } from "./policy/pii-content.js";
 export type { CircuitBreakerSnapshot } from "./resilience/circuit.js";
 // Circuit breaker
 export { CircuitBreaker, CircuitBreakerRegistry, CircuitOpenError } from "./resilience/circuit.js";

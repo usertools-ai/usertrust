@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { utcDay, utcHour } from "./format.js";
-import { type LedgerRow, type RowStatus, statusOf } from "./rows.js";
+import { jobTypeOf, type LedgerRow, type RowStatus, statusOf } from "./rows.js";
 
 /**
  * The header's Spend rule: the cost of every `llm_call` record, over the whole vault. ONE predicate, used at load
@@ -77,6 +77,14 @@ export function costByKind(rows: LedgerRow[]): KeyTotal[] {
 
 export function costByModel(rows: LedgerRow[]): KeyTotal[] {
 	return totalBy(rows, (r) => r.model);
+}
+
+/**
+ * Cost by DECLARED job type (see `JOB_TYPE_CAVEAT`). Every row lands in a bucket, those with no type in `untyped`, so
+ * the buckets add up to the total of the rows in view; the by-kind and by-model lists leave out rows they have no key for.
+ */
+export function costByJobType(rows: LedgerRow[]): KeyTotal[] {
+	return totalBy(rows, jobTypeOf);
 }
 
 export interface StatTiles {

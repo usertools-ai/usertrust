@@ -67,4 +67,41 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — a hold's pending timeout", ()
 
 		await gov.abort(auth, new Error("done"));
 	});
+
+	it("a hold asked to live longer (`holdTtlMs`) is stored with that timeout", async () => {
+		const dir = join(tmpdir(), `tb-hold-ttl-${randomUUID()}`);
+		mkdirSync(join(dir, VAULT_DIR), { recursive: true });
+		writeFileSync(
+			join(dir, VAULT_DIR, "usertrust.config.json"),
+			JSON.stringify({ budget: 1_000_000, tigerbeetle: { addresses: [TB_ADDRESS], clusterId: 0 } }),
+		);
+		cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+		const gov = await createGovernor({ vaultBase: dir });
+		cleanup.push(() => gov.destroy());
+		const unit = `ttl-${randomUUID().slice(0, 8)}`;
+		const auth = await gov.authorize({
+			model: "claude-sonnet-4-6",
+			estimatedInputTokens: 10,
+			principal: { unit },
+			holdTtlMs: 900_000,
+		});
+		const tbNode = await import("tigerbeetle-node");
+		const raw = tbNode.createClient({ cluster_id: 0n, replica_addresses: [TB_ADDRESS as string] });
+		cleanup.push(() => raw.destroy());
+		const held = await raw.queryTransfers({
+			user_data_128: 0n,
+			user_data_64: principalLedgerTags({ unit }).userData64,
+			user_data_32: 0,
+			ledger: 0,
+			code: 0,
+			timestamp_min: 0n,
+			timestamp_max: 0n,
+			limit: 10,
+			flags: 0,
+		});
+		expect(held).toHaveLength(1);
+		expect(held[0]?.timeout).toBe(900);
+		expect(auth.holdTimeoutMs).toBe(900_000);
+		await gov.abort(auth, new Error("done"));
+	});
 });

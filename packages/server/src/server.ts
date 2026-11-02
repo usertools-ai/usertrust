@@ -9,13 +9,15 @@ import type {
 	AbortOutcome,
 	Authorization,
 	Governor,
+	JobType,
 	ReleaseClass,
 	ReleaseOutcome,
+	TypeSource,
 } from "usertrust";
 import { sanitizeReleaseReason } from "usertrust";
 import { sanitizeMapped, scrubForStderr } from "./cli/scrub.js";
 import type { ServerConfig, TenantConfig } from "./config.js";
-import { DEFAULT_LEDGER_TIMEOUT_MS, resolveTenant } from "./config.js";
+import { DEFAULT_LEDGER_TIMEOUT_MS, maxHoldLife, resolveTenant } from "./config.js";
 import { EventBus } from "./events.js";
 import {
 	type HealthChildSpawner,
@@ -38,6 +40,11 @@ import {
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const SERVER_NAME = "usertrust-server";
+/** What an authorize gets once `close()` has begun: no new hold is taken, and none is delivered. */
+const SHUTTING_DOWN = {
+	error: "shutting_down",
+	reason: "the server is shutting down and takes no new holds",
+} as const;
 /** Reported by /healthz — read from this package's own manifest so the
  * version can never drift from the published package again (Addendum D5). */
 const SERVER_VERSION = (createRequire(import.meta.url)("../package.json") as { version: string })
@@ -67,6 +74,12 @@ const SERVER_CAPABILITIES = Object.freeze([
 	// `usageTo` (and a `job`/`jobState` it must agree with). All recorded verbatim on
 	// the audit records, none a pricing input, none selecting a wallet.
 	"job",
+	// `job-type`: authorize accepts `jobType` (the closed `JOB_TYPES` list) and `typeSource`
+	// (`explicit` | `agent`) beside a `job`, and settle accepts either only to be CHECKED against
+	// the hold's. Both are recorded verbatim on every record that carries `job`. A type is a
+	// DECLARATION, not evidence, and no pricing, policy or wallet input. An older server strips
+	// both keys, so a client sends them only to a server that lists this.
+	"job-type",
 	// `settle-unrecoverable`: `POST /v1/settle` for a transferId this server holds no hold for no
 	// longer answers a bare 404 (and drops real provider spend): it answers `410
 	// settlement_unrecoverable` (recorded on the chain, counted per tenant as
@@ -78,6 +91,11 @@ const SERVER_CAPABILITIES = Object.freeze([
 	// charges the estimate when any tier is flagged. Without it a client must not send zeroed counts for a refused tier: an
 	// older server strips the unknown key and would price the zeros at the floor.
 	"refused",
+	// `hold-ttl`: `POST /v1/authorize` accepts `holdTtlMs`, how long the hold should live, clamped to
+	// [`pendingTtlMs`, `maxPendingTtlMs`]: the ledger's pending timeout for that hold and the server's
+	// own sweep life for it alike. /v1/health also states `maxHoldTtlMs`, the ceiling. An older server
+	// strips the key, and the hold keeps the default life.
+	"hold-ttl",
 ]);
 /**
  * A dryRun server has no ledger, so it writes no `user_data` tags — but it records
@@ -139,7 +157,30 @@ interface PendingEntry {
 	 * parse of the authorize body: what a settle's `job` is checked against, and the
 	 * floor of its `usageTo`. Never read from the handle, which is the caller's.
 	 */
-	labels: { job?: string; jobState?: "invalid"; usageFrom?: string };
+	labels: {
+		job?: string;
+		jobType?: JobType;
+		typeSource?: TypeSource;
+		jobState?: "invalid";
+		usageFrom?: string;
+	};
+	/**
+	 * This hold's own sweep life, in ms (`holdLife`): what its authorize asked for (`holdTtlMs`),
+	 * clamped, else `pendingTtlMs`. `remainingLifeMs` reads it in place of `pendingTtlMs`.
+	 */
+	lifeMs: number;
+}
+
+/**
+ * The sweep life of a hold whose authorize asked for `requested` ms (`holdTtlMs`, capability
+ * `hold-ttl`): clamped to [`pendingTtlMs`, `maxPendingTtlMs`]. Absent, `pendingTtlMs`, as before.
+ */
+export function holdLife(
+	requested: number | undefined,
+	config: { pendingTtlMs: number; maxPendingTtlMs?: number | undefined },
+): number {
+	if (requested === undefined) return config.pendingTtlMs;
+	return Math.min(Math.max(requested, config.pendingTtlMs), maxHoldLife(config));
 }
 
 /**
@@ -1410,6 +1451,11 @@ export function createUsertrustServer(opts: {
 	 * process, a sleep and a forward wall-clock step look alike.
 	 */
 	const monoAge = (entry: PendingEntry): number => performance.now() - entry.startedMono;
+	/** `remainingLifeMs`'s config for one hold: its own sweep life (`lifeMs`) as `pendingTtlMs`. */
+	const entryLife = (entry: PendingEntry) => ({
+		pendingTtlMs: entry.lifeMs,
+		dryRun: config.dryRun,
+	});
 	/**
 	 * Late holds being given back (see `OwedEntry`), keyed `${tenantId}\0${transferId}`. An entry is
 	 * added BEFORE its `release()` starts, so a give-back waiting on the ledger is visible
@@ -1670,9 +1716,15 @@ export function createUsertrustServer(opts: {
 			const set = unsettled.get(tenant.id);
 			if (set?.delete(token) === true && set.size === 0) unsettled.delete(tenant.id);
 		};
+		// The hold's life, clamped once (`holdLife`): the governor reserves it for that long, and the
+		// sweep keeps it for that long. Unasked, the governor's own default, and `pendingTtlMs`.
+		const { holdTtlMs: requestedLife, ...request } = parsed.data;
+		const lifeMs = holdLife(requestedLife, config);
 		let auth: Authorization;
 		try {
-			auth = await governor.authorize(parsed.data);
+			auth = await governor.authorize(
+				requestedLife === undefined ? request : { ...request, holdTtlMs: lifeMs },
+			);
 		} catch (err) {
 			settle();
 			// A rejection after the request ended is consumed: no second write, no second event.
@@ -1683,6 +1735,15 @@ export function createUsertrustServer(opts: {
 		// The client never received this hold's transferId (the 503 was written instead, or it was
 		// gone before any answer), so no call can have run under it: `unused`.
 		if (state !== "waiting") {
+			releaseLate(tenant.id, governor, auth, "unused");
+			return;
+		}
+		// close() began while this authorize was in flight (it passed the check at the route, then waited
+		// on its body, the governor or the ledger): its hold missed close()'s walk over the pending holds,
+		// so it is not delivered. Nothing ran under it, so it is given back, and the caller is told why.
+		if (closeStarted) {
+			if (gone()) leave("abandoned");
+			else if (leave("answered")) sendJson(res, 503, SHUTTING_DOWN);
 			releaseLate(tenant.id, governor, auth, "unused");
 			return;
 		}
@@ -1700,9 +1761,12 @@ export function createUsertrustServer(opts: {
 			startedMono,
 			labels: {
 				...(parsed.data.job === undefined ? {} : { job: parsed.data.job }),
+				...(parsed.data.jobType === undefined ? {} : { jobType: parsed.data.jobType }),
+				...(parsed.data.typeSource === undefined ? {} : { typeSource: parsed.data.typeSource }),
 				...(parsed.data.jobState === undefined ? {} : { jobState: parsed.data.jobState }),
 				...(parsed.data.usageFrom === undefined ? {} : { usageFrom: parsed.data.usageFrom }),
 			},
+			lifeMs,
 		};
 		// The answer is written, and the hold registered, in one synchronous step: no settle for this
 		// id can arrive between the two. A write that throws registers nothing: the hold is given back.
@@ -1712,7 +1776,7 @@ export function createUsertrustServer(opts: {
 				estimatedCost: auth.estimatedCost,
 				model: auth.model,
 				createdAt: auth.createdAt,
-				...expiresIn(remainingLifeMs(auth, config, monoAge(entry))),
+				...expiresIn(remainingLifeMs(auth, entryLife(entry), monoAge(entry))),
 			});
 		} catch {
 			state = "abandoned";
@@ -1744,7 +1808,8 @@ export function createUsertrustServer(opts: {
 			sendJson(res, 400, { error: "bad_request", reason: "invalid settle request" });
 			return;
 		}
-		const { transferId, job, jobState, ...usage } = parsed.data;
+		// The echo fields are taken OUT of `usage`: they are checked below, never metered or passed on.
+		const { transferId, job, jobState, jobType, typeSource, ...usage } = parsed.data;
 		const entry = pending.get(transferId);
 		if (!entry || entry.tenantId !== tenant.id) {
 			await handleUnheldSettle(tenant, transferId, usage, res);
@@ -1761,6 +1826,19 @@ export function createUsertrustServer(opts: {
 			sendJson(res, 400, {
 				error: "bad_request",
 				reason: "settle job differs from the hold's job",
+			});
+			return;
+		}
+		// The type is fixed by the authorize capture exactly as the job is: an echo that names a
+		// type (or a source) the hold does not carry, including any type on an untyped hold, is
+		// refused before the claim.
+		if (
+			(jobType !== undefined && jobType !== entry.labels.jobType) ||
+			(typeSource !== undefined && typeSource !== entry.labels.typeSource)
+		) {
+			sendJson(res, 400, {
+				error: "bad_request",
+				reason: "settle job type differs from the hold's",
 			});
 			return;
 		}
@@ -1873,7 +1951,7 @@ export function createUsertrustServer(opts: {
 	async function handleUnheldSettle(
 		tenant: TenantConfig,
 		transferId: string,
-		usage: Omit<SettleRequest, "transferId" | "job" | "jobState">,
+		usage: Omit<SettleRequest, "transferId" | "job" | "jobState" | "jobType" | "typeSource">,
 		res: ServerResponse,
 	): Promise<void> {
 		const key = `${tenant.id}\0${transferId}`;
@@ -2134,6 +2212,8 @@ export function createUsertrustServer(opts: {
 				name: SERVER_NAME,
 				version: SERVER_VERSION,
 				capabilities: config.dryRun ? DRY_RUN_CAPABILITIES : SERVER_CAPABILITIES,
+				// The longest hold an authorize may ask for (`hold-ttl`).
+				maxHoldTtlMs: maxHoldLife(config),
 				logLinesDropped,
 			});
 			return;
@@ -2195,6 +2275,13 @@ export function createUsertrustServer(opts: {
 				url === "/v1/abort" ||
 				url === "/v1/release")
 		) {
+			// Once close() has begun, no NEW hold: it would miss close()'s walk over the pending holds and
+			// be voided under a caller that may already be spending it. Settles, aborts and releases stay
+			// served, so a call already in flight can still report back.
+			if (closeStarted && url === "/v1/authorize") {
+				sendJson(res, 503, SHUTTING_DOWN);
+				return;
+			}
 			const raw = await readBody(req);
 			if (raw === null) {
 				// The rest of the oversized body is never read — close the
@@ -2265,8 +2352,8 @@ export function createUsertrustServer(opts: {
 		// The server's own sweep reads the monotonic age; an explicit `now` is epoch ms.
 		const due = (entry: PendingEntry): boolean => {
 			const age = now === undefined ? monoAge(entry) : now - entry.createdAt;
-			const left = remainingLifeMs(entry.auth, config, age);
-			return left === null ? age >= config.pendingTtlMs : left === 0;
+			const left = remainingLifeMs(entry.auth, entryLife(entry), age);
+			return left === null ? age >= entry.lifeMs : left === 0;
 		};
 		// A late hold whose void the ledger refused stays counted until the hold's own life, counted from
 		// the late reply (OwedEntry), has run out (the ledger's pending timeout has ended it by then), plus
@@ -2358,18 +2445,22 @@ export function createUsertrustServer(opts: {
 			// and the ledger stay consistent; Governor.destroy() voids at the ledger
 			// layer as the backstop.
 			const remaining = [...pending.entries()];
-			for (const [transferId, entry] of remaining) {
-				const outcome = await releaseEntry(transferId, entry, "shutdown", "server shutdown");
-				// Announced only when the governor says it released the hold: one it no
-				// longer held, or could not be asked about, was not released here.
-				if (outcome?.released !== true) continue;
-				bus.publish(entry.tenantId, {
-					type: "released",
-					transferId,
-					reason: "server shutdown",
-					at: new Date().toISOString(),
-				});
-			}
+			// All at once, not one after another: a hold whose void never answers must not keep the
+			// others from being voided and recorded (the command line bounds how long close() may take).
+			await Promise.allSettled(
+				remaining.map(async ([transferId, entry]) => {
+					const outcome = await releaseEntry(transferId, entry, "shutdown", "server shutdown");
+					// Announced only when the governor says it released the hold: one it no
+					// longer held, or could not be asked about, was not released here.
+					if (outcome?.released !== true) return;
+					bus.publish(entry.tenantId, {
+						type: "released",
+						transferId,
+						reason: "server shutdown",
+						at: new Date().toISOString(),
+					});
+				}),
+			);
 			await new Promise<void>((resolve) => {
 				if (!httpServer) return resolve();
 				httpServer.closeAllConnections();

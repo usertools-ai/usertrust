@@ -253,8 +253,13 @@ export const AUDIT_LOCK_LEFT_WARNING = "USERTRUST_AUDIT_LOCK_LEFT";
  * for the terminal.
  */
 export function releaseAuditWriterForTeardown(audit: AuditWriter): void {
+	releaseReporting(() => audit.release());
+}
+
+/** Run `release`; a lock it leaves behind is reported as {@link releaseAuditWriterForTeardown} says, never thrown. */
+function releaseReporting(release: () => void): void {
 	try {
-		audit.release();
+		release();
 	} catch (err) {
 		const message = describeReleaseFailure(err);
 		console.warn(`[AUDIT] ${message}`);
@@ -1726,6 +1731,10 @@ function createAuditWriterAt(
 	const lastEventCache = new Map<string, CachedTail>();
 	let degraded = false;
 	let writeFailures = 0;
+	// Set by release(). An append after it (a terminal record whose call outlived its holder's
+	// release) takes the lock as any append does and gives it back when it finishes, so a released
+	// writer never keeps the vault's lock from the next writer.
+	let released = false;
 	// Eager: a second writer fails HERE. The append's own acquire then only verifies this
 	// writer's lock (the file carries this writer's id and inode) and creates nothing.
 	if (options.lockAtCreate === true) acquireProcessLock(logPath, writerId, leasable);
@@ -1835,6 +1844,8 @@ function createAuditWriterAt(
 			});
 			throw err;
 		} finally {
+			// A lock left behind here is reported, never thrown over the append's own outcome.
+			if (released) releaseReporting(() => releaseLocks(writerId, logPath));
 			release();
 		}
 	}
@@ -1853,6 +1864,7 @@ function createAuditWriterAt(
 	}
 
 	function releaseWriter(): void {
+		released = true;
 		lastEventCache.clear();
 		degraded = false;
 		writeFailures = 0;

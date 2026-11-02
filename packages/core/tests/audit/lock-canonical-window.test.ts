@@ -1483,8 +1483,13 @@ describe("the lock appears complete: written to a temp file, then hard-linked in
 
 		w.release();
 		expect(existsSync(lockOf(vault)), "released").toBe(false);
+		let retaken: string | undefined;
+		afterLockCreate.fn = (p) => {
+			retaken = JSON.parse(fsHooks.real.readFileSync(p, "utf-8")).writerId;
+		};
 		await w.appendEvent({ kind: "k", actor: "a", data: {} }); // re-acquires: same temp name
-		expect(idOf(lockOf(vault))).toBe(mine);
+		expect(retaken, "the append took the lock afresh, under the writer's id").toBe(mine);
+		expect(existsSync(lockOf(vault)), "and gave it back: the writer was released").toBe(false);
 		expect(tempsIn(vault), "the leftover was replaced and removed").toEqual([]);
 	});
 
@@ -1554,10 +1559,20 @@ describe("the lock appears complete: written to a temp file, then hard-linked in
 		writeFileSync(outside, "untouched");
 		symlinkSync(outside, join(auditDirOf(vault), `.audit-writer.lock.${mine}.tmp`));
 
+		let retaken: { writerId: string; symlink: boolean } | undefined;
+		afterLockCreate.fn = (p) => {
+			retaken = {
+				writerId: JSON.parse(fsHooks.real.readFileSync(p, "utf-8")).writerId,
+				symlink: fsHooks.real.lstatSync(p).isSymbolicLink(),
+			};
+		};
 		await w.appendEvent({ kind: "k", actor: "a", data: {} });
 		expect(readFileSync(outside, "utf-8")).toBe("untouched");
-		expect(idOf(lockOf(vault))).toBe(mine);
-		expect(lstatSync(lockOf(vault)).isSymbolicLink()).toBe(false);
+		expect(retaken, "the lock was created afresh, not through the link").toEqual({
+			writerId: mine,
+			symlink: false,
+		});
+		expect(existsSync(lockOf(vault)), "released after the append").toBe(false);
 		expect(tempsIn(vault)).toEqual([]);
 	});
 

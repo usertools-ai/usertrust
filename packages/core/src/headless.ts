@@ -95,6 +95,7 @@ import {
 	trustConfigOverrides,
 } from "./govern.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
+import { preflightLedger } from "./ledger/preflight.js";
 import {
 	copyAppliedRates,
 	costFromRates,
@@ -132,7 +133,12 @@ import {
 import { detectPII } from "./policy/pii.js";
 import type { ProxyConnection } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
-import { DEFAULT_BUDGET, LEDGER_HOLD_TIMEOUT_MS, VAULT_DIR } from "./shared/constants.js";
+import {
+	DEFAULT_BUDGET,
+	DEFAULT_MAX_HOLD_TTL_MS,
+	LEDGER_HOLD_TIMEOUT_MS,
+	VAULT_DIR,
+} from "./shared/constants.js";
 import {
 	InsufficientBalanceError,
 	LedgerUnavailableError,
@@ -146,8 +152,10 @@ import {
 	captureJob,
 	captureUsageTo,
 	type JobCapture,
+	type JobType,
 	type ReleaseClass,
 	releaseClassRefusal,
+	type TypeSource,
 	usageTimeRefusal,
 } from "./shared/job.js";
 import {
@@ -170,7 +178,19 @@ import { governorVaultBase } from "./shared/vault-base.js";
 // the root export for the argument type of a method it can already see here.
 export type { EnvelopeDescriptor, EnvelopeStatus } from "./budget/context.js";
 // The wire's ISO-8601 UTC rule for `usageFrom`/`usageTo`, shared for the reason above.
-export { RELEASE_CLASSES, type ReleaseClass, usageTimeRefusal } from "./shared/job.js";
+// `JOB_TYPES`/`TYPE_SOURCES` are the closed lists `AuthorizeParams.jobType`/`typeSource` accept;
+// an integration that offers a choice, or validates one before sending, reads them here.
+export {
+	JOB_TYPES,
+	type JobType,
+	jobTypeRefusal,
+	RELEASE_CLASSES,
+	type ReleaseClass,
+	TYPE_SOURCES,
+	type TypeSource,
+	typeSourceRefusal,
+	usageTimeRefusal,
+} from "./shared/job.js";
 // Same reason for the principal: an integration that passes `principal` to
 // `authorize()` gets its type, its field rule and its ledger tags from the entry
 // point it already imports — the tags are what a `query_transfers` roll-up filters on.
@@ -205,6 +225,26 @@ export interface GovernorOpts extends Omit<TrustOpts, "allowUngoverned"> {
 	 */
 	endpoint?: Partial<EndpointInfo> | undefined;
 	/**
+	 * The longest life an authorize may ask its hold for (`AuthorizeParams.holdTtlMs`),
+	 * in ms: a request above it is clamped to it. An integer no less than
+	 * `LEDGER_HOLD_TIMEOUT_MS` (the life every hold has by default); anything else is a
+	 * `RangeError` at creation. Default `DEFAULT_MAX_HOLD_TTL_MS` (one hour). A longer
+	 * one keeps a hold whose call never reports back reserved for longer.
+	 */
+	maxHoldTtlMs?: number | undefined;
+	/**
+	 * Whether the governor installs its own process-exit safety net: a one-time `beforeExit`,
+	 * `SIGTERM` and `SIGINT` listener that calls `destroy()`. Default `true`, so a program that
+	 * never calls `destroy()` still voids its pending holds when it is stopped.
+	 *
+	 * Set it to `false` when the host process owns shutdown and calls `destroy()` itself. Two
+	 * owners race: the safety net's `destroy()` starts first, and a host that then calls
+	 * `process.exit()` after its own shutdown work can end the process before that teardown
+	 * has voided and recorded the pending holds. `usertrust-server` sets it to `false`; its
+	 * command line owns the signals.
+	 */
+	installSignalHandlers?: boolean | undefined;
+	/**
 	 * How long destroy() waits for terminals still working (settles, and aborts and
 	 * releases in flight) before it sweeps. Default 5 000 ms. For tests: ignored outside a
 	 * test environment.
@@ -230,6 +270,8 @@ const TRUST_ONLY_OPTS: Readonly<Record<Exclude<keyof TrustOpts, keyof GovernorOp
 const { allowUngoverned: _trustOnly, ...GOVERNOR_TRUST_OPTS_KEYS } = TRUST_OPTS_KEYS;
 const GOVERNOR_OPTS_KEYS: Readonly<Record<keyof GovernorOpts, true>> = {
 	...GOVERNOR_TRUST_OPTS_KEYS,
+	maxHoldTtlMs: true,
+	installSignalHandlers: true,
 	_destroyDrainMs: true,
 };
 
@@ -268,11 +310,19 @@ export interface Authorization {
 	 */
 	costCenter?: string | undefined;
 	/**
-	 * The job this hold is labelled with, for REPORTING: frozen with the handle and never
-	 * read back by the governor, whose records come from the authorize capture. Absent
-	 * for an unlabelled call.
+	 * The job this hold is labelled with, for REPORTING: a copy of the frozen authorize
+	 * capture. The property is writable, but assigning to it changes only this handle: the
+	 * governor never reads it back, and its records come from its own capture. Absent for an
+	 * unlabelled call.
 	 */
 	job?: string | undefined;
+	/**
+	 * The job's TYPE and who declared it, for REPORTING: copied from the authorize capture and
+	 * never read back by the governor, exactly like `job` (a caller editing the handle changes
+	 * no record). A declaration, not evidence. Absent for an untyped call.
+	 */
+	jobType?: JobType | undefined;
+	typeSource?: TypeSource | undefined;
 	/**
 	 * The ledger's pending timeout this call's hold was reserved with, in ms
 	 * (`LEDGER_HOLD_TIMEOUT_MS`): TigerBeetle expires the hold on its own that long
@@ -300,7 +350,8 @@ interface AuthorizationCapture {
 	/** The frozen principal captured at authorize, or `undefined` when none was given. */
 	readonly principal: Principal | undefined;
 	/**
-	 * The frozen job labels captured at authorize (`job`, `jobState`, `usageFrom`);
+	 * The frozen job labels captured at authorize (`job`, `jobType`, `typeSource`,
+	 * `jobState`, `usageFrom`);
 	 * `{}` for an unlabelled call. Every record this hold produces spreads it, so
 	 * release and TTL expiry carry the hold's job and usage start too.
 	 */
@@ -404,10 +455,29 @@ export interface AuthorizeParams {
 	 * the principal's field rule and captured once, before any I/O.
 	 */
 	job?: string | undefined;
+	/**
+	 * Which KIND of work the job was (`JOB_TYPES`), and who declared it (`TYPE_SOURCES`).
+	 * Same standing as `job`: a label, never a payer, validated and captured once, before
+	 * any I/O. A type needs a `job` (a type labels a job); `typeSource` needs a `jobType`;
+	 * `jobState: "invalid"` excludes both. A violation is a `TypeError`. A SETTLE carries
+	 * neither: the type is fixed by this capture, and no later params can relabel the hold.
+	 */
+	jobType?: JobType | undefined;
+	typeSource?: TypeSource | undefined;
 	/** `"invalid"` when the caller's job state could not be trusted; exclusive with `job`. */
 	jobState?: "invalid" | undefined;
 	/** When the usage this hold covers began (ISO-8601 UTC); inherited by release and expiry records. */
 	usageFrom?: string | undefined;
+	/**
+	 * How long the hold should live, in ms: a call expected to run longer than the default
+	 * (`LEDGER_HOLD_TIMEOUT_MS`, five minutes) asks for its hold to outlive it, so its budget
+	 * stays reserved until it settles. It is the ledger's own pending timeout (TigerBeetle's
+	 * per-transfer `timeout`), clamped to [`LEDGER_HOLD_TIMEOUT_MS`, the governor's
+	 * `maxHoldTtlMs`] and rounded up to whole seconds; the handle's `holdTimeoutMs` says what
+	 * was used. Omitted → the default. A positive integer; anything else is a `TypeError`
+	 * before any I/O.
+	 */
+	holdTtlMs?: number | undefined;
 	/**
 	 * Per-call endpoint scope override — wins over the governor-wide default
 	 * (A3). The effective scope is captured on the Authorization and governs
@@ -613,7 +683,14 @@ export interface Governor {
 	 */
 	recordUnheldSettlement(params: UnheldSettlementParams): Promise<UnheldSettlementOutcome>;
 
-	/** Graceful shutdown — voids all pending holds, flushes audit. */
+	/**
+	 * Graceful shutdown — voids all pending holds, records each one, flushes audit.
+	 *
+	 * Safe to call more than once, and from more than one place: every call returns the SAME
+	 * teardown, so a later caller's promise settles only when the first caller's void and
+	 * records have landed (and rejects with what that teardown threw). A caller that must not
+	 * exit before the holds are recorded can therefore always await it.
+	 */
 	destroy(): Promise<void>;
 
 	/**
@@ -1005,10 +1082,14 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 	const tbAddresses = config.tigerbeetle.addresses;
 	const tbClusterId = BigInt(config.tigerbeetle.clusterId);
 
+	// No ledger listening: say so in milliseconds, before any native client exists (it would retry forever).
+	await preflightLedger(tbAddresses, { clusterId: config.tigerbeetle.clusterId });
 	const tbClient = new TrustTBClient({
 		addresses: tbAddresses,
 		clusterId: tbClusterId,
 	});
+	// Something listening but not answering as a usertrust ledger: stop at the deadline (this client is closed).
+	await tbClient.connectDeadline(config.tigerbeetle.connectTimeoutMs);
 
 	// Treasury (unconstrained) funds a per-session enforcing holding wallet.
 	await tbClient.createTreasury();
@@ -1032,6 +1113,7 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 			amount: number;
 			debitAccountId?: bigint | undefined;
 			userData?: PrincipalLedgerTags | undefined;
+			timeoutSeconds?: number | undefined;
 		}): Promise<{ transferId: string }> {
 			// An ATTRIBUTED hold names its own debit account — the cost-center
 			// envelope the governor derived at authorize. Unattributed holds keep
@@ -1045,7 +1127,7 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 					code: XFER_SPEND,
 					// Named, not the client's default: the ledger expires the hold at this
 					// timeout, and a headless handle publishes it (`holdTimeoutMs`).
-					timeoutSeconds: LEDGER_HOLD_TIMEOUT_MS / 1000,
+					timeoutSeconds: params.timeoutSeconds ?? LEDGER_HOLD_TIMEOUT_MS / 1000,
 					// The principal's roll-up tags ride the hold; post/void inherit them.
 					...(params.userData !== undefined
 						? {
@@ -1200,6 +1282,19 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
  * An optional per-tier token estimate from `AuthorizeParams`: omitted is 0;
  * otherwise a non-negative safe integer, or a `TypeError` naming the field.
  */
+/**
+ * The ledger timeout, in ms, of a hold asked to live `requested` ms (`AuthorizeParams.holdTtlMs`):
+ * clamped to [`LEDGER_HOLD_TIMEOUT_MS`, `maxMs`], in whole seconds. Absent → the default.
+ */
+function holdLifeMs(requested: unknown, maxMs: number): number {
+	if (requested === undefined) return LEDGER_HOLD_TIMEOUT_MS;
+	if (typeof requested !== "number" || !Number.isSafeInteger(requested) || requested <= 0) {
+		throw new TypeError("holdTtlMs must be a positive integer");
+	}
+	const clamped = Math.min(Math.max(requested, LEDGER_HOLD_TIMEOUT_MS), maxMs);
+	return Math.ceil(clamped / 1000) * 1000;
+}
+
 function estimateTier(value: unknown, field: string): number {
 	if (value === undefined) return 0;
 	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
@@ -1247,11 +1342,30 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	const isDryRun = opts?.dryRun ?? process.env.USERTRUST_DRY_RUN === "true";
 	const isTestEnv = process.env.USERTRUST_TEST === "1" || process.env.NODE_ENV === "test";
 	const destroyDrainMs = (isTestEnv ? opts?._destroyDrainMs : undefined) ?? 5_000;
+	const installSignalHandlers = opts?.installSignalHandlers ?? true;
+	if (typeof installSignalHandlers !== "boolean") {
+		throw new TypeError("createGovernor(): installSignalHandlers must be true or false");
+	}
+	const askedMaxHoldTtlMs = opts?.maxHoldTtlMs ?? DEFAULT_MAX_HOLD_TTL_MS;
+	// TigerBeetle's `Transfer.timeout` is a u32 count of seconds: a longer ceiling fails at the ledger.
+	const ledgerMaxMs = 4_294_967_295_000;
+	if (
+		!Number.isSafeInteger(askedMaxHoldTtlMs) ||
+		askedMaxHoldTtlMs < LEDGER_HOLD_TIMEOUT_MS ||
+		askedMaxHoldTtlMs > ledgerMaxMs
+	) {
+		throw new RangeError(
+			`createGovernor(): maxHoldTtlMs must be an integer from ${LEDGER_HOLD_TIMEOUT_MS} to ${ledgerMaxMs}`,
+		);
+	}
+	// In whole seconds, rounded DOWN: the ledger's timeout is in seconds, and a life rounded up to
+	// one (`holdLifeMs`) must never exceed the ceiling.
+	const maxHoldTtlMs = Math.floor(askedMaxHoldTtlMs / 1000) * 1000;
 
 	// 2. Initialize subsystems
 	const vaultPath = vaultBase;
 	// This governor's budget on its vault's record (budget/effective-record.ts); set once it has started. Its first
-	// successful append means this process holds the vault's writer lock, which is when the record may be published.
+	// successful append means this process holds the vault's writer lock, which is when the record may be replaced.
 	let enforcedBudget: EnforcedBudgetRegistration | undefined;
 	const audit: AuditWriter =
 		(isTestEnv ? opts?._audit : undefined) ??
@@ -1302,6 +1416,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// remaining budget so TigerBeetle atomically REJECTS an over-budget hold.
 			engine = await createTBEngine(config, Math.max(0, config.budget - budgetSpent));
 		} catch (err) {
+			// preflight and the connect deadline already say what is wrong and how to fix it.
+			if (err instanceof LedgerUnavailableError) throw err;
 			throw new LedgerUnavailableError(
 				err instanceof Error ? err.message : String(err),
 				config.tigerbeetle.addresses.join(","),
@@ -1313,6 +1429,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 
 	// 5. State
 	let destroyed = false;
+	// The teardown destroy() started, shared by every caller (set by the first call).
+	let destroying: Promise<void> | undefined;
 	// Set by destroy() in the same synchronous step that takes every remaining hold, at its
 	// deadline. From then on settle(), abort() and release() refuse at entry, before any
 	// claim. Not `destroyed`, which is set when destroy() BEGINS: while it drains, a terminal
@@ -1385,6 +1503,159 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	}
 
 	// 6. Governor implementation
+	/**
+	 * The one teardown destroy() runs: the drain, the records for every hold the governor still has,
+	 * the sweep, the flush and the close. destroy() starts it once and hands every caller the same
+	 * promise (see `destroying`).
+	 */
+	const tearDown = async (): Promise<void> => {
+		destroyed = true;
+		// This governor's budget stays on the vault's record until the teardown step that
+		// releases it, after the drain and the records below: a call that settles while
+		// destroy() drains, or a hold destroy() records, is still this governor's, and may be
+		// its first append, which takes the vault's lock and publishes the record
+		// (budget/effective-record.ts).
+
+		// Never void a hold a terminal is still working on: a settle's POST, or an abort
+		// or release parked on the budget lock or its own void. ONE deadline for both
+		// (trust()'s 5 s bound), never one per set. A terminal that starts while this
+		// drains (a settle, an abort, a release) runs as before and is waited for too; they
+		// refuse only from the claim below (`sweeping`).
+		const deadline = Date.now() + destroyDrainMs;
+		while (
+			(settling.size > 0 || inFlight.size > 0 || unheldInFlight.size > 0) &&
+			Date.now() < deadline
+		) {
+			await new Promise<void>((r) => setTimeout(r, 50));
+		}
+
+		// At the deadline, destroy() takes every hold that is still the governor's, in ONE
+		// synchronous step, before its first await: no terminal can claim one of them
+		// while destroy() records another, and every terminal called from here on refuses
+		// at entry (`sweeping`), before any claim.
+		//  - An abort or release still in flight has not recorded its hold, and its own
+		//    record would land after the writer closes below. Taken out of `inFlight`, it
+		//    writes none (see abort()); its record is destroy()'s.
+		//  - Every hold still held: still active, or handed back by a settle that threw
+		//    before its POST. A settle still posting is in neither map (it leaves
+		//    `unpostedHolds` before its POST, its first await), and neither is a
+		//    transport-ambiguous POST, which already has its record (`settlement_ambiguous`).
+		const stillInFlight = [...inFlight];
+		inFlight.clear();
+		sweeping = true;
+		const leftovers = [...activeAuths, ...unpostedHolds];
+		activeAuths.clear();
+		unpostedHolds.clear();
+
+		// Every step runs, whatever an earlier one throws (shared with trust()); destroy()
+		// rejects with what a step threw only once the last has run, so the TigerBeetle client
+		// is always closed.
+		await runTeardownSteps([
+			async () => {
+				// A terminal still in flight: its void is its own, or the engine sweep's below
+				// (which also reaches this hold: its engine entry goes only when its own void
+				// returns), and the ledger takes one of the two: one mutation either way. The record
+				// says only what destroy() knows, that the void had not completed. It names no
+				// `voidError`: there was no outcome yet. The terminal still answers its caller from
+				// its own void.
+				for (const [txId, capture] of stillInFlight) {
+					await audit
+						.appendEvent({
+							kind: "hold_released",
+							actor: capture.actor,
+							data: {
+								transferId: txId,
+								reason: "governor destroyed (terminal still in flight: its void had not completed)",
+								source: "headless",
+								...(capture.releaseClass === undefined
+									? {}
+									: { releaseClass: capture.releaseClass }),
+								...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
+								...(capture.principal === undefined ? {} : { principal: capture.principal }),
+								...capture.jobAudit,
+							},
+						})
+						.catch(() => {});
+				}
+
+				// Every hold still held: voided and recorded, so destroy() ends no hold without a
+				// record.
+				for (const [txId, capture] of leftovers) {
+					let voidError: string | undefined;
+					if (proxyConn != null && !isDryRun) {
+						try {
+							await proxyConn.void(capture.proxyTransferId ?? txId);
+						} catch {
+							voidError = "proxy_void_failed";
+						}
+					} else if (engine != null && !isDryRun) {
+						try {
+							await engine.voidPendingSpend(txId);
+						} catch (err) {
+							voidError = releaseVoidError(err);
+						}
+					}
+					// The capture carries no model (#205), so this record names none.
+					await audit
+						.appendEvent({
+							kind: "hold_released",
+							actor: capture.actor,
+							data: {
+								transferId: txId,
+								reason: "governor destroyed",
+								source: "headless",
+								...(voidError === undefined ? {} : { voidError }),
+								...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
+								...(capture.principal === undefined ? {} : { principal: capture.principal }),
+								...capture.jobAudit,
+							},
+						})
+						.catch(() => {});
+				}
+			},
+			// Same sweep trust() runs, best-effort, and it writes no
+			// record. What it can still find has one already: a settle whose POST threw
+			// (`settlement_ambiguous`; a void of a transfer TB did post fails closed in the
+			// catch), an abort or release whose own void failed (its record names the
+			// `voidError`, though this sweep may yet return the funds), a terminal still in
+			// flight above (recorded there), and a settle still posting past the deadline (its
+			// own records). Then close the client: a voidAllPending throw must not skip
+			// destroy() and hang the process on the open TigerBeetle socket.
+			async () => {
+				if (engine != null && typeof engine.voidAllPending === "function") {
+					try {
+						await engine.voidAllPending();
+					} catch {
+						// Best-effort — TigerBeetle auto-voids pending transfers after 300s.
+					}
+				}
+			},
+			// Flush audit, then release its lock. destroy() never REJECTS for a lock left
+			// behind: callers call it without await or catch, and an unhandled rejection kills
+			// the process. The teardown reports it as a USERTRUST_AUDIT_LOCK_LEFT warning instead.
+			() => audit.flush(),
+			// Drop this governor's budget from the vault's record (never throws), once its last
+			// append has landed and BEFORE the audit lock is released: the record is republished
+			// for the governors still live only while this process holds the lock. It waits on the
+			// audit flush (an unbounded mutex wait), as the lock release after it does, so a hung
+			// flush keeps a destroyed governor on the record exactly as long as destroy() hangs.
+			() => enforcedBudget?.release(),
+			() => releaseAuditWriterForTeardown(audit),
+			// Destroy the engine and the proxy.
+			// close() where the engine has it: the TigerBeetle client's destroy() aborts the process
+			// on a client the cluster evicted while it was idle, and close() asks it first. An
+			// injected engine without it is destroyed as before.
+			async () => {
+				if (engine == null) return;
+				if (typeof engine.close === "function") await engine.close();
+				else if (typeof engine.destroy === "function") engine.destroy();
+			},
+			() => {
+				if (proxyConn != null) proxyConn.destroy();
+			},
+		]);
+	};
+
 	const governor: Governor = {
 		config,
 
@@ -1421,6 +1692,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// before any I/O, and every record below spreads this one capture.
 			const jobAudit = captureJob({
 				job: params.job,
+				jobType: params.jobType,
+				typeSource: params.typeSource,
 				jobState: params.jobState,
 				usageFrom: params.usageFrom,
 			});
@@ -1435,6 +1708,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				params.estimatedCacheWriteTokens,
 				"estimatedCacheWriteTokens",
 			);
+			// The hold's life, validated before any I/O like the tiers above.
+			const holdTimeoutMs = holdLifeMs(params.holdTtlMs, maxHoldTtlMs);
 			const messages = params.messages ?? [];
 
 			// Per-invocation denial evidence, filled by the throw sites and read by
@@ -1723,6 +1998,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 								// Roll-up tags only; an untagged call omits the key, so its hold
 								// is created exactly as before.
 								...(principal !== undefined ? { userData: principalLedgerTags(principal) } : {}),
+								timeoutSeconds: holdTimeoutMs / 1000,
 							});
 						} catch (holdErr) {
 							// P1-LEDGER-ENFORCE: an over-budget reservation is rejected
@@ -1746,7 +2022,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						// The hold landed. Record WHICH wallet it debited, for the session
 						// accounting below and for the release on settle/abort.
 						envelopeDebited = envelope !== undefined;
-						ledgerHoldTimeoutMs = LEDGER_HOLD_TIMEOUT_MS;
+						ledgerHoldTimeoutMs = holdTimeoutMs;
 					}
 
 					// SESSION accounting tracks SESSION-WALLET money only. An attributed hold
@@ -1817,6 +2093,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// or transports it.
 				...(captured !== undefined ? { costCenter: captured.attribution.costCenter } : {}),
 				...(jobAudit.job !== undefined ? { job: jobAudit.job } : {}),
+				...(jobAudit.jobType !== undefined ? { jobType: jobAudit.jobType } : {}),
+				...(jobAudit.typeSource !== undefined ? { typeSource: jobAudit.typeSource } : {}),
 			};
 			// destroy() may have begun while this call awaited (the budget lock, the policy,
 			// the reserve). It claims every hold registered before it, and a hold registered
@@ -2743,154 +3021,13 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				: { outcome: "unrecoverable", recorded: true };
 		},
 
-		async destroy(): Promise<void> {
-			if (destroyed) return;
-			destroyed = true;
-			// This governor's budget stays on the vault's record until the teardown step that
-			// releases it, after the drain and the records below: a call that settles while
-			// destroy() drains, or a hold destroy() records, is still this governor's, and may be
-			// its first append, which takes the vault's lock and publishes the record
-			// (budget/effective-record.ts).
-
-			// Never void a hold a terminal is still working on: a settle's POST, or an abort
-			// or release parked on the budget lock or its own void. ONE deadline for both
-			// (trust()'s 5 s bound), never one per set. A terminal that starts while this
-			// drains (a settle, an abort, a release) runs as before and is waited for too; they
-			// refuse only from the claim below (`sweeping`).
-			const deadline = Date.now() + destroyDrainMs;
-			while (
-				(settling.size > 0 || inFlight.size > 0 || unheldInFlight.size > 0) &&
-				Date.now() < deadline
-			) {
-				await new Promise<void>((r) => setTimeout(r, 50));
-			}
-
-			// At the deadline, destroy() takes every hold that is still the governor's, in ONE
-			// synchronous step, before its first await: no terminal can claim one of them
-			// while destroy() records another, and every terminal called from here on refuses
-			// at entry (`sweeping`), before any claim.
-			//  - An abort or release still in flight has not recorded its hold, and its own
-			//    record would land after the writer closes below. Taken out of `inFlight`, it
-			//    writes none (see abort()); its record is destroy()'s.
-			//  - Every hold still held: still active, or handed back by a settle that threw
-			//    before its POST. A settle still posting is in neither map (it leaves
-			//    `unpostedHolds` before its POST, its first await), and neither is a
-			//    transport-ambiguous POST, which already has its record (`settlement_ambiguous`).
-			const stillInFlight = [...inFlight];
-			inFlight.clear();
-			sweeping = true;
-			const leftovers = [...activeAuths, ...unpostedHolds];
-			activeAuths.clear();
-			unpostedHolds.clear();
-
-			// Every step runs, whatever an earlier one throws (shared with trust()); destroy()
-			// rejects with what a step threw only once the last has run, so the TigerBeetle client
-			// is always closed.
-			await runTeardownSteps([
-				async () => {
-					// A terminal still in flight: its void is its own, or the engine sweep's below
-					// (which also reaches this hold: its engine entry goes only when its own void
-					// returns), and the ledger takes one of the two: one mutation either way. The record
-					// says only what destroy() knows, that the void had not completed. It names no
-					// `voidError`: there was no outcome yet. The terminal still answers its caller from
-					// its own void.
-					for (const [txId, capture] of stillInFlight) {
-						await audit
-							.appendEvent({
-								kind: "hold_released",
-								actor: capture.actor,
-								data: {
-									transferId: txId,
-									reason:
-										"governor destroyed (terminal still in flight: its void had not completed)",
-									source: "headless",
-									...(capture.releaseClass === undefined
-										? {}
-										: { releaseClass: capture.releaseClass }),
-									...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
-									...(capture.principal === undefined ? {} : { principal: capture.principal }),
-									...capture.jobAudit,
-								},
-							})
-							.catch(() => {});
-					}
-
-					// Every hold still held: voided and recorded, so destroy() ends no hold without a
-					// record.
-					for (const [txId, capture] of leftovers) {
-						let voidError: string | undefined;
-						if (proxyConn != null && !isDryRun) {
-							try {
-								await proxyConn.void(capture.proxyTransferId ?? txId);
-							} catch {
-								voidError = "proxy_void_failed";
-							}
-						} else if (engine != null && !isDryRun) {
-							try {
-								await engine.voidPendingSpend(txId);
-							} catch (err) {
-								voidError = releaseVoidError(err);
-							}
-						}
-						// The capture carries no model (#205), so this record names none.
-						await audit
-							.appendEvent({
-								kind: "hold_released",
-								actor: capture.actor,
-								data: {
-									transferId: txId,
-									reason: "governor destroyed",
-									source: "headless",
-									...(voidError === undefined ? {} : { voidError }),
-									...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
-									...(capture.principal === undefined ? {} : { principal: capture.principal }),
-									...capture.jobAudit,
-								},
-							})
-							.catch(() => {});
-					}
-				},
-				// Same sweep trust() runs, best-effort, and it writes no
-				// record. What it can still find has one already: a settle whose POST threw
-				// (`settlement_ambiguous`; a void of a transfer TB did post fails closed in the
-				// catch), an abort or release whose own void failed (its record names the
-				// `voidError`, though this sweep may yet return the funds), a terminal still in
-				// flight above (recorded there), and a settle still posting past the deadline (its
-				// own records). Then close the client: a voidAllPending throw must not skip
-				// destroy() and hang the process on the open TigerBeetle socket.
-				async () => {
-					if (engine != null && typeof engine.voidAllPending === "function") {
-						try {
-							await engine.voidAllPending();
-						} catch {
-							// Best-effort — TigerBeetle auto-voids pending transfers after 300s.
-						}
-					}
-				},
-				// Flush audit, then release its lock. destroy() never REJECTS for a lock left
-				// behind: callers call it without await or catch, and an unhandled rejection kills
-				// the process. The teardown reports it as a USERTRUST_AUDIT_LOCK_LEFT warning instead.
-				() => audit.flush(),
-				// Drop this governor's budget from the vault's record (never throws), once its last
-				// append has landed and BEFORE the audit lock is released: the record is republished
-				// for the governors still live only while this process holds the lock. It waits on the
-				// audit flush (an unbounded mutex wait), as the lock release after it does, so a hung
-				// flush keeps a destroyed governor on the record exactly as long as destroy() hangs.
-				() => enforcedBudget?.release(),
-				() => releaseAuditWriterForTeardown(audit),
-				// Destroy the engine and the proxy.
-				// close() where the engine has it: the TigerBeetle client's destroy() aborts the process
-				// on a client the cluster evicted while it was idle, and close() asks it first. An
-				// injected engine without it is destroyed as before.
-				async () => {
-					if (engine == null) return;
-					if (typeof engine.close === "function") await engine.close();
-					else if (typeof engine.destroy === "function") engine.destroy();
-				},
-				() => {
-					if (proxyConn != null) proxyConn.destroy();
-				},
-			]);
+		destroy(): Promise<void> {
+			// Idempotent by promise, not by flag: a second caller (the server's pool, after a signal
+			// handler already began this teardown) waits for the SAME teardown, so the void and the
+			// records it writes have landed when this resolves. A bare return here let a caller treat a
+			// teardown that had only begun as finished, and the process exit under it.
+			destroying ??= tearDown();
+			return destroying;
 		},
 
 		/**
@@ -2962,21 +3099,27 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 		},
 	};
 
-	// Safety net: clean up on process exit (use once to avoid listener accumulation)
-	const cleanupHandler = (): void => {
-		if (!destroyed) {
-			governor.destroy().catch(() => {});
-		}
-	};
-	process.once("beforeExit", cleanupHandler);
-	process.once("SIGTERM", cleanupHandler);
-	process.once("SIGINT", cleanupHandler);
+	// Safety net: clean up on process exit (use once to avoid listener accumulation). Off when the
+	// host owns shutdown (`installSignalHandlers: false`): two owners of one signal race, and the
+	// loser's exit can cut the winner's teardown short.
+	if (installSignalHandlers) {
+		const cleanupHandler = (): void => {
+			if (!destroyed) {
+				governor.destroy().catch(() => {});
+			}
+		};
+		process.once("beforeExit", cleanupHandler);
+		process.once("SIGTERM", cleanupHandler);
+		process.once("SIGINT", cleanupHandler);
+	}
 
 	// The budget this governor ENFORCES, recorded for vault readers (the ledger UI, inspect, health, report): they see
 	// only the vault, and the budget may have come from opts, a config file outside it, or the default. Registered LAST,
 	// once the governor is fully initialised: a start that fails later (an invalid policy) enforces nothing and must not
-	// replace the record of a governor that is running. Published only while this process holds the vault's writer lock
-	// (from the first successful append), so a process that never gets the lock never overwrites the holder's record.
+	// replace the record of a governor that is running. Published here, at the start: a vault with no record (a new one,
+	// or one only an earlier release wrote) gets this governor's budget now, not at its first call. An existing record
+	// is replaced only while this process holds the vault's writer lock (from the first successful append), so a process
+	// that never gets the lock never overwrites the holder's record.
 	// Advisory: it never throws, and a failed write removes any earlier record rather than leave a stale one.
 	enforcedBudget = registerEnforcedBudget(join(vaultBase, VAULT_DIR), config.budget, () =>
 		audit.lockOwner?.(),

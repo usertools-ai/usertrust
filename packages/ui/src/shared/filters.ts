@@ -7,7 +7,7 @@
  */
 
 import { utcDay } from "./format.js";
-import { type LedgerRow, statusOf } from "./rows.js";
+import { jobTypeOf, type LedgerRow, statusOf, typeSourceOf } from "./rows.js";
 
 export interface FilterState {
 	search: string;
@@ -15,6 +15,10 @@ export interface FilterState {
 	models: string[];
 	actors: string[];
 	statuses: string[];
+	/** Job types as declared (`untyped` selects records with none). */
+	jobTypes: string[];
+	/** Who declared the type (`untyped` selects records with none). */
+	typeSources: string[];
 	// `| undefined`: a cleared field is set to undefined, and under exactOptionalPropertyTypes an optional field
 	// declared without it refuses that.
 	from?: string | undefined;
@@ -29,6 +33,8 @@ export const EMPTY_FILTERS: FilterState = {
 	models: [],
 	actors: [],
 	statuses: [],
+	jobTypes: [],
+	typeSources: [],
 };
 
 export function isFiltering(f: FilterState): boolean {
@@ -38,6 +44,8 @@ export function isFiltering(f: FilterState): boolean {
 		f.models.length > 0 ||
 		f.actors.length > 0 ||
 		f.statuses.length > 0 ||
+		f.jobTypes.length > 0 ||
+		f.typeSources.length > 0 ||
 		f.from !== undefined ||
 		f.to !== undefined ||
 		f.costMin !== undefined ||
@@ -46,7 +54,18 @@ export function isFiltering(f: FilterState): boolean {
 }
 
 function haystack(r: LedgerRow): string {
-	return [r.id, r.kind, r.actor, r.model, r.provider, r.transferId, r.hash, r.source, r.error]
+	return [
+		r.id,
+		r.kind,
+		r.actor,
+		r.model,
+		r.provider,
+		r.transferId,
+		r.hash,
+		r.source,
+		r.error,
+		r.job,
+	]
 		.filter((v): v is string => typeof v === "string")
 		.join(" ")
 		.toLowerCase();
@@ -60,6 +79,8 @@ export function applyFilters(rows: LedgerRow[], f: FilterState): LedgerRow[] {
 		if (f.models.length > 0 && (r.model === undefined || !f.models.includes(r.model))) return false;
 		if (f.actors.length > 0 && !f.actors.includes(r.actor)) return false;
 		if (f.statuses.length > 0 && !f.statuses.includes(statusOf(r))) return false;
+		if (f.jobTypes.length > 0 && !f.jobTypes.includes(jobTypeOf(r))) return false;
+		if (f.typeSources.length > 0 && !f.typeSources.includes(typeSourceOf(r))) return false;
 		// The UTC date: the date the row shows (`formatUtc`) and the date the pickers are labelled with.
 		if (f.from !== undefined || f.to !== undefined) {
 			const day = utcDay(r.ts);

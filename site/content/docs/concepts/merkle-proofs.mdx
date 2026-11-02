@@ -89,7 +89,7 @@ interface MerkleInclusionProof {
 
 ## Consistency Proofs
 
-A consistency proof demonstrates that a Merkle tree of size `N` is a prefix of a Merkle tree of size `M` (where `M > N`). This proves the audit log was only appended to -- no events were modified or removed.
+A consistency proof demonstrates that a Merkle tree of size `N` is a prefix of a Merkle tree of size `M` (where `M > N`). Checked against an older root you obtained independently (a signed anchor, a published checkpoint), it shows the log was only appended to since then: no event under that root was modified or removed. On its own it shows nothing about tampering: `verifyConsistencyProof` takes both roots from the proof, so a log rewritten from the start yields proofs that verify against its own roots.
 
 ```typescript
 generateConsistencyProof(
