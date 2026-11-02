@@ -42,6 +42,7 @@ import pc from "picocolors";
 import { type BudgetStatus, getBudgetStatus } from "../budget/allocation.js";
 import { loadConfig } from "../config.js";
 import { TrustTBClient } from "../ledger/client.js";
+import { preflightLedger } from "../ledger/preflight.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import { GLOBAL_FLAGS } from "./flags.js";
 import type { CliOptions } from "./init.js";
@@ -417,10 +418,14 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 	let leftOpen = false;
 	try {
 		const config = await loadConfig(undefined, root);
+		await preflightLedger(config.tigerbeetle.addresses, {
+			clusterId: config.tigerbeetle.clusterId,
+		});
 		tb = new TrustTBClient({
 			addresses: config.tigerbeetle.addresses,
 			clusterId: BigInt(config.tigerbeetle.clusterId),
 		});
+		await tb.connectDeadline(config.tigerbeetle.connectTimeoutMs);
 		status = await getBudgetStatus(tb, {
 			parentUserId: flags.parentUserId,
 			costCenter: flags.costCenter,
