@@ -26,8 +26,8 @@ function makeCloudConfig(): TrustConfig {
 }
 
 describe("PRICING_TABLE", () => {
-	it("contains 42 models", () => {
-		expect(Object.keys(PRICING_TABLE)).toHaveLength(42);
+	it("contains 50 models", () => {
+		expect(Object.keys(PRICING_TABLE)).toHaveLength(56);
 	});
 
 	it("all rates are positive", () => {
@@ -408,7 +408,82 @@ describe("PRICING_TABLE_VERSION", () => {
 		// the up-to-100,000-token tier and carries the higher tier as `longPrompt`.
 		// 2026-10-28: gpt-5.6-sol corrected to its published $4 / $20 / $0.40 / $5.00 write;
 		// Gemini 3.1 Pro keyed by its published id, `gemini-3.1-pro-preview`.
-		expect(PRICING_TABLE_VERSION).toBe("2026-10-28");
+		// 2026-11-02: the current xAI models (grok-4.7, 4.6, 4.5, 4.3, the three 4.20-0309 ids and
+		// grok-build-0.1) from xAI's published pricing, each with its 200,000-token tier; grok-3 and
+		// the six other retired slugs on xAI's May 15, 2026 retirement notice repriced to the model each is billed as (grok-code-fast-1 to grok-build-0.1's).
+		expect(PRICING_TABLE_VERSION).toBe("2026-11-02");
+	});
+});
+
+describe("xAI rows (published model pricing, retrieved 2026-11-02)", () => {
+	// $/MTok as xAI publishes them: input / cached input / output, and the long-context arm.
+	const PUBLISHED: Record<string, [number, number, number]> = {
+		"grok-4.7": [2.0, 0.5, 6.0],
+		"grok-4.6": [2.0, 0.5, 6.0],
+		"grok-4.5": [2.0, 0.3, 6.0],
+		"grok-4.3": [1.25, 0.2, 2.5],
+		"grok-4.20-0309-reasoning": [1.25, 0.2, 2.5],
+		"grok-4.20-0309-non-reasoning": [1.25, 0.2, 2.5],
+		"grok-4.20-multi-agent-0309": [1.25, 0.2, 2.5],
+		"grok-build-0.1": [1.0, 0.2, 2.0],
+		// Retired slugs that xAI still resolves, billed at the pricing of the model they run on: grok-4.3,
+		// except grok-code-fast-1, which xAI routes to grok-build-0.1.
+		"grok-3": [1.25, 0.2, 2.5],
+		"grok-4-0709": [1.25, 0.2, 2.5],
+		"grok-4-1-fast-reasoning": [1.25, 0.2, 2.5],
+		"grok-4-1-fast-non-reasoning": [1.25, 0.2, 2.5],
+		"grok-4-fast-reasoning": [1.25, 0.2, 2.5],
+		"grok-4-fast-non-reasoning": [1.25, 0.2, 2.5],
+		"grok-code-fast-1": [1.0, 0.2, 2.0],
+	};
+
+	for (const [id, [inp, cached, out]] of Object.entries(PUBLISHED)) {
+		it(`${id}: usertokens per 1k are $/MTok x 10, the long tier is exactly 2x, writes are unpublished`, () => {
+			const r = getModelRates(id);
+			expect(r).toBe(PRICING_TABLE[id]);
+			expect(r).not.toBe(FALLBACK_RATE);
+			expect([r.inputPer1k, r.cacheReadPer1k, r.outputPer1k]).toEqual([
+				inp * 10,
+				cached * 10,
+				out * 10,
+			]);
+			expect(r.cacheWritePer1k).toBeUndefined();
+			expect(r.cacheWrite1hPer1k).toBeUndefined();
+			expect(r.longPrompt?.thresholdTokens).toBe(200_000);
+			expect(r.longPrompt?.rates).toStrictEqual({
+				inputPer1k: inp * 20,
+				cacheReadPer1k: cached * 20,
+				outputPer1k: out * 20,
+			});
+		});
+	}
+
+	it("the tier applies above 200,000 prompt tokens and not at exactly 200,000", () => {
+		const r = getModelRates("grok-4.7");
+		// 1 fresh input token and 1,000 output tokens; the prompt length decides the tier.
+		const at = costFromRatesUnfloored(r, 200_000, 1_000);
+		const over = costFromRatesUnfloored(r, 200_001, 1_000);
+		expect(at).toBeCloseTo((200_000 * 20) / 1000 + (1_000 * 60) / 1000, 6);
+		expect(over).toBeCloseTo((200_001 * 40) / 1000 + (1_000 * 120) / 1000, 6);
+	});
+
+	it("prices each retired slug exactly as the model xAI bills it as", () => {
+		for (const id of [
+			"grok-3",
+			"grok-4-0709",
+			"grok-4-1-fast-reasoning",
+			"grok-4-1-fast-non-reasoning",
+			"grok-4-fast-reasoning",
+			"grok-4-fast-non-reasoning",
+		]) {
+			expect(PRICING_TABLE[id]).toStrictEqual(PRICING_TABLE["grok-4.3"]);
+		}
+		expect(PRICING_TABLE["grok-code-fast-1"]).toStrictEqual(PRICING_TABLE["grok-build-0.1"]);
+	});
+
+	it("leaves grok-3-mini and bare grok-4 unpriced (not on xAI's retirement notice)", () => {
+		expect(PRICING_TABLE["grok-3-mini"]).toBeUndefined();
+		expect(PRICING_TABLE["grok-4"]).toBeUndefined();
 	});
 });
 
@@ -648,7 +723,144 @@ const AUDITED_RATES: Record<string, ModelRates> = {
 	"mistral-large-latest": { inputPer1k: 5, outputPer1k: 15 },
 	"deepseek-chat": { inputPer1k: 2.8, outputPer1k: 4.2 },
 	"deepseek-reasoner": { inputPer1k: 2.8, outputPer1k: 4.2 },
-	"grok-3": { inputPer1k: 30, outputPer1k: 150 },
+	// Retired xAI slugs billed at grok-4.3 pricing (xAI retirement notice, May 15, 2026).
+	"grok-3": {
+		inputPer1k: 12.5,
+		outputPer1k: 25,
+		cacheReadPer1k: 2,
+		longPrompt: {
+			thresholdTokens: 200_000,
+			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
+		},
+	},
+	"grok-4-0709": {
+		inputPer1k: 12.5,
+		outputPer1k: 25,
+		cacheReadPer1k: 2,
+		longPrompt: {
+			thresholdTokens: 200_000,
+			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
+		},
+	},
+	"grok-4-1-fast-reasoning": {
+		inputPer1k: 12.5,
+		outputPer1k: 25,
+		cacheReadPer1k: 2,
+		longPrompt: {
+			thresholdTokens: 200_000,
+			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
+		},
+	},
+	"grok-4-1-fast-non-reasoning": {
+		inputPer1k: 12.5,
+		outputPer1k: 25,
+		cacheReadPer1k: 2,
+		longPrompt: {
+			thresholdTokens: 200_000,
+			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
+		},
+	},
+	"grok-4-fast-reasoning": {
+		inputPer1k: 12.5,
+		outputPer1k: 25,
+		cacheReadPer1k: 2,
+		longPrompt: {
+			thresholdTokens: 200_000,
+			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
+		},
+	},
+	"grok-4-fast-non-reasoning": {
+		inputPer1k: 12.5,
+		outputPer1k: 25,
+		cacheReadPer1k: 2,
+		longPrompt: {
+			thresholdTokens: 200_000,
+			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
+		},
+	},
+	"grok-code-fast-1": {
+		inputPer1k: 10,
+		outputPer1k: 20,
+		cacheReadPer1k: 2,
+		longPrompt: {
+			thresholdTokens: 200_000,
+			rates: { inputPer1k: 20, outputPer1k: 40, cacheReadPer1k: 4 },
+		},
+	},
+	// xAI — published $/MTok x 10; xAI lists no cache-write price, and every model has a 200,000-token
+	// tier at exactly 2x each category (retrieved 2026-11-02).
+	"grok-4.7": {
+		inputPer1k: 20,
+		outputPer1k: 60,
+		cacheReadPer1k: 5,
+		longPrompt: {
+			thresholdTokens: 200_000,
+			rates: { inputPer1k: 40, outputPer1k: 120, cacheReadPer1k: 10 },
+		},
+	},
+	"grok-4.6": {
+		inputPer1k: 20,
+		outputPer1k: 60,
+		cacheReadPer1k: 5,
+		longPrompt: {
+			thresholdTokens: 200_000,
+			rates: { inputPer1k: 40, outputPer1k: 120, cacheReadPer1k: 10 },
+		},
+	},
+	"grok-4.5": {
+		inputPer1k: 20,
+		outputPer1k: 60,
+		cacheReadPer1k: 3,
+		longPrompt: {
+			thresholdTokens: 200_000,
+			rates: { inputPer1k: 40, outputPer1k: 120, cacheReadPer1k: 6 },
+		},
+	},
+	"grok-4.3": {
+		inputPer1k: 12.5,
+		outputPer1k: 25,
+		cacheReadPer1k: 2,
+		longPrompt: {
+			thresholdTokens: 200_000,
+			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
+		},
+	},
+	"grok-4.20-0309-reasoning": {
+		inputPer1k: 12.5,
+		outputPer1k: 25,
+		cacheReadPer1k: 2,
+		longPrompt: {
+			thresholdTokens: 200_000,
+			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
+		},
+	},
+	"grok-4.20-0309-non-reasoning": {
+		inputPer1k: 12.5,
+		outputPer1k: 25,
+		cacheReadPer1k: 2,
+		longPrompt: {
+			thresholdTokens: 200_000,
+			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
+		},
+	},
+	"grok-4.20-multi-agent-0309": {
+		inputPer1k: 12.5,
+		outputPer1k: 25,
+		cacheReadPer1k: 2,
+		longPrompt: {
+			thresholdTokens: 200_000,
+			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
+		},
+	},
+	"grok-build-0.1": {
+		inputPer1k: 10,
+		outputPer1k: 20,
+		cacheReadPer1k: 2,
+		longPrompt: {
+			thresholdTokens: 200_000,
+			rates: { inputPer1k: 20, outputPer1k: 40, cacheReadPer1k: 4 },
+		},
+	},
 	"llama-4-maverick": { inputPer1k: 2.4, outputPer1k: 9.7 },
 	"command-a": { inputPer1k: 25, outputPer1k: 100 },
 	"sonar-pro": { inputPer1k: 30, outputPer1k: 150 },
