@@ -4,9 +4,11 @@
 // A stand-in for tigerbeetle-node, for a CLI run in its own process (fake-tigerbeetle-register.mjs).
 // `FAKE_TB_MODE` says how its clients behave, as a 0.17.9 client does:
 //  - "healthy": every request answers;
-//  - "evict-after-read": a client answers one read, then learns the cluster evicted it while idle,
-//    and fails every request after that "closed";
-//  - "evicted": every client fails every request "closed" from the start.
+//  - "evict-after-read": a client answers the start-up probe and one read, then learns the cluster
+//    evicted it while idle, and fails every request after that "closed";
+//  - "evicted": every client fails every request "closed" from the start;
+//  - "hang": a request is never answered (something listens, but it is not a usertrust ledger, or a
+//    cluster of another id): the client holds the event loop until it is destroyed and never fails.
 // Each client holds the event loop until it is destroyed, as a native client does, and destroying
 // an evicted one aborts the process (SIGABRT), as tigerbeetle-node 0.17.9 does.
 const mode = process.env.FAKE_TB_MODE ?? "healthy";
@@ -16,10 +18,15 @@ const closed = () => Object.assign(new Error("Client was closed."), { code: "ERR
 export function createClient() {
 	let evicted = mode === "evicted";
 	let open = true;
+	// Reads that carry ids: the first is connectDeadline()'s start-up probe, the second is the
+	// command's own read, which is the one "evict-after-read" evicts after.
+	let reads = 0;
 	const hold = setInterval(() => {}, 60_000);
 	const request = async (ids) => {
 		if (!open || evicted) throw closed();
-		if (mode === "evict-after-read" && ids.length > 0) evicted = true;
+		if (mode === "hang") return await new Promise(() => {});
+		if (ids.length > 0) reads += 1;
+		if (mode === "evict-after-read" && ids.length > 0 && reads > 1) evicted = true;
 		return [{ id: 1n, credits_posted: 750n, debits_posted: 0n, debits_pending: 0n }].slice(
 			0,
 			ids.length > 0 ? 1 : 0,
