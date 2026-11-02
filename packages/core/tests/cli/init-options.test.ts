@@ -273,3 +273,43 @@ describe("running init over a vault that already exists", () => {
 		expect(readFileSync(vault(), "utf-8")).toBe("not a directory");
 	});
 });
+
+describe("a .gitignore that names the key file but then un-ignores it", () => {
+	/** git's own verdict, with a clean environment: exit 0 means the path is ignored. */
+	const ignored = (path: string): boolean =>
+		spawnSync("git", ["check-ignore", "-q", path], {
+			cwd: dir,
+			env: {
+				PATH: process.env.PATH ?? "",
+				HOME: dir,
+				GIT_CONFIG_GLOBAL: "/dev/null",
+				GIT_CONFIG_SYSTEM: "/dev/null",
+			},
+		}).status === 0;
+
+	for (const negation of ["!*", "!.*", "!.env", "!.env.*.tmp"]) {
+		it(`${negation} after .env: re-running init makes the key file and its temp files ignored again`, async () => {
+			spawnSync("git", ["init", "-q"], {
+				cwd: dir,
+				env: { PATH: process.env.PATH ?? "", HOME: dir },
+			});
+			mkdirSync(vault(), { recursive: true, mode: 0o700 });
+			const seed = `mine/\n.env\n.env.*.tmp\n${negation}\n`;
+			writeFileSync(vault(".gitignore"), seed, { mode: 0o600 });
+			// Positive control: git, not this code, says the seeded file leaves the key stageable.
+			const tmp = ".usertrust/.env.abc123.tmp";
+			expect(ignored(".usertrust/.env") && ignored(tmp), "seed must not ignore both").toBe(false);
+
+			await run(dir, { json: true });
+			expect(ignored(".usertrust/.env")).toBe(true);
+			expect(ignored(tmp)).toBe(true);
+			// Custom lines are kept in place, and the protection comes after the negation.
+			const after = readFileSync(vault(".gitignore"), "utf-8");
+			expect(after.startsWith(seed)).toBe(true);
+
+			// A second run changes nothing.
+			await run(dir, { json: true });
+			expect(readFileSync(vault(".gitignore"), "utf-8")).toBe(after);
+		});
+	}
+});
