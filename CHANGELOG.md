@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`usertrust init` hides the key as you type it, takes Enter at the budget prompt, and always leaves a key file.** The key prompt echoed every character; it is now masked. Enter at the budget prompt was refused (the default was applied only after validation); the prompt now offers $5 (50,000 usertokens) as a real value and calls the amount a total for the project that does not reset, not a monthly one. When no key was typed, or there is no terminal (`--json`, a pipe, CI), `init` creates `.usertrust/.env` as an owner-only template of commented lines instead of leaving none, and leaves a `.env` that exists as it is; a reconfigure that types a key keeps every other line and comment byte for byte, replaces the line of the same variable rather than adding a second, and writes the file owner-only through a rename. Running `init` again over an existing vault now exits 0 and keeps its config (`--json` reports `success: true` with `created: false`; it reported `success: false`).
+
 ## [5.3.0] - 2026-11-01
 
 ### Added

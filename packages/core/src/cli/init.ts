@@ -9,8 +9,9 @@
  * config, .env, policy, and .gitignore.
  */
 
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { Readable, Writable } from "node:stream";
 import * as clack from "@clack/prompts";
 import type { ModelRates } from "../ledger/pricing.js";
 import { modelsForProvider, PRICING_TABLE, PRICING_TABLE_VERSION } from "../ledger/pricing.js";
@@ -33,6 +34,12 @@ export interface CliOptions {
 	 * the defaults the --json path writes, asking nothing. Unset means interactive.
 	 */
 	interactive?: boolean;
+	/**
+	 * Where the prompts read and write. Unset means the terminal. A test hands the real prompts a
+	 * stream pair instead, so what it checks is what clack does, not what a stand-in returns.
+	 */
+	input?: Readable;
+	output?: Writable;
 }
 
 const ENV_VAR_MAP: Record<string, string> = {
@@ -77,6 +84,9 @@ const DEFAULT_POLICY = `rules:
         value: 1000
 `;
 
+/** Usertokens in a dollar: the budget is asked for in dollars and kept in usertokens. */
+const USERTOKENS_PER_DOLLAR = 10_000;
+
 const SUBDIRS = ["audit", "policies", "patterns", "snapshots", "board", "dlq"] as const;
 
 function envVarName(provider: string): string {
@@ -111,17 +121,28 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	const json = opts?.json === true;
 
 	// ── Check existing vault ──
+	// A second run carries on rather than stopping: it keeps the vault's config exactly as it is,
+	// gives a vault from before the key file existed its template, and says so. Changing the
+	// config is what --reconfigure is for.
 	if (existsSync(vaultPath) && !opts?.reconfigure) {
+		const envCreated = ensureEnvTemplate(vaultPath);
 		if (json) {
 			console.log(
 				JSON.stringify({
 					command: "init",
-					success: false,
-					data: { message: "Vault already exists", path: vaultPath },
+					success: true,
+					data: {
+						message: "Vault already exists; its config was kept",
+						path: vaultPath,
+						created: false,
+						envCreated,
+					},
 				}),
 			);
 		} else {
-			clack.log.warn(`Vault already exists at ${vaultPath}`);
+			clack.log.info(
+				`Vault already exists at ${scrubForTerminal(vaultPath)}. Its config was kept; run "usertrust init --reconfigure" to change it.`,
+			);
 		}
 		return;
 	}
@@ -164,19 +185,27 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	}
 
 	// ── Interactive wizard ──
-	clack.intro("usertrust init");
+	// Only the streams the caller gave: an explicit `undefined` is not an absent option under
+	// exactOptionalPropertyTypes, and clack falls back to stdin/stdout when they are absent.
+	const io: { input?: Readable; output?: Writable } = {
+		...(opts?.input ? { input: opts.input } : {}),
+		...(opts?.output ? { output: opts.output } : {}),
+	};
+	clack.intro("usertrust init", io);
 
 	// Step 1: API key loop
 	const keys: Record<string, string> = {};
 	const providers: Array<{ name: string; models: string[] }> = [];
 
 	while (true) {
-		const keyResult = await clack.text({
+		// Masked: a key typed into a terminal that is shared, recorded or on a projector is not echoed.
+		const keyResult = await clack.password({
 			message:
 				Object.keys(keys).length === 0
 					? "Paste your API key:"
 					: "Paste another API key (empty = done):",
-			placeholder: "sk-...",
+			mask: "•",
+			...io,
 		});
 
 		if (clack.isCancel(keyResult)) {
@@ -193,6 +222,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 			const providerResult = await clack.text({
 				message: "Could not detect provider. Enter provider name:",
 				placeholder: "e.g. mistral, deepseek",
+				...io,
 			});
 
 			if (clack.isCancel(providerResult)) {
@@ -209,7 +239,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 
 		// Validate key unless --skip-verify
 		if (!opts?.skipVerify) {
-			const s = clack.spinner();
+			const s = clack.spinner(io);
 			s.start(`Validating ${provider} key...`);
 			const result = await validateKey(key, provider);
 			if (result.valid) {
@@ -228,9 +258,14 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	}
 
 	// Step 2: Budget
+	// A total, not a monthly allowance: the budget is spent down and does not reset. The default is
+	// the initial value, not a placeholder, so Enter accepts it ($5 is DEFAULT_BUDGET usertokens).
+	const defaultDollars = String(DEFAULT_BUDGET / USERTOKENS_PER_DOLLAR);
 	const budgetResult = await clack.text({
-		message: "Monthly budget: $",
-		placeholder: "50",
+		message: "Total budget for this project, $ (it does not reset)",
+		placeholder: defaultDollars,
+		initialValue: defaultDollars,
+		...io,
 		validate: (value) => {
 			if (!value) return "Enter a positive number";
 			const cleaned = value.replace(/[$,]/g, "");
@@ -246,7 +281,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	}
 
 	const dollars = Number((budgetResult as string).replace(/[$,]/g, ""));
-	const budgetUsertokens = Math.round(dollars * 10_000);
+	const budgetUsertokens = Math.round(dollars * USERTOKENS_PER_DOLLAR);
 
 	// Step 3: Rates
 	let pricing: "recommended" | "custom" = "recommended";
@@ -255,6 +290,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	const useRecommended = await clack.confirm({
 		message: `Use recommended rates? (verified ${PRICING_TABLE_VERSION})`,
 		initialValue: true,
+		...io,
 	});
 
 	if (clack.isCancel(useRecommended)) {
@@ -295,6 +331,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 		// Allow editing individual models
 		while (true) {
 			const modelResult = await clack.text({
+				...io,
 				message: "Model to edit (empty = accept all):",
 				placeholder: "e.g. claude-sonnet-4-6",
 			});
@@ -313,6 +350,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 			}
 
 			const inputResult = await clack.text({
+				...io,
 				message: `${model} input rate ($/1M tokens):`,
 			});
 
@@ -322,6 +360,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 			}
 
 			const outputResult = await clack.text({
+				...io,
 				message: `${model} output rate ($/1M tokens):`,
 			});
 
@@ -349,6 +388,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 			// just doesn't carry the model's cache discount. Never write 0 for
 			// "unanswered"; that would zero-bill cache tokens.
 			const cacheReadResult = await clack.text({
+				...io,
 				message: `${model} cache-read rate ($/1M tokens, blank = price at full input rate):`,
 			});
 
@@ -358,6 +398,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 			}
 
 			const cacheWriteResult = await clack.text({
+				...io,
 				message: `${model} cache-write rate ($/1M tokens, blank = price at full input rate):`,
 			});
 
@@ -369,6 +410,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 			// The 1-hour cache-write rate. A blank answer OMITS it (never 0): an omitted
 			// 1-hour rate settles at the dearer of the 5-minute write and 2x input.
 			const cacheWrite1hResult = await clack.text({
+				...io,
 				message: `${model} cache-write 1-hour rate ($/1M tokens, blank = the dearer of the 5-minute write rate and 2x the input rate):`,
 			});
 
@@ -438,6 +480,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	const wantsLocal = await clack.confirm({
 		message: "Configure local inference (Ollama / LM Studio / vLLM)?",
 		initialValue: false,
+		...io,
 	});
 	if (clack.isCancel(wantsLocal)) {
 		clack.log.warn("Setup cancelled.");
@@ -446,6 +489,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 
 	if (wantsLocal === true) {
 		const localChoice = await clack.select({
+			...io,
 			message: "Pick your local runtime:",
 			options: [
 				{ value: "skip", label: "Skip — cloud providers only" },
@@ -466,7 +510,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 			const base = LOCAL_PRESET_URLS[runtime];
 			endpoints = [{ match: base, class: "local", runtime }];
 
-			const s = clack.spinner();
+			const s = clack.spinner(io);
 			s.start(`Probing ${base}/v1/models...`);
 			const models = await probeLocalModels(base);
 			if (models.length > 0) {
@@ -496,7 +540,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 		keys,
 	});
 
-	clack.outro(`Vault created at ${vaultPath}`);
+	clack.outro(`Vault created at ${vaultPath}`, io);
 }
 
 interface VaultData {
@@ -509,6 +553,68 @@ interface VaultData {
 	endpoints?: Array<{ match: string; class: "local"; runtime: LocalPreset }>;
 	/** Detected local models, written to local.models with {0,0} nominal rates. */
 	localModels?: Record<string, ModelRates>;
+}
+
+/** What a new vault's key file holds when no key was typed: all comments, so it loads as empty. */
+const ENV_TEMPLATE = `# usertrust provider keys, read by usertrust when it runs and by \`node --env-file=.usertrust/.env\`.
+# This file is private to you (mode 0600) and ignored by git. Remove the # and add a key to use it.
+# ANTHROPIC_API_KEY=
+# OPENAI_API_KEY=
+# GOOGLE_API_KEY=
+`;
+
+function warnOnStderr(message: string): void {
+	process.stderr.write(`${scrubForTerminal(message)}\n`);
+}
+
+/**
+ * Make the key file a commented template when the vault has none. Returns true when it made one.
+ * An existing file is left alone, whatever it holds, and so is a dangling symlink: lstat sees the
+ * link itself, so nothing is written through it.
+ */
+function ensureEnvTemplate(vaultPath: string): boolean {
+	const envPath = join(vaultPath, ".env");
+	try {
+		lstatSync(envPath);
+		return false;
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+	}
+	// Never in place: a fresh owner-only file is renamed into position (shared/private-fs.ts).
+	writePrivateFileAtomic(envPath, ENV_TEMPLATE, warnOnStderr);
+	return true;
+}
+
+/** Whether a line of a key file assigns `name` (`NAME=...`, optionally `export NAME=...`). */
+function assigns(line: string, name: string): boolean {
+	return new RegExp(`^\\s*(?:export\\s+)?${name}\\s*=`).test(line);
+}
+
+/**
+ * Put the typed keys in the key file. Lines for other variables, and comments, are kept as they
+ * are; a typed key replaces the line that assigned the same variable, or is added after the last
+ * line. Written through a fresh owner-only file renamed into place, never in place: a mode passed
+ * to an in-place write applies only when the file is CREATED, so a reconfigure over an existing
+ * 0644 file would put the new key in that 0644 file (a symlink is replaced, never written through).
+ */
+function writeKeys(vaultPath: string, keys: Record<string, string>): void {
+	const envPath = join(vaultPath, ".env");
+	let lines: string[] = [];
+	try {
+		lines = readFileSync(envPath, "utf-8").split("\n");
+		if (lines[lines.length - 1] === "") lines.pop();
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+	}
+	for (const [provider, key] of Object.entries(keys)) {
+		const name = envVarName(provider);
+		const escaped = key.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+		const line = `${name}="${escaped}"`;
+		const at = lines.findIndex((l) => assigns(l, name));
+		if (at === -1) lines.push(line);
+		else lines[at] = line;
+	}
+	writePrivateFileAtomic(envPath, `${lines.join("\n")}\n`, warnOnStderr);
 }
 
 function createVault(vaultPath: string, data: VaultData): void {
@@ -575,18 +681,13 @@ dlq/
 		mode: PRIVATE_FILE_MODE,
 	});
 
-	// Write .env with API keys
+	// The key file. Typed keys are merged into it, so another provider's key and the comments in
+	// the file survive; with none typed, a commented template is made only when there is no file,
+	// so `node --env-file=.usertrust/.env` works on a vault that has no key yet. An existing file
+	// is never replaced with a template.
 	if (data.keys && Object.keys(data.keys).length > 0) {
-		const envLines = Object.entries(data.keys).map(([provider, key]) => {
-			const escaped = key.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-			return `${envVarName(provider)}="${escaped}"`;
-		});
-		// Never in place: a mode passed to an in-place write applies only when the file is
-		// CREATED, so a reconfigure over an existing 0644 `.env` put the new key in that 0644
-		// file. A fresh owner-only file is renamed over it instead (a symlink is replaced,
-		// never written through).
-		writePrivateFileAtomic(join(vaultPath, ".env"), `${envLines.join("\n")}\n`, (message) => {
-			process.stderr.write(`${scrubForTerminal(message)}\n`);
-		});
+		writeKeys(vaultPath, data.keys);
+	} else {
+		ensureEnvTemplate(vaultPath);
 	}
 }
