@@ -13,7 +13,7 @@ Each record contains:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `promptHash` | string | SHA-256 hex digest, but of what depends on the writer. `govern()` records `sha256(JSON.stringify(promptParts))` over the provider-normalized prompt parts (messages plus system prompt; Google `contents`); the headless governor records `sha256(transferId)`, a per-call id, so headless entries never repeat; `hashPrompt(text)` is `sha256(text)` of the raw string, so a hash of the raw prompt will not match a `govern()` entry |
+| `promptHash` | string | SHA-256 hex digest, but of what depends on the writer. `govern()` records `sha256(JSON.stringify(promptParts))` over the provider-normalized prompt parts (messages plus system prompt; Google `contents`); the headless controller records `sha256(transferId)`, a per-call id, so headless entries never repeat; `hashPrompt(text)` is `sha256(text)` of the raw string, so a hash of the raw prompt will not match a `govern()` entry |
 | `model` | string | Model used for the call |
 | `cost` | number | Usertokens spent |
 | `success` | boolean | Whether the call succeeded |

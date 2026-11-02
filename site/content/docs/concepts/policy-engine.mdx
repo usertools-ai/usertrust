@@ -81,7 +81,7 @@ See [Policy Operators](/docs/policy/operators) for detailed usage and examples o
 
 ## Scope Matching
 
-`scopePatterns` match the **operator-declared** `scope` on the governor or config — never request content. Set it the same way you set `budget` or `parentUserId`:
+`scopePatterns` match the **operator-declared** `scope` on the controller or config — never request content. Set it the same way you set `budget` or `parentUserId`:
 
 ```ts
 await trust(client, { scope: ["production/api"] });
@@ -111,7 +111,7 @@ timeWindows:
     endHour: 17
 ```
 
-A rule with a time window only matches during the specified period. Outside the window, the rule is skipped entirely. Hours are compared in the governor process's local time (`getDay` / `getHours`): `startHour` (0–23) is inclusive and `endHour` (0–24) is exclusive, and a window whose `startHour` is greater than its `endHour` wraps midnight on the same local day. Either bound may be omitted.
+A rule with a time window only matches during the specified period. Outside the window, the rule is skipped entirely. Hours are compared in the controller process's local time (`getDay` / `getHours`): `startHour` (0–23) is inclusive and `endHour` (0–24) is exclusive, and a window whose `startHour` is greater than its `endHour` wraps midnight on the same local day. Either bound may be omitted.
 
 ## Priority
 

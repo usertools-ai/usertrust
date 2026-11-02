@@ -7,10 +7,10 @@ description: Define governance rules in YAML with enforcement levels, severity, 
 
 Rules are defined in YAML (or JSON) and loaded from `.usertrust/policies/default.yml` by default.
 
-The file is read when the governor is built (`trust()` / `createGovernor()`). Its path is the `policies` key of `usertrust.config.json` (default `./policies/default.yml`, relative to the `.usertrust/` vault); a `.yml` or `.yaml` extension parses as YAML, anything else as JSON. The document is either a bare list of rules or an object with a single `rules` key. No file means built-in defaults only. A file that is present but unreadable, unparseable, or contains any invalid rule throws `PolicyLoadError` and the governor does not start; no partial rule set is ever loaded. Check a file ahead of time with `usertrust policy validate [path] [--json]`.
+The file is read when the controller is built (`trust()` / `createGovernor()`). Its path is the `policies` key of `usertrust.config.json` (default `./policies/default.yml`, relative to the `.usertrust/` vault); a `.yml` or `.yaml` extension parses as YAML, anything else as JSON. The document is either a bare list of rules or an object with a single `rules` key. No file means built-in defaults only. A file that is present but unreadable, unparseable, or contains any invalid rule throws `PolicyLoadError` and the controller does not start; no partial rule set is ever loaded. Check a file ahead of time with `usertrust policy validate [path] [--json]`.
 
 ```yaml
-# Requires operator scope on the governor/config, e.g. scope: ["production/api"]
+# Requires operator scope on the controller/config, e.g. scope: ["production/api"]
 - name: block-expensive-models
   effect: deny
   enforcement: hard
@@ -57,7 +57,7 @@ Hard rules fail closed. A condition whose field is absent from the context, or i
 
 ## Scope Matching
 
-Uses minimatch glob patterns against the **operator-declared** `scope` on the governor or `usertrust.config.json` — not request content, and not `params.params.scope`.
+Uses minimatch glob patterns against the **operator-declared** `scope` on the controller or `usertrust.config.json` — not request content, and not `params.params.scope`.
 
 ```yaml
 scopePatterns:
@@ -117,4 +117,4 @@ interface RuleMatch {
 }
 ```
 
-`evaluatedAt` is the context timestamp when one was supplied, otherwise the evaluation time as an ISO string. Neither `PolicyResult` nor `RuleMatch` is exported from the `usertrust` package entry points; they describe the result the governor evaluates internally.
+`evaluatedAt` is the context timestamp when one was supplied, otherwise the evaluation time as an ISO string. Neither `PolicyResult` nor `RuleMatch` is exported from the `usertrust` package entry points; they describe the result the controller evaluates internally.
