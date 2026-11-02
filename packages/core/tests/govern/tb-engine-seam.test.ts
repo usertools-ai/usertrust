@@ -206,6 +206,9 @@ vi.mock("tigerbeetle-node", async (importOriginal) => {
 	return { ...actual, createClient: vi.fn(() => mockClient) };
 });
 
+// The native client is faked, so there is no listener to reach: the TCP preflight is stood down.
+vi.mock("../../src/ledger/preflight.js", () => ({ preflightLedger: async () => {} }));
+
 import { withCostCenter } from "../../src/budget/attribution.js";
 import { createTBEngine, trust } from "../../src/govern.js";
 import { createGovernor } from "../../src/headless.js";

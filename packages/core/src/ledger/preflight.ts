@@ -16,13 +16,15 @@
 import { connect } from "node:net";
 import { LedgerUnavailableError } from "../shared/errors.js";
 
-/** How long one TCP attempt may take before the address counts as not answering. */
+/** How long one loopback TCP attempt may take before the address counts as not answering. */
 const CONNECT_ATTEMPT_MS = 1_000;
+/** A remote link may lose a SYN: three seconds outlasts the first retransmit, so a lossy link is not "no ledger". */
+const REMOTE_CONNECT_ATTEMPT_MS = 3_000;
 
 export interface PreflightOptions {
 	/** The configured cluster id, named in the fix for an explicit non-loopback address. */
 	clusterId?: number | bigint;
-	/** Per-address TCP attempt budget. Default 1 s. */
+	/** Per-address TCP attempt budget. Default 1 s for loopback, 3 s for any other host. */
 	attemptMs?: number;
 }
 
@@ -83,7 +85,6 @@ export async function preflightLedger(
 	addresses: readonly string[],
 	options: PreflightOptions = {},
 ): Promise<void> {
-	const attemptMs = options.attemptMs ?? CONNECT_ATTEMPT_MS;
 	const targets: ParsedAddress[] = [];
 	for (const address of addresses) {
 		const parsed = parseLedgerAddress(address);
@@ -93,7 +94,9 @@ export async function preflightLedger(
 	}
 	if (targets.length === 0) return;
 
-	const answers = await Promise.all(targets.map((t) => reachable(t, attemptMs)));
+	const attemptFor = (t: ParsedAddress): number =>
+		options.attemptMs ?? (isLoopbackHost(t.host) ? CONNECT_ATTEMPT_MS : REMOTE_CONNECT_ATTEMPT_MS);
+	const answers = await Promise.all(targets.map((t) => reachable(t, attemptFor(t))));
 	if (answers.some(Boolean)) return;
 
 	const shown = targets.map((t) =>
