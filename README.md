@@ -87,13 +87,13 @@ npx usertrust init
 
 `npx usertrust init` does not install the package into your project, so the `npm install` line is required. `import { trust } from "usertrust"` fails until it runs.
 
-usertrust wraps your provider's own client and does not install it. Install the SDK for the provider you use beside it: `@anthropic-ai/sdk` for the example above, `openai`, or `@google/genai` for Google Gemini (`npm install usertrust @google/genai`). `@anthropic-ai/sdk` (0.116.0 or newer) and `openai` (7.4.0 or newer) are declared as optional peer dependencies. `@google/genai` is not declared at all: usertrust recognises a Google client by its shape (`models.generateContent`), so nothing in the install names that package, and you install it yourself.
+usertrust wraps your provider's own client and does not install it. Install the SDK for the provider you use beside it: `@anthropic-ai/sdk` for the example above, `openai`, or `@google/genai` for Google Gemini (`npm install usertrust @google/genai`). All three are declared as optional peer dependencies (`@anthropic-ai/sdk` 0.116.0 or newer, `openai` 7.4.0 or newer, `@google/genai` 1.52.0 or newer). Optional peers are not installed for you, so you install the one you use yourself.
 
 `init` is interactive in a terminal. It asks for your provider API key (Anthropic `sk-ant-`, OpenAI `sk-` and Google `AIza` keys are detected from their prefix; any other provider you name yourself) and writes it to `.usertrust/.env`. A new or rewritten `.env` is always owner-only (mode 600): `init --reconfigure` writes a fresh owner-only file and renames it over the old one, whatever the old file's mode, and replaces a symlinked `.env` rather than writing through it. An Anthropic, OpenAI or Google key is first checked against that provider's models endpoint (unless you pass `--skip-verify`); a key that fails the check is still written, with a warning. A key for a provider you name yourself is not checked at all, even though `init` reports it as valid, so a wrong key there shows up only on the first real call.
 
 Without a terminal (CI, scripts, a container build), run `npx usertrust init --json`: it creates the vault without prompting and without asking for a key.
 
-This creates a `.usertrust/` vault in your project root with default config, policies, and an empty audit chain.
+This creates a `.usertrust/` vault in your project root with the default config and policies; the audit chain, `audit/events.jsonl`, is created by the first governed call.
 
 The vault is owner-only on Linux and macOS: every directory usertrust creates in it is `0700` and every file `0600`, and a `.usertrust/` another user owns is refused. On Windows usertrust does not set or check permissions, because POSIX modes do not map to ACLs: the vault folder's inherited ACL governs who can read it. Keep the vault (and a usertrust-server's `stateDir`) under your own user profile, or give the folder an owner-only ACL yourself. See [LIMITATIONS.md](https://github.com/usertools-ai/usertrust/blob/master/LIMITATIONS.md).
 
@@ -170,18 +170,25 @@ npx usertrust inspect
 ```
 
 ```
-=== Vault Report ===
-Chain:    847 events · 12 segments
-Budget:   38,420 / 50,000 UT remaining
-Models:   claude-fable-5 (412) · gpt-5.6-sol (289) · kimi-k3 (146)
-Policy:   3 rules active · 0 violations
-PII:      2 warnings · 0 blocks
-Merkle:   a3f8c1...d92b (root)
++--------------------------------------------------------------+
+|  * usertrust vault                                           |
+|  Budget: 38,420 / 50,000 UT remaining (76.8%)                |
+|    (the enforced budget, as of 2026-03-16T12:00:00.000Z)     |
+|  Chain: 847 events | Integrity: SHA-256 verified             |
+|  Merkle root: a3f8c1d92b4e7f01...                            |
++----------+--------------+--------+---------------------------+
+| Time     | Model        | Cost   | Receipt                   |
++----------+--------------+--------+---------------------------+
+| 12:00:04 | claude-fable | 342 UT | tx_m5xunpc0_a1b2c3d4      |
+| 11:59:52 | gpt-5.6-sol  | 118 UT | tx_m5xunk1q_9f3e21ab      |
++----------+--------------+--------+---------------------------+
 ```
+
+The header gives the budget and where it came from, the chain length and integrity verdict, and the start of the Merkle root; the table lists the last 10 events, newest first. `usertrust inspect --json` returns the same data as JSON.
 
 ## CLI
 
-All commands support `--json` for machine-readable output.
+Every command except `ui` supports `--json` for machine-readable output.
 
 ```bash
 usertrust init          # Create .usertrust/ vault
@@ -198,7 +205,7 @@ usertrust completions   # Shell completions (bash, zsh, fish)
 
 ### JSON output
 
-Every command supports `--json` for scripting and CI:
+Every command except `ui` supports `--json` for scripting and CI:
 
 ```bash
 usertrust inspect --json | jq '.data.remaining'
@@ -228,7 +235,7 @@ Ledger unavailable: connection refused
   Docs: https://usertrust.ai/docs/errors/ledger-unavailable
 ```
 
-In 4.1.0, `usertrust tb start` only prints the manual steps, so the hint above refers to them. Start TigerBeetle as described in [Running TigerBeetle](#running-tigerbeetle), or use `{ dryRun: true }`.
+`usertrust tb start` only prints the manual steps and does not start TigerBeetle, so the hint above refers to them. Start TigerBeetle as described in [Running TigerBeetle](#running-tigerbeetle), or use `{ dryRun: true }`.
 
 ## Config
 
@@ -247,19 +254,17 @@ Create `.usertrust/usertrust.config.json`:
 
 `budget`, `pii`, `parentUserId` and `scope` can also be passed to `trust()` (and to `createGovernor()`), and override the file: `trust(client, { pii: "block" })` blocks PII whatever the file says. Every other setting (`circuitBreaker`, `patterns`, `audit`, …) is read from the file only. Besides these, its own options (`configPath`, `dryRun`, `vaultBase`, `endpoint`, `allowUngoverned`) and `tier` (accepted, but currently not applied), any key passed to `trust()` is refused by name: it throws a `TypeError` such as `trust(): unknown option "circuitBreaker" (set it in .usertrust/usertrust.config.json)` instead of being ignored. So does a `pii` value the config does not allow. `allowUngoverned` is for `trust()` only: `createGovernor()` refuses it by name.
 
-`defineConfig` is available as a TypeScript type-checking helper for validating config objects in your code. The actual config file must be `usertrust.config.json` (JSON format):
+`defineConfig` takes the fully resolved `TrustConfig`, in which every field that has a default is required, and returns it parsed through the schema, so it does not accept a partial object. To build a config in code, pass overrides to `loadConfig`: it reads `.usertrust/usertrust.config.json`, replaces each top-level field you give (the whole field, not a merge) and validates the result. The actual config file must be `usertrust.config.json` (JSON format):
 
 ```typescript
-import { defineConfig } from "usertrust";
+import { loadConfig } from "usertrust";
 
-// Type-check your config object — useful for programmatic overrides
-const config = defineConfig({
+// Read the config file, override some fields, validate the result
+const config = await loadConfig({
   budget: 50_000,
-  tier: "pro",
   pii: "block",
   circuitBreaker: { failureThreshold: 5, resetTimeout: 60_000 },
-  patterns: { enabled: true },
-  audit: { rotation: "daily", indexLimit: 10_000 },
+  audit: { rotation: "daily", indexLimit: 10_000, failClosed: false },
 });
 ```
 
@@ -273,13 +278,13 @@ const config = defineConfig({
 
 **External anchoring** — Ed25519-signed chain-head checkpoints pushed to an append-only store the vault operator cannot rewrite (S3 Object Lock, protected git branch, SIEM). Even a fully re-hashed, internally-consistent rewrite of the events an anchor covers fails verification against the externally-held root; events appended after the last anchor are covered only by the next one. Ships a native SigV4 S3 sink (no AWS SDK), an experimental [Rekor](https://docs.sigstore.dev/logging/overview/) transparency-log witness that publishes digests only, `anchor doctor` to probe whether the writer identity can actually delete or overwrite in the store, and `anchor export-bundle` to hand an auditor the records and receipts in one file. See the [anchoring guide](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md).
 
-**Policy engine** — 12 field operators (`eq`, `gt`, `in`, `regex`, etc.) with soft/hard enforcement. Block specific models, cap costs, require approvals.
+**Policy engine** — 12 field operators (`eq`, `gt`, `in`, `regex`, etc.) with soft/hard enforcement. Block specific models, cap costs. A rule's effect is `deny` or `warn`; there is no approval step.
 
 **PII detection** — a pattern scan of each request's prompt text for email, phone, SSN, Luhn-validated credit card, IPv4 and common secret formats (API keys, cloud and GitHub tokens, JWTs, private keys). Block, redact or warn before the prompt leaves your process. It reads the prompt (messages, input, contents), not tool definitions or other request fields, and never the response; see [what it does and does not cover](https://usertrust.ai/docs/policy/pii).
 
 **Circuit breakers** — Per-provider failure isolation. When a provider starts failing, the breaker opens and requests fail fast instead of cascading.
 
-**Pattern memory** — Learns optimal model routing from historical prompt-cost-success data. Feeds routing decisions when connected to proxy.
+**Pattern memory** — Records a hash of each prompt with the model, cost and outcome in `.usertrust/patterns/memory.json`, and can suggest a model from it (`suggestModel()`). It does not route calls: nothing in the SDK changes the model on the strength of what it recorded, and proxy mode is not implemented.
 
 ## Why this exists
 
