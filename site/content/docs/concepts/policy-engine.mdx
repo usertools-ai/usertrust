@@ -12,11 +12,13 @@ Each rule specifies an enforcement level that determines what happens when the r
 | Enforcement | Effect |
 |-------------|--------|
 | **hard** | Deny the request. Throws `PolicyDeniedError`. |
-| **soft** | Allow the request with warnings. The governance receipt includes the matched rule and reason. |
+| **soft** | Allow the request. A soft-only match is invisible to the caller: the receipt carries no rule or reason, the `llm_call` audit event records nothing about it, and every call site reads the evaluation result only inside its `decision === "deny"` branch. `hasWarnings` and `softViolations` live only on the internal `PolicyResult`, which is not exported. A soft rule's `[WARN]` reason surfaces in exactly one place: the `PolicyDeniedError` message, when a hard rule denies the same call. |
+
+Enforcement also decides what happens when a condition cannot be evaluated — the field is absent from the context, or has the wrong type for the operator (every operator except `exists` / `not_exists` reports this as indeterminate). A hard rule treats an indeterminate condition as satisfied and still fires (fail closed); a soft rule treats it as unmet and stays silent. So a hard rule on `model` denies a governed action call, which carries no `model`; lead such a rule with an `exists` condition on the same field when it must apply only where the field is populated.
 
 ## PolicyResult
 
-Every policy evaluation returns a structured result:
+Every policy evaluation returns a structured result. This type and `evaluatePolicy()` are internal to the package — neither is exported from `usertrust` or `usertrust/headless` — so a governed call observes a policy decision in-band only as a `PolicyDeniedError`, whose `reason` joins one entry per matched violation with `; `: the rule's `[id]` (or `[name]`) label followed by its description (or, for a rule that has an `id` but no description, its name), with soft matches prefixed `[WARN]`. Only the denial's audit event is filtered to the hard rules:
 
 ```typescript
 interface PolicyResult {
@@ -109,7 +111,7 @@ timeWindows:
     endHour: 17
 ```
 
-A rule with a time window only matches during the specified period. Outside the window, the rule is skipped entirely.
+A rule with a time window only matches during the specified period. Outside the window, the rule is skipped entirely. Hours are compared in the governor process's local time (`getDay` / `getHours`): `startHour` (0–23) is inclusive and `endHour` (0–24) is exclusive, and a window whose `startHour` is greater than its `endHour` wraps midnight on the same local day. Either bound may be omitted.
 
 ## Priority
 
@@ -128,9 +130,11 @@ If multiple rules match, all hard violations result in denial. Soft violations a
 
 usertrust ships with three built-in rules:
 
-1. **block-budget-overshoot** -- Deny when `budget_remaining_after` `lt` 0 (hard)
-2. **block-budget-exhausted** -- Deny when `budget_remaining` `lte` 0 (hard)
-3. **warn-high-cost** -- Warn when `estimated_cost` `gt` 1000 (soft)
+1. **block-budget-overshoot** — Deny when `budget_remaining_after` `lt` 0 (hard)
+2. **block-budget-exhausted** — Deny when `budget_remaining` `lte` 0 (hard)
+3. **warn-high-cost** — Warn when `estimated_cost` `gt` 1000 (soft)
+
+The built-ins carry priorities 1, 2 and 50 and are always enforced: a custom policy file is concatenated on top of them (`mergePolicies`), so user rules can add deny or warn rules but cannot remove, disable, or override a built-in — `enabled: false` or a rule reusing a built-in's `id` simply appends another rule while the original stays active. The `default.yml` that `usertrust init` writes contains a copy of these three rules; deleting them from the file does not turn them off.
 
 ## Further Reading
 

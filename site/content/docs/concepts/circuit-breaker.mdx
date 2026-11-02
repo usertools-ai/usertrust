@@ -19,7 +19,7 @@ CLOSED → (failures hit threshold) → OPEN → (timeout expires) → HALF-OPEN
 |-------|----------|
 | **Closed** | Requests pass through normally. Failures are counted. |
 | **Open** | All requests are immediately rejected with `CircuitOpenError`. No calls reach the provider. |
-| **Half-Open** | A limited number of requests are allowed through as probes. Successes move toward closed; a failure returns to open. |
+| **Half-Open** | Requests are allowed through as probes (there is no cap on how many). Each success counts toward `halfOpenSuccessThreshold`; a single failure returns to open. |
 
 ## CircuitBreaker
 
@@ -31,9 +31,11 @@ const breaker = new CircuitBreaker("anthropic", {
 });
 
 breaker.allowRequest();   // throws CircuitOpenError if open
-breaker.recordSuccess();  // decrements toward closed
+breaker.recordSuccess();  // closed: resets the failure count to 0; half-open: counts toward closing
 breaker.recordFailure();  // increments toward open
 breaker.reset();          // force close
+breaker.getState();       // "closed" | "open" | "half-open" — applies the open → half-open timeout
+breaker.snapshot();       // CircuitBreakerSnapshot (see below)
 ```
 
 ### Request Flow
@@ -63,6 +65,9 @@ const all = registry.allSnapshots();
 
 // Reset all breakers
 registry.resetAll();
+
+// Number of tracked breakers
+const count = registry.size;
 ```
 
 ## CircuitBreakerSnapshot
@@ -71,11 +76,11 @@ The snapshot provides a read-only view of a breaker's current state:
 
 ```typescript
 interface CircuitBreakerSnapshot {
-  state: "closed" | "open" | "half-open";
-  consecutiveFailures: number;
-  halfOpenSuccesses: number;
-  lastFailureTime: number | null;
-  lastStateChange: number;
+  readonly state: "closed" | "open" | "half-open";
+  readonly consecutiveFailures: number;
+  readonly halfOpenSuccesses: number;
+  readonly lastFailureTime: number | null;
+  readonly lastStateChange: number;
 }
 ```
 
@@ -110,4 +115,6 @@ Set circuit breaker thresholds in `usertrust.config.json`:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `circuitBreaker.failureThreshold` | number | `5` | Consecutive failures before the breaker trips open |
-| `circuitBreaker.resetTimeout` | number | `60000` | Milliseconds before an open breaker transitions to half-open |
+| `circuitBreaker.resetTimeout` | number | `60000` | Milliseconds after the last recorded failure before an open breaker transitions to half-open |
+
+Both values must be integers; a non-integer fails config validation. These are the only two circuit-breaker keys the schema reads — any other key under `circuitBreaker`, including `halfOpenSuccessThreshold`, is dropped silently rather than rejected. The registries that `trust()` and `createGovernor()` build pass only `failureThreshold` and `resetTimeout` (as `resetTimeoutMs`), so `halfOpenSuccessThreshold` stays at its default of 2 for governed clients and cannot be changed from config or options. The constructor option only applies to a `CircuitBreaker` or `CircuitBreakerRegistry` you construct and drive yourself.
