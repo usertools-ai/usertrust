@@ -160,10 +160,15 @@ export interface MethodBoundary {
  * runs the whole suite, with one difference: a free-list entry that SDK does not have is skipped
  * (it is a method the line removed or never had) instead of failing, whereas on a listed version a
  * missing entry is classification drift and fails.
+ *
+ * anthropic: 1.3.0 is the 1.x line CI runs the suite on (the `sdk-1x` job). Every entry of the free
+ * list exists on it (checked), so the free list is verified there; the 1.x request methods that are
+ * not on the list are REFUSED by default, which is the safe side. The supported range is
+ * `>=0.116.0 <2`: a 2.x line is not supported until it is classified.
  */
 export const CLASSIFIED_SDK_VERSIONS = {
 	openai: ["7.4.0"],
-	anthropic: ["0.116.0"],
+	anthropic: ["0.116.0", "1.3.0"],
 	google: ["1.52.0"],
 } as const;
 

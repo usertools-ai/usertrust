@@ -1376,8 +1376,14 @@ describe("the SDK peer floors are the versions the free list was classified on",
 		["@google/genai", "google"],
 	] as const)("%s", (pkgName, key) => {
 		expect(classified, "CLASSIFIED_SDK_VERSIONS is exported").toBeDefined();
-		const floor = /^>=(\d+\.\d+\.\d+)$/.exec(corePkg.peerDependencies[pkgName] ?? "")?.[1];
-		expect(floor, `${pkgName}'s peer range is a plain >= floor`).toBeDefined();
+		// A plain `>=X`, or the two-sided `>=X <N` (anthropic: the 1.x line is classified, 2.x is not).
+		const floor = /^>=(\d+\.\d+\.\d+)(?: <\d+)?$/.exec(
+			corePkg.peerDependencies[pkgName] ?? "",
+		)?.[1];
+		expect(
+			floor,
+			`${pkgName}'s peer range is a >= floor, with an optional < ceiling`,
+		).toBeDefined();
 		const lines = classified?.[key] as readonly string[] | undefined;
 		expect(
 			Array.isArray(lines) && lines.length > 0,
