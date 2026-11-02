@@ -81,6 +81,17 @@ Before dispatching a release, a pull request cuts them:
 3. Merge that pull request, and dispatch the release on `master`, at that commit, once CI has
    passed on it, with the bump from step 1.
 
+`scripts/changelog-guard.mjs` (a step of the `lint` job in `ci.yml`) grades every pull request's merge
+result against the base it merges into, and enforces three rules. (1) A cut adds exactly one new
+dated section right after `[Unreleased]`; that section holds every line of the base's `[Unreleased]`,
+verbatim and in order, and may add lines (upgrade notes, a known issue); `[Unreleased]` is left empty
+and stays the first section. No entry is dropped, reworded or reordered. (2) In a released section no
+existing line ever changes, is removed, is reordered or ends up under a different `###` heading; lines may only be added, and only under a
+`### Known issues` heading inside that section (created if absent), which is how a problem found after
+shipping is recorded. (3) Everything else is added under `[Unreleased]`, whose heading stays exactly
+`## [Unreleased]`. Blank lines are not compared. Notes for a release are best written under
+`[Unreleased]` in their own pull request before the cut; the cut may still add them.
+
 The release commit then changes only the six `package.json` files, as it always has: the
 CHANGELOG already says what the release holds, at the commit CI tested. A pull request that
 merges between the cut and the dispatch adds its entries under the new `[Unreleased]`, for the

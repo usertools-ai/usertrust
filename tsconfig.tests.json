@@ -17,6 +17,12 @@
 	// where openclaw — an optional peer `npm ci` may or may not install — is present at its pinned
 	// version. Here its resolution would depend on the environment, and so would the baseline.
 	"exclude": [
+		// The positive control for pii-sdk1-pin.test.ts. It does not compile on purpose (one request field
+		// the PII schema does not name), so the ratchet must not see it: only the pin test compiles it.
+		"packages/core/tests/policy/fixtures/pii-sdk1-extra-field.fixture-d.ts",
+		"packages/core/tests/policy/fixtures/pii-sdk1-extra-key.fixture-d.ts",
+		// Compiled only by the 1.x leg: on the SDK floor its key sets differ, so it would not compile.
+		"packages/core/tests/policy/pii-sdk1-exact-gaps.sdk1-d.ts",
 		"packages/openclaw/tests/contract-openclaw.test-d.ts",
 		"packages/openclaw/tests/contract.test.ts",
 		"packages/openclaw/tests/host-fixtures.ts"
