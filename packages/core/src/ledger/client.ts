@@ -17,6 +17,7 @@ import {
 	createClient,
 	TransferFlags,
 } from "tigerbeetle-node";
+import { LedgerUnavailableError } from "../shared/errors.js";
 import {
 	COST_CENTER_PATTERN,
 	LEGACY_COST_CENTER_SEPARATOR,
@@ -160,6 +161,9 @@ function isClosedByClient(err: unknown): boolean {
  * within this has learned of none.
  */
 const CLOSE_PROBE_TIMEOUT_MS = 2_000;
+
+/** How long `connectDeadline` waits for a first answer (`tigerbeetle.connectTimeoutMs`, the server's figure). */
+export const DEFAULT_CONNECT_TIMEOUT_MS = 5_000;
 
 /**
  * What a TrustTBClient holds in place of its native client once destroy() has closed it:
@@ -1277,6 +1281,54 @@ export class TrustTBClient {
 		} catch {
 			return false;
 		}
+	}
+
+	/**
+	 * Fail within `timeoutMs` when nothing usable answers. tigerbeetle-node retries a connection forever and has no
+	 * request timeout, so without this a governor pointed at a port where something else listens (or a cluster
+	 * with another id) waits indefinitely. This makes ONE request first, `lookupAccounts([1n])`, on the current
+	 * native client, through `send` and with no reconnect, and races it against the deadline:
+	 *  - answered: resolves, and the client is usable;
+	 *  - not answered in time: takes the `close()` path (the client is destroyed, and the process can exit) and
+	 *    throws "something is listening but no usertrust ledger answered";
+	 *  - the cluster evicts the client (a release mismatch): `send` marks it, `close()` leaves it open, and the
+	 *    error says the process must exit on its own, because an evicted native client cannot be released;
+	 *  - any other failure is rethrown as it came.
+	 */
+	async connectDeadline(timeoutMs: number = DEFAULT_CONNECT_TIMEOUT_MS): Promise<void> {
+		const current = this.native();
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const bound = new Promise<"timeout">((resolve) => {
+			timer = setTimeout(() => resolve("timeout"), timeoutMs);
+		});
+		const probe = this.send((native) => native.lookupAccounts([1n]), current).then(
+			() => "answered" as const,
+			(err: unknown) => ({ err }),
+		);
+		const outcome = await Promise.race([probe, bound]);
+		clearTimeout(timer);
+		if (outcome === "answered") return;
+		const where = this.opts.addresses.join(",");
+		if (outcome === "timeout") {
+			await this.close();
+			const seconds = timeoutMs / 1000;
+			throw new LedgerUnavailableError(
+				`something is listening at ${where} but no usertrust ledger answered in ${seconds} s: run npx usertrust tb status`,
+				where,
+				{ hint: "Run `npx usertrust tb status`, or pass { dryRun: true } to skip the ledger." },
+			);
+		}
+		const { err } = outcome;
+		if (isEviction(err) || isClosedByClient(err)) {
+			await this.close();
+			throw new LedgerUnavailableError(
+				`the ledger at ${where} evicted this client (${(err as { code?: string }).code ?? "closed"}), usually a tigerbeetle-node release the cluster does not accept. The evicted client cannot be released, so this process will not exit on its own: end it with process.exit()`,
+				where,
+				{ hint: "Run a TigerBeetle server of the same release as the bundled client (0.17.9)." },
+			);
+		}
+		await this.close();
+		throw err;
 	}
 
 	/**
