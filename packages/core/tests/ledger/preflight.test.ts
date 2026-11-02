@@ -8,7 +8,12 @@
 
 import { createServer, type Server } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { isLoopbackHost, parseLedgerAddress, preflightLedger } from "../../src/ledger/preflight.js";
+import {
+	describeMissingLedger,
+	isLoopbackHost,
+	parseLedgerAddress,
+	preflightLedger,
+} from "../../src/ledger/preflight.js";
 import { LedgerUnavailableError } from "../../src/shared/errors.js";
 
 const servers: Server[] = [];
@@ -94,8 +99,42 @@ describe("preflightLedger", () => {
 		expect(err).toBeInstanceOf(LedgerUnavailableError);
 		const message = (err as Error).message;
 		expect(message).toContain(`No ledger is running at 127.0.0.1:${down}.`);
-		expect(message).toContain("Fix: npx usertrust tb start");
-		expect((err as LedgerUnavailableError).hint).toContain("npx usertrust tb start");
+		// A refused port that is not the default is named as configured, never as the default shortcut.
+		expect(message).toContain(`start the ledger at 127.0.0.1:${down}`);
+		expect(message).not.toContain("npx usertrust tb start");
+		expect((err as LedgerUnavailableError).hint).toContain(`127.0.0.1:${down}`);
+	});
+
+	describe("describeMissingLedger: the shortcut is for the default ledger only", () => {
+		const at = (port: number, host = "127.0.0.1") => [{ host, port }];
+
+		it("the default address and cluster 0 (or none) get `usertrust tb start`", () => {
+			for (const cluster of [undefined, 0, 0n]) {
+				const said = describeMissingLedger(at(3001), cluster);
+				expect(said.fix).toBe("npx usertrust tb start");
+				expect(said.hint).toContain("npx usertrust tb start");
+			}
+		});
+
+		it("a custom port gets its own address", () => {
+			const said = describeMissingLedger(at(3005), 0);
+			expect(said.fix).toContain("127.0.0.1:3005");
+			expect(said.fix).not.toContain("tb start");
+			expect(said.hint).toContain("127.0.0.1:3005");
+		});
+
+		it("a custom cluster gets its own cluster, even on the default port", () => {
+			const said = describeMissingLedger(at(3001), 7);
+			expect(said.fix).toContain("127.0.0.1:3001 (cluster 7)");
+			expect(said.fix).not.toContain("tb start");
+			expect(said.hint).toContain("cluster 7");
+		});
+
+		it("two loopback replicas are not the default ledger", () => {
+			const said = describeMissingLedger([...at(3001), ...at(3002)], 0);
+			expect(said.fix).not.toContain("tb start");
+			expect(said.fix).toContain("127.0.0.1:3001, 127.0.0.1:3002");
+		});
 	});
 
 	it("for an explicit non-loopback address, the fix names the address and the configured cluster", async () => {

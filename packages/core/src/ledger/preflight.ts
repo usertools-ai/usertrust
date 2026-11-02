@@ -99,19 +99,46 @@ export async function preflightLedger(
 	const answers = await Promise.all(targets.map((t) => reachable(t, attemptFor(t))));
 	if (answers.some(Boolean)) return;
 
-	const shown = targets.map((t) =>
-		t.host.includes(":") ? `[${t.host}]:${t.port}` : `${t.host}:${t.port}`,
-	);
-	const allLoopback = targets.every((t) => isLoopbackHost(t.host));
-	const where = shown.join(", ");
-	const fix = allLoopback
-		? "npx usertrust tb start"
-		: `start the ledger at ${where}${
-				options.clusterId !== undefined ? ` (cluster ${String(options.clusterId)})` : ""
-			}, or change tigerbeetle.addresses`;
+	const { where, fix, hint } = describeMissingLedger(targets, options.clusterId);
 	throw new LedgerUnavailableError(`No ledger is running at ${where}. Fix: ${fix}`, where, {
-		hint: allLoopback
-			? "Run `npx usertrust tb start`, or pass { dryRun: true } to skip the ledger."
-			: `Start TigerBeetle at ${where}, or pass { dryRun: true } to skip the ledger.`,
+		hint,
 	});
+}
+
+/** The address `usertrust tb start` prints commands for: 127.0.0.1:3001, cluster 0, one replica. */
+function isDefaultLedger(targets: readonly ParsedAddress[], clusterId?: number | bigint): boolean {
+	const only = targets.length === 1 ? targets[0] : undefined;
+	return (
+		only !== undefined &&
+		only.host === "127.0.0.1" &&
+		only.port === 3001 &&
+		(clusterId === undefined || BigInt(clusterId) === 0n)
+	);
+}
+
+/**
+ * What to tell the caller. `npx usertrust tb start` prints commands for the default ledger only, so
+ * the shortcut is named only when that is the ledger that is missing; any other address or cluster
+ * is named as configured, so the caller never starts a ledger the governor will not use.
+ */
+export function describeMissingLedger(
+	targets: readonly ParsedAddress[],
+	clusterId?: number | bigint,
+): { where: string; fix: string; hint: string } {
+	const where = targets
+		.map((t) => (t.host.includes(":") ? `[${t.host}]:${t.port}` : `${t.host}:${t.port}`))
+		.join(", ");
+	if (isDefaultLedger(targets, clusterId)) {
+		return {
+			where,
+			fix: "npx usertrust tb start",
+			hint: "Run `npx usertrust tb start`, or pass { dryRun: true } to skip the ledger.",
+		};
+	}
+	const named = `${where}${clusterId !== undefined ? ` (cluster ${String(clusterId)})` : ""}`;
+	return {
+		where,
+		fix: `start the ledger at ${named}, or change tigerbeetle.addresses`,
+		hint: `Start TigerBeetle at ${named}, or pass { dryRun: true } to skip the ledger.`,
+	};
 }

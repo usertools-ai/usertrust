@@ -108,7 +108,9 @@ describe("a governor with no ledger fails fast, with its fix", () => {
 			// timing: 1 s bound on the call itself, measured inside the child; a refused loopback connect answers in about 1 ms, so it took 15-40 ms here (5 runs).
 			expect(out.ms).toBeLessThan(1_000);
 			expect(out.message).toContain(`No ledger is running at 127.0.0.1:${port}`);
-			expect(out.message).toContain("npx usertrust tb start");
+			// A custom port is named as configured; the `tb start` shortcut is for the default ledger only.
+			expect(out.message).toContain(`start the ledger at 127.0.0.1:${port}`);
+			expect(out.message).not.toContain("npx usertrust tb start");
 			// No native client was built: it would have logged its connection attempts.
 			expect(r.stderr).not.toContain("message_bus");
 		}, 40_000); // timing: 40 s test budget; the child ended in 0.6 s when measured (60x headroom).
