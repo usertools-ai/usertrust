@@ -348,7 +348,7 @@ stopped by SIGINT or SIGTERM ends each pending hold with the reason `server shut
 dry run, and waits for the void and the record before it exits, for at most 8 seconds. A hold whose void
 had not reached the ledger by then may stay reserved until the ledger's 300 s timeout, and its release may
 not be recorded on the chain; the server says so on stderr. The command line owns the process signals: the
-governors it builds are created with `installSignalHandlers: false`. While `close()` runs, `POST /v1/authorize` answers `503 shutting_down`; settle, abort and release are
+controllers it builds are created with `installSignalHandlers: false`. While `close()` runs, `POST /v1/authorize` answers `503 shutting_down`; settle, abort and release are
 still served. An embedder that runs `createUsertrustServer` itself owns the signals too, and calls `close()`. See the repository's
 `LIMITATIONS.md`.
 

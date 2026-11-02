@@ -417,7 +417,7 @@ not visible to vault readers either: the enforced-budget record
 (`effective-budget.json`) is replaced only by the process that holds the lock, so
 the ledger UI, `inspect`, `health` and `report` show the lock holder's budget while
 the degraded process goes on enforcing its own. The exception is a vault with no
-record: a governor publishes its budget when it starts if none stands, so until the
+record: a controller publishes its budget when it starts if none stands, so until the
 lock holder's first append they show the budget of whichever process started
 first.
 
@@ -612,7 +612,7 @@ thinking and compaction blocks, OpenAI reasoning and compaction items, Google
 parts marked as thoughts or carrying a thought signature). The content fields
 are a closed list per provider, written from the provider SDKs' request types. A
 field the list does not name (one a newer SDK adds, or a content block type it
-does not know) is not rewritten, and each governor reports it once, by its path
+does not know) is not rewritten, and each controller reports it once, by its path
 and never its value, as a `USERTRUST_PII_UNLISTED_FIELD` process warning.
 
 When the scan finds PII that redaction leaves as written (an address in a
