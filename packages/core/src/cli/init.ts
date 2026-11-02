@@ -125,6 +125,13 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	// gives a vault from before the key file existed its template, and says so. Changing the
 	// config is what --reconfigure is for.
 	if (existsSync(vaultPath) && !opts?.reconfigure) {
+		// The same checks createVault makes, without creating anything: a vault that is foreign-owned,
+		// a symlink to a directory others can read, or not a directory is refused here, before a file
+		// is written into it. The ignore entries come before the key file, as in createVault, so a
+		// vault made by trust() or createGovernor() (which writes none) is never left with a template
+		// that `git add .` can commit.
+		securePrivateVault(vaultPath);
+		ensureGitignore(vaultPath);
 		const envCreated = ensureEnvTemplate(vaultPath);
 		if (json) {
 			console.log(
@@ -563,6 +570,33 @@ const ENV_TEMPLATE = `# usertrust provider keys, read by usertrust when it runs 
 # GOOGLE_API_KEY=
 `;
 
+/** What a vault's .gitignore must hold: the ledger's data, the dead-letter queue, and the key file with its temp files. */
+const GITIGNORE_ENTRIES = ["tigerbeetle/", "*.tigerbeetle", "dlq/", ".env", ".env.*.tmp"];
+
+/**
+ * Make sure the vault's .gitignore has every entry in GITIGNORE_ENTRIES, appending the missing ones
+ * to what is there and keeping every existing line. Vaults made by trust() or createGovernor() have
+ * no .gitignore at all; one made by an older init may lack the key file's temp pattern. Written
+ * as createVault always wrote it: a plain owner-only write, ahead of the key file.
+ */
+function ensureGitignore(vaultPath: string): void {
+	const file = join(vaultPath, ".gitignore");
+	let existing = "";
+	try {
+		existing = readFileSync(file, "utf-8");
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+	}
+	const present = new Set(existing.split("\n").map((l) => l.trim()));
+	const missing = GITIGNORE_ENTRIES.filter((e) => !present.has(e));
+	if (missing.length === 0) return;
+	const base = existing === "" || existing.endsWith("\n") ? existing : `${existing}\n`;
+	writeFileSync(file, `${base}${missing.join("\n")}\n`, {
+		encoding: "utf-8",
+		mode: PRIVATE_FILE_MODE,
+	});
+}
+
 function warnOnStderr(message: string): void {
 	process.stderr.write(`${scrubForTerminal(message)}\n`);
 }
@@ -681,16 +715,7 @@ function createVault(vaultPath: string, data: VaultData): void {
 	// and a process killed between that file's creation and its rename leaves the key in it. It
 	// must already be ignored then, on a fresh vault and on one whose .gitignore predates the
 	// pattern alike.
-	const gitignoreContent = `tigerbeetle/
-*.tigerbeetle
-dlq/
-.env
-.env.*.tmp
-`;
-	writeFileSync(join(vaultPath, ".gitignore"), gitignoreContent, {
-		encoding: "utf-8",
-		mode: PRIVATE_FILE_MODE,
-	});
+	ensureGitignore(vaultPath);
 
 	// The key file. Typed keys are merged into it, so another provider's key and the comments in
 	// the file survive; with none typed, a commented template is made only when there is no file,

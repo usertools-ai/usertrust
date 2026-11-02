@@ -9,9 +9,11 @@
 
 import { spawnSync } from "node:child_process";
 import {
+	chmodSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
 	rmSync,
 	statSync,
@@ -27,9 +29,15 @@ const repoRoot = join(import.meta.dirname, "..", "..", "..", "..");
 const TSX = join(repoRoot, "node_modules", ".bin", "tsx");
 const MAIN = join(repoRoot, "packages", "core", "src", "cli", "main.ts");
 
+/** The parent environment with every `*_API_KEY` removed: an exported key overrides `--env-file`, and a failure would print it. */
+function envWithoutKeys(): NodeJS.ProcessEnv {
+	return Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.endsWith("_API_KEY")));
+}
+
 function runCli(cwd: string, args: string[]) {
 	const r = spawnSync(TSX, [MAIN, ...args], {
 		cwd,
+		env: envWithoutKeys(),
 		encoding: "utf-8",
 		// timing: 30 s bound on one CLI start; it ran in about 1 s when measured (30x headroom)
 		timeout: 30_000,
@@ -91,7 +99,7 @@ describe("usertrust init leaves a key file", () => {
 				"-e",
 				"process.stdout.write(String(process.env.ANTHROPIC_API_KEY))",
 			],
-			{ encoding: "utf-8" },
+			{ encoding: "utf-8", env: envWithoutKeys() },
 		);
 		expect(loaded.status).toBe(0);
 		expect(loaded.stdout).toBe("undefined");
@@ -180,7 +188,7 @@ describe("writing a typed key into a key file that already has lines", () => {
 		const r = spawnSync(
 			process.execPath,
 			["--env-file", envPath(), "-e", `process.stdout.write(String(process.env.${name}))`],
-			{ encoding: "utf-8" },
+			{ encoding: "utf-8", env: envWithoutKeys() },
 		);
 		return r.stdout;
 	};
@@ -219,5 +227,49 @@ describe("writing a typed key into a key file that already has lines", () => {
 		expect(readFileSync(envPath(), "utf-8")).toBe(
 			'# ANTHROPIC_API_KEY="sk-ant-old"\nANTHROPIC_API_KEY="sk-ant-new-0000"\n',
 		);
+	});
+});
+
+describe("running init over a vault that already exists", () => {
+	const envTemplate = () => vault(".env");
+
+	it("a vault made by the SDK (no .gitignore) gets the ignore entries before the template", async () => {
+		mkdirSync(vault(), { recursive: true, mode: 0o700 });
+		await run(dir, { json: true });
+		const ignore = readFileSync(vault(".gitignore"), "utf-8").split("\n");
+		for (const entry of [".env", ".env.*.tmp", "dlq/", "tigerbeetle/", "*.tigerbeetle"]) {
+			expect(ignore, entry).toContain(entry);
+		}
+		expect(existsSync(envTemplate())).toBe(true);
+	});
+
+	it("an existing .gitignore keeps its lines, gains only what is missing, and is not grown by a re-run", async () => {
+		mkdirSync(vault(), { recursive: true, mode: 0o700 });
+		writeFileSync(vault(".gitignore"), "mine/\n.env", { mode: 0o600 }); // no trailing newline
+		await run(dir, { json: true });
+		await run(dir, { json: true });
+		const lines = readFileSync(vault(".gitignore"), "utf-8").split("\n").filter(Boolean);
+		expect(lines.slice(0, 2)).toEqual(["mine/", ".env"]);
+		expect(lines.filter((l) => l === ".env").length).toBe(1);
+		expect(lines).toContain(".env.*.tmp");
+		expect(lines.length).toBe(new Set(lines).size);
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"a vault that is a symlink to a directory others can read is refused, and nothing is written into it",
+		async () => {
+			const target = join(dir, "shared");
+			mkdirSync(target, { mode: 0o755 });
+			chmodSync(target, 0o755);
+			symlinkSync(target, vault());
+			await expect(run(dir, { json: true })).rejects.toThrow(/other users can read/);
+			expect(readdirSync(target)).toEqual([]);
+		},
+	);
+
+	it("a vault that is not a directory is refused", async () => {
+		writeFileSync(vault(), "not a directory");
+		await expect(run(dir, { json: true })).rejects.toThrow();
+		expect(readFileSync(vault(), "utf-8")).toBe("not a directory");
 	});
 });
