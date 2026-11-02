@@ -5,7 +5,7 @@ description: Usertoken costs per model across all four tiers, estimation functio
 
 All costs in the usertrust SDK are denominated in **usertokens** (UT).
 
-**1 UT = $0.0001** (one basis point of a cent).
+**1 UT = $0.0001** (one basis point of a dollar — a hundredth of a cent).
 
 A budget of `100_000` UT equals $10.00. A budget of `1_000_000` UT equals $100.00.
 
@@ -57,6 +57,13 @@ happen. The **1-hour** cache write (2x base input, the last column) is its own t
 `cacheWriteTokens` stays the TOTAL written and a call that reports a 1-hour share
 (`cache_creation.ephemeral_1h_input_tokens`) prices that share at `cacheWrite1hPer1k` and the
 remainder at the 5-minute rate; see [1-hour cache writes](#1-hour-cache-writes).
+
+A `customRates` entry is honoured only when the config's `pricing` field is `"custom"` (it is ignored
+under the default `"recommended"`), and it replaces the table row rather than merging with it.
+Restate `cacheReadPer1k`, `cacheWritePer1k` and `cacheWrite1hPer1k` in the entry: an omitted read or
+5-minute write tier prices at `inputPer1k`, and an omitted 1-hour write rate at the dearer of the
+5-minute write rate and 2× `inputPer1k`. The SDK prints a one-time warning when a custom entry
+drops cache tiers the table publishes for that model.
 
 ### Per-request prompt tiers (Claude Haiku 5.5)
 
@@ -174,20 +181,23 @@ the input rate.
 | `nova-pro` | Amazon | 8 | 32 |
 
 <Callout type="info">
-Rates reflect the SDK's built-in table. Check `packages/core/src/ledger/pricing.ts` for the canonical source.
+**CANONICAL SOURCE**
+
+Rates reflect the SDK's built-in table. Check `packages/core/src/ledger/pricing.ts` for the canonical source, or run `usertrust pricing` (`--json` for machine output) to print the table as resolved against your `usertrust.config.json` — input, output, cache-read and cache-write, the 1-hour write rate, and for `claude-haiku-5-5` its higher per-request tier, with absent cache rates shown at `inputPer1k`, in $/MTok. It lists the models of the providers named in your config, or every table model when none are named.
 </Callout>
 
 ## Cache tiers and the fallback invariant
 
-`ModelRates` carries two optional fields beyond `inputPer1k`/`outputPer1k`:
+`ModelRates` carries optional fields beyond `inputPer1k`/`outputPer1k`:
 
 ```typescript
 interface ModelRates {
   inputPer1k: number;
   outputPer1k: number;
-  cacheReadPer1k?: number;  // absent ⇒ prices at inputPer1k, never 0
-  cacheWritePer1k?: number; // absent ⇒ prices at inputPer1k, never 0
-  cacheWrite1hPer1k?: number; // 1-hour writes; absent ⇒ the dearer of cacheWritePer1k and 2 × inputPer1k
+  cacheReadPer1k?: number | undefined;     // absent or undefined ⇒ prices at inputPer1k, never 0
+  cacheWritePer1k?: number | undefined;    // absent or undefined ⇒ prices at inputPer1k, never 0
+  cacheWrite1hPer1k?: number | undefined;  // 1-hour writes; absent ⇒ the dearer of cacheWritePer1k and 2 × inputPer1k
+  longPrompt?: LongPromptTier | undefined; // per-request prompt tier (built-in rows only)
 }
 ```
 
@@ -217,6 +227,15 @@ so a dearer row cannot be added without raising the fallback. A fallback-priced 
 `rateSource: "fallback"` and `unknown: true`. An unrecognized model isn't known to be
 Anthropic-shaped, so no cache-read discount is attached. Set `unknownModelPolicy: "deny"` to refuse
 an unknown model instead of metering it. The fallback is the dearest rate the table KNOWS; it cannot bound a model the table does not list that costs more than every row in it (`claude-mythos-preview` was exactly that case before it got its own row). For a hard budget, `unknownModelPolicy: "deny"` is the guarantee.
+
+Whether an unknown model is *allowed* to meter at this rate is governed by the `unknownModelPolicy`
+config field (`"fallback"` | `"warn"` | `"deny"`, default `"warn"`). `"fallback"` meters silently;
+`"warn"` meters at the same rate and prints a once-per-process stderr warning per model; either way
+the receipt carries `meter.rateSource: "fallback"`. `"deny"` throws `PolicyDeniedError`
+(`unknown_model: <model> not in pricing table`) before any PENDING hold is placed. Only cloud-scope
+calls can be unknown: a model on a `local` endpoint never reaches the fallback rate — it resolves
+through `local.models` (exact key, then longest trailing-`*` glob) and otherwise `local.defaultRate`
+(default `{ inputPer1k: 0, outputPer1k: 0 }`, which the 1-UT floor settles at exactly 1 nominal usertoken).
 
 ## Model Matching
 
@@ -252,13 +271,19 @@ getModelRates("claude-opus-5-fast")       // unknown → fallback → { 250, 125
 
 ## Functions
 
+`getModelRates`, `isModelPriced`, `costFromRates`, `estimateCost`, `estimateInputTokens`,
+`PRICING_TABLE_VERSION`, `resolveAppliedRates`, `resolveRates` and the `ModelRates` type are exported
+from the package root (`import { ... } from "usertrust"`). `PRICING_TABLE`, `FALLBACK_RATE`,
+`effectiveCacheWriteRate` and `effectiveCacheWrite1hRate` are not on the root — import them from the
+`usertrust/pricing` subpath.
+
 ### getModelRates()
 
 ```typescript
-function getModelRates(model: string): ModelRates
+function getModelRates(model: string, customRates?: Record<string, ModelRates>): ModelRates
 ```
 
-Look up the four-tier rates for a model. Resolves an exact row, then the id with one date suffix stripped, then the fallback rate (never a prefix match).
+Look up the four-tier rates for a model. An exact key in the optional `customRates` map wins first; then an exact table row, then the id with one date suffix stripped, then the fallback rate (never a prefix match).
 
 ### costFromRates()
 
@@ -298,7 +323,12 @@ exactly, on every input.
 ### estimateCost()
 
 ```typescript
-function estimateCost(model: string, inputTokens: number, outputTokens: number): number
+function estimateCost(
+  model: string,
+  inputTokens: number,
+  outputTokens: number,
+  customRates?: Record<string, ModelRates>,
+): number
 ```
 
 Two-tier convenience wrapper around `costFromRates()` for callers that don't have a cache split —
@@ -336,24 +366,26 @@ approximations](#documented-approximations).
 interface ModelRates {
   inputPer1k: number;        // usertokens per 1,000 fresh input tokens
   outputPer1k: number;       // usertokens per 1,000 output tokens
-  cacheReadPer1k?: number;   // usertokens per 1,000 cache-hit tokens; absent ⇒ inputPer1k
-  cacheWritePer1k?: number;  // usertokens per 1,000 cache-creation tokens; absent ⇒ inputPer1k
-  cacheWrite1hPer1k?: number; // 1-hour cache writes; absent ⇒ max(cacheWritePer1k, 2 × inputPer1k)
-  longPrompt?: {              // a per-request prompt tier (built-in rows only)
-    thresholdTokens: number;  // a prompt OVER this many tokens pays `rates` for every category
-    rates: Omit<ModelRates, "longPrompt">;
-  };
+  cacheReadPer1k?: number | undefined;     // usertokens per 1,000 cache-hit tokens; absent or undefined ⇒ inputPer1k
+  cacheWritePer1k?: number | undefined;    // usertokens per 1,000 cache-creation tokens; absent or undefined ⇒ inputPer1k
+  cacheWrite1hPer1k?: number | undefined;  // 1-hour cache writes; absent ⇒ max(cacheWritePer1k, 2 × inputPer1k)
+  longPrompt?: LongPromptTier | undefined; // a per-request prompt tier (built-in rows only)
+}
+
+interface LongPromptTier {
+  thresholdTokens: number;   // a prompt OVER this many tokens pays `rates` for every category
+  rates: Omit<ModelRates, "longPrompt">;
 }
 ```
 
 ### PRICING_TABLE_VERSION
 
 ```typescript
-const PRICING_TABLE_VERSION: string  // e.g. "2026-08-09"
+const PRICING_TABLE_VERSION: string  // e.g. "2026-10-28"
 ```
 
 Date-stamped version of the built-in `PRICING_TABLE`, bumped whenever any entry's rates change.
-Recorded on every settled receipt (`receipt.pricing.tableVersion`) alongside the resolved
+Recorded on every settled LLM receipt (`receipt.pricing.tableVersion`; governed non-LLM action receipts meter no tokens and omit the `pricing` block) alongside the resolved
 rates (`receipt.pricing.appliedRates`) so a metered cost can be reproduced exactly against the table
 version that priced it, independent of the SDK version currently installed.
 
@@ -391,7 +423,7 @@ exactly reproduces usertrust's own configured metered cost (counts × `appliedRa
 
 1-hour cache writes are priced at the 1-hour rate only when the provider reports the 5m/1h split
 (a flat write total, or a host with no TTL split, bills at the 5-minute rate); long-context, service-tier, regional, modality, and cache-STORAGE charges (Gemini
-hourly storage, prompt-size-dependent rates; GPT-5.4 long-context uplifts) not modeled — fixed
+hourly storage, prompt-size-dependent rates; `gpt-5.6-sol`'s >272k long-context uplift, 2× in / 1.5× out) not modeled — fixed
 per-model rates by design, except `claude-haiku-5-5`, which is priced per request by prompt length
 (see "Per-request prompt tiers" at `/docs/api/pricing`); fast mode is not priced (Opus 5.5 fast is $8 / $40, Opus 5 and
 Opus 4.8 fast $10 / $50; `speed` is a usage field, not a model id); per-call `ceil` + 1-UT floor
@@ -401,6 +433,6 @@ differs from provider-side aggregation. Estimates never model cache state.
 
 During the [two-phase spend lifecycle](/docs/concepts/two-phase-spend), costs are estimated twice:
 
-1. **Before the call (PENDING):** `estimateInputTokens()` produces a conservative input estimate. Combined with `max_tokens` for the output estimate and the cache-write premium guard above, the SDK calculates the hold amount. The 1.5x safety margin (plus the write-premium guard) means the hold usually exceeds actual cost.
+1. **Before the call (PENDING):** `estimateInputTokens()` produces a conservative input estimate. Combined with the output cap the request names for the output estimate — `trust()` reads `max_tokens` on Anthropic; `max_output_tokens` on OpenAI Responses; `max_completion_tokens`, else `max_tokens`, times `n` on OpenAI chat; `config.maxOutputTokens` times `candidateCount` on Google (with no Google cap, 4096 and never less than the thinking budget); any other call with no cap holds 4096; the headless governor uses `maxOutputTokens ?? 4096` — and the cache-write premium guard above, the SDK calculates the hold amount. The 1.5x safety margin (plus the write-premium guard) means the hold usually exceeds actual cost.
 
 2. **After the call (POST):** Actual token counts from the provider response (or accumulated from stream chunks), split into all four tiers, produce the real cost via `costFromRates()`. The difference between the hold and the actual cost is released back to the available budget.

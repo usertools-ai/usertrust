@@ -761,7 +761,7 @@ that costs ~327, which is a false 402 near a budget.
 **Documented pricing approximations — verbatim, also published at `/docs/api/pricing`:**
 1-hour cache writes are priced at the 1-hour rate only when the provider reports the 5m/1h split
 (a flat write total, or a host with no TTL split, bills at the 5-minute rate); long-context, service-tier, regional, modality, and cache-STORAGE charges (Gemini
-hourly storage, prompt-size-dependent rates; GPT-5.4 long-context uplifts) not modeled — fixed
+hourly storage, prompt-size-dependent rates; `gpt-5.6-sol`'s >272k long-context uplift, 2× in / 1.5× out) not modeled — fixed
 per-model rates by design, except `claude-haiku-5-5`, which is priced per request by prompt length
 (see "Per-request prompt tiers" at `/docs/api/pricing`); fast mode is not priced (Opus 5.5 fast is $8 / $40, Opus 5 and
 Opus 4.8 fast $10 / $50; `speed` is a usage field, not a model id); per-call `ceil` + 1-UT floor
