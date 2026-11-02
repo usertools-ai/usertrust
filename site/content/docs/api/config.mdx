@@ -65,7 +65,10 @@ const TrustConfigSchema = z.object({
   tier: z.enum(["free", "mini", "pro", "mega", "ultra"]).default("mini"),
   proxy: z.string().url().optional(),
   key: z.string().optional(),
-  parentUserId: z.string().superRefine(parentUserIdRefusal).optional(),
+  parentUserId: z.string().superRefine((value, ctx) => {
+    const refusal = parentUserIdRefusal(value);
+    if (refusal !== null) ctx.addIssue(`parentUserId ${refusal}`);
+  }).optional(),
   scope: z.array(z.string().regex(/^[a-zA-Z0-9._@:+/-]{1,128}$/)).max(32).optional(),
   policies: z.string().default("./policies/default.yml"),
   pii: z.enum(["redact", "warn", "block", "off"]).default("warn"),
@@ -90,6 +93,7 @@ const TrustConfigSchema = z.object({
   tigerbeetle: z.object({
     addresses: z.array(z.string()).default(["127.0.0.1:3001"]),
     clusterId: z.number().int().nonnegative().default(0),
+    connectTimeoutMs: z.number().int().positive().default(5_000),
   }).prefault({}),
   providers: z.array(z.object({
     name: z.string(),
@@ -177,7 +181,8 @@ const TrustConfigSchema = z.object({
   },
   "tigerbeetle": {
     "addresses": ["127.0.0.1:3001"],
-    "clusterId": 0
+    "clusterId": 0,
+    "connectTimeoutMs": 5000
   }
 }
 ```
@@ -257,12 +262,13 @@ Receipts are organized into date-based directories under `.usertrust/audit/`.
 
 ### tigerbeetle
 
-Default: `{ addresses: ["127.0.0.1:3001"], clusterId: 0 }`.
+Default: `{ addresses: ["127.0.0.1:3001"], clusterId: 0, connectTimeoutMs: 5000 }`.
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `addresses` | `["127.0.0.1:3001"]` | TigerBeetle cluster addresses |
 | `clusterId` | `0` | TigerBeetle cluster ID |
+| `connectTimeoutMs` | `5000` | How long the first request waits for an answer from a ledger before the controller stops and says so. It applies when something is listening at the address but no usertrust ledger answers (another service on the port, or a cluster formatted with a different id). An address with nothing listening is refused at once and never waits this long (it is refused within 1 s on a loopback address, 3 s on a remote one). |
 
 <Callout type="info">
 **DRY-RUN MODE**
@@ -275,7 +281,7 @@ The remaining schema fields. All are optional in the file; defaults shown are wh
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `parentUserId` | absent | This governor's ledger identity, the parent half of the `(parentUserId, costCenter)` tuple cost-center envelope accounts derive from. Validated at parse time by `parentUserIdRefusal()`; a `::` in the value or a character outside the id charset throws |
+| `parentUserId` | absent | This controller's ledger identity, the parent half of the `(parentUserId, costCenter)` tuple cost-center envelope accounts derive from. Validated at parse time by `parentUserIdRefusal()`; a `::` in the value or a character outside the id charset throws |
 | `scope` | absent | Up to 32 operator-declared path-like labels (`/^[a-zA-Z0-9._@:+/-]{1,128}$/`) that `scopePatterns` policy rules match against; globs and control characters are refused |
 | `injection` | `"warn"` | Prompt-injection detection mode: `block` throws `PolicyDeniedError`, `warn` records it, `off` disables the scan |
 | `board` | `{ enabled: false, vetoThreshold: "high" }` | Accepted and written by `usertrust init`, but not read by `trust()` or `createGovernor()`: the exported `createBoard()` takes its own options. `vetoThreshold` is one of `low`, `medium`, `high`, `critical` |
