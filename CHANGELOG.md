@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The `@anthropic-ai/sdk` peer range is now `>=0.116.0 <2`, and CI runs the suite on both lines.** The floor (0.116.0) and the 1.x line classified in `CLASSIFIED_SDK_VERSIONS` (1.3.0) are each type-checked and tested in the `sdk-1x` job. A 1.x request method the free list does not name is refused by default; a 2.x SDK is outside the range until it is classified. On 1.3.0 the PII content schema does not yet name seven of the SDK's request additions, so `pii-content-sdk-types.test-d.ts` reports seven known diagnostics there; the 1.x leg pins exactly those seven by assertion name and location (any other, or a missing one, fails), and a field in one of them is covered by the fail-closed behaviour in LIMITATIONS section 11. Classifying them removes the pin.
 
+### Fixed
+
+- **A governor with no ledger fails within seconds and prints its fix, instead of waiting without end.** The native TigerBeetle client retries a refused connection without end and sets no request timeout, so `trust()`, `createGovernor()` and `usertrust budget` against a ledger that was not running never returned. Each now opens a plain TCP connection to the configured addresses first, before any native client exists, and rejects at once with `No ledger is running at 127.0.0.1:3001. Fix: npx usertrust tb start` (for an explicit non-loopback address, the fix names the address and the configured cluster). It fails only when every address refuses. When something does listen but no usertrust ledger answers (another service on the port, or a cluster formatted with another id), the first request is bounded by the new `tigerbeetle.connectTimeoutMs` (default 5000): the client is closed and the error says "something is listening but no usertrust ledger answered in 5 s: run npx usertrust tb status". If the cluster evicts the client, the error says the evicted client cannot be released and the process must exit on its own. `tigerbeetle-node` is now pinned to exactly 0.17.9.
+
 ## [5.3.0] - 2026-11-01
 
 ### Added

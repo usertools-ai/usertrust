@@ -582,7 +582,9 @@ describe("every entry path honours destroy(), shortcuts included", () => {
 			(checksFirst ? opens : doesNot).push(member.name.getText(source));
 		}
 		// ping() answers `false` instead, and close() returns, asking nothing (both pinned below).
-		expect(doesNot).toEqual(["ping", "close"]);
+		// connectDeadline() is the one-off start-up probe: it reaches the native client through native()
+		// and send() once, and a destroyed client refuses there (CLOSED), so it needs no table row.
+		expect(doesNot).toEqual(["ping", "connectDeadline", "close"]);
 		// A new operation fails this until it has a row in OPERATIONS (refused after destroy())
 		// and in SCENARIOS (destroy() at each of its await boundaries), so behaviour pins it too.
 		const tabled = new Set(OPERATIONS.map(([name]) => name.split(",")[0]));
@@ -645,8 +647,9 @@ describe("every entry path honours destroy(), shortcuts included", () => {
 		// Only the client's lifecycle touches the field; requests go through native().
 		expect([...readsClient].sort()).toEqual(["_doReconnect", "constructor", "destroy", "native"]);
 		// withReconnect() calls native(): for the request, and for its retry; close() calls it once,
-		// for its probe, which it makes through send() at once.
-		expect(callsNative).toEqual(["withReconnect", "withReconnect", "close"]);
+		// for its probe, which it makes through send() at once; connectDeadline() does the same for its
+		// one lookup.
+		expect(callsNative).toEqual(["withReconnect", "withReconnect", "connectDeadline", "close"]);
 		expect(notOneRequest).toEqual([]);
 		// A control: the walk sees the requests, every kind this client makes.
 		expect([...requests].sort()).toEqual([
