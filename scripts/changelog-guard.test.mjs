@@ -119,14 +119,29 @@ describe("the release cut", () => {
 	test("is recognised by its shape: the same cut is allowed whoever sends it", () => {
 		assert.equal(pair(PRE_CUT, CUT).code, 0);
 	});
-	test("is refused when the new release carries a line the Unreleased body did not", () => {
+	test("is allowed with notes added during the cut (upgrade notes, a known issue, a new class)", () => {
 		const merged = log(
-			"\n## [5.3.0] - 2026-11-01\n\n### Added\n\n- Feature A.\n- Feature B.\n- Smuggled.\n\n",
+			"\n## [5.3.0] - 2026-11-01\n\n### Read before upgrading\n\n- A note.\n\n### Added\n\n- Feature A.\n- Feature B.\n- Another entry written during the cut.\n\n### Known issues\n\n- A known issue.\n\n",
+			R520,
+		);
+		const r = pair(PRE_CUT, merged);
+		assert.equal(r.code, 0, r.out);
+	});
+	test("is refused when an entry is reworded", () => {
+		const merged = log(
+			"\n## [5.3.0] - 2026-11-01\n\n### Added\n\n- Feature A, reworded.\n- Feature B.\n\n",
 			R520,
 		);
 		const r = pair(PRE_CUT, merged);
 		assert.equal(r.code, 1);
 		assert.match(r.out, /not a release cut/);
+	});
+	test("is refused when entries are reordered", () => {
+		const merged = log(
+			"\n## [5.3.0] - 2026-11-01\n\n### Added\n\n- Feature B.\n- Feature A.\n\n",
+			R520,
+		);
+		assert.equal(pair(PRE_CUT, merged).code, 1);
 	});
 	test("is refused when the new release drops a line of the Unreleased body", () => {
 		const merged = log("\n## [5.3.0] - 2026-11-01\n\n### Added\n\n- Feature A.\n\n", R520);
@@ -155,6 +170,66 @@ describe("the release cut", () => {
 			R520,
 		);
 		assert.equal(pair(PRE_CUT, merged).code, 1);
+	});
+});
+
+describe("a known issue recorded in a released section", () => {
+	test("is allowed: a new ### Known issues block", () => {
+		const merged = CUT.replace(
+			"- Feature B.\n",
+			"- Feature B.\n\n### Known issues\n\n- A known issue.\n",
+		);
+		const r = pair(CUT, merged);
+		assert.equal(r.code, 0, r.out);
+	});
+	test("is allowed: a line appended to an existing ### Known issues block", () => {
+		const withBlock = CUT.replace(
+			"- Feature B.\n",
+			"- Feature B.\n\n### Known issues\n\n- First issue.\n",
+		);
+		const merged = withBlock.replace("- First issue.\n", "- First issue.\n- Second issue.\n");
+		assert.equal(pair(withBlock, merged).code, 0);
+	});
+	test("is allowed in an older release too", () => {
+		const merged = CUT.replace(
+			"- Old entry A.\n",
+			"- Old entry A.\n\n### Known issues\n\n- Found after shipping.\n",
+		);
+		assert.equal(pair(CUT, merged).code, 0);
+	});
+	test("is refused: an added line under any other heading", () => {
+		const merged = CUT.replace("- Feature B.\n", "- Feature B.\n- Slipped in.\n");
+		const r = pair(CUT, merged);
+		assert.equal(r.code, 1);
+		assert.match(r.out, /outside "### Known issues"/);
+	});
+	test("is refused: a line added after the Known issues block ends", () => {
+		const withBlock = CUT.replace(
+			"- Feature B.\n",
+			"- Feature B.\n\n### Known issues\n\n- First issue.\n",
+		);
+		const merged = withBlock.replace(
+			"- First issue.\n",
+			"- First issue.\n\n### Changed\n\n- Slipped in.\n",
+		);
+		assert.equal(pair(withBlock, merged).code, 1);
+	});
+	test("is refused: an existing line of the block is reworded", () => {
+		const withBlock = CUT.replace(
+			"- Feature B.\n",
+			"- Feature B.\n\n### Known issues\n\n- First issue.\n",
+		);
+		assert.equal(
+			pair(withBlock, withBlock.replace("First issue.", "First issue, reworded.")).code,
+			1,
+		);
+	});
+	test("is refused together with an edit to an existing line", () => {
+		const merged = CUT.replace(
+			"- Feature B.\n",
+			"- Feature B, reworded.\n\n### Known issues\n\n- A known issue.\n",
+		);
+		assert.equal(pair(CUT, merged).code, 1);
 	});
 });
 
@@ -231,7 +306,7 @@ describe("a pull request cut from a base that predates a cut (the case that put 
 		const { dir, cut, merged } = realMerge();
 		const r = runGuard(dir, cut, merged);
 		assert.equal(r.code, 1, r.out);
-		assert.match(r.out, /inside the released section \[5\.3\.0\]/);
+		assert.match(r.out, /added to the released section \[5\.3\.0\] outside/);
 	});
 	test("would have passed if graded as the branch alone against its own base (why the merge result is read)", () => {
 		const { dir, preCut } = realMerge();
@@ -259,7 +334,7 @@ describe("usage and failures", () => {
 	});
 });
 
-describe("mutants: each rule, switched off, lets its red row through", () => {
+describe("mutants: each rule, switched off, lets its refused row through", () => {
 	function mutate(from, to) {
 		assert.equal(GUARD_SOURCE.split(from).length - 1, 1, `anchor appears exactly once: ${from}`);
 		const path = join(scratch, `mutant-${++counter}.mjs`);
@@ -267,42 +342,44 @@ describe("mutants: each rule, switched off, lets its red row through", () => {
 		return path;
 	}
 	const editReleased = [CUT, CUT.replace("Old entry B.", "Old entry B, edited.")];
-	const smuggled = [
+	const addOutsideKnownIssues = [
+		CUT,
+		CUT.replace("- Feature B.\n", "- Feature B.\n- Slipped in.\n"),
+	];
+	const dropsAnEntry = [
+		PRE_CUT,
+		log("\n## [5.3.0] - 2026-11-01\n\n### Added\n\n- Feature A.\n\n", R520),
+	];
+	const leftBehind = [
 		PRE_CUT,
 		log(
-			"\n## [5.3.0] - 2026-11-01\n\n### Added\n\n- Feature A.\n- Feature B.\n- Smuggled.\n\n",
+			"\n- Left behind.\n\n## [5.3.0] - 2026-11-01\n\n### Added\n\n- Feature A.\n- Feature B.\n\n",
 			R520,
 		),
 	];
 
-	test("control: the unmutated guard refuses both rows", () => {
-		assert.equal(pair(...editReleased).code, 1);
-		assert.equal(pair(...smuggled).code, 1);
+	test("control: the unmutated guard refuses every row", () => {
+		for (const rows of [editReleased, addOutsideKnownIssues, dropsAnEntry, leftBehind]) {
+			assert.equal(pair(...rows).code, 1);
+		}
 	});
-	test("M1: without the released-section comparison, an edit to a released section is allowed", () => {
-		const guard = mutate("b.heading !== m.heading || bodyOf(b) !== bodyOf(m)", "false");
+	test("M1: without the in-order match of a released section's lines, an edit to one is allowed", () => {
+		const guard = mutate("problems.push(rewritten(b.key));", "void rewritten(b.key);");
 		assert.equal(pair(...editReleased, guard).code, 0);
 	});
-	test("M2: without the cut's body comparison, a cut that smuggles a line is allowed", () => {
-		const guard = mutate(
-			"const sameBody = trimmedBody(candidate) === trimmedBody(baseUnreleased);",
-			"const sameBody = true;",
-		);
-		assert.equal(pair(...smuggled, guard).code, 0);
+	test("M2: without the Known issues limit, a line added anywhere in a released section is allowed", () => {
+		const guard = mutate("!matched.has(i) && !region.has(i)", "false");
+		assert.equal(pair(...addOutsideKnownIssues, guard).code, 0);
 	});
-	test("M3: without the emptied-Unreleased rule, a cut that leaves entries behind is allowed", () => {
+	test("M3: without the every-entry rule, a cut that drops an entry is allowed", () => {
+		const guard = mutate("return matchInOrder(wanted, lines) !== null;", "return true;");
+		assert.equal(pair(...dropsAnEntry, guard).code, 0);
+	});
+	test("M4: without the emptied-Unreleased rule, a cut that leaves entries behind is allowed", () => {
 		const guard = mutate(
-			'const emptied = trimmedBody(mergedUnreleased) === "";',
+			"const emptied = contentLines(mergedUnreleased).length === 0;",
 			"const emptied = true;",
 		);
-		const leftBehind = [
-			PRE_CUT,
-			log(
-				"\n- Left behind.\n\n## [5.3.0] - 2026-11-01\n\n### Added\n\n- Feature A.\n- Feature B.\n\n",
-				R520,
-			),
-		];
-		assert.equal(pair(...leftBehind).code, 1);
 		assert.equal(pair(...leftBehind, guard).code, 0);
 	});
 });

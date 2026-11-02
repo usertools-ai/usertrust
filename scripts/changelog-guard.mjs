@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // The CHANGELOG guard: a pull request, graded as the merge commit GitHub tests, may only add to
-// `## [Unreleased]`.
+// `## [Unreleased]`, with two exceptions that have their own shape.
 //
 //   node scripts/changelog-guard.mjs <base> <merged>
 //
@@ -8,11 +8,13 @@
 // result itself. A pull request cut from a base that predates a CHANGELOG cut can put its Unreleased line next to
 // the cut heading, and git merges it cleanly INTO the released section: the text of the pull request is right and
 // the text of the merge result is wrong. So the check reads the merge result, and asserts:
-//   (a) every line the change adds sits under `## [Unreleased]`;
-//   (b) no line inside a released `## [x.y.z]` section changes, and none is removed or reordered.
-// The one exception is the release cut, recognised by its shape and never by who sent it: exactly one section
-// is new, it is a released one (`## [x.y.z] - YYYY-MM-DD`), its body is the base's Unreleased body to the line,
-// and the Unreleased section is left empty. Everything else in the file stays as it was.
+//   1. A release cut: exactly one new section, headed `## [x.y.z] - YYYY-MM-DD`, right after `[Unreleased]`. It holds
+//      EVERY line of the base's Unreleased section, verbatim and in order, and may add lines (upgrade notes, a known
+//      issue). Unreleased is left empty and stays first. Nothing is dropped or reworded.
+//   2. A released section: no existing line changes, is removed or is reordered, ever. Lines may be ADDED, and only
+//      under a `### Known issues` heading inside that section (created if absent).
+//   3. Everything else is added under `[Unreleased]`, whose heading stays exactly `## [Unreleased]` and the first.
+// Blank lines are not content: they are ignored when lines are compared. The text above the first section is locked.
 //
 // A change that leaves CHANGELOG.md byte-identical to the base is skipped.
 //
@@ -48,8 +50,45 @@ export function parse(text) {
 	return { preamble: preamble.join("\n"), sections };
 }
 
-const bodyOf = (s) => s.body.join("\n");
-const trimmedBody = (s) => bodyOf(s).replace(/^\n+/, "").replace(/\n+$/, "");
+/** The non-blank lines of a section's body: blank lines are not content. */
+const contentLines = (s) => s.body.filter((l) => l.trim() !== "");
+const KNOWN_ISSUES = "### Known issues";
+
+/**
+ * Greedy in-order match of `wanted` into `lines`: the Set of indexes of `lines` that carry `wanted`, or null when some
+ * wanted line is missing or out of order.
+ */
+function matchInOrder(wanted, lines) {
+	const used = new Set();
+	let at = 0;
+	for (const w of wanted) {
+		while (at < lines.length && lines[at] !== w) at++;
+		if (at === lines.length) return null;
+		used.add(at);
+		at++;
+	}
+	return used;
+}
+
+/** True when every line of `wanted` is in `lines`, in order. */
+function holdsEveryLine(wanted, lines) {
+	return matchInOrder(wanted, lines) !== null;
+}
+
+/** The indexes of `lines` inside a `### Known issues` block: its heading, to the next `###` or `##` heading. */
+function knownIssuesRegion(lines) {
+	const region = new Set();
+	let inside = false;
+	lines.forEach((line, i) => {
+		if (line === KNOWN_ISSUES) inside = true;
+		else if (line.startsWith("### ") || line.startsWith("## ")) inside = false;
+		if (inside) region.add(i);
+	});
+	return region;
+}
+
+const rewritten = (key) =>
+	`a line inside the released section [${key}] changed, moved or was removed: a released section may only gain lines under "${KNOWN_ISSUES}"`;
 
 /** The reasons to refuse the change from `base` to `merged` (CHANGELOG.md text); [] when it is allowed. */
 export function check(baseText, mergedText) {
@@ -77,17 +116,17 @@ export function check(baseText, mergedText) {
 	const mergedUnreleased = mergedByKey.get("Unreleased");
 	const added = merged.sections.filter((s) => !baseKeys.has(s.key) && s.key !== "Unreleased");
 
-	// The release cut: one new released section that is the base's Unreleased body, to the line, with Unreleased left empty.
+	// The release cut: one new dated section holding every line of the base's Unreleased section, with Unreleased left empty.
 	let cut = null;
 	if (added.length === 1 && baseUnreleased && mergedUnreleased) {
 		const [candidate] = added;
-		const emptied = trimmedBody(mergedUnreleased) === "";
-		const sameBody = trimmedBody(candidate) === trimmedBody(baseUnreleased);
+		const emptied = contentLines(mergedUnreleased).length === 0;
+		const keepsEveryEntry = holdsEveryLine(contentLines(baseUnreleased), contentLines(candidate));
 		if (
 			CUT_HEADING.test(candidate.heading) &&
-			trimmedBody(baseUnreleased) !== "" &&
+			contentLines(baseUnreleased).length > 0 &&
 			emptied &&
-			sameBody
+			keepsEveryEntry
 		) {
 			cut = candidate;
 		}
@@ -96,7 +135,7 @@ export function check(baseText, mergedText) {
 	if (cut === null) {
 		for (const s of added) {
 			problems.push(
-				`a released section [${s.key}] is added, and this is not a release cut (the new section must be the base's Unreleased body, to the line, with Unreleased left empty)`,
+				`a released section [${s.key}] is added, and this is not a release cut (the new section must hold every line of the base's Unreleased section, verbatim and in order, and Unreleased must be left empty)`,
 			);
 		}
 	}
@@ -105,9 +144,23 @@ export function check(baseText, mergedText) {
 		const m = mergedByKey.get(b.key);
 		if (m === undefined) {
 			problems.push(`the released section [${b.key}] is gone`);
-		} else if (b.heading !== m.heading || bodyOf(b) !== bodyOf(m)) {
+			continue;
+		}
+		if (b.heading !== m.heading) {
+			problems.push(`the heading of the released section [${b.key}] changed`);
+			continue;
+		}
+		const mergedLines = contentLines(m);
+		const matched = matchInOrder(contentLines(b), mergedLines);
+		if (matched === null) {
+			problems.push(rewritten(b.key));
+			continue;
+		}
+		const region = knownIssuesRegion(mergedLines);
+		const stray = mergedLines.findIndex((_, i) => !matched.has(i) && !region.has(i));
+		if (stray !== -1) {
 			problems.push(
-				`a line inside the released section [${b.key}] changed: a change may only add under [Unreleased]`,
+				`a line was added to the released section [${b.key}] outside "${KNOWN_ISSUES}": ${mergedLines[stray].slice(0, 60)}`,
 			);
 		}
 	}
