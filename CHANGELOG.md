@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.3.0] - 2026-11-01
+
 ### Added
 
 - **usertrust-ui shows, filters and totals by a job's declared type.** A ledger row carries `job`, `jobType` and `typeSource` when its record does; two new filters ("job type" and "type declared by", each with an `untyped` choice for records that carry none) work with the existing ones and have chips; the trends gain a "Cost by job type" list whose buckets include `untyped`, so they add up to the total in view; the CSV export appends `job`, `job_type_declared_not_checked` and `type_declared_by` after `usage_source` (earlier columns keep their positions); the inspector shows the job and its type. A type is a declaration, not evidence: every place that shows one says it was declared by the caller and is not checked. A value outside core's closed lists is shown as `unrecognized`, never dropped. The dashboard reads the audit chain only; nothing in the server changed.
