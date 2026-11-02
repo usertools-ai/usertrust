@@ -109,6 +109,27 @@ jobs:
           git diff --exit-code
       # The tested-tree stamp's verdict and ci.yml's wiring of it (scripts/tested-tree.test.mjs).
       - run: node --test scripts/tested-tree.test.mjs
+      # A pull request cut from a base that predates a CHANGELOG cut can merge its Unreleased entry into the
+      # released section (git places it next to the heading the cut inserted). So the MERGE result is graded against
+      # the base it merges into: every line a change adds sits under [Unreleased], no line of a released section
+      # changes, and a change that leaves CHANGELOG.md alone is skipped. The release cut is recognised by its shape
+      # (scripts/changelog-guard.mjs). The guard is read from the BASE, so a change is never graded by its own copy;
+      # a base without one has nothing to run. A push to master is not a change to grade.
+      - name: CHANGELOG.md changes only under [Unreleased]
+        if: startsWith(github.ref, 'refs/heads/candidate/') || github.event_name == 'pull_request'
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          git fetch --no-tags --deepen=1 origin
+          base=$(git rev-parse "$SHA^1")
+          guard=$(mktemp --suffix=.mjs)
+          if git cat-file -e "$base:scripts/changelog-guard.mjs" 2>/dev/null; then
+            git cat-file blob "$base:scripts/changelog-guard.mjs" > "$guard"
+            node "$guard" "$base" "$SHA"
+          else
+            echo "the base has no CHANGELOG guard yet: nothing to run"
+          fi
+      - run: node --test scripts/changelog-guard.test.mjs
 
   typecheck:
     name: typecheck
