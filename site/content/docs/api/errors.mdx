@@ -56,7 +56,7 @@ class InsufficientBalanceError extends Error {
 
 **When it fires:** During the PENDING hold phase, before the LLM call is forwarded to the provider. No tokens are consumed.
 
-**Hint:** `"Increase the budget in trust() options or add funds via the ledger."` for an unattributed call. For a call attributed to a cost center, the governor substitutes `"Fund this cost center with allocateBudget(parent, costCenter, amount) — or reclaim from another envelope. Raising the trust()/createGovernor() budget funds the session wallet, which an attributed call never debits."`, because the default advice does not fund the wallet an attributed call debits.
+**Hint:** `"Increase the budget in trust() options or add funds via the ledger."` for an unattributed call. For a call attributed to a cost center, the controller substitutes `"Fund this cost center with allocateBudget(parent, costCenter, amount) — or reclaim from another envelope. Raising the trust()/createGovernor() budget funds the session wallet, which an attributed call never debits."`, because the default advice does not fund the wallet an attributed call debits.
 
 ---
 
@@ -76,7 +76,7 @@ class PolicyDeniedError extends Error {
 
 **When it fires:** During policy evaluation, before the LLM call. The `reason` field describes which rule, PII type, injection pattern, or unknown model triggered the denial. On any client (Anthropic, OpenAI or Google) it also fires when you call an SDK method usertrust does not govern and does not list as free: the `reason` starts `ungoverned_method: <path>` (for example `ungoverned_method: embeddings.create`), the promise rejects without calling the SDK, and `trust({ allowUngoverned: ["<path>"] })` lets that method through, audited as `ungoverned_call`.
 
-**Hint:** depends on what denied the call. The class default is `'Check your policy rules in .usertrust/policies/default.yml, or set "pii": "warn" in .usertrust/usertrust.config.json (or pass { pii: "warn" } to trust()) to downgrade PII enforcement.'`, but the governor overrides it at its throw sites. A budget-family rule points at the `trust()` budget and `max_tokens` (or at `allocateBudget` for an attributed call), PII at `{ pii: "warn" }` or `{ pii: "redact" }`, injection at `{ injection: "warn" }`, and an unknown model at `pricing: "custom"` with a `customRates` entry.
+**Hint:** depends on what denied the call. The class default is `'Check your policy rules in .usertrust/policies/default.yml, or set "pii": "warn" in .usertrust/usertrust.config.json (or pass { pii: "warn" } to trust()) to downgrade PII enforcement.'`, but the controller overrides it at its throw sites. A budget-family rule points at the `trust()` budget and `max_tokens` (or at `allocateBudget` for an attributed call), PII at `{ pii: "warn" }` or `{ pii: "redact" }`, injection at `{ injection: "warn" }`, and an unknown model at `pricing: "custom"` with a `customRates` entry.
 
 To change PII enforcement, set `pii` in the config file `trust()` reads: `.usertrust/usertrust.config.json` by default, or the file you pass as `configPath` (which is read instead, so edit that one), or pass `pii` to `trust()` itself (e.g. `{ pii: "warn" }`), which overrides the file.
 
@@ -85,9 +85,9 @@ To change PII enforcement, set `pii` in the config file `trust()` reads: `.usert
 ## The denial correlation handle
 
 Both denial errors above carry `auditEventHash` — the hash of the chain event
-the governor wrote when it refused the call. It is the join between the
+the controller wrote when it refused the call. It is the join between the
 exception your code logged and the record an auditor reads: `policy_denied` for
-a governor decision (a policy rule, a budget-family rule, PII, injection, an
+a controller decision (a policy rule, a budget-family rule, PII, injection, an
 unpriceable model, or a refused ungoverned SDK method on any provider), `ledger_rejected` for the ledger's own atomic refusal of the
 hold.
 
@@ -171,9 +171,15 @@ class LedgerUnavailableError extends Error {
 }
 ```
 
-**When it fires:** Before any LLM call, during the connection check or PENDING hold attempt. This is failure mode 15.4 -- no tokens are at risk because no hold was placed.
+**When it fires:** Before any LLM call, during the connection check or PENDING hold attempt. This is failure mode 15.4 -- no tokens are at risk because no hold was placed. `trust()`, `createGovernor()` and `usertrust budget` first open a plain TCP connection to each configured address; when every one refuses (within 1 s for a loopback address, 3 s for a remote one), they throw with `No ledger is running at <address>. Fix: ...`. When something is listening but no usertrust ledger answers (another service on the port, or a cluster formatted with another id), the first request is bounded by `tigerbeetle.connectTimeoutMs` (default `5000`) and the error says so. When the cluster evicts the client, the error says the evicted client cannot be released and the process must exit on its own.
 
-**Hint:** `'Start TigerBeetle 0.17.x (tigerbeetle format … then tigerbeetle start --addresses=<address>) or use { dryRun: true } to skip the ledger.'`, where `<address>` is the ledger the governor was configured with (`127.0.0.1:3001` by default).
+**Hint:** the hint depends on what the controller found. It says to:
+
+- Nothing listening at the default ledger (`127.0.0.1:3001`, cluster 0): run `npx usertrust tb start`, or pass `{ dryRun: true }` to skip the ledger
+- Nothing listening at any other address or cluster: start TigerBeetle at the named address and cluster, or pass `{ dryRun: true }` to skip the ledger
+- Something listens, but no usertrust ledger answers: run `npx usertrust tb status`, or pass `{ dryRun: true }` to skip the ledger
+- The cluster evicts the client: run a TigerBeetle server of the same release as the bundled client (`0.17.9`)
+- Any other ledger failure, with no hint of its own: `Start TigerBeetle 0.17.x (tigerbeetle format … then tigerbeetle start --addresses=<address>) or use { dryRun: true } to skip the ledger.`, where `<address>` is the ledger the controller was configured with (`127.0.0.1:3001` by default).
 
 <Callout type="warn">
 `usertrust tb start` does not manage TigerBeetle in this version: it prints the same
@@ -309,7 +315,7 @@ class SkillVerificationError extends Error {
 }
 ```
 
-**When it fires:** In `enforceSkillLoad()`, at the first step of the verification pipeline, and only while `supplyChain.enabled` is `true` (the default). The only caller is `usertrust skill verify`, so it surfaces from the CLI, before any code is executed and before any LLM call. A missing registered key, a bad signature, an `entryHash` mismatch, or a denied permission does *not* throw; those come back as a `SkillVerification` result with `valid: false` and an `error` string.
+**When it fires:** In `enforceSkillLoad()`, at the first step of the verification pipeline, and only while `supplyChain.enabled` is `true` (the default). `usertrust skill verify` does not raise it: the CLI checks the manifest with `validateManifest()` first, prints `Schema error: ...` for malformed input and returns before it reaches `enforceSkillLoad()`. `enforceSkillLoad()` is exported, so an SDK caller that passes it a manifest failing the schema meets this error directly, before any code is executed. A missing registered key, a bad signature, an `entryHash` mismatch, or a denied permission does *not* throw; those come back as a `SkillVerification` result with `valid: false` and an `error` string.
 
 **Hint:** `"Verify the skill manifest is signed by a trusted publisher, or add the publisher to supplyChain.trustedPublishers."`
 
@@ -361,7 +367,7 @@ Thresholds live under `anomaly` in config: `tokenRate.thresholdTokPerSec` (defau
 | `AuditDegradedError` | 15.3 | Yes when it fires after the provider call (the usual case, and a failed primary record under `audit.failClosed`); No when `audit.failClosed` refuses a call at its start on an already-degraded client | Settled and charged in the usual case; nothing is charged on a start-of-call refusal or a failed primary record (the hold is released by a best-effort void request, see above) |
 | `VaultNotInitializedError` | Not thrown | — | — |
 | `SpendLedgerUnreadableError` | Startup | No | No |
-| `AnomalyError` | Mid-stream | Yes (aborted) | No (hold voided; delivered chunks are not billed) |
+| `AnomalyError` | Mid-stream | Yes (aborted) | No (the ledger hold is voided; the provider can still bill the tokens it generated) |
 | `VaultKeyMissingError` | Vault open | No | No |
 | `SkillVerificationError` | Skill verification | No | No |
 | `CredentialAccessDeniedError` | Not thrown | — | — |
