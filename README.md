@@ -363,7 +363,7 @@ With [external anchoring](https://github.com/usertools-ai/usertrust/blob/master/
 
 ```bash
 usertrust anchor init                                     # once: mint identity, pin the key
-usertrust anchor now --sink-file /mnt/worm/anchors.jsonl  # from cron/CI, or in-process
+usertrust anchor now --sink-file /mnt/worm/anchors.jsonl  # from cron or CI
 
 # or publish straight to S3, after checking the store really refuses deletes
 usertrust anchor doctor --sink-s3 bucket=audit-anchors,region=us-east-1
