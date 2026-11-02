@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **minimatch 10.2.6 → 11.0.3 in `usertrust`, which closes GHSA-g3hv-75wg-m249; the verdict for two shapes of scope glob changes.** Policy `scopePatterns`, scope leases and `scopesOverlap` all match with minimatch. (1) A pattern with several `**` segments now matches a path it missed before: `**/a/b/c/**/d/**` matches `a/b/c/d/d`, so a deny or lease rule written that way catches more (this errs toward refusing). (2) A scope that ends in a slash no longer matches an optional-extglob tail: `a/b/` does not match `a/b/?(x)` or `a/b/*(x)`; `scopesOverlap` still reports the pair as overlapping through its prefix check. A glob of 65,536 characters or more is still refused when a policy file loads, as before. If a rule uses one of these shapes, re-check what it matches.
+
 ## [5.3.0] - 2026-11-01
 
 ### Added
