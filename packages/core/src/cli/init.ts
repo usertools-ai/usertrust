@@ -585,9 +585,13 @@ function ensureEnvTemplate(vaultPath: string): boolean {
 	return true;
 }
 
-/** Whether a line of a key file assigns `name` (`NAME=...`, optionally `export NAME=...`). */
-function assigns(line: string, name: string): boolean {
-	return new RegExp(`^\\s*(?:export\\s+)?${name}\\s*=`).test(line);
+/**
+ * The variable a line of a key file assigns (`NAME=...`, optionally `export NAME=...`), or
+ * undefined for a comment, a blank line or anything else. Compared as text, never built into a
+ * pattern: a provider name is typed by the user and may hold characters a pattern gives meaning to.
+ */
+function assignedName(line: string): string | undefined {
+	return /^\s*(?:export\s+)?([^=\s#]+)\s*=/.exec(line)?.[1];
 }
 
 /**
@@ -597,7 +601,7 @@ function assigns(line: string, name: string): boolean {
  * to an in-place write applies only when the file is CREATED, so a reconfigure over an existing
  * 0644 file would put the new key in that 0644 file (a symlink is replaced, never written through).
  */
-function writeKeys(vaultPath: string, keys: Record<string, string>): void {
+export function writeKeys(vaultPath: string, keys: Record<string, string>): void {
 	const envPath = join(vaultPath, ".env");
 	let lines: string[] = [];
 	try {
@@ -610,9 +614,16 @@ function writeKeys(vaultPath: string, keys: Record<string, string>): void {
 		const name = envVarName(provider);
 		const escaped = key.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 		const line = `${name}="${escaped}"`;
-		const at = lines.findIndex((l) => assigns(l, name));
-		if (at === -1) lines.push(line);
-		else lines[at] = line;
+		// `node --env-file` takes the LAST assignment of a variable and the vault's own loader the
+		// FIRST, so a rotation must leave exactly one: the first is replaced and every later one (an
+		// `export` form too) is dropped.
+		const first = lines.findIndex((l) => assignedName(l) === name);
+		if (first === -1) {
+			lines.push(line);
+		} else {
+			lines = lines.filter((l, i) => i <= first || assignedName(l) !== name);
+			lines[first] = line;
+		}
 	}
 	writePrivateFileAtomic(envPath, `${lines.join("\n")}\n`, warnOnStderr);
 }

@@ -10,6 +10,7 @@
 import { spawnSync } from "node:child_process";
 import {
 	existsSync,
+	mkdirSync,
 	mkdtempSync,
 	readFileSync,
 	rmSync,
@@ -20,7 +21,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { run } from "../../src/cli/init.js";
+import { run, writeKeys } from "../../src/cli/init.js";
 
 const repoRoot = join(import.meta.dirname, "..", "..", "..", "..");
 const TSX = join(repoRoot, "node_modules", ".bin", "tsx");
@@ -165,5 +166,58 @@ describe("running init again carries on", () => {
 		expect(report.data.created).toBe(false);
 		expect(report.data.message).toContain("already exists");
 		expect(readFileSync(config, "utf-8")).toBe(before);
+	});
+});
+
+describe("writing a typed key into a key file that already has lines", () => {
+	const envPath = () => vault(".env");
+	const seed = (content: string) => {
+		mkdirSync(vault(), { recursive: true });
+		writeFileSync(envPath(), content, { mode: 0o600 });
+	};
+	/** What a process that loads the file with Node's own loader sees for a variable. */
+	const loaded = (name: string): string => {
+		const r = spawnSync(
+			process.execPath,
+			["--env-file", envPath(), "-e", `process.stdout.write(String(process.env.${name}))`],
+			{ encoding: "utf-8" },
+		);
+		return r.stdout;
+	};
+
+	it("a variable assigned twice ends with one line, holding the new key, as Node loads it", () => {
+		seed('ANTHROPIC_API_KEY="sk-ant-old-1"\nOTHER=1\nANTHROPIC_API_KEY="sk-ant-old-2"\n');
+		writeKeys(vault(), { anthropic: "sk-ant-new-0000" });
+		const after = readFileSync(envPath(), "utf-8");
+		expect(after).toBe('ANTHROPIC_API_KEY="sk-ant-new-0000"\nOTHER=1\n');
+		// Node takes the last assignment: a rotation that kept the old later line would load the old key.
+		expect(loaded("ANTHROPIC_API_KEY")).toBe("sk-ant-new-0000");
+	});
+
+	it("an `export` form of the same variable is replaced or dropped too", () => {
+		seed(
+			"export ANTHROPIC_API_KEY=old-a\nANTHROPIC_API_KEY=old-b\n  export ANTHROPIC_API_KEY = old-c\n",
+		);
+		writeKeys(vault(), { anthropic: "sk-ant-new-0000" });
+		expect(readFileSync(envPath(), "utf-8")).toBe('ANTHROPIC_API_KEY="sk-ant-new-0000"\n');
+	});
+
+	it("a name with pattern characters matches only itself: no throw, no other key line touched", () => {
+		const other = 'ABC_API_KEY="keep-me"\nA_C_API_KEY="keep-me-too"\n';
+		for (const provider of ["a.c", "a(c", "a[c", "a*c", "a+c", "a|c"]) {
+			seed(other);
+			expect(() => writeKeys(vault(), { [provider]: "typed-key-0000" })).not.toThrow();
+			const after = readFileSync(envPath(), "utf-8");
+			expect(after.startsWith(other), provider).toBe(true);
+			expect(after, provider).toContain('"typed-key-0000"');
+		}
+	});
+
+	it("a commented-out line for the variable is not an assignment and is kept", () => {
+		seed('# ANTHROPIC_API_KEY="sk-ant-old"\n');
+		writeKeys(vault(), { anthropic: "sk-ant-new-0000" });
+		expect(readFileSync(envPath(), "utf-8")).toBe(
+			'# ANTHROPIC_API_KEY="sk-ant-old"\nANTHROPIC_API_KEY="sk-ant-new-0000"\n',
+		);
 	});
 });
