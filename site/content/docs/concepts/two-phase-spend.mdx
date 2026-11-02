@@ -68,7 +68,7 @@ By default, usertrust does not fail a call because the audit write degraded: if 
 
 ### 15.4 — TigerBeetle Unreachable
 
-The ledger is unreachable before the LLM call starts: creating the ledger engine at `trust()` startup fails, or a ledger operation fails before the call. usertrust throws a `LedgerUnavailableError` and does **not** forward the request to the provider. No tokens are at risk because no hold was placed. An address with nothing listening is a different case: the TigerBeetle client has no request timeout, so a request nobody answers stays queued, and `trust()` waits on its first ledger request.
+The ledger is unreachable before the LLM call starts: creating the ledger engine at `trust()` startup fails, or a ledger operation fails before the call. usertrust throws a `LedgerUnavailableError` and does **not** forward the request to the provider. No tokens are at risk because no hold was placed. An address with nothing listening is refused within 1 s (loopback) or 3 s (remote): `trust()` rejects with `LedgerUnavailableError` (`No ledger is running at <address>. Fix: ...`, which is `npx usertrust tb start` for the default ledger and otherwise names the address and cluster to start) instead of waiting. When something is listening but no usertrust ledger answers, the first request is bounded by `tigerbeetle.connectTimeoutMs` (default `5000`) and then fails with an error that says so. If the cluster evicts the client, the evicted client cannot be released and the process must exit on its own.
 
 ### 15.5 — Multiple Failures Combine
 
