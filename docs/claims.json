@@ -245,7 +245,7 @@
 				},
 				{
 					"file": "site/content/docs/concepts/index.mdx",
-					"text": "<Card title=\"Audit Trail\" description=\"SHA-256 hash-chained, append-only log for every governed call\" href=\"/docs/concepts/audit-trail\" />"
+					"text": "<Card title=\"Audit trail\" description=\"SHA-256 hash-chained, append-only log for every governed call\" href=\"/docs/concepts/audit-trail\" />"
 				},
 				{
 					"file": "site/content/docs/index.mdx",
@@ -1407,6 +1407,16 @@
 			"why": "policy evaluation order"
 		},
 		{
+			"file": "site/content/docs/concepts/policy-engine.mdx",
+			"text": "and every call site reads the evaluation result only inside its `decision === \"deny\"` branch.",
+			"why": "where the code reads the policy result; not a claim about the audit chain"
+		},
+		{
+			"file": "site/content/docs/concepts/policy-engine.mdx",
+			"text": "so user rules can add deny or warn rules but cannot remove, disable, or override a built-in",
+			"why": "how custom policy rules merge with the built-ins; not a claim about the audit chain"
+		},
+		{
 			"file": "site/content/docs/concepts/two-phase-spend.mdx",
 			"text": "--- title: Two-Phase Spend description: How usertrust uses banking-style authorization holds for every LLM call. ---",
 			"why": "the spend lifecycle, not the audit chain"
@@ -1545,6 +1555,21 @@
 			"file": "LIMITATIONS.md",
 			"text": "Detecting a rollback after the fact needs evidence held outside the vault, an anchor or receipts you kept (section 8): a restore that takes the log below an anchor shows as `ANCHOR_MISMATCH` when you verify with the anchors and your pinned key (see [docs/anchoring.md](docs/anchoring.md)). Without either, the restored vault is checked only against itself. Verification reads every audit segment in the directory, so a segment the snapshot lacked can make the restored vault fail with duplicate sequences or a count mismatch.",
 			"why": "describes what snapshot restore does and refuses to do, not a property of the audit chain"
+		},
+		{
+			"file": "site/content/docs/concepts/circuit-breaker.mdx",
+			"text": "so `halfOpenSuccessThreshold` stays at its default of 2 for governed clients and cannot be changed from config or options.",
+			"why": "which circuit-breaker settings the config reaches; not about the audit chain"
+		},
+		{
+			"file": "site/content/docs/policy/operators.mdx",
+			"text": "A hard rule on a field the SDK never populates therefore denies every call.",
+			"why": "what a hard policy rule on an unpopulated field does; not about the audit chain"
+		},
+		{
+			"file": "site/content/docs/policy/operators.mdx",
+			"text": "and `cost_center` on every LLM call",
+			"why": "which fields the policy context carries; not about the audit chain"
 		}
 	],
 	"denied": [

@@ -7,7 +7,7 @@ description: 12 field operators for policy conditions — equality, comparison, 
 
 ```typescript
 interface FieldCondition {
-  field: string;       // dot-notation path (e.g., "model", "cost.estimated")
+  field: string;       // dot-notation path (e.g., "model", "estimated_cost", "messages.0.role")
   operator: FieldOperator;
   value?: unknown;     // not needed for exists/not_exists
 }
@@ -18,7 +18,7 @@ interface FieldCondition {
 | Operator | Description | Example |
 |----------|-------------|---------|
 | `exists` | Field is present and not null/undefined | `{ field: "scope", operator: "exists" }` |
-| `not_exists` | Field is absent or null/undefined | `{ field: "proxy", operator: "not_exists" }` |
+| `not_exists` | Field is absent or null/undefined | `{ field: "cost_center", operator: "not_exists" }` |
 
 ## Equality
 
@@ -31,9 +31,9 @@ interface FieldCondition {
 
 | Operator | Description | Example |
 |----------|-------------|---------|
-| `gt` | Greater than | `{ field: "cost.estimated", operator: "gt", value: 1000 }` |
-| `gte` | Greater than or equal | `{ field: "budget", operator: "gte", value: 0 }` |
-| `lt` | Less than | `{ field: "budgetRemaining", operator: "lt", value: 100 }` |
+| `gt` | Greater than | `{ field: "estimated_cost", operator: "gt", value: 1000 }` |
+| `gte` | Greater than or equal | `{ field: "budget_remaining", operator: "gte", value: 1000 }` |
+| `lt` | Less than | `{ field: "budget_remaining", operator: "lt", value: 100 }` |
 | `lte` | Less than or equal | `{ field: "max_tokens", operator: "lte", value: 4096 }` |
 
 ## Membership
@@ -49,6 +49,20 @@ interface FieldCondition {
 |----------|-------------|---------|
 | `contains` | String contains substring | `{ field: "model", operator: "contains", value: "opus" }` |
 | `regex` | Regex match (safe: max 200 chars, no nested quantifiers) | `{ field: "model", operator: "regex", value: "^claude-.*" }` |
+
+<Callout type="warn">
+**Hard rules fail closed on a field they cannot read**
+
+Every operator except `exists` / `not_exists` returns *indeterminate* when the field does not resolve. Beyond that it depends on the operator: `gt`, `gte`, `lt` and `lte` are also indeterminate when either side is not a number, `contains` and `regex` when either side is not a string, and `in` and `not_in` when the rule value is not an array. `eq`, `neq`, `in` and `not_in` compare with strict equality, so a defined value of another type is a determinate comparison (false for `eq` and `in`, true for `neq` and `not_in`), and `null` is a value that compares determinately. In a rule with `enforcement: hard` an indeterminate condition counts as satisfied, so the rule still fires; in a `soft` rule it counts as unmet. A hard rule on a field the SDK never populates therefore denies every call. Lead such a rule with an `exists` condition on the same field when it must only apply to calls that carry it.
+
+The controller injects `model`, `tier`, `estimated_cost`, `budget_remaining`, `budget_remaining_after`, `scope` and `cost_center` on every LLM call (plus `budgetFractionRemaining` / `budgetRunwayHours` for a call inside a `withCostCenter` scope that declared an allocation, and `action_kind` / `action_name` instead of `model` for a governed action). The caller's request params are spread in underneath, so `max_tokens` and `messages.0.role` resolve when the request carries them.
+</Callout>
+
+<Callout type="info">
+**Values are checked when the file loads**
+
+`gt` / `gte` / `lt` / `lte` need a finite number, `in` / `not_in` an array, `contains` / `regex` a string, and every operator except `exists` / `not_exists` needs a `value`. A `regex` the evaluator would refuse (invalid, over 200 characters, or nested quantifiers) is refused here instead. Any such fault throws `PolicyLoadError` and loads none of the file's rules.
+</Callout>
 
 ## Dot-Notation Field Resolution
 
@@ -72,7 +86,7 @@ conditions:
     - field: model
       operator: contains
       value: opus
-    - field: cost.estimated
+    - field: estimated_cost
       operator: gt
       value: 500
 ```
