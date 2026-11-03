@@ -84,7 +84,9 @@ export function formatUsd(ut: number): string {
  * tooltip beside it.
  */
 export function formatUsdTotal(ut: number): string {
-	return dollarsFromUt(ut, 2);
+	// A nonzero total under a cent (1-99 UT) keeps 4 dp: at 2 dp it would read "$0.00" (or a rounded "$0.01"), and
+	// "overspent by $0.00" contradicts itself.
+	return dollarsFromUt(ut, ut !== 0 && Math.abs(ut) < 100 ? 4 : 2);
 }
 
 /**

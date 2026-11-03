@@ -143,16 +143,25 @@ describe("dollars first", () => {
 		expect(formatUsdTotal(0)).toBe("$0.00");
 		expect(formatUsd(0)).toBe("$0.0000");
 		expect(formatUsd(1)).toBe("$0.0001");
-		expect(formatUsdTotal(1)).toBe("$0.00");
+		expect(formatUsdTotal(1)).toBe("$0.0001");
 		expect(formatUsd(9_999)).toBe("$0.9999");
 		expect(formatUsdTotal(9_999)).toBe("$1.00");
 		expect(formatUsd(10_000)).toBe("$1.0000");
 		expect(formatUsdTotal(10_000)).toBe("$1.00");
 	});
 
+	it("a nonzero total under a cent keeps 4 dp, so it never reads $0.00", () => {
+		expect(formatUsdTotal(1)).toBe("$0.0001");
+		expect(formatUsdTotal(49)).toBe("$0.0049");
+		expect(formatUsdTotal(99)).toBe("$0.0099");
+		expect(formatUsdTotal(-49)).toBe("-$0.0049");
+		expect(formatUsdTotal(0)).toBe("$0.00");
+		expect(formatUsdTotal(100)).toBe("$0.01");
+	});
+
 	it("rounds a half cent up, never by a float's whim", () => {
-		expect(formatUsdTotal(49)).toBe("$0.00");
-		expect(formatUsdTotal(50)).toBe("$0.01");
+		expect(formatUsdTotal(150)).toBe("$0.02");
+		expect(formatUsdTotal(149)).toBe("$0.01");
 		// 1.005 * 100 is 100.49999999999999 in floats: integer math has no such case
 		expect(formatUsdTotal(10_050)).toBe("$1.01");
 		expect(formatUsdTotal(76_050)).toBe("$7.61");

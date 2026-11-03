@@ -22,6 +22,12 @@ import {
 import { JOB_TYPE_CAVEAT, type LedgerRow } from "../shared/rows.js";
 import { BarList } from "./bar-list.js";
 
+/**
+ * The cost axis plots whole usertokens, so its ticks are whole too. With decimals allowed, a 1 UT tallest bar gets
+ * ticks at 0, 0.25, 0.5, 0.75 and 1, and the dollar labels (exact to 1 UT) repeat and misstate their heights.
+ */
+export const Y_AXIS_ALLOW_DECIMALS = false;
+
 type Granularity = "day" | "hour";
 
 function pad2(n: number): string {
@@ -174,6 +180,7 @@ export function Trends(props: {
 							/>
 							<YAxis
 								width={64}
+								allowDecimals={Y_AXIS_ALLOW_DECIMALS}
 								tickFormatter={(v: number) => formatUsdAxis(v)}
 								tick={{ fill: "var(--body)", fontSize: 10.5, fontFamily: "var(--mono)" }}
 								tickLine={false}
