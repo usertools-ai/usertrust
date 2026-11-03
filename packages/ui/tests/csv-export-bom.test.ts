@@ -36,8 +36,13 @@ describe("CSV export byte-order mark", () => {
 		}
 	});
 
-	it("control: a prefix without the mark is detected as not starting with EF BB BF", () => {
-		const bytes = [...Buffer.from("x", "utf8").subarray(0, 3)];
-		expect(bytes).not.toEqual([0xef, 0xbb, 0xbf]);
+	it("control: the same real source with the mark taken out no longer starts with EF BB BF", () => {
+		const prefix = PREFIX.exec(APP)?.[1] ?? "";
+		expect(prefix).not.toBe("");
+		const without = APP.replace(prefix, "");
+		const after = PREFIX.exec(without)?.[1];
+		expect(after).toBe("");
+		const decoded = JSON.parse(`"${after}"`) as string;
+		expect([...Buffer.from(`${decoded}x`, "utf8").subarray(0, 3)]).not.toEqual([0xef, 0xbb, 0xbf]);
 	});
 });
