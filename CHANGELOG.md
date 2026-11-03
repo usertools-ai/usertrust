@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The pinned TigerBeetle 0.17.9 server can be downloaded and checked, and nothing runs until its sha256 matches.** Internal building block for the local ledger (`usertrust tb` does not use it yet). `tigerbeetle-release.json` pins the release asset for macOS, Linux and Windows x64/arm64 by sha256 and size; the download streams to a temp file beside the destination, is cut at the pinned size, is refused with nothing left behind if one byte differs, and only then is the one binary extracted in-process and checked with `tigerbeetle version`. It installs per user under a versioned folder, never `node_modules`. `USERTRUST_TB_BINARY` is checked against the pinned version in the same way, and it is the way around a blocked network. CI reads the server version and digest from the same manifest instead of repeating them, and `scripts/check-tigerbeetle-release.mjs` re-checks the manifest against GitHub when it changes.
+
 ## [5.4.0] - 2026-11-03
 
 ### Read before upgrading

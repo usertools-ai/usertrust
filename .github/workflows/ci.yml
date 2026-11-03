@@ -109,6 +109,8 @@ jobs:
           git diff --exit-code
       # The tested-tree stamp's verdict and ci.yml's wiring of it (scripts/tested-tree.test.mjs).
       - run: node --test scripts/tested-tree.test.mjs
+      # The TigerBeetle release manifest's digest check, against a fake GitHub (no network).
+      - run: node --test scripts/check-tigerbeetle-release.test.mjs
       # A pull request cut from a base that predates a CHANGELOG cut can merge its Unreleased entry into the
       # released section (git places it next to the heading the cut inserted). So the MERGE result is graded against
       # the base it merges into: every line a change adds sits under [Unreleased], no line of a released section
@@ -348,12 +350,11 @@ jobs:
     # runs the env-gated integration test that the normal `test` job self-skips
     # (USERTRUST_TB_ADDRESS unset there). A failure here is a real hard-budget
     # enforcement failure, so this job is allowed to fail the workflow.
-    env:
-      # Pin the TigerBeetle server to a version compatible with tigerbeetle-node
-      # 0.17.9 in packages/core. The client must never be newer than the server
-      # (0.17.9 requires server >= 0.17.5), so pin the server to 0.17.9 and bump
-      # this in lockstep whenever tigerbeetle-node is upgraded — never `latest`.
-      TIGERBEETLE_VERSION: "0.17.9"
+    # The TigerBeetle server version and its digests are NOT written here: they come from
+    # packages/core/src/ledger/tigerbeetle-release.json, the manifest the CLI installs from too.
+    # The client must never be newer than the server (tigerbeetle-node 0.17.9 requires a server
+    # >= 0.17.5), so the manifest pins the server to the client's exact version, and
+    # packages/core/tests/ledger/tigerbeetle-release.test.ts fails if the two ever differ.
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -361,6 +362,20 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Check the manifest's digests against the GitHub release (only when the manifest changed)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          MANIFEST=packages/core/src/ledger/tigerbeetle-release.json
+          if [ -n "$BASE_SHA" ] && [ "$BASE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA" 2>/dev/null || true
+            if git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null && git diff --quiet "$BASE_SHA" HEAD -- "$MANIFEST"; then
+              echo "The manifest is unchanged since $BASE_SHA: the network digest check is skipped."
+              exit 0
+            fi
+          fi
+          node scripts/check-tigerbeetle-release.mjs --download
       - name: Download TigerBeetle static binary
         # The statically-linked binary avoids the Docker seccomp/io_uring + memlock
         # pitfalls on ubuntu-latest. If this version-pinned release URL is ever
@@ -372,12 +387,15 @@ jobs:
         #     -v "$PWD/data:/data" ghcr.io/tigerbeetle/tigerbeetle:${TIGERBEETLE_VERSION} \
         #     start --addresses=0.0.0.0:3000 --development /data/0_0.tigerbeetle
         run: |
+          MANIFEST=packages/core/src/ledger/tigerbeetle-release.json
+          TIGERBEETLE_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('$MANIFEST','utf8')).version")"
+          TIGERBEETLE_FILE="$(node -p "JSON.parse(require('fs').readFileSync('$MANIFEST','utf8')).assets['linux-x64'].file")"
+          TIGERBEETLE_SHA256="$(node -p "JSON.parse(require('fs').readFileSync('$MANIFEST','utf8')).assets['linux-x64'].sha256")"
           curl -fsSLo tigerbeetle.zip \
-            "https://github.com/tigerbeetle/tigerbeetle/releases/download/${TIGERBEETLE_VERSION}/tigerbeetle-x86_64-linux.zip"
-          # Supply-chain pin: verify the exact release asset before executing it.
-          # Recompute when bumping TIGERBEETLE_VERSION:
-          #   curl -fsSL <url> | shasum -a 256
-          echo "af71f2c0057e3b409bf79940fa94894b738187b0d4f1e711097bca15df5d8cd4  tigerbeetle.zip" | sha256sum -c -
+            "https://github.com/tigerbeetle/tigerbeetle/releases/download/${TIGERBEETLE_VERSION}/${TIGERBEETLE_FILE}"
+          # Supply-chain pin: verify the exact release asset before executing it. The digest is the
+          # manifest's; scripts/check-tigerbeetle-release.mjs proves it against GitHub when it changes.
+          echo "${TIGERBEETLE_SHA256}  tigerbeetle.zip" | sha256sum -c -
           unzip -o tigerbeetle.zip
           chmod +x ./tigerbeetle
           ./tigerbeetle version
