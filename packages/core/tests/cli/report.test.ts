@@ -516,11 +516,11 @@ describe("usertrust report --week", () => {
 		};
 		expect(out.budget.unknown).toBe(true);
 		expect(out.budget.unknownReason).toBe(
-			"unknown: several governors with different budgets, as of 2026-10-12T00:00:00.000Z",
+			"unknown: several controllers with different budgets, as of 2026-10-12T00:00:00.000Z",
 		);
 		stdout = "";
 		await run(dir, {}, ["--week", "--end", endIso()]);
-		expect(stdout).toContain("Budget `unknown: several governors with different budgets");
+		expect(stdout).toContain("Budget `unknown: several controllers with different budgets");
 		expect(stdout).not.toContain("vault config could not be read");
 		write.mockRestore();
 	});
@@ -965,7 +965,7 @@ describe("usertrust report --week", () => {
 		await run(dir, {}, ["--week", "--end", endIso()]);
 		expect(process.exitCode).toBeUndefined();
 		expect(stdout).toContain(
-			"Budget `unknown: not yet published; no governor has recorded the budget it enforces`",
+			"Budget `unknown: not yet published; no controller has recorded the budget it enforces`",
 		);
 		expect(stdout).not.toMatch(/no budget configured\b(?!')/);
 		write.mockRestore();
