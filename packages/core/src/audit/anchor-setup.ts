@@ -20,6 +20,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { VAULT_DIR } from "../shared/constants.js";
 import {
+	ANCHOR_IDENTITY_EXISTS,
 	type AnchorIdentity,
 	anchorsDir,
 	defaultKeyPath,
@@ -93,6 +94,25 @@ export function ensureAnchorIdentity(
 			};
 		}
 		if (signerKeyId !== identity.keyId) {
+			// readAnchorIdentity checks only the top-level fields, so the history may be any shape.
+			const history: unknown = identity.keyHistory;
+			if (
+				history !== undefined &&
+				(!Array.isArray(history) ||
+					!history.every(
+						(k: unknown) =>
+							typeof k === "object" &&
+							k !== null &&
+							typeof (k as { keyId?: unknown }).keyId === "string" &&
+							typeof (k as { publicKeySpki?: unknown }).publicKeySpki === "string",
+					))
+			) {
+				return {
+					status: "needs-attention",
+					reason: "identity-unreadable",
+					message: `${identityPath} has a malformed key history. It was left untouched; inspect or restore it.`,
+				};
+			}
 			const superseded = identity.keyHistory?.some((k) => k.keyId === signerKeyId) === true;
 			return {
 				status: "needs-attention",
@@ -132,7 +152,10 @@ export function ensureAnchorIdentity(
 	} catch (err) {
 		// A concurrent caller created the identity between our check and our write:
 		// its identity stands, so judge that one instead of reporting a failure.
-		if (!retried && existsSync(identityPath)) return ensureAnchorIdentity(rootDir, opts, true);
+		// Only that race: any other failure is reported, never mistaken for a ready vault.
+		if (!retried && (err as NodeJS.ErrnoException).code === ANCHOR_IDENTITY_EXISTS) {
+			return ensureAnchorIdentity(rootDir, opts, true);
+		}
 		return {
 			status: "needs-attention",
 			reason: "key-write-failed",

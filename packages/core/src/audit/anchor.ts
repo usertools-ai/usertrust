@@ -315,6 +315,15 @@ function realResolve(p: string): string {
 	return suffix.length === 0 ? base : join(base, ...suffix);
 }
 
+/** Code on the error thrown when an identity already stands (an existing one, or a lost race). */
+export const ANCHOR_IDENTITY_EXISTS = "ANCHOR_IDENTITY_EXISTS";
+
+function identityExistsError(identityPath: string): Error {
+	return Object.assign(new Error(`Anchor identity already exists: ${identityPath}`), {
+		code: ANCHOR_IDENTITY_EXISTS,
+	});
+}
+
 /**
  * Mint the vault's anchor identity: Ed25519 keypair (private key OUTSIDE the
  * vault, mode 0600), `identity.json`, and an empty mirror file. Returns the
@@ -327,9 +336,7 @@ export function initAnchorIdentity(
 ): { identity: AnchorIdentity; publicKeyPem: string; keyFile: string } {
 	const dir = anchorsDir(rootDir);
 	const identityPath = join(dir, "identity.json");
-	if (existsSync(identityPath)) {
-		throw new Error(`Anchor identity already exists: ${identityPath}`);
-	}
+	if (existsSync(identityPath)) throw identityExistsError(identityPath);
 	const vaultId = randomUUID();
 	const { publicKey, privateKey } = generateKeyPairSync("ed25519");
 	const keyId = keyIdFromKeyObject(publicKey);
@@ -352,17 +359,34 @@ export function initAnchorIdentity(
 	mkdirSync(keyDir, { recursive: true, mode: 0o700 });
 	// Exclusive create: an existing file at this path is somebody's key (or another
 	// vault's). Overwriting it would silently destroy the only copy of that signer.
+	let keyFd: number;
 	try {
-		writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }) as string, {
-			mode: 0o600,
-			flag: "wx",
-		});
+		keyFd = openSync(keyFile, "wx", 0o600);
 	} catch (err) {
 		if ((err as NodeJS.ErrnoException).code === "EEXIST") {
 			throw new Error(`Refusing to overwrite an existing key file: ${keyFile}`);
 		}
 		throw err;
 	}
+	// The file exists and is ours from here: a write that fails part-way (ENOSPC, EIO) must
+	// not leave a partial key behind, or every retry with this --key-file would refuse.
+	try {
+		writeSync(keyFd, privateKey.export({ type: "pkcs8", format: "pem" }) as string);
+		fsyncSync(keyFd);
+	} catch (err) {
+		try {
+			closeSync(keyFd);
+		} catch {
+			/* already failing */
+		}
+		try {
+			unlinkSync(keyFile);
+		} catch {
+			/* never created */
+		}
+		throw err;
+	}
+	closeSync(keyFd);
 	let createdIdentity: AnchorIdentity;
 	// From here until the identity is published, ANY failure removes the key this call just
 	// made (the exclusive create above proves it is ours): an orphaned key would make a
@@ -375,6 +399,14 @@ export function initAnchorIdentity(
 		// written, so cleanup removes only what this call made.
 		pubCopy = writePublicKeyCopy(keyFile, publicKeyPem);
 		mkdirPrivate(join(dir, "outbox"));
+		// Touch the mirror so "mirror file missing" (accidental loss / partial restore) is
+		// distinguishable from "fresh vault, no anchors yet". Done BEFORE the identity is
+		// published, so nothing that can fail runs after publication; a leftover empty
+		// mirror from a failed attempt is harmless.
+		const mirrorPath = join(dir, "anchors.jsonl");
+		if (!existsSync(mirrorPath)) {
+			writeFileSync(mirrorPath, "", { mode: 0o600 });
+		}
 		const identity: AnchorIdentity = {
 			v: 1,
 			vaultId,
@@ -394,16 +426,8 @@ export function initAnchorIdentity(
 			}
 		}
 		// EEXIST: lost a race to a concurrent init, whose identity stands.
-		if ((err as NodeJS.ErrnoException).code === "EEXIST") {
-			throw new Error(`Anchor identity already exists: ${identityPath}`);
-		}
+		if ((err as NodeJS.ErrnoException).code === "EEXIST") throw identityExistsError(identityPath);
 		throw err;
-	}
-	// Touch the mirror so "mirror file missing" (accidental loss / partial
-	// restore) is distinguishable from "fresh vault, no anchors yet".
-	const mirrorPath = join(dir, "anchors.jsonl");
-	if (!existsSync(mirrorPath)) {
-		writeFileSync(mirrorPath, "", { mode: 0o600 });
 	}
 	return { identity: createdIdentity, publicKeyPem, keyFile };
 }

@@ -134,6 +134,31 @@ describe("ensureAnchorIdentity", () => {
 		if (r.status === "needs-attention") expect(r.reason).toBe("key-mismatch");
 	});
 
+	it.each([
+		["an object", {}],
+		["a null entry", [null]],
+		["an entry without keys", [{ keyId: 1 }]],
+	])(
+		"a mismatched key with a key history that is %s is identity-unreadable, not a throw",
+		(_n, history) => {
+			const a = vaultRoot();
+			const b = vaultRoot();
+			const ra = ensureAnchorIdentity(a);
+			const rb = ensureAnchorIdentity(b);
+			if (ra.status !== "created" || rb.status !== "created") throw new Error("setup");
+			writeFileSync(ra.keyFile, readFileSync(rb.keyFile));
+			const p = join(a, ".usertrust", "audit", "anchors", "identity.json");
+			const identity = JSON.parse(readFileSync(p, "utf-8"));
+			identity.keyHistory = history;
+			const text = JSON.stringify(identity);
+			writeFileSync(p, text);
+			const r = ensureAnchorIdentity(a);
+			expect(r.status).toBe("needs-attention");
+			if (r.status === "needs-attention") expect(r.reason).toBe("identity-unreadable");
+			expect(readFileSync(p, "utf-8")).toBe(text);
+		},
+	);
+
 	it("leaves a corrupt identity.json byte-for-byte and creates nothing", () => {
 		const root = vaultRoot();
 		const dir = join(root, ".usertrust", "audit", "anchors");
