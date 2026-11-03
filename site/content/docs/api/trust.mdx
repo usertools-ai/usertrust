@@ -3,7 +3,7 @@ title: trust()
 description: The core API — wraps any LLM client with governed spend, audit, and policy.
 ---
 
-`trust()` is the single entry point for the usertrust SDK. It takes any supported LLM client, wraps it in a JS Proxy, and returns a governed client where every API call becomes an audited, budget-enforced financial transaction.
+`trust()` is the single entry point for the usertrust SDK. It takes any supported LLM client, wraps it in a JS Proxy, and returns a governed client where every governed call — the provider methods listed under [Provider detection](#provider-detection) — becomes an audited, budget-enforced financial transaction. Every other SDK method on the client is either refused or, if it only reads or deletes, runs unmetered; that rule is in the same section.
 
 ## Signature
 
@@ -11,7 +11,7 @@ description: The core API — wraps any LLM client with governed spend, audit, a
 async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClient<T>>
 ```
 
-`trust()` is async because it initializes the vault, loads config, connects to TigerBeetle (unless dry-run), and sets up the audit chain before returning the governed client.
+`trust()` is async because it initializes the vault, loads config, connects to TigerBeetle (unless dry-run), and sets up the audit chain before returning the governed client. If creating the ledger engine fails (a rejected connection or a failed account seed) it throws `LedgerUnavailableError` (failure mode 15.4) and never wraps the client. It first opens a plain TCP connection to the configured addresses: when every one refuses (checked within 1 s for a loopback address, 3 s for a remote one), `trust()` throws `LedgerUnavailableError` with `No ledger is running at <address>. Fix: ...` (`npx usertrust tb start` for the default ledger at `127.0.0.1:3001`; for any other address or cluster the fix names the address and cluster to start). When something is listening but no usertrust ledger answers, the first request is bounded by `tigerbeetle.connectTimeoutMs` (default `5000`) and then throws an error that says so. If the cluster evicts the client, the error says the evicted client cannot be released and the process must exit on its own. Use `dryRun` where no replica is running.
 
 ## TrustOpts
 
@@ -23,45 +23,56 @@ interface TrustOpts {
   budget?: number;        // Token budget override (in usertokens)
   tier?: string;          // Accepted, but currently not applied (the config file's tier is used)
   pii?: "redact" | "warn" | "block" | "off"; // PII enforcement override
+  parentUserId?: string;  // Ledger identity for cost-center envelopes; overrides config
+  scope?: string[];       // Policy scopes for scopePatterns rules; overrides config
   dryRun?: boolean;       // Skip TigerBeetle — audit chain + policy still run
   vaultBase?: string;     // Vault directory override (default: process.cwd())
+  endpoint?: Partial<EndpointInfo>; // Force local | cloud classification (wins over config + loopback autodetect)
   allowUngoverned?: string[]; // SDK methods to run ungoverned (every provider)
 }
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `configPath` | `.usertrust/usertrust.config.json` | Path to the config file. Resolved relative to `vaultBase`. |
+| `configPath` | `.usertrust/usertrust.config.json` | Path to the config file. Used exactly as given — a relative path resolves against `process.cwd()`, not `vaultBase`; only the default location is built under `vaultBase`. |
 | `proxy` | `undefined` | **Not implemented.** Setting this option throws. Use a local TigerBeetle or `dryRun` for enforcement. |
 | `key` | `undefined` | **Not implemented.** API key for the removed proxy. Unused; `proxy` throws first. |
-| `budget` | Config value or `10_000` | Total usertoken budget for this client. Overrides the config file value. |
+| `budget` | Config value, else `50_000` | Total usertoken budget for this client. Overrides the config file value. `50_000` applies only when there is no config file; a config file without `budget` (and no `budget` option) fails validation. |
 | `tier` | `"mini"` | Tier classification. Accepted, but currently not applied: the config file's `tier` is used. |
 | `pii` | Config value or `"warn"` | PII enforcement: `"redact"`, `"warn"`, `"block"` or `"off"`. Overrides the config file value. Any other value is refused by name. |
 | `dryRun` | `false` | Skip TigerBeetle entirely. Also enabled by `USERTRUST_DRY_RUN=true` env var. Useful for CI and testing. |
 | `vaultBase` | `process.cwd()` | Base directory containing the `.usertrust/` vault. |
+| `parentUserId` | Config value, else unset | This controller's ledger identity — the parent half of every `(parentUserId, costCenter)` envelope account. Validated by the same rule as the config field; a malformed value throws at `trust()`. Trusted-operator input only. |
+| `scope` | Config value, else unset | Operator-declared policy scopes that `scopePatterns` rules match against. Up to 32 labels of `[a-zA-Z0-9._@:+/-]`, 1–128 chars each. A request-body `scope` is stripped and ignored. |
+| `endpoint` | `undefined` | Explicit `Partial<EndpointInfo>` override for endpoint classification — `{ class: "local" \| "cloud", runtime?, baseURL? }`. Applies only when `class` is set; `runtime` defaults to `"unknown"`. Wins over `config.endpoints` matchers and loopback autodetect. Trusted-operator input only. |
 | `allowUngoverned` | `[]` | `trust()` only: `createGovernor()` refuses it by name. SDK method paths to run **ungoverned**, as the refusal names them (`"embeddings.create"`, `"files.upload"`). A listed method runs on the raw SDK with no hold, no PII scan and no cost, and each call appends an `ungoverned_call` audit event (`{ method, provider }`). Validated when `trust()` is called: an array of non-empty paths, none free, none governed, none through `_client` or a raw HTTP member such as `post`, and on a Google client none through `apiClient`, `_nextGenClient`, `getNextGenClient`, `_interactions`, `_webhooks` or the Live transports, and not `chats.create`, `live.connect`, `live.music.connect` or `processAfcStream`, whose one call hands out or drives further billable calls. `authTokens.create` can be listed: a key it mints and you use outside governance is out of scope, like reading `apiKey`. Without `audit.failClosed` the method returns what the SDK returns. Under `audit.failClosed` the append is awaited before the SDK is called, a failed append refuses the call, and the method always returns a Promise: a method that is synchronous in the SDK (`chat.completions.stream`) returns a Promise of its value, and `beta.messages.toolRunner`, whose runner is thenable, returns a Promise of the runner's FINAL result (promise resolution adopts the thenable and runs it to completion), not the runner object. |
 
 Every other config setting (`circuitBreaker`, `patterns`, `audit`, …) is read from the config file only. `trust()` refuses an option it does not declare: it throws a `TypeError` that names each unknown key, before anything is read or created, instead of ignoring it.
 
 <Callout type="info">
-The internal `_engine` and `_audit` options exist for testing only. They inject mock subsystems and are not part of the public API.
+**TESTING ONLY**
+The internal `_engine` and `_audit` options exist for testing only. They inject mock subsystems and are not part of the public API. They are honoured only when `USERTRUST_TEST=1` or `NODE_ENV=test`; anywhere else they are silently ignored.
 </Callout>
 
 ## TrustedClient\<T\>
 
 ```typescript
-type TrustedClient<T> = T & { destroy(): Promise<void> };
+type TrustedClient<T> = GovernedShape<T> & {
+  destroy(): Promise<void>;
+  governAction<R>(action: ActionDescriptor, execute: () => Promise<R>): Promise<GovernedActionResult<R>>;
+};
 ```
 
-The returned client has the exact same shape as the original LLM client, plus a `destroy()` method. You call the same methods you already use (`messages.create`, `chat.completions.create`, etc.) and get governed responses back.
+The returned client has the shape of the original client with the governed methods retyped (that is `GovernedShape<T>`): the governed `create` methods return `{ response, receipt }`, `messages.stream()` becomes async and carries a `receipt` promise, and `messages.parse()` returns the parsed message with a settled `receipt` attached. It also gains `destroy()` and `governAction()` for non-LLM actions. You call the same methods you already use (`messages.create`, `chat.completions.create`, etc.) and get governed responses back. Any other SDK method keeps its SDK signature in the type, but is refused at runtime unless it is free or listed in `allowUngoverned` (see [Provider detection](#provider-detection)).
 
 <Callout type="warn">
+**CALL DESTROY()**
 Always call `destroy()` when you are done with the client. Without it, the process will hang due to open TigerBeetle connections and file locks.
 </Callout>
 
 ## Return Value
 
-Every intercepted LLM call returns `{ response, receipt }` instead of the raw provider response:
+Every governed `create()` and `generateContent()` call returns `{ response, receipt }` instead of the raw provider response:
 
 ```typescript
 const { response, receipt } = await client.messages.create({
@@ -71,7 +82,7 @@ const { response, receipt } = await client.messages.create({
 });
 ```
 
-The `response` is the original, unmodified provider response. The `receipt` is a `TrustReceipt` with governance metadata.
+The `response` is the original, unmodified provider response. The `receipt` is a `TrustReceipt` with governance metadata. For a streaming call the envelope's receipt is only an estimate — `settled: false`, `cost` equal to the pre-call estimate, no `usage` — and the settled receipt arrives on `response.receipt` once the stream has been consumed.
 
 ## TrustReceipt
 
@@ -80,14 +91,24 @@ interface TrustReceipt {
   transferId: string;         // Universal join key across ledger, audit, receipts
   cost: number;               // Actual cost in usertokens
   budgetRemaining: number;    // Remaining budget after this call
-  auditHash: string;          // SHA-256 hash of the audit event
-  chainPath: string;          // Path to the audit chain JSONL file
-  receiptUrl: string | null;  // Verify URL (null in local mode)
-  settled: boolean;           // true if POST succeeded; false on failure mode 15.1
+  auditHash: string;          // SHA-256 hash of the audit event, or the sentinel "AUDIT_DEGRADED"
+  chainPath: string;          // Vault-relative audit chain directory — currently ".usertrust/audit"
+  receiptUrl: string | null;  // Always null today — only proxy mode set it, and proxy mode throws
+  settled: boolean;           // true if POST succeeded; false on failure mode 15.1 and on the estimated receipt a streaming call returns up front
   model: string;              // Model used for the call
   provider: string;           // "anthropic" | "openai" | "google"
   timestamp: string;          // ISO 8601 timestamp
   auditDegraded?: boolean;    // true if a chain append for the call failed (mode 15.3; a failed rotated-receipt write, with `audit.rotation` on, is ignored and neither sets this nor degrades the writer, even under `failClosed`); its order relative to the settle varies by path and record (a capped non-stream settle posts before its shortfall record is appended); a failed `injection_detected` append in warn mode is swallowed without marking the call, so that receipt carries a normal hash and no flag even though the client is now degraded
+  postedCost?: number;        // Ledger amount actually posted when capped at the hold (cost - postedCost = shortfall)
+  usageSource?: "provider" | "estimated"; // Where cost came from
+  usage?: ReceiptUsage;       // Four-tier token split; present when a complete provider report priced the call
+  cacheWrite1h?: { tokens: number; ratePer1k: number }; // 1-hour share of usage.cacheWriteTokens; only when the call wrote 1-hour cache
+  chunksDelivered?: number;   // Streaming calls only
+  actionKind?: ActionKind;    // governAction() receipts only
+  endpoint?: { class: "local" | "cloud"; runtime: LocalRuntime };
+  meter?: { costBasis: "usd-proxy" | "nominal"; rateSource: RateSource; computeMs?: number };
+  pricing?: { appliedRates: AppliedRates; tableVersion: string }; // Rates the cost was metered with
+  budget?: { costCenter: string; remaining: number; fraction?: number }; // Only inside withCostCenter()
 }
 ```
 
@@ -113,7 +134,7 @@ The governed methods are `messages.create`, `messages.stream` and `messages.pars
 - **Free list, by rule.** A method whose requests are all GET or DELETE (a retrieve, list, download, delete or poll) runs on the raw SDK resource, unaudited: a read cannot start billable work and a delete only reduces storage. A POST runs free only when it is named with a reason: token counts, `moderations.create`, cancels, pauses, metadata updates and a few others. A local method (webhook signature checks) runs free when named. Six GET or DELETE methods are refused by name because they can start work or lift a spend control: Anthropic `beta.environments.work.poll`, and OpenAI's spend-limit, spend-alert and model-permission deletes. The exact list, with each method's SDK source line and verb, is in `packages/core/src/default-deny.ts`.
 - **Opt-out.** `allowUngoverned: ["embeddings.create"]` runs a listed method ungoverned and audits each call as `ungoverned_call`, with no usage and no cost. An entry that names a free method (`models.list`) or a governed one (`messages.create`) is refused with a `TypeError` when the client is created: it would run without the `ungoverned_call` record the option promises.
 - **Raw clients.** A resource's `_client` is the SDK's raw client, so every call through it is refused, and so are the client's raw HTTP members (`post`, `get`, `request`, …). `allowUngoverned` cannot list them.
-- **`withOptions()`** returns a client governed by the same governor: same budget, audit chain and ledger. A `withOptions()` clone shares its parent's governor: `destroy()` on either ends both, and `governAction()` on a clone runs under the shared governor, including on a clone whose transport was refused. A `withOptions()` that changes where or how calls are sent is refused: every call through the new client rejects. Only `timeout`, `maxRetries`, `defaultHeaders`, `defaultQuery`, `logLevel`, `logger`, `dangerouslyAllowBrowser` and the API key and account options keep it governed; `baseURL`, `fetch`, `fetchOptions`, Anthropic `middleware`, `credentials`, `config` and `profile`, OpenAI `provider` and `workloadIdentity`, and any other key refuse it.
+- **`withOptions()`** returns a client governed by the same controller: same budget, audit chain and ledger. A `withOptions()` clone shares its parent's controller: `destroy()` on either ends both, and `governAction()` on a clone runs under the shared controller, including on a clone whose transport was refused. A `withOptions()` that changes where or how calls are sent is refused: every call through the new client rejects. Only `timeout`, `maxRetries`, `defaultHeaders`, `defaultQuery`, `logLevel`, `logger`, `dangerouslyAllowBrowser` and the API key and account options keep it governed; `baseURL`, `fetch`, `fetchOptions`, Anthropic `middleware`, `credentials`, `config` and `profile`, OpenAI `provider` and `workloadIdentity`, and any other key refuse it.
 
 Symbols, non-function values (`baseURL`, `maxRetries`, …) and `Object.prototype` members pass untouched, so inspection and serialization behave as on the raw client. The `TrustedClient` type still gives a refused method its SDK signature.
 
@@ -195,7 +216,7 @@ The billing claim is made in one place only: the catch around `await response.re
 
 Token counts are accumulated per-provider from stream chunks:
 - **Anthropic**: `message_start` (input tokens), `message_delta` (output tokens)
-- **OpenAI**: `usage` field on the final chunk
+- **OpenAI**: `usage` field on the final chunk. `chat.completions` only sends it when the request carries `stream_options: { include_usage: true }`; usertrust injects that for *local* endpoints only, so against the OpenAI cloud pass it yourself or the stream settles at the pre-call estimate (`usageSource: "estimated"`). Responses API streams carry usage on the terminal `response.completed` event with no opt-in.
 - **Google**: `usageMetadata` field, read from the latest chunk that carries it (each one is a running total, so nothing is summed)
 
 ## Examples

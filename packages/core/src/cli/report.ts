@@ -150,7 +150,7 @@ function readVaultBudgetText(text: string): number {
 	const parsed = TrustConfigSchema.shape.budget.safeParse(budget);
 	if (!parsed.success) {
 		throw new UsageError(
-			"The vault config's budget is not a positive integer of usertokens (the governor would not load it)",
+			"The vault config's budget is not a positive integer of usertokens (the controller would not load it)",
 		);
 	}
 	return parsed.data;

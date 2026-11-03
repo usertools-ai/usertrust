@@ -81,4 +81,18 @@ describe("HARDEN: verify pkg verifyVault fails on tail truncation via .meta", ()
 		expect(result.valid).toBe(false);
 		expect(result.errors.some((e) => /missing.*anchor|deletion/.test(e))).toBe(true);
 	});
+
+	it("a .meta that is present but unparseable fails verification instead of silently disabling the anchor", () => {
+		const { lines } = buildChain([
+			{ kind: "a", data: { n: 1 } },
+			{ kind: "b", data: { n: 2 } },
+		]);
+		const auditDir = join(vaultPath, "audit");
+		writeFileSync(join(auditDir, "events.jsonl"), `${lines.join("\n")}\n`);
+		writeFileSync(join(auditDir, "events.jsonl.meta"), "{not json");
+
+		const result = verifyVault(vaultPath);
+		expect(result.valid).toBe(false);
+		expect(result.errors).toContain("Audit anchor (.meta) present but corrupt");
+	});
 });
