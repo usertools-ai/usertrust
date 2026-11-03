@@ -247,7 +247,13 @@ function createIdentityFileExclusive(rootDir: string, identity: AnchorIdentity):
 	try {
 		linkSync(tmp, path);
 	} finally {
-		unlinkSync(tmp);
+		// Best effort: once the link succeeded the identity is published, so a failure
+		// removing the temp name must neither undo the caller's work nor hide a lost race.
+		try {
+			unlinkSync(tmp);
+		} catch {
+			/* a stray temp name is harmless */
+		}
 	}
 }
 
