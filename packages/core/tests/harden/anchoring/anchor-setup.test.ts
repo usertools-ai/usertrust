@@ -27,6 +27,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	initAnchorIdentity,
 	mintSuccessorKey,
+	publicKeyCopyPath,
 	recordRotatedIdentity,
 	resolveSigner,
 } from "../../../src/audit/anchor.js";
@@ -275,6 +276,18 @@ describe("initAnchorIdentity writes the private key exclusively", () => {
 		expect(() => initAnchorIdentity(root, { keyFile: target })).toThrow(/overwrite/);
 		expect(readFileSync(target, "utf-8")).toBe("somebody's key\n");
 		expect(existsSync(join(root, ".usertrust", "audit", "anchors", "identity.json"))).toBe(false);
+	});
+
+	it("two key files in one directory keep separate public copies (anchor and anchor.pem)", () => {
+		const dir = tmp("anchor-setup-inj-");
+		const a = initAnchorIdentity(vaultRoot(), { keyFile: join(dir, "anchor") });
+		const b = initAnchorIdentity(vaultRoot(), { keyFile: join(dir, "anchor.pem") });
+		expect(a.publicKeyPem).not.toBe(b.publicKeyPem);
+		expect(readFileSync(join(dir, "anchor.pub"), "utf-8")).toBe(a.publicKeyPem);
+		expect(readFileSync(join(dir, "anchor.pub.pem"), "utf-8")).toBe(b.publicKeyPem);
+		// positive control: the mapping is the one the test names
+		expect(publicKeyCopyPath(join(dir, "anchor"))).toBe(join(dir, "anchor.pub"));
+		expect(publicKeyCopyPath(join(dir, "anchor.pem"))).toBe(join(dir, "anchor.pub.pem"));
 	});
 
 	it("replaces a stale public copy left beside an earlier key at the same path", () => {

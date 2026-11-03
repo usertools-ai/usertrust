@@ -287,9 +287,13 @@ export function defaultKeyPath(vaultId: string): string {
 	return join(homedir(), ".usertrust", "keys", `${vaultId}.anchor.pem`);
 }
 
-/** `<name>.anchor.pem` -> `<name>.anchor.pub.pem`, beside the private key. */
+/**
+ * `<name>.anchor.pem` -> `<name>.anchor.pub.pem`, beside the private key. Any other name
+ * gets `.pub` appended. Each branch is injective and the two cannot meet (one result ends
+ * in `.pem`, the other never does), so two key files in one directory never share a copy.
+ */
 export function publicKeyCopyPath(keyFile: string): string {
-	return keyFile.endsWith(".pem") ? `${keyFile.slice(0, -4)}.pub.pem` : `${keyFile}.pub.pem`;
+	return keyFile.endsWith(".pem") ? `${keyFile.slice(0, -4)}.pub.pem` : `${keyFile}.pub`;
 }
 
 /**
