@@ -27,6 +27,7 @@
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
+	createWriteStream,
 	existsSync,
 	mkdirSync,
 	readFileSync,
@@ -35,9 +36,11 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
+import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import { promisify } from "node:util";
 import releaseManifest from "./tigerbeetle-release.json" with { type: "json" };
 import { extractZipEntry, ZipEntryError } from "./zip-entry.js";
@@ -151,8 +154,8 @@ export interface InstallOptions {
 	timeoutMs?: number;
 	/** Run `<binary> version` and return its stdout. Injectable. */
 	runVersion?: (binary: string) => Promise<string>;
-	/** Open the temp file for the download. Injectable (tests make a write fail); defaults to `fs/promises.open`. */
-	openFile?: typeof open;
+	/** Create the write stream for the download's temp file. Injectable (tests make a write fail); defaults to `fs.createWriteStream`. */
+	createWriteStream?: typeof createWriteStream;
 }
 
 export interface ResolvedBinary {
@@ -207,7 +210,18 @@ function removeQuietly(path: string): void {
 	}
 }
 
-/** Stream `url` to `tmp`, return the sha256 of what was written. Cut and refuse past `limit` bytes. */
+/**
+ * Stream `url` to `tmp`, return the sha256 of what was written. Cut and refuse past `limit` bytes.
+ *
+ * Native route (CLAUDE.md rule 10): `fs.createWriteStream` plus `stream/promises.pipeline`. The sha256 and the byte cap sit in a Transform that
+ * errors BEFORE it passes an over-cap chunk on, so nothing past the cap is hashed or written. Node's write stream retries a partial write until
+ * the whole chunk is on disk and fails when a write makes no progress, so a full disk surfaces as an error instead of a silently truncated file
+ * whose streamed hash still matches. `pipeline` also destroys every stage on the first error, which cancels the response body. A hand-written
+ * `file.write` loop would have to re-implement all of that.
+ *
+ * Errors keep their class: a disk error (creating the file, writing it) is install-failed with the cause; the cap is too-large; a fetch or stream
+ * error is download-failed with the blocked-network hint. The response body is cancelled on every early exit.
+ */
 async function download(
 	url: string,
 	tmp: string,
@@ -227,7 +241,11 @@ async function download(
 			`could not download ${url}: ${(err as Error).message}. ${BLOCKED_NETWORK_HINT}`,
 		);
 	}
+	const cancelBody = async (): Promise<void> => {
+		await res.body?.cancel().catch(() => undefined);
+	};
 	if (!res.ok || res.body === null) {
+		await cancelBody();
 		throw new TigerBeetleInstallError(
 			"download-failed",
 			`downloading ${url} answered HTTP ${res.status}. ${BLOCKED_NETWORK_HINT}`,
@@ -235,45 +253,57 @@ async function download(
 	}
 	const declared = Number(res.headers.get("content-length") ?? "");
 	if (Number.isFinite(declared) && declared > limit) {
-		await res.body.cancel().catch(() => undefined);
+		await cancelBody();
 		throw new TigerBeetleInstallError(
 			"too-large",
 			`${url} declares ${declared} bytes, over the ${limit} byte limit for this release; refusing it`,
 		);
 	}
+
 	const hash = createHash("sha256");
-	let file: Awaited<ReturnType<typeof open>>;
-	try {
-		file = await (opts.openFile ?? open)(tmp, "wx", 0o600);
-	} catch (err) {
-		throw installFailed(`cannot create the download file ${tmp}`, err);
-	}
 	let received = 0;
-	try {
-		for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+	const counter = new Transform({
+		transform(chunk: Buffer, _encoding, callback) {
 			received += chunk.byteLength;
 			if (received > limit) {
-				throw new TigerBeetleInstallError(
-					"too-large",
-					`${url} sent more than the ${limit} bytes this release has; the stream was cut and the file refused`,
+				callback(
+					new TigerBeetleInstallError(
+						"too-large",
+						`${url} sent more than the ${limit} bytes this release has; the stream was cut and the file refused`,
+					),
 				);
+				return;
 			}
 			hash.update(chunk);
-			try {
-				await file.write(chunk);
-			} catch (err) {
-				// a disk error (ENOSPC, EIO), not a network one: keep the cause and do not blame the network
-				throw installFailed(`cannot write the download to ${tmp}`, err);
-			}
-		}
+			callback(null, chunk);
+		},
+	});
+	let source: Readable;
+	let sink: ReturnType<typeof createWriteStream>;
+	let diskError: unknown;
+	try {
+		source = Readable.fromWeb(res.body as unknown as WebReadableStream<Uint8Array>);
+		sink = (opts.createWriteStream ?? createWriteStream)(tmp, { flags: "wx", mode: 0o600 });
 	} catch (err) {
+		await cancelBody();
+		throw installFailed(`cannot create the download file ${tmp}`, err);
+	}
+	// an error the write stream itself raises (open, write, close) is a DISK error; anything else that rejects the pipeline is not
+	sink.on("error", (err) => {
+		diskError ??= err;
+	});
+	try {
+		await pipeline(source, counter, sink);
+	} catch (err) {
+		await cancelBody();
 		if (err instanceof TigerBeetleInstallError) throw err;
+		if (diskError !== undefined)
+			throw installFailed(`cannot create or write the download file ${tmp}`, diskError);
 		throw new TigerBeetleInstallError(
 			"download-failed",
 			`the download of ${url} broke after ${received} bytes: ${(err as Error).message}. ${BLOCKED_NETWORK_HINT}`,
+			{ cause: err },
 		);
-	} finally {
-		await file.close().catch(() => undefined);
 	}
 	return hash.digest("hex");
 }

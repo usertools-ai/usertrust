@@ -9,19 +9,25 @@
  */
 
 import { createHash } from "node:crypto";
+import * as fs from "node:fs";
 import {
 	chmodSync,
+	closeSync,
+	createWriteStream,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
+	openSync,
 	readdirSync,
+	readFileSync,
 	statSync,
 	writeFileSync,
+	writeSync,
 } from "node:fs";
-import { open } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Writable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	installDir,
@@ -393,40 +399,187 @@ describe.skipIf(!POSIX || process.getuid?.() === 0)(
 			expect(readdirSync(dir)).toEqual([]);
 		});
 
-		it("a write that fails mid-download (ENOSPC) is install-failed with the cause kept, not download-failed with the blocked-network hint, and the temp file is removed", async () => {
+		/** installPinned against a served fixture, with `extra` options; returns the error it refuses with. */
+		async function refusedWith(
+			extra: Partial<Parameters<typeof installPinned>[0]>,
+			h: string,
+		): Promise<TigerBeetleInstallError> {
 			const bin = script(VERSION);
 			const zip = makeZip([{ name: "tigerbeetle", data: bin }]);
 			const served = await serve(zip);
-			const h = home();
-			const refused = await installPinned({
+			return installPinned({
 				manifest: manifestFor(zip, "tigerbeetle", bin.length),
 				platform: "linux",
 				arch: "x64",
 				home: h,
 				env: {},
 				baseUrl: served.baseUrl,
-				// the real temp file is created, then every write fails the way a full disk does
-				openFile: (async (...args: Parameters<typeof open>) => {
-					const real = await open(...args);
-					return {
-						write: async () => {
-							throw Object.assign(new Error("ENOSPC: no space left on device, write"), {
-								code: "ENOSPC",
-							});
-						},
-						close: () => real.close(),
-					};
-				}) as unknown as typeof open,
+				...extra,
 			}).then(
 				() => {
 					throw new Error("expected installPinned to refuse");
 				},
 				(e: unknown) => e as TigerBeetleInstallError,
 			);
+		}
+
+		it("a write stream that takes PART of the last chunk and then fails (ENOSPC) is install-failed with the cause kept, not download-failed with the blocked-network hint, and the temp file is removed", async () => {
+			const h = home();
+			const refused = await refusedWith(
+				{
+					createWriteStream: ((path: string) => {
+						const fd = openSync(path, "wx", 0o600);
+						return new Writable({
+							write(chunk: Buffer, _enc, cb) {
+								writeSync(fd, chunk, 0, Math.max(1, Math.floor(chunk.length / 2))); // half of it reaches the disk
+								cb(
+									Object.assign(new Error("ENOSPC: no space left on device, write"), {
+										code: "ENOSPC",
+									}),
+								);
+							},
+							destroy(err, cb) {
+								try {
+									closeSync(fd);
+								} catch {
+									/* already closed */
+								}
+								cb(err);
+							},
+						});
+					}) as unknown as typeof createWriteStream,
+				},
+				h,
+			);
 			expect(refused.code).toBe("install-failed");
 			expect((refused.cause as NodeJS.ErrnoException).code).toBe("ENOSPC");
 			expect(refused.message).not.toContain("release-assets.githubusercontent.com");
 			expect(readdirSync(dirOf(h))).toEqual([]);
+		});
+
+		it("a write that makes NO progress (reports 0 bytes written, no error) is install-failed and leaves nothing: it can never pass for a complete file", async () => {
+			const h = home();
+			const refused = await refusedWith(
+				{
+					createWriteStream: ((path: string, o: object) =>
+						createWriteStream(path, {
+							...o,
+							fs: {
+								...fs,
+								write: (
+									_fd: number,
+									buf: Buffer,
+									_off: number,
+									_len: number,
+									_pos: unknown,
+									cb: (e: null, n: number, b: Buffer) => void,
+								) => cb(null, 0, buf),
+							},
+						} as never)) as unknown as typeof createWriteStream,
+				},
+				h,
+			);
+			expect(refused.code).toBe("install-failed");
+			expect(refused.message).not.toContain("release-assets.githubusercontent.com");
+			expect(readdirSync(dirOf(h))).toEqual([]);
+		});
+
+		it("a SHORT write that makes progress is completed natively by the write stream: the install succeeds with every byte on disk", async () => {
+			const bin = Buffer.concat([script(VERSION), Buffer.from(`# ${"x".repeat(4000)}\n`)]);
+			const zip = makeZip([{ name: "tigerbeetle", data: bin }]);
+			const served = await serve(zip);
+			const h = home();
+			let calls = 0;
+			const got = await installPinned({
+				manifest: manifestFor(zip, "tigerbeetle", bin.length),
+				platform: "linux",
+				arch: "x64",
+				home: h,
+				env: {},
+				baseUrl: served.baseUrl,
+				createWriteStream: ((path: string, o: object) =>
+					createWriteStream(path, {
+						...o,
+						fs: {
+							...fs,
+							// every write lands only HALF of what it was given, and reports so
+							write: (
+								fd: number,
+								buf: Buffer,
+								off: number,
+								len: number,
+								pos: number | null,
+								cb: (e: Error | null, n: number, b: Buffer) => void,
+							) => {
+								calls++;
+								fs.write(fd, buf, off, Math.max(1, Math.floor(len / 2)), pos, cb);
+							},
+						},
+					} as never)) as unknown as typeof createWriteStream,
+			});
+			expect(got.source).toBe("downloaded");
+			expect(calls).toBeGreaterThan(2);
+			expect(readFileSync(got.path).equals(bin)).toBe(true);
+		});
+
+		it("the response body is cancelled on every early exit: a non-OK status, a file that cannot be created, and a write error", async () => {
+			const stream = () => {
+				const state = { cancelled: false };
+				const body = new ReadableStream<Uint8Array>({
+					start(c) {
+						c.enqueue(new Uint8Array([1, 2, 3]));
+					},
+					cancel() {
+						state.cancelled = true;
+					},
+				});
+				return { state, body };
+			};
+			const bin = script(VERSION);
+			const zip = makeZip([{ name: "tigerbeetle", data: bin }]);
+			const manifest = manifestFor(zip, "tigerbeetle", bin.length);
+			const base = { manifest, platform: "linux" as const, arch: "x64", env: {} };
+
+			const a = stream();
+			await expect(
+				installPinned({
+					...base,
+					home: home(),
+					fetch: (async () => new Response(a.body, { status: 404 })) as typeof fetch,
+				}),
+			).rejects.toMatchObject({ code: "download-failed" });
+			expect(a.state.cancelled).toBe(true);
+
+			const b = stream();
+			await expect(
+				installPinned({
+					...base,
+					home: home(),
+					fetch: (async () => new Response(b.body, { status: 200 })) as typeof fetch,
+					createWriteStream: ((_p: string, o: object) =>
+						createWriteStream(
+							"/nonexistent-dir-for-ut-tests/x",
+							o as never,
+						)) as unknown as typeof createWriteStream,
+				}),
+			).rejects.toMatchObject({ code: "install-failed" });
+			expect(b.state.cancelled).toBe(true);
+
+			const c = stream();
+			await expect(
+				installPinned({
+					...base,
+					home: home(),
+					fetch: (async () => new Response(c.body, { status: 200 })) as typeof fetch,
+					createWriteStream: (() =>
+						new Writable({
+							write(_chunk, _enc, cb) {
+								cb(Object.assign(new Error("EIO"), { code: "EIO" }));
+							},
+						})) as unknown as typeof createWriteStream,
+				}),
+			).rejects.toMatchObject({ code: "install-failed" });
+			expect(c.state.cancelled).toBe(true);
 		});
 	},
 );
