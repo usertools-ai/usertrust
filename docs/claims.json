@@ -920,7 +920,7 @@
 			"statements": [
 				{
 					"file": "packages/ui/README.md",
-					"text": "- **Inspector** — select a row to see its call, cost and chain fields, docked beside the list on a wide screen, and a one-click **Verify** that replays the independent `usertrust-verify` check and renders a thermal-receipt style result: verified, failed, or not found in any of the vault's audit segments."
+					"text": "- **Inspector** — select a row to see its call, cost and chain fields, docked beside the list on a wide screen, and a one-click **Verify** that runs the `usertrust-verify` check and renders a thermal-receipt style result under its verdict: verified (only when the receipt proves inclusion against an anchor), consistent, unanchored (the chain agrees with itself, with no anchor to check it against), failed, or not found in any of the vault's audit segments."
 				}
 			],
 			"proofs": [
@@ -931,6 +931,10 @@
 				{
 					"file": "packages/ui/tests/verify-endpoint.test.ts",
 					"test": "404s an unknown transaction"
+				},
+				{
+					"file": "packages/ui/tests/verify-view.test.ts",
+					"test": "a real receipt from this dashboard's own check (no anchor) reads consistent, unanchored, never verified"
 				}
 			]
 		},

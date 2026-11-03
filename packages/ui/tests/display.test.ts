@@ -170,7 +170,7 @@ describe("verifiedAsOf: when the integrity verdict was last derived from a full 
 	it("shows the instant of the last full read in the reader's local time", () => {
 		const local = (d: Date): string => `local(${d.toISOString()})`;
 		expect(verifiedAsOf("2026-10-13T09:15:00.000Z", local)).toBe(
-			"verified as of local(2026-10-13T09:15:00.000Z)",
+			"links checked as of local(2026-10-13T09:15:00.000Z)",
 		);
 	});
 
@@ -179,6 +179,6 @@ describe("verifiedAsOf: when the integrity verdict was last derived from a full 
 	});
 
 	it("shows an unparseable value as it is, never as a made-up time", () => {
-		expect(verifiedAsOf("not a time", () => "never")).toBe("verified as of not a time");
+		expect(verifiedAsOf("not a time", () => "never")).toBe("links checked as of not a time");
 	});
 });

@@ -1,16 +1,76 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { verifyTransaction } from "usertrust-verify";
+import { afterEach, describe, expect, it } from "vitest";
+import { createAuditWriter } from "../../core/src/audit/chain.js";
+import { type ReceiptData, renderReceipt } from "../../verify/src/receipt.js";
 import { applyStatusChanges } from "../src/shared/live.js";
 import type { LedgerRow } from "../src/shared/rows.js";
-import { heldFor, verifyOutcome } from "../src/shared/verify-view.js";
+import { heldFor, receiptAnchored, verifyOutcome } from "../src/shared/verify-view.js";
+
+/** A receipt as usertrust-verify renders it, with the Merkle row `merkleLabel` and the event's model `model`. */
+function receipt(merkleLabel: string | undefined, model = "claude-sonnet-4-6"): string {
+	const data: ReceiptData = {
+		event: {
+			id: "e1",
+			timestamp: "2026-10-12T17:59:02.770Z",
+			previousHash: "0".repeat(64),
+			kind: "llm_call",
+			actor: "local",
+			data: { model, cost: 5, settled: true, transferId: "tx_1" },
+			sequence: 1,
+			hash: "a".repeat(64),
+		},
+		chainLength: 1,
+		merkleRoot: "b".repeat(64),
+		merkleVerified: true,
+		chainVerified: true,
+		verifiedAt: new Date("2026-10-12T18:00:00.000Z"),
+		merkleLabel,
+	};
+	return renderReceipt(data);
+}
+
+const valid = (r: string) => ({
+	found: true,
+	valid: true,
+	receipt: r,
+	errors: [],
+	status: "SETTLED",
+});
 
 describe("verifyOutcome", () => {
-	it("found and valid: VERIFIED", () => {
-		expect(
-			verifyOutcome(200, { found: true, valid: true, receipt: "R", errors: [], status: "SETTLED" }),
-		).toEqual({ kind: "verified", receipt: "R" });
+	it("found, valid and anchored (the receipt proves inclusion against an anchor): verified", () => {
+		const r = receipt("INCLUSION VERIFIED (anchor #7)");
+		expect(verifyOutcome(200, valid(r))).toEqual({ kind: "verified", receipt: r });
+	});
+
+	it("found and valid but UNANCHORED: consistent, unanchored, never verified", () => {
+		const r = receipt(undefined);
+		expect(r).toContain("CHAIN CONSISTENT (UNANCHORED)");
+		expect(verifyOutcome(200, valid(r))).toEqual({ kind: "consistent-unanchored", receipt: r });
+	});
+
+	it("every valid receipt short of an inclusion proof is unanchored: a tail past the last anchor, an unverifiable anchor, a bare string", () => {
+		for (const r of [receipt("IN UNANCHORED TAIL"), receipt("INCLUSION UNVERIFIABLE"), "R"])
+			expect(verifyOutcome(200, valid(r)).kind).toBe("consistent-unanchored");
+	});
+
+	it("reads the Merkle row only: an event field saying INCLUSION VERIFIED does not make an unanchored receipt verified", () => {
+		const r = receipt(undefined, "INCLUSION VERIFIED");
+		expect(r).toContain("INCLUSION VERIFIED");
+		expect(receiptAnchored(r)).toBe(false);
+		expect(verifyOutcome(200, valid(r)).kind).toBe("consistent-unanchored");
+	});
+
+	it("an anchor number long enough that the Merkle row has no dots is still read", () => {
+		const r = receipt("INCLUSION VERIFIED (anchor #123456)");
+		expect(r).not.toMatch(/Merkle \.+ INCLUSION/);
+		expect(receiptAnchored(r)).toBe(true);
 	});
 
 	it("found and not valid: FAILED, with the first reason", () => {
@@ -45,6 +105,30 @@ describe("verifyOutcome", () => {
 		expect(verifyOutcome(200, { found: "yes", valid: true, receipt: "R" })).toMatchObject({
 			kind: "request-failed",
 		});
+	});
+});
+
+describe("verifyOutcome on this dashboard's own check", () => {
+	let dir: string | undefined;
+	afterEach(() => {
+		if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
+		dir = undefined;
+	});
+
+	it("a real receipt from this dashboard's own check (no anchor) reads consistent, unanchored, never verified", async () => {
+		dir = mkdtempSync(join(tmpdir(), "trust-words-"));
+		const writer = createAuditWriter(dir);
+		await writer.appendEvent({
+			kind: "llm_call",
+			actor: "local",
+			data: { model: "claude-sonnet-4-6", cost: 5, settled: true, transferId: "tx_words" },
+		});
+		writer.release();
+		// The call the server's /api/verify makes: no anchor inputs.
+		const result = verifyTransaction(join(dir, ".usertrust"), "tx_words");
+		expect(result.found && result.valid).toBe(true);
+		expect(result.receipt).toContain("UNANCHORED");
+		expect(verifyOutcome(200, result).kind).toBe("consistent-unanchored");
 	});
 });
 
