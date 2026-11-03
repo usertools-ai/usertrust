@@ -109,6 +109,8 @@ jobs:
           git diff --exit-code
       # The tested-tree stamp's verdict and ci.yml's wiring of it (scripts/tested-tree.test.mjs).
       - run: node --test scripts/tested-tree.test.mjs
+      # The "is this file the command being run?" guard of the CI scripts, from a path with a space and through a symlink.
+      - run: node --test scripts/entry-guards.test.mjs
       # A pull request cut from a base that predates a CHANGELOG cut can merge its Unreleased entry into the
       # released section (git places it next to the heading the cut inserted). So the MERGE result is graded against
       # the base it merges into: every line a change adds sits under [Unreleased], no line of a released section
