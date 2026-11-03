@@ -190,16 +190,11 @@ jobs:
           cache: npm
       - run: npm ci
       # scan-linear.test.ts runs in the scan-linear job below, not here (see that job).
-      - name: Run tests with coverage
+      # ONE run: the coverage thresholds (lines 92, branches 84, functions 90, statements 92) are in vitest.config.ts
+      # under `coverage.thresholds`, which vitest enforces in this same run by exiting non-zero below them. They used
+      # to be checked by a second, identical run of the whole suite, which doubled the job's wall time.
+      - name: Run tests with coverage and enforce the thresholds
         run: npx vitest run --coverage --exclude packages/core/tests/harden/scan-linear.test.ts
-      - name: Check coverage thresholds
-        run: >-
-          npx vitest run --coverage
-          --exclude packages/core/tests/harden/scan-linear.test.ts
-          --coverage.thresholds.lines=92
-          --coverage.thresholds.branches=84
-          --coverage.thresholds.functions=90
-          --coverage.thresholds.statements=92
       - name: Upload coverage artifact
         if: always()
         uses: actions/upload-artifact@v7

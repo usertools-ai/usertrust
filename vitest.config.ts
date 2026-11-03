@@ -34,10 +34,14 @@ export default defineConfig({
 				// Bin entry — argv parsing + browser open; runtime-smoke-tested, not unit-testable
 				"packages/ui/src/server/main.ts",
 			],
+			// Enforced in the same `vitest run --coverage` that runs the tests: vitest exits non-zero when a metric is
+			// below its threshold (coverage.thresholds, https://vitest.dev/config/coverage#coverage-thresholds), so
+			// CI needs no second run of the suite to check them.
 			thresholds: {
 				lines: 92,
 				branches: 84,
 				functions: 90,
+				statements: 92,
 			},
 		},
 	},
