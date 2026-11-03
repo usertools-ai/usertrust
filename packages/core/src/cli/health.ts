@@ -561,7 +561,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 			`  Policy rules loaded:      0    ${pc.red("[CONFIG]")} ${scrubForTerminal(policyStatus.configError)}`,
 		);
 		console.log(
-			`${pc.red("      The governor resolves its policy path from this file, so it will not start.")}`,
+			`${pc.red("      The controller resolves its policy path from this file, so it will not start.")}`,
 		);
 	} else if (!policyStatus.present) {
 		console.log(
