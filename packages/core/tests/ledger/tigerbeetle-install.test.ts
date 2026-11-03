@@ -18,6 +18,7 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
+import { open } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -355,6 +356,80 @@ describe.skipIf(!POSIX)("installPinned: refusals leave nothing at the install pa
 		expect(readdirSync(dir)).toEqual(["tigerbeetle"]);
 	});
 });
+
+describe.skipIf(!POSIX || process.getuid?.() === 0)(
+	"installPinned: disk failures while downloading are install-failed, not network errors",
+	() => {
+		const dirOf = (h: string) => installDir({ platform: "linux", home: h, env: {} });
+
+		it("an existing but unwritable version directory is install-failed with the cause kept, and the message does not blame the network", async () => {
+			const bin = script(VERSION);
+			const zip = makeZip([{ name: "tigerbeetle", data: bin }]);
+			const served = await serve(zip);
+			const h = home();
+			const dir = dirOf(h);
+			mkdirSync(dir, { recursive: true });
+			chmodSync(dir, 0o555);
+			try {
+				const refused = await installPinned({
+					manifest: manifestFor(zip, "tigerbeetle", bin.length),
+					platform: "linux",
+					arch: "x64",
+					home: h,
+					env: {},
+					baseUrl: served.baseUrl,
+				}).then(
+					() => {
+						throw new Error("expected installPinned to refuse");
+					},
+					(e: unknown) => e as TigerBeetleInstallError,
+				);
+				expect(refused.code).toBe("install-failed");
+				expect((refused.cause as NodeJS.ErrnoException).code).toMatch(/^(EACCES|EPERM)$/);
+				expect(refused.message).not.toContain("release-assets.githubusercontent.com");
+			} finally {
+				chmodSync(dir, 0o755);
+			}
+			expect(readdirSync(dir)).toEqual([]);
+		});
+
+		it("a write that fails mid-download (ENOSPC) is install-failed with the cause kept, not download-failed with the blocked-network hint, and the temp file is removed", async () => {
+			const bin = script(VERSION);
+			const zip = makeZip([{ name: "tigerbeetle", data: bin }]);
+			const served = await serve(zip);
+			const h = home();
+			const refused = await installPinned({
+				manifest: manifestFor(zip, "tigerbeetle", bin.length),
+				platform: "linux",
+				arch: "x64",
+				home: h,
+				env: {},
+				baseUrl: served.baseUrl,
+				// the real temp file is created, then every write fails the way a full disk does
+				openFile: (async (...args: Parameters<typeof open>) => {
+					const real = await open(...args);
+					return {
+						write: async () => {
+							throw Object.assign(new Error("ENOSPC: no space left on device, write"), {
+								code: "ENOSPC",
+							});
+						},
+						close: () => real.close(),
+					};
+				}) as unknown as typeof open,
+			}).then(
+				() => {
+					throw new Error("expected installPinned to refuse");
+				},
+				(e: unknown) => e as TigerBeetleInstallError,
+			);
+			expect(refused.code).toBe("install-failed");
+			expect((refused.cause as NodeJS.ErrnoException).code).toBe("ENOSPC");
+			expect(refused.message).not.toContain("release-assets.githubusercontent.com");
+			expect(readdirSync(dirOf(h))).toEqual([]);
+		});
+	},
+);
 
 describe("platform map", () => {
 	it("covers darwin-x64/arm64, linux-x64/arm64 and win32-x64, and nothing else", () => {

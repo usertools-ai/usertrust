@@ -12,7 +12,8 @@
 // The download mode is the stronger one: it does not rely on GitHub's digest field at all.
 
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 
 const MANIFEST_PATH = new URL(
 	"../packages/core/src/ledger/tigerbeetle-release.json",
@@ -23,7 +24,12 @@ const MANIFEST_PATH = new URL(
  * @param {{manifest: any, fetchImpl?: typeof fetch, download?: boolean}} opts
  * @returns {Promise<{ok: boolean, problems: string[], checked: number}>}
  */
-export async function checkRelease({ manifest, fetchImpl = fetch, download = false }) {
+export async function checkRelease({
+	manifest,
+	fetchImpl = fetch,
+	download = false,
+	apiBase = "https://api.github.com",
+}) {
 	const problems = [];
 	const distinct = new Map();
 	for (const [key, asset] of Object.entries(manifest.assets)) {
@@ -40,17 +46,12 @@ export async function checkRelease({ manifest, fetchImpl = fetch, download = fal
 	}
 
 	const tag = manifest.version;
-	const res = await fetchImpl(
-		`https://api.github.com/repos/tigerbeetle/tigerbeetle/releases/tags/${tag}`,
-		{
-			headers: {
-				accept: "application/vnd.github+json",
-				...(process.env.GITHUB_TOKEN
-					? { authorization: `Bearer ${process.env.GITHUB_TOKEN}` }
-					: {}),
-			},
+	const res = await fetchImpl(`${apiBase}/repos/tigerbeetle/tigerbeetle/releases/tags/${tag}`, {
+		headers: {
+			accept: "application/vnd.github+json",
+			...(process.env.GITHUB_TOKEN ? { authorization: `Bearer ${process.env.GITHUB_TOKEN}` } : {}),
 		},
-	);
+	});
 	if (!res.ok) {
 		return {
 			ok: false,
@@ -97,9 +98,26 @@ export async function checkRelease({ manifest, fetchImpl = fetch, download = fal
 	return { ok: problems.length === 0, problems, checked: distinct.size };
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// import.meta.url is percent-encoded and symlink-resolved, process.argv[1] is neither: compare through realpath and pathToFileURL, or a path with a
+// space, a symlinked directory (macOS /tmp, /var) or a Windows path skips this block and the script exits 0 without checking anything.
+const runAsCommand = (() => {
+	try {
+		return (
+			process.argv[1] !== undefined &&
+			import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
+		);
+	} catch {
+		return false;
+	}
+})();
+if (runAsCommand) {
 	const manifest = JSON.parse(readFileSync(MANIFEST_PATH, "utf8"));
-	const result = await checkRelease({ manifest, download: process.argv.includes("--download") });
+	// TB_RELEASE_API_BASE points the API call at a stub; the tests use it, CI never sets it.
+	const result = await checkRelease({
+		manifest,
+		download: process.argv.includes("--download"),
+		apiBase: process.env.TB_RELEASE_API_BASE || undefined,
+	});
 	if (!result.ok) {
 		for (const p of result.problems) console.error(`tigerbeetle-release: ${p}`);
 		console.error(

@@ -2,11 +2,17 @@
 // ONE size or one asset differs, and passes only when all match. Run with
 // `node --test scripts/check-tigerbeetle-release.test.mjs`.
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { describe, test } from "node:test";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, describe, test } from "node:test";
+import { promisify } from "node:util";
 import { checkRelease } from "./check-tigerbeetle-release.mjs";
 
+const execFileP = promisify(execFile);
 const real = JSON.parse(
 	readFileSync(
 		new URL("../packages/core/src/ledger/tigerbeetle-release.json", import.meta.url),
@@ -124,5 +130,81 @@ describe("checkRelease", () => {
 		});
 		assert.equal(bad.ok, false);
 		assert.match(bad.problems.join("\n"), /downloaded bytes hash/);
+	});
+});
+
+// The entry guard compares import.meta.url (percent-encoded) with the path in argv. A raw string compare is false under a path with a space (or on
+// Windows), and then the script exits 0 without checking anything. These rows run the real script from a path WITH A SPACE, against a local stub of
+// the release API (TB_RELEASE_API_BASE), so they need no network and cannot become a flaky CI dependency.
+describe("the script run as a command, from a path with a space", () => {
+	const root = mkdtempSync(join(tmpdir(), "tb-release-cli-"));
+	const home = join(root, "space dir");
+	const copy = (manifest) => {
+		mkdirSync(join(home, "scripts"), { recursive: true });
+		mkdirSync(join(home, "packages/core/src/ledger"), { recursive: true });
+		copyFileSync(
+			new URL("./check-tigerbeetle-release.mjs", import.meta.url),
+			join(home, "scripts/check-tigerbeetle-release.mjs"),
+		);
+		writeFileSync(
+			join(home, "packages/core/src/ledger/tigerbeetle-release.json"),
+			JSON.stringify(manifest),
+		);
+		return join(home, "scripts/check-tigerbeetle-release.mjs");
+	};
+	after(() => rmSync(root, { recursive: true, force: true }));
+
+	/** A stub of the release API that publishes exactly the REAL manifest's assets. */
+	async function withStub(fn) {
+		const server = createServer((_req, res) => {
+			res.setHeader("content-type", "application/json");
+			res.end(JSON.stringify({ assets: publishedFor(real) }));
+		});
+		await new Promise((r) => server.listen(0, "127.0.0.1", r));
+		try {
+			return await fn(`http://127.0.0.1:${server.address().port}`);
+		} finally {
+			await new Promise((r) => server.close(r));
+		}
+	}
+	const run = async (script, base) => {
+		try {
+			const { stdout, stderr } = await execFileP(process.execPath, [script], {
+				env: { ...process.env, TB_RELEASE_API_BASE: base },
+			});
+			return { code: 0, stdout, stderr };
+		} catch (err) {
+			return { code: err.code, stdout: err.stdout, stderr: err.stderr };
+		}
+	};
+
+	test("the good manifest exits 0 and says it matched", async () => {
+		const script = copy(real);
+		assert.match(script, / /);
+		await withStub(async (base) => {
+			const r = await run(script, base);
+			assert.equal(r.code, 0, r.stderr);
+			assert.match(r.stdout, /match the manifest/);
+		});
+	});
+
+	test("a manifest with one wrong sha exits non-zero and prints the problem (the old guard exited 0 silently)", async () => {
+		const bad = structuredClone(real);
+		bad.assets["linux-x64"].sha256 = "0".repeat(64);
+		const script = copy(bad);
+		await withStub(async (base) => {
+			const r = await run(script, base);
+			assert.notEqual(r.code, 0);
+			assert.match(r.stderr, /tigerbeetle-x86_64-linux\.zip: manifest sha256/);
+			assert.match(r.stderr, /1 problem\(s\)/);
+		});
+	});
+
+	test("a manifest that cannot be read exits non-zero", async () => {
+		const script = copy({ version: "0.0.0-nonexistent", assets: null });
+		await withStub(async (base) => {
+			const r = await run(script, base);
+			assert.notEqual(r.code, 0);
+		});
 	});
 });

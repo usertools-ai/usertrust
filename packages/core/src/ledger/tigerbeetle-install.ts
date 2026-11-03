@@ -151,6 +151,8 @@ export interface InstallOptions {
 	timeoutMs?: number;
 	/** Run `<binary> version` and return its stdout. Injectable. */
 	runVersion?: (binary: string) => Promise<string>;
+	/** Open the temp file for the download. Injectable (tests make a write fail); defaults to `fs/promises.open`. */
+	openFile?: typeof open;
 }
 
 export interface ResolvedBinary {
@@ -240,7 +242,12 @@ async function download(
 		);
 	}
 	const hash = createHash("sha256");
-	const file = await open(tmp, "wx", 0o600);
+	let file: Awaited<ReturnType<typeof open>>;
+	try {
+		file = await (opts.openFile ?? open)(tmp, "wx", 0o600);
+	} catch (err) {
+		throw installFailed(`cannot create the download file ${tmp}`, err);
+	}
 	let received = 0;
 	try {
 		for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
@@ -252,7 +259,12 @@ async function download(
 				);
 			}
 			hash.update(chunk);
-			await file.write(chunk);
+			try {
+				await file.write(chunk);
+			} catch (err) {
+				// a disk error (ENOSPC, EIO), not a network one: keep the cause and do not blame the network
+				throw installFailed(`cannot write the download to ${tmp}`, err);
+			}
 		}
 	} catch (err) {
 		if (err instanceof TigerBeetleInstallError) throw err;
