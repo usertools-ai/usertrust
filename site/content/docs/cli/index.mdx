@@ -15,11 +15,11 @@ The CLI is available as `npx usertrust`.
 
 ## usertrust init
 
-Interactive wizard that creates the `.usertrust/` vault. It prompts for one or more provider API keys, a monthly budget in dollars (stored as usertokens, dollars × 10,000), whether to use the built-in rate table or custom per-model rates, and optionally a local inference endpoint (Ollama, LM Studio or vLLM). Anthropic, OpenAI and Google keys are checked against the provider unless `--skip-verify` is passed; a key that fails the check is still saved, with a warning, and a key for any other provider is not checked. It writes the config and the default policy file; the audit chain is not created until the first governed call. If a vault already exists, `init` leaves it untouched and warns unless `--reconfigure` is passed. When stdin is not a terminal, `init` asks nothing and writes the same defaults as `--json`.
+Interactive wizard that creates the `.usertrust/` vault. It prompts for one or more provider API keys, a total budget in dollars for the project, which does not reset (Enter takes $5; stored as usertokens, dollars × 10,000), whether to use the built-in rate table or custom per-model rates, and optionally a local inference endpoint (Ollama, LM Studio or vLLM). Anthropic, OpenAI and Google keys are checked against the provider unless `--skip-verify` is passed; a key that fails the check is still saved, with a warning, and a key for any other provider is not checked. It writes the config and the default policy file; the audit chain is not created until the first governed call. If a vault already exists, `init` exits 0 and keeps its config (`--json` reports `created: false`) unless `--reconfigure` is passed. The key is typed masked, never echoed, and an existing `.env` is left as it is. When stdin is not a terminal, `init` asks nothing and writes the same defaults as `--json`.
 
 ```bash
 npx usertrust init                  # interactive wizard
-npx usertrust init --json           # non-interactive: budget 50,000 usertokens, no providers, no .env
+npx usertrust init --json           # non-interactive: budget 50,000 usertokens, no providers, an .env template
 npx usertrust init --skip-verify    # accept keys without calling the provider
 npx usertrust init --reconfigure    # run the wizard again over an existing vault
 ```
@@ -29,7 +29,7 @@ Creates:
 ```
 .usertrust/
 ├── usertrust.config.json
-├── .env              # only when the wizard was given API keys; mode 0600
+├── .env              # the keys the wizard was given, else a template of commented lines; mode 0600
 ├── .gitignore        # tigerbeetle/, *.tigerbeetle, dlq/, .env, .env.*.tmp
 ├── audit/            # empty until the first governed call writes events.jsonl
 ├── policies/
