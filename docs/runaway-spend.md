@@ -1,7 +1,7 @@
 # A runaway `budgetSpent`, and how to recover
 
 `.usertrust/spend-ledger.json` holds the cumulative session spend (`budgetSpent`, in usertokens). On every start the
-governor reads it and seeds the session wallet with `max(0, budget - budgetSpent)`. If that number is wrong by orders of
+controller reads it and seeds the session wallet with `max(0, budget - budgetSpent)`. If that number is wrong by orders of
 magnitude, every later call in the vault is refused by the budget rule, and raising `budget` does not help.
 
 ## How it used to happen, and what prevents it now
