@@ -31,15 +31,30 @@ npx usertrust-ui [rootDir] [--port N] [--no-open]
 | `rootDir` | Project root containing `.usertrust/` (default: cwd) |
 | `--port N` | Bind exactly this port (default: probe 4180-4199) |
 | `--no-open` | Don't open the browser |
+| `--allow-host NAME` | Also answer requests whose `Host` is `NAME` (repeatable; see [Reaching it from another device](#reaching-it-from-another-device-opt-in)) |
 
 If `usertrust` (the core CLI) is installed alongside, `usertrust ui` launches the same server.
 
 ## Security model
 
-- **Loopback only.** The server binds `127.0.0.1` and rejects requests whose `Host` header is not loopback (DNS-rebinding guard) and cross-origin POSTs (CSRF guard).
+- **Loopback only.** The server binds `127.0.0.1` and rejects requests whose `Host` header is not loopback (DNS-rebinding guard) and cross-origin POSTs (CSRF guard). `--allow-host` adds host names to that list; it never changes the bind address.
 - **Read-only**, with one exception: `POST /api/export` writes a markdown export, and only to a directory inside the project root (never inside the vault).
 - **No secrets on the wire.** The audit chain stores metadata (hashes, costs, task types) — never raw prompts or completions — so the UI cannot leak them.
 - **Nothing leaves the machine by default.** The one remote load, the usertrust mark, is off unless you turn it on (below).
+
+## Reaching it from another device (opt-in)
+
+By default the dashboard answers only `127.0.0.1:<port>` and `localhost:<port>`. To open it from your phone through a private network proxy such as `tailscale serve`, which forwards to the loopback address, name the host the proxy presents:
+
+```sh
+usertrust-ui --allow-host my-mac.example-tailnet.ts.net
+tailscale serve --bg http://127.0.0.1:4180
+```
+
+- `--allow-host NAME` is repeatable. The server then accepts a `Host` header of exactly `NAME` or `NAME:<port>`, and a POST whose `Origin` is `https://NAME`, `http://NAME` or `http://NAME:<port>`. Every other `Host` and every other `Origin` is still refused with 403.
+- `NAME` must be a plain DNS host name: letters, digits and `-` in dot-separated labels. A wildcard, an IP address, a port, a scheme or a path is refused and the server does not start (exit code 2).
+- The server still binds `127.0.0.1` only. There is no option to bind another address.
+- It prints one line at start naming the allowed hosts. **Use it only behind a private network such as Tailscale serve; never behind a public tunnel.** Anyone who can reach the host name can read the dashboard, and the dashboard has no login of its own.
 
 ## The usertrust mark (opt-in)
 

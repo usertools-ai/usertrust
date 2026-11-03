@@ -188,7 +188,7 @@ Flags and exit codes:
 | `budget` | `--cost-center <name>` and `--allocated <int>` are required; `--parent <id>` (else `$USERTRUST_USER_ID`, else `local`), `--period-start <iso>`, `--period-end <iso>`. Connects to TigerBeetle at `tigerbeetle.addresses` | 0 printed; 1 on missing or invalid flags, no vault or a ledger failure |
 | `secret <sub>` | `add <name> <value>`, `rm <name>`, `ls`, `get <name>`, `rotate <name> <value>` | 0, except 1 when the command or the vault cleanup after it fails |
 | `skill verify <manifest.json> [entry]` | optional second path: the skill's entry file, hashed against the manifest | 0 whatever the verdict; read `success` in the `--json` output |
-| `ui [args]` | forwards its arguments to `usertrust-ui` when installed; ignores `--json` | 0 |
+| `ui [args]` | forwards its arguments to `usertrust-ui` when installed; ignores `--json`. `--allow-host <name>` (repeatable) also answers requests whose `Host` is that DNS name, for a private network proxy such as `tailscale serve` that forwards to the loopback bind (the server still binds `127.0.0.1` only; a wildcard, IP address or invalid name exits 2). Use it only behind a private network; never behind a public tunnel | 0 |
 | `audit quarantine-tail` | `--dry-run` | 0 done; 1 refused or failed; 2 bad arguments |
 | `report --week --end <iso>` | `--format md\|html\|json` (default `md`, or `json` with `--json`), `--out <path>`, `--agent-key <key>`, `--segment <n>`, `--top <n>` (default 10), `--budget <int>` or `--tenant-config <file>` (one of the two) | 0 reported; 1 no vault or an operational failure; 2 bad arguments, or the chain did not verify (the report is stamped UNVERIFIED) |
 
