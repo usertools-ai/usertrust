@@ -6,9 +6,11 @@
  */
 
 /**
- * `verified` is the explicit check passing AGAINST AN ANCHOR. A check that passed without one (the receipt's Merkle
- * row reads `CHAIN CONSISTENT (UNANCHORED)`, or anything short of an inclusion proof) is `consistent-unanchored`:
- * the chain agrees with itself, which a log cut short and rewritten to match also does.
+ * `verified` is the explicit check passing AGAINST AN ANCHOR: the verifier's structured `inclusionVerified` is true.
+ * A check that passed without one (no anchor inputs, a tail past the last anchor, an unverifiable anchor) is
+ * `consistent-unanchored`: the chain agrees with itself, which a log cut short and rewritten to match also does.
+ * The receipt TEXT is never read for this: it prints fields the vault under audit wrote, and a written field can
+ * imitate a receipt row (a line separator the renderer passes through starts a new "line" for a multiline regex).
  */
 export type VerifyOutcome =
 	| { kind: "verified"; receipt: string }
@@ -18,21 +20,10 @@ export type VerifyOutcome =
 	| { kind: "request-failed"; reason: string };
 
 /**
- * The receipt's Merkle row: `│  Merkle ........ <label> │`. Read from that row only, never from anywhere in the
- * text, because the receipt also prints the event's own fields, which the vault under audit wrote.
- */
-const MERKLE_ROW = /^│ {2}Merkle[ .]+(.+?)\s*│$/m;
-
-/** Whether a receipt proves inclusion against an anchor: its Merkle row says `INCLUSION VERIFIED`, nothing less. */
-export function receiptAnchored(receipt: string): boolean {
-	return MERKLE_ROW.exec(receipt)?.[1]?.startsWith("INCLUSION VERIFIED") === true;
-}
-
-/**
  * `found: false` is NOT a failed verification: the transaction is in none of the audit segments `--tx` reads (no
  * segment at all, empty ones, or a record outside them). The panel read `valid` alone and printed a red "FAILED: Audit log not found".
  * Anything that is not a verification result (a 400, a proxy's error page) is a failed request. A valid check is
- * `verified` only when its receipt is anchored (`receiptAnchored`).
+ * `verified` only when the response's `inclusionVerified` is the boolean `true`.
  */
 export function verifyOutcome(httpStatus: number, body: unknown): VerifyOutcome {
 	if (body === null || typeof body !== "object")
@@ -47,7 +38,7 @@ export function verifyOutcome(httpStatus: number, body: unknown): VerifyOutcome 
 	const reason = errors[0] as string | undefined;
 	if (!b.found) return { kind: "not-found", receipt: b.receipt, reason };
 	if (!b.valid) return { kind: "failed", receipt: b.receipt, reason };
-	return receiptAnchored(b.receipt)
+	return b.inclusionVerified === true
 		? { kind: "verified", receipt: b.receipt }
 		: { kind: "consistent-unanchored", receipt: b.receipt };
 }

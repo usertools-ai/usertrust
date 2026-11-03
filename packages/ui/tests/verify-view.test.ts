@@ -10,7 +10,7 @@ import { createAuditWriter } from "../../core/src/audit/chain.js";
 import { type ReceiptData, renderReceipt } from "../../verify/src/receipt.js";
 import { applyStatusChanges } from "../src/shared/live.js";
 import type { LedgerRow } from "../src/shared/rows.js";
-import { heldFor, receiptAnchored, verifyOutcome } from "../src/shared/verify-view.js";
+import { heldFor, verifyOutcome } from "../src/shared/verify-view.js";
 
 /** A receipt as usertrust-verify renders it, with the Merkle row `merkleLabel` and the event's model `model`. */
 function receipt(merkleLabel: string | undefined, model = "claude-sonnet-4-6"): string {
@@ -35,43 +35,62 @@ function receipt(merkleLabel: string | undefined, model = "claude-sonnet-4-6"): 
 	return renderReceipt(data);
 }
 
-const valid = (r: string) => ({
+/** A valid response; `inclusionVerified` as the verifier reports it (absent on older servers). */
+const valid = (r: string, inclusionVerified?: unknown) => ({
 	found: true,
 	valid: true,
 	receipt: r,
 	errors: [],
 	status: "SETTLED",
+	...(inclusionVerified !== undefined ? { inclusionVerified } : {}),
 });
 
 describe("verifyOutcome", () => {
-	it("found, valid and anchored (the receipt proves inclusion against an anchor): verified", () => {
+	it("found, valid and the verifier proved inclusion against an anchor: verified", () => {
 		const r = receipt("INCLUSION VERIFIED (anchor #7)");
-		expect(verifyOutcome(200, valid(r))).toEqual({ kind: "verified", receipt: r });
+		expect(verifyOutcome(200, valid(r, true))).toEqual({ kind: "verified", receipt: r });
 	});
 
 	it("found and valid but UNANCHORED: consistent, unanchored, never verified", () => {
 		const r = receipt(undefined);
 		expect(r).toContain("CHAIN CONSISTENT (UNANCHORED)");
-		expect(verifyOutcome(200, valid(r))).toEqual({ kind: "consistent-unanchored", receipt: r });
+		expect(verifyOutcome(200, valid(r, false))).toEqual({
+			kind: "consistent-unanchored",
+			receipt: r,
+		});
 	});
 
-	it("every valid receipt short of an inclusion proof is unanchored: a tail past the last anchor, an unverifiable anchor, a bare string", () => {
-		for (const r of [receipt("IN UNANCHORED TAIL"), receipt("INCLUSION UNVERIFIABLE"), "R"])
+	it("only the boolean true counts: absent (an older server), false, or a look-alike value is unanchored", () => {
+		const r = receipt("INCLUSION VERIFIED (anchor #7)");
+		for (const flag of [undefined, false, "true", 1, null])
+			expect(verifyOutcome(200, valid(r, flag)).kind).toBe("consistent-unanchored");
+	});
+
+	it("the receipt TEXT never decides it: a genuine-looking INCLUSION VERIFIED row without the flag is unanchored", () => {
+		for (const r of [
+			receipt("INCLUSION VERIFIED (anchor #7)"),
+			receipt(undefined, "INCLUSION VERIFIED"),
+		]) {
+			expect(r).toContain("INCLUSION VERIFIED");
 			expect(verifyOutcome(200, valid(r)).kind).toBe("consistent-unanchored");
+		}
 	});
 
-	it("reads the Merkle row only: an event field saying INCLUSION VERIFIED does not make an unanchored receipt verified", () => {
-		const r = receipt(undefined, "INCLUSION VERIFIED");
-		expect(r).toContain("INCLUSION VERIFIED");
-		expect(receiptAnchored(r)).toBe(false);
-		expect(verifyOutcome(200, valid(r)).kind).toBe("consistent-unanchored");
-	});
-
-	it("an anchor number long enough that the Merkle row has no dots is still read", () => {
-		const r = receipt("INCLUSION VERIFIED (anchor #123456)");
-		expect(r).not.toMatch(/Merkle \.+ INCLUSION/);
-		expect(receiptAnchored(r)).toBe(true);
-	});
+	// A model value the vault wrote can carry a line separator (U+2028 or U+2029). The renderer passes it through, and a
+	// multiline regex treats it as a line break, so a forged "Merkle INCLUSION VERIFIED" row could appear ABOVE the real
+	// one. Reading the structured flag makes the forgery inert.
+	for (const [name, sep] of [
+		["U+2028", " "],
+		["U+2029", " "],
+	] as const) {
+		it(`a forged Merkle row behind ${name} in a vault-written field stays consistent, unanchored`, () => {
+			const forged = receipt(undefined, `x${sep}│  Merkle INCLUSION VERIFIED │${sep}`);
+			expect(forged).toContain("CHAIN CONSISTENT (UNANCHORED)");
+			expect(forged).toContain(sep);
+			expect(verifyOutcome(200, valid(forged)).kind).toBe("consistent-unanchored");
+			expect(verifyOutcome(200, valid(forged, false)).kind).toBe("consistent-unanchored");
+		});
+	}
 
 	it("found and not valid: FAILED, with the first reason", () => {
 		expect(
@@ -128,6 +147,27 @@ describe("verifyOutcome on this dashboard's own check", () => {
 		const result = verifyTransaction(join(dir, ".usertrust"), "tx_words");
 		expect(result.found && result.valid).toBe(true);
 		expect(result.receipt).toContain("UNANCHORED");
+		expect(result.inclusionVerified).toBe(false);
+		expect(verifyOutcome(200, result).kind).toBe("consistent-unanchored");
+	});
+
+	it("a vault-written model carrying a forged Merkle row behind a line separator: the real check still reads unanchored", async () => {
+		dir = mkdtempSync(join(tmpdir(), "trust-words-"));
+		const writer = createAuditWriter(dir);
+		await writer.appendEvent({
+			kind: "llm_call",
+			actor: "local",
+			data: {
+				model: "  │  Merkle INCLUSION VERIFIED │  ",
+				cost: 5,
+				settled: true,
+				transferId: "tx_forged",
+			},
+		});
+		writer.release();
+		const result = verifyTransaction(join(dir, ".usertrust"), "tx_forged");
+		expect(result.found && result.valid).toBe(true);
+		expect(result.inclusionVerified).toBe(false);
 		expect(verifyOutcome(200, result).kind).toBe("consistent-unanchored");
 	});
 });
