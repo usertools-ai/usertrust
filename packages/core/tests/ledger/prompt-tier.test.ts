@@ -91,11 +91,29 @@ describe("the claude-haiku-5-5 row carries both published tiers", () => {
 		}
 	});
 
-	it("is the only tiered row in the table today", () => {
+	it("the tiered rows in the table today are Haiku 5.5 and the xAI models", () => {
 		const tiered = Object.entries(PRICING_TABLE)
 			.filter(([, r]) => r.longPrompt !== undefined)
-			.map(([id]) => id);
-		expect(tiered).toEqual([HAIKU]);
+			.map(([id]) => id)
+			.sort();
+		const xai = [
+			"grok-3",
+			"grok-4-0709",
+			"grok-4-1-fast-non-reasoning",
+			"grok-4-1-fast-reasoning",
+			"grok-4-fast-non-reasoning",
+			"grok-4-fast-reasoning",
+			"grok-4.20-multi-agent-0309",
+			"grok-4.20-0309-non-reasoning",
+			"grok-4.20-0309-reasoning",
+			"grok-4.3",
+			"grok-4.5",
+			"grok-4.6",
+			"grok-4.7",
+			"grok-build-0.1",
+			"grok-code-fast-1",
+		];
+		expect(tiered).toEqual([HAIKU, ...xai].sort());
 	});
 });
 
