@@ -11,8 +11,7 @@
  * says that no AI was called and no money was spent.
  */
 
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { verifyVaultComplete } from "../audit/complete.js";
@@ -64,8 +63,12 @@ export interface DemoResult {
 
 /** This package's version: the demo names the visual ledger at the same version, since the two ship in step. */
 function ownVersion(): string {
-	const require = createRequire(import.meta.url);
-	return (require("../../package.json") as { version: string }).version;
+	// Parsed from the file, not `require()`d: the packages are ES modules (the same way `cli/ui.ts` reads a package.json).
+	// `../../package.json` is the package root from both `src/cli/` and `dist/cli/`.
+	const manifest = JSON.parse(
+		readFileSync(new URL("../../package.json", import.meta.url), "utf-8"),
+	) as { version: string };
+	return manifest.version;
 }
 
 /** The first line of an error message, scrubbed for a terminal and cut to a sensible width. */
