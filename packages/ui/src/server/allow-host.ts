@@ -41,15 +41,18 @@ export function parseAllowHost(raw: string): AllowHostResult {
 	return { ok: true, name };
 }
 
-/** Parse every name; the first bad one is returned as an error message. */
+/**
+ * Parse every name; the first bad one is returned as an error message. The message NAMES the value by
+ * its position and never repeats it: it is untrusted text, and a terminal would act on any control
+ * character in it (a C1 CSI byte, DEL, a bidi override) that escaping the C0 range does not remove.
+ */
 export function parseAllowHosts(
 	raw: readonly string[],
 ): { ok: true; names: string[] } | { ok: false; error: string } {
 	const names: string[] = [];
-	for (const value of raw) {
+	for (const [i, value] of raw.entries()) {
 		const parsed = parseAllowHost(value);
-		if (!parsed.ok)
-			return { ok: false, error: `--allow-host ${JSON.stringify(value)} ${parsed.reason}` };
+		if (!parsed.ok) return { ok: false, error: `--allow-host value ${i + 1} ${parsed.reason}` };
 		if (!LOOPBACK_NAMES.has(parsed.name) && !names.includes(parsed.name)) names.push(parsed.name);
 	}
 	return { ok: true, names };

@@ -141,6 +141,53 @@ describe("usertrust-ui --allow-host", () => {
 		expect(address).toMatchObject({ address: "127.0.0.1" });
 	});
 
+	// Untrusted text printed to a terminal must carry no control character. JSON.stringify escapes the C0
+	// range but passes C1 (a CSI byte), DEL and the bidi overrides through, so a refusal names the value by
+	// position and repeats none of it. mutant: the value is echoed (JSON.stringify) → this row fails.
+	it("a refused value is never echoed: no control character reaches the message", async () => {
+		// Built from code points, not written as characters: a bidi control in this source would reorder how it is read.
+		const ranges = [
+			[0x00, 0x1f],
+			[0x7f, 0x9f],
+			[0x61c],
+			[0x200e, 0x200f],
+			[0x202a, 0x202e],
+			[0x2066, 0x2069],
+		];
+		const CONTROL = new RegExp(
+			`[${ranges.map(([a, b]) => (b === undefined ? `\\u{${a.toString(16)}}` : `\\u{${a.toString(16)}}-\\u{${b.toString(16)}}`)).join("")}]`,
+			"u",
+		);
+		const hostile = [
+			"a\u009b2Jb",
+			"a\u001b[2Jb",
+			"a\u007fb",
+			`a${String.fromCodePoint(0x202e)}b`,
+			`a${String.fromCodePoint(0x2066)}b`,
+			"*\u009b",
+		];
+		// positive control: the check sees a planted control character, including one JSON.stringify leaves raw
+		expect(CONTROL.test(JSON.stringify("x\u009by"))).toBe(true);
+		expect(CONTROL.test("--allow-host value 1 must be a bare host name")).toBe(false);
+		for (const value of hostile) {
+			const parsed = parseAllowHosts(["ok-host", value]);
+			expect(parsed.ok).toBe(false);
+			if (parsed.ok) continue;
+			expect(parsed.error).not.toMatch(CONTROL);
+			expect(parsed.error).not.toContain(value);
+			expect(parsed.error).toMatch(/^--allow-host value 2 /);
+			const args = parseUiArgs(["--allow-host", value]);
+			expect(args).toMatchObject({ ok: false, code: 2 });
+			if (!args.ok) expect(args.message).not.toMatch(CONTROL);
+			const refused = await createUiServer(tempDir, { port: 0, allowHosts: [value] }).then(
+				() => undefined,
+				(e: unknown) => (e instanceof Error ? e.message : String(e)),
+			);
+			expect(refused, "createUiServer refused").toBeDefined();
+			expect(refused).not.toMatch(CONTROL);
+		}
+	});
+
 	it("createUiServer refuses a wildcard or invalid name rather than starting", async () => {
 		// mutant: the wildcard check is removed → the first row starts a server
 		for (const bad of ["*", "*.ts.net", "evil.com/path", "10.0.0.5", "[::1]", "a b"]) {

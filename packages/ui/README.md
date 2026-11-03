@@ -37,7 +37,7 @@ If `usertrust` (the core CLI) is installed alongside, `usertrust ui` launches th
 
 ## Security model
 
-- **Loopback only.** The server binds `127.0.0.1` and rejects requests whose `Host` header is not loopback (DNS-rebinding guard) and cross-origin POSTs (CSRF guard). `--allow-host` adds host names to that list; it never changes the bind address.
+- **Loopback only.** The server binds `127.0.0.1` and rejects requests whose `Host` header is not loopback (DNS-rebinding guard) and cross-origin POSTs (CSRF guard). `--allow-host` adds host names to that list and leaves the bind address alone.
 - **Read-only**, with one exception: `POST /api/export` writes a markdown export, and only to a directory inside the project root (never inside the vault).
 - **No secrets on the wire.** The audit chain stores metadata (hashes, costs, task types) — never raw prompts or completions — so the UI cannot leak them.
 - **Nothing leaves the machine by default.** The one remote load, the usertrust mark, is off unless you turn it on (below).
