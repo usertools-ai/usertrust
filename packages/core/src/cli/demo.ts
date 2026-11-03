@@ -15,13 +15,13 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { verifyVault } from "../audit/verify.js";
+import { verifyVaultComplete } from "../audit/complete.js";
 import { trust } from "../govern.js";
 import { formatReceipt, formatUsd } from "../receipt/format.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { TrustReceipt } from "../shared/types.js";
 import type { CliOptions } from "./init.js";
-import { scrubForTerminal } from "./target.js";
+import { scrubForTerminal, toSafeJson } from "./target.js";
 
 /** Said at the start of every line the demo prints. */
 export const DEMO_PREFIX = "demo: no AI was called, no money was spent";
@@ -54,6 +54,8 @@ export interface DemoResult {
 	readonly refusals: readonly { readonly kind: "pii" | "budget"; readonly reason: string }[];
 	readonly verified: {
 		readonly valid: boolean;
+		/** No audit event is missing from the chain (the dead-letter queue is empty and readable). */
+		readonly complete: boolean;
 		readonly chainLength: number;
 		readonly merkleRoot: string | null;
 	};
@@ -113,11 +115,13 @@ export async function runDemo(): Promise<DemoResult> {
 		await client.destroy();
 	}
 
-	const reading = verifyVault(vaultDir);
+	// As `usertrust verify` does: the chain verifies AND no event is missing from it (a dead-lettered append still verifies).
+	const reading = verifyVaultComplete(vaultDir);
 	const verified = {
 		valid: reading.valid,
-		chainLength: reading.chainLength,
-		merkleRoot: reading.merkleRoot,
+		complete: reading.complete,
+		chainLength: reading.reading.result.chainLength,
+		merkleRoot: reading.reading.result.merkleRoot,
 	};
 	const ok =
 		receipts.length === 3 &&
@@ -136,15 +140,17 @@ export async function runDemo(): Promise<DemoResult> {
 }
 
 /**
- * A path as one shell word. A plain path is left as it is; any other is single-quoted for a POSIX shell, with an
- * embedded quote written as `'\''`, or double-quoted on Windows, where single quotes are not quoting. The command
- * is printed for a person to paste, and a temporary directory's name can hold a space.
+ * A path as one shell word, for the shell the command is printed for. A plain path is left as it is. Any other
+ * is single-quoted, which is literal in a POSIX shell (an embedded quote is written `'\\''`) and in PowerShell (an
+ * embedded quote is doubled), so `$(...)` and `$var` are never expanded. `cmd.exe` does not treat single quotes as
+ * quoting, so on Windows the command is printed as a PowerShell one and labelled. The command is for a person to
+ * paste, and a temporary directory's name can hold a space.
  */
 export function shellWord(path: string, platform: string = process.platform): string {
-	// A backslash is a path separator on Windows and an escape in a POSIX shell, so only Windows may leave it bare.
-	if ((platform === "win32" ? /^[A-Za-z0-9_@%+=:,./\\-]+$/ : /^[A-Za-z0-9_@%+=:,./-]+$/).test(path))
-		return path;
-	if (platform === "win32") return `"${path.replace(/"/g, '""')}"`;
+	// A backslash is a path separator on Windows and an escape in a POSIX shell; `%` is expanded by cmd.exe.
+	const plain = platform === "win32" ? /^[A-Za-z0-9_@+=:,./\\-]+$/ : /^[A-Za-z0-9_@%+=:,./-]+$/;
+	if (plain.test(path)) return path;
+	if (platform === "win32") return `'${path.replace(/'/g, "''")}'`;
 	return `'${path.replace(/'/g, `'\\''`)}'`;
 }
 
@@ -173,11 +179,17 @@ export function demoLines(result: DemoResult): string[] {
 	out.push(
 		...say(
 			result.verified.valid
-				? `the audit chain verifies: ${result.verified.chainLength} events, merkle root ${(result.verified.merkleRoot ?? "").slice(0, 12)}...`
-				: "the audit chain did NOT verify",
+				? `the audit chain verifies and is complete: ${result.verified.chainLength} events, merkle root ${(result.verified.merkleRoot ?? "").slice(0, 12)}...`
+				: result.verified.complete
+					? "the audit chain did NOT verify"
+					: "the audit chain is INCOMPLETE: an audit event is missing from it, or its dead-letter queue could not be read",
 		),
 	);
-	out.push(...say(`see it in the visual ledger: ${scrubForTerminal(result.uiCommand)}`));
+	out.push(
+		...say(
+			`see it in the visual ledger${process.platform === "win32" ? " (in PowerShell)" : ""}: ${scrubForTerminal(result.uiCommand)}`,
+		),
+	);
 	return out;
 }
 
@@ -186,7 +198,7 @@ export async function run(_rootDir?: string, opts?: CliOptions): Promise<void> {
 	if (!result.ok) process.exitCode = 1;
 	if (opts?.json === true) {
 		console.log(
-			JSON.stringify({
+			toSafeJson({
 				command: "demo",
 				success: result.ok,
 				data: {

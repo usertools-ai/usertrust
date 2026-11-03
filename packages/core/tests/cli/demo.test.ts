@@ -115,12 +115,34 @@ describe("usertrust demo", () => {
 			vaultBase: hostile,
 			receipts: [],
 			refusals: [],
-			verified: { valid: true, chainLength: 0, merkleRoot: null },
+			verified: { valid: true, complete: true, chainLength: 0, merkleRoot: null },
 			uiCommand: `npx usertrust-ui@1.2.3 ${shellWord(hostile, "linux")}`,
 		});
 		const joined = lines.join("\n");
 		expect(joined).not.toContain("\u001b");
 		expect(joined).toContain("npx usertrust-ui@1.2.3");
+	});
+
+	it("--json keeps C1 and format characters out of the raw output, and the path still parses back", async () => {
+		// a temporary directory whose name holds a C1 control (CSI) and a right-to-left override
+		const hostile = mkdtempSync(join(tmpdir(), "h\u009b\u202e-"));
+		const saved = process.env.TMPDIR;
+		process.env.TMPDIR = hostile;
+		const out: string[] = [];
+		vi.spyOn(console, "log").mockImplementation((line: unknown) => {
+			out.push(String(line));
+		});
+		try {
+			await run(undefined, { json: true });
+		} finally {
+			if (saved === undefined) delete process.env.TMPDIR;
+			else process.env.TMPDIR = saved;
+		}
+		const raw = out[0] as string;
+		expect(raw).not.toMatch(/[\u007f-\u009f\p{Cf}]/u);
+		const parsed = JSON.parse(raw) as { data: { vault: string; ui: string } };
+		expect(parsed.data.vault).toContain("h\u009b\u202e-");
+		expect(parsed.data.ui).toContain("h\u009b\u202e-");
 	});
 
 	it("shellWord leaves a plain path alone and quotes anything else for the shell it is printed for", () => {
@@ -129,7 +151,10 @@ describe("usertrust demo", () => {
 		expect(shellWord("/tmp/it's", "linux")).toBe("'/tmp/it'\\''s'");
 		expect(shellWord("/tmp/$(whoami)", "linux")).toBe("'/tmp/$(whoami)'");
 		expect(shellWord("/tmp/a\\b", "linux")).toBe("'/tmp/a\\b'");
-		expect(shellWord("C:\\Users\\A B\\Temp", "win32")).toBe('"C:\\Users\\A B\\Temp"');
+		// Windows: PowerShell single quotes are literal ($var, $(...) stay text); an embedded quote is doubled; % is quoted for cmd.exe
+		expect(shellWord("C:\\Users\\A B\\Temp", "win32")).toBe("'C:\\Users\\A B\\Temp'");
+		expect(shellWord("C:\\Users\\$(whoami)\\it's", "win32")).toBe("'C:\\Users\\$(whoami)\\it''s'");
+		expect(shellWord("C:\\Temp\\%PATH%", "win32")).toBe("'C:\\Temp\\%PATH%'");
 		expect(shellWord("C:\\Users\\Temp", "win32")).toBe("C:\\Users\\Temp");
 	});
 
