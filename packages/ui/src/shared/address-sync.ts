@@ -5,13 +5,13 @@
  * Keeps the page address in step with the dashboard's state, and knows when it is not. A browser can refuse a history
  * write (a sandboxed frame; a burst of `replaceState` calls while someone types, which browsers rate-limit): the
  * address then still describes the previous state, so a reload or a copied link would open something else. A refused
- * write is therefore never swallowed: the address is marked BEHIND (the page says so) and the write is retried, with
+ * write (thrown, or silently ignored and caught by reading the address back) is therefore never swallowed: the address is marked BEHIND (the page says so) and the write is retried, with
  * the newest state, until it lands or a newer state or a navigation supersedes it.
  *
  * No `window` here: the browser is passed in (`AddressIo`), so every path is tested with a stub.
  */
 
-import { planHistory, type UrlState } from "./url-state.js";
+import { decodeUrlState, encodeUrlState, planHistory, type UrlState } from "./url-state.js";
 
 /** How long to wait before retrying a refused write, in ms. */
 export const ADDRESS_RETRY_MS = 1000;
@@ -64,6 +64,10 @@ export class AddressSync {
 		if (plan.kind !== "none") {
 			try {
 				this.io.write(plan.kind, plan.hash);
+				// A browser can also IGNORE a write without throwing (Chromium's navigation rate limit, e.g. a key held
+				// down in the search box): read the address back, compared canonically, and treat a mismatch as refused.
+				if (encodeUrlState(decodeUrlState(this.io.hash())) !== plan.hash)
+					throw new Error("write ignored");
 			} catch {
 				// Not written: `written` stays the old state, so a refused push is retried as a push.
 				this.setBehind(true);

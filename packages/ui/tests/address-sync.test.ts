@@ -31,6 +31,8 @@ function stubBrowser(initialHash = "") {
 		hash: initialHash,
 		writes: [] as Array<{ kind: "push" | "replace"; hash: string }>,
 		refuse: 0,
+		/** Writes to ignore WITHOUT throwing, as Chromium's navigation rate limiter does. */
+		ignore: 0,
 		timers: [] as Array<{ fn: () => void; ms: number; cancelled: boolean }>,
 		behind: [] as boolean[],
 	};
@@ -40,6 +42,10 @@ function stubBrowser(initialHash = "") {
 			if (b.refuse > 0) {
 				b.refuse--;
 				throw new Error("SecurityError: too many calls to Location or History APIs");
+			}
+			if (b.ignore > 0) {
+				b.ignore--;
+				return; // no throw, and the address does not change
 			}
 			b.writes.push({ kind, hash });
 			b.hash = hash;
@@ -83,6 +89,22 @@ describe("AddressSync", () => {
 		runTimers();
 		expect(b.hash).toBe("#q=new");
 		expect(b.writes).toEqual([{ kind: "replace", hash: "#q=new" }]);
+		expect(sync.behind).toBe(false);
+		expect(b.behind).toEqual([true, false]);
+	});
+
+	it("red-first: a write the browser silently ignores is caught by reading the address back, then retried", () => {
+		// Review of #510, round 4: no throw, so without the read-back the state was marked written and a reload or a
+		// copied link restored the OLD filters with no note.
+		const { b, io, runTimers } = stubBrowser("#q=old");
+		const sync = new AddressSync(withFilters({ search: "old" }), io, (x) => b.behind.push(x));
+		b.ignore = 1;
+		sync.sync(withFilters({ search: "new" }));
+		expect(b.hash).toBe("#q=old");
+		expect(sync.behind).toBe(true);
+		expect(b.timers).toHaveLength(1);
+		runTimers();
+		expect(b.hash).toBe("#q=new");
 		expect(sync.behind).toBe(false);
 		expect(b.behind).toEqual([true, false]);
 	});
