@@ -108,6 +108,21 @@ describe("usertrust demo", () => {
 		}
 	});
 
+	it("scrubs the ui command like the vault line: a control character in the path never reaches the terminal", () => {
+		const hostile = "/tmp/a\u001b[2Jb";
+		const lines = demoLines({
+			ok: true,
+			vaultBase: hostile,
+			receipts: [],
+			refusals: [],
+			verified: { valid: true, chainLength: 0, merkleRoot: null },
+			uiCommand: `npx usertrust-ui@1.2.3 ${shellWord(hostile, "linux")}`,
+		});
+		const joined = lines.join("\n");
+		expect(joined).not.toContain("\u001b");
+		expect(joined).toContain("npx usertrust-ui@1.2.3");
+	});
+
 	it("shellWord leaves a plain path alone and quotes anything else for the shell it is printed for", () => {
 		expect(shellWord("/tmp/usertrust-demo-abc123", "linux")).toBe("/tmp/usertrust-demo-abc123");
 		expect(shellWord("/tmp/a b", "linux")).toBe("'/tmp/a b'");

@@ -177,7 +177,7 @@ export function demoLines(result: DemoResult): string[] {
 				: "the audit chain did NOT verify",
 		),
 	);
-	out.push(...say(`see it in the visual ledger: ${result.uiCommand}`));
+	out.push(...say(`see it in the visual ledger: ${scrubForTerminal(result.uiCommand)}`));
 	return out;
 }
 

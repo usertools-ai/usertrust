@@ -43,6 +43,8 @@ export interface ReceiptFields {
 	readonly timestamp: string;
 	readonly auditDegraded?: boolean | undefined;
 	readonly usageSource?: "provider" | "estimated" | undefined;
+	/** Set on a governed action's receipt, which has no `usageSource`. */
+	readonly actionKind?: string | undefined;
 }
 
 /**
@@ -89,12 +91,15 @@ export function formatReceipt(receipt: ReceiptFields): string {
 	}
 	const left = `${usertokens(receipt.budgetRemaining)} (${formatUsd(receipt.budgetRemaining)}) left in the budget`;
 
-	// An unsettled receipt (a stream's estimate, before settlement) carries a placeholder hash for a spend event that is
-	// not on the chain yet, so it is never called sealed.
+	// Only a stream's estimate handle (unsettled, before the stream is consumed) carries a placeholder hash for a spend
+	// event that is not on the chain yet. Every final receipt of a call has a usageSource and every governed action has
+	// an actionKind; an unsettled one of those is an ambiguous settlement, whose record IS on the chain under its hash.
+	const placeholderHash =
+		!receipt.settled && receipt.usageSource === undefined && receipt.actionKind === undefined;
 	const seal =
 		receipt.auditDegraded === true
 			? "not sealed: the audit record could not be written (auditDegraded)"
-			: !receipt.settled
+			: placeholderHash
 				? `provisional: not yet recorded in the audit chain at ${plain(receipt.chainPath)}`
 				: `sealed ${plain(receipt.auditHash).slice(0, 12)}... in the audit chain at ${plain(receipt.chainPath)}`;
 

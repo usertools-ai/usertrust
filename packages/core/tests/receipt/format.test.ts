@@ -89,23 +89,41 @@ describe("formatReceipt", () => {
 	});
 
 	it("calls a stream's estimate provisional, not sealed: its hash is a placeholder for a spend event not yet on the chain", () => {
-		// the shape buildEstimatedStreamReceipt returns before settlement: settled false, auditHash a placeholder
+		// the shape buildEstimatedStreamReceipt returns before settlement: settled false, no usageSource, a placeholder hash
 		const placeholderHash = "5f2b8c1e9a7d4036c1b2e3f4a5968778899aabbccddeeff00112233445566778";
-		const estimate = formatReceipt({
-			...receipt,
-			settled: false,
-			auditHash: placeholderHash,
-			usageSource: "estimated",
-		});
+		const estimate = formatReceipt({ ...receipt, settled: false, auditHash: placeholderHash });
 		expect(estimate).toContain(
 			"provisional: not yet recorded in the audit chain at .usertrust/audit",
 		);
 		expect(estimate).not.toContain("sealed");
 		expect(estimate).not.toContain(placeholderHash.slice(0, 12));
-		// and a settled receipt with the same hash is sealed, so the line is chosen by `settled`, not by the hash
+		// the control: the same hash on a settled receipt is sealed, so the line is chosen by the receipt's shape
 		expect(formatReceipt({ ...receipt, auditHash: placeholderHash })).toContain(
 			"sealed 5f2b8c1e9a7d...",
 		);
+	});
+
+	it("an ambiguous settlement is sealed under its real hash and says settlement is not confirmed", () => {
+		// a lost reply to the post: the llm_call event IS on the chain, with settled false, and a usageSource
+		for (const usageSource of ["provider", "estimated"] as const) {
+			const ambiguous = formatReceipt({ ...receipt, settled: false, usageSource });
+			expect(ambiguous, usageSource).toContain("sealed a3f8c1d92b4e... in the audit chain");
+			expect(ambiguous, usageSource).not.toContain("provisional");
+			expect(ambiguous, usageSource).toContain("settlement is not confirmed");
+		}
+	});
+
+	it("a governed action whose settlement is ambiguous is sealed too: it has an actionKind and no usageSource", () => {
+		const action = formatReceipt({
+			...receipt,
+			settled: false,
+			actionKind: "tool",
+			model: "send-email",
+			provider: "tool",
+		});
+		expect(action).toContain("sealed a3f8c1d92b4e... in the audit chain");
+		expect(action).not.toContain("provisional");
+		expect(action).toContain("settlement is not confirmed");
 	});
 
 	it("strips format characters, the bidirectional overrides among them", () => {
