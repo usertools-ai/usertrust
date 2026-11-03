@@ -34,6 +34,7 @@ import {
 	existsSync,
 	constants as fsConstants,
 	fsyncSync,
+	linkSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
@@ -183,6 +184,27 @@ function writeIdentityFile(rootDir: string, identity: AnchorIdentity): void {
 	renameSync(tmp, path);
 }
 
+/**
+ * Create identity.json only if it does not exist: temp file + fsync + hard link (link(2)
+ * fails with EEXIST instead of replacing). Two concurrent inits cannot both succeed.
+ */
+function createIdentityFileExclusive(rootDir: string, identity: AnchorIdentity): void {
+	const path = join(anchorsDir(rootDir), "identity.json");
+	const tmp = `${path}.new-${process.pid}-${randomUUID()}`;
+	const fd = openSync(tmp, "wx", 0o600);
+	try {
+		writeSync(fd, JSON.stringify(identity, null, "\t"));
+		fsyncSync(fd);
+	} finally {
+		closeSync(fd);
+	}
+	try {
+		linkSync(tmp, path);
+	} finally {
+		unlinkSync(tmp);
+	}
+}
+
 /** Persist the durable anchorSeq high-water (never decreases). */
 function bumpAnchorHighWater(rootDir: string, anchorSeq: number): void {
 	const identity = readAnchorIdentity(rootDir);
@@ -290,9 +312,12 @@ export function initAnchorIdentity(
 		throw err;
 	}
 	// The public half sits beside the private key so it can be pinned or handed to a
-	// verifier without touching the secret. Best effort: the identity does not need it.
+	// verifier without touching the secret. It is REPLACED, never kept: a copy left over
+	// from an earlier key at the same --key-file would sit beside the new private key and
+	// be the file someone pins. Best effort: the identity does not need it.
+	const pubCopy = publicKeyCopyPath(keyFile);
 	try {
-		writeFileSync(publicKeyCopyPath(keyFile), publicKeyPem, { mode: 0o644, flag: "wx" });
+		writeFileSync(pubCopy, publicKeyPem, { mode: 0o644 });
 	} catch {
 		/* a missing copy is recoverable with `usertrust anchor pubkey` */
 	}
@@ -306,7 +331,23 @@ export function initAnchorIdentity(
 		createdAt: new Date().toISOString(),
 		keyHistory: [{ keyId, publicKeySpki }],
 	};
-	writeIdentityFile(rootDir, identity);
+	try {
+		createIdentityFileExclusive(rootDir, identity);
+	} catch (err) {
+		// Lost a race to a concurrent init: the winner's identity stands. Remove the key
+		// pair THIS call just created (nothing else can be using it), so no orphan is left.
+		if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+			for (const f of [keyFile, pubCopy]) {
+				try {
+					unlinkSync(f);
+				} catch {
+					/* never created */
+				}
+			}
+			throw new Error(`Anchor identity already exists: ${identityPath}`);
+		}
+		throw err;
+	}
 	// Touch the mirror so "mirror file missing" (accidental loss / partial
 	// restore) is distinguishable from "fresh vault, no anchors yet".
 	const mirrorPath = join(dir, "anchors.jsonl");

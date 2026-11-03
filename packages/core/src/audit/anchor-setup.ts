@@ -3,7 +3,11 @@
  * ensureAnchorIdentity: the one idempotent entry point that init (and later the
  * scheduler) calls to make sure a vault can anchor.
  *
- * It never overwrites, never deletes, and mints at most once:
+ * It never overwrites or deletes an existing key or identity, and mints at most once
+ * (the identity file is created exclusively, so two concurrent callers cannot both
+ * succeed; the loser removes only the key pair it just made and re-reads the winner's).
+ * Vaults signed by an external signer (KMS/HSM) have no key file and are out of scope:
+ *
  *   - no identity.json            -> create identity, key, public copy, mirror, outbox
  *   - identity + matching key     -> "ready" (nothing written)
  *   - identity, key missing/other -> "needs-attention" (nothing minted: a new key would
@@ -40,11 +44,13 @@ export type EnsureAnchorReason =
 	| "identity-unreadable"
 	| "key-missing"
 	| "key-mismatch"
+	| "key-superseded"
 	| "key-write-failed";
 
 export function ensureAnchorIdentity(
 	rootDir: string,
 	opts?: { keyFile?: string },
+	retried = false,
 ): EnsureAnchorResult {
 	if (!existsSync(join(rootDir, VAULT_DIR, "usertrust.config.json"))) {
 		return {
@@ -64,28 +70,35 @@ export function ensureAnchorIdentity(
 				message: `${identityPath} exists but cannot be read as an anchor identity. It was left untouched; inspect or restore it.`,
 			};
 		}
-		const keyFile = opts?.keyFile ?? defaultKeyPath(identity.vaultId);
-		if (!existsSync(keyFile)) {
+		// Resolve the signer exactly as the emitter does: USERTRUST_ANCHOR_KEY, then the
+		// given key file, then the default path. A vault keyed by the environment, or
+		// rotated onto a successor key, is judged by the key it would really sign with.
+		let signerKeyId: string;
+		try {
+			signerKeyId = resolveSigner(
+				{ type: "pem", ...(opts?.keyFile !== undefined ? { file: opts.keyFile } : {}) },
+				identity.vaultId,
+			).keyId;
+		} catch (err) {
+			const code = (err as NodeJS.ErrnoException).code;
+			const absent =
+				code === "ENOENT" || /^No anchor private key/.test(String((err as Error).message));
 			return {
 				status: "needs-attention",
-				reason: "key-missing",
-				message: `The anchor key ${keyFile} is missing. No new key was minted; restore it, or run \`usertrust anchor rotate\` if it is lost.`,
+				reason: absent ? "key-missing" : "key-mismatch",
+				message: absent
+					? `No anchor key found (looked at USERTRUST_ANCHOR_KEY, the key file, then ${defaultKeyPath(identity.vaultId)}). No new key was minted; restore it, or run \`usertrust anchor rotate\` if it is lost.`
+					: "The anchor key cannot be read as a signing key. Nothing was changed.",
 			};
 		}
-		try {
-			const signer = resolveSigner({ type: "pem", file: keyFile }, identity.vaultId);
-			if (signer.keyId !== identity.keyId) {
-				return {
-					status: "needs-attention",
-					reason: "key-mismatch",
-					message: `The key at ${keyFile} does not match this vault's identity (keyId ${identity.keyId}). Nothing was changed.`,
-				};
-			}
-		} catch {
+		if (signerKeyId !== identity.keyId) {
+			const superseded = identity.keyHistory?.some((k) => k.keyId === signerKeyId) === true;
 			return {
 				status: "needs-attention",
-				reason: "key-mismatch",
-				message: `The key at ${keyFile} cannot be read as a signing key. Nothing was changed.`,
+				reason: superseded ? "key-superseded" : "key-mismatch",
+				message: superseded
+					? "The key found is an earlier one: this vault has rotated. Point USERTRUST_ANCHOR_KEY or --key-file at the current private key. Nothing was changed."
+					: `The key found does not match this vault's identity (keyId ${identity.keyId}). Nothing was changed.`,
 			};
 		}
 		return { status: "ready", identity, keyId: identity.keyId };
@@ -104,6 +117,9 @@ export function ensureAnchorIdentity(
 			keyId: made.identity.keyId,
 		};
 	} catch (err) {
+		// A concurrent caller created the identity between our check and our write:
+		// its identity stands, so judge that one instead of reporting a failure.
+		if (!retried && existsSync(identityPath)) return ensureAnchorIdentity(rootDir, opts, true);
 		return {
 			status: "needs-attention",
 			reason: "key-write-failed",

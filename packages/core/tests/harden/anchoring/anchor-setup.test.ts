@@ -7,6 +7,7 @@
  * exclusive private-key write.
  */
 
+import { execFile } from "node:child_process";
 import { createPublicKey, sign as cryptoSign, verify as cryptoVerify } from "node:crypto";
 import {
 	existsSync,
@@ -20,8 +21,13 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { initAnchorIdentity } from "../../../src/audit/anchor.js";
+import {
+	initAnchorIdentity,
+	mintSuccessorKey,
+	recordRotatedIdentity,
+} from "../../../src/audit/anchor.js";
 import { ensureAnchorIdentity } from "../../../src/audit/anchor-setup.js";
 import { run as anchorRun } from "../../../src/cli/anchor.js";
 import { cleanupAll, tmp } from "./fixtures.js";
@@ -159,6 +165,66 @@ describe("ensureAnchorIdentity", () => {
 	});
 });
 
+describe("ensureAnchorIdentity resolves the signer like the emitter does", () => {
+	it("a vault keyed by USERTRUST_ANCHOR_KEY is ready; without it the same state is key-missing", () => {
+		const root = vaultRoot();
+		const first = ensureAnchorIdentity(root);
+		if (first.status !== "created") throw new Error("setup");
+		const aside = join(mkdtempSync(join(tmpdir(), "anchor-setup-env-")), "key.pem");
+		renameSync(first.keyFile, aside);
+		expect(ensureAnchorIdentity(root).status).toBe("needs-attention");
+		process.env.USERTRUST_ANCHOR_KEY = aside;
+		try {
+			expect(ensureAnchorIdentity(root).status).toBe("ready");
+		} finally {
+			delete process.env.USERTRUST_ANCHOR_KEY;
+		}
+	});
+
+	it("a rotated vault is ready with the successor key and key-superseded with the old one", () => {
+		const root = vaultRoot();
+		const first = ensureAnchorIdentity(root);
+		if (first.status !== "created") throw new Error("setup");
+		const next = mintSuccessorKey(first.identity.vaultId);
+		recordRotatedIdentity(root, { keyId: next.keyId, publicKeySpki: next.publicKeySpki });
+		const old = ensureAnchorIdentity(root);
+		expect(old.status).toBe("needs-attention");
+		if (old.status === "needs-attention") expect(old.reason).toBe("key-superseded");
+		expect(ensureAnchorIdentity(root, { keyFile: next.keyFile }).status).toBe("ready");
+	});
+});
+
+describe("concurrent callers", () => {
+	it("six processes on one fresh vault: exactly one creates, the rest see ready, one key pair on disk", async () => {
+		const root = vaultRoot();
+		const dir = tmp("anchor-setup-race-");
+		const script = join(dir, "child.mts");
+		const mod = pathToFileURL(join(import.meta.dirname, "../../../src/audit/anchor-setup.ts")).href;
+		writeFileSync(
+			script,
+			`import { ensureAnchorIdentity } from ${JSON.stringify(mod)};\nconst r = ensureAnchorIdentity(process.argv[2]);\nconsole.log(JSON.stringify({ status: r.status, reason: r.status === "needs-attention" ? r.reason : null }));\n`,
+		);
+		const results = await Promise.all(
+			Array.from(
+				{ length: 6 },
+				() =>
+					new Promise<string>((resolve, reject) => {
+						execFile(
+							process.execPath,
+							["--import", "tsx", script, root],
+							{ env: { ...process.env, HOME: home } },
+							(err, stdout) => (err ? reject(err) : resolve(stdout.trim())),
+						);
+					}),
+			),
+		);
+		const statuses = results.map((r) => (JSON.parse(r) as { status: string }).status);
+		expect(statuses.filter((x) => x === "created")).toHaveLength(1);
+		expect(statuses.filter((x) => x === "ready")).toHaveLength(5);
+		expect(keyFiles()).toHaveLength(2);
+	}, 60_000);
+});
+
 describe("initAnchorIdentity writes the private key exclusively", () => {
 	it("refuses a --key-file that already exists and leaves its bytes unchanged", () => {
 		const root = vaultRoot();
@@ -167,6 +233,15 @@ describe("initAnchorIdentity writes the private key exclusively", () => {
 		expect(() => initAnchorIdentity(root, { keyFile: target })).toThrow(/overwrite/);
 		expect(readFileSync(target, "utf-8")).toBe("somebody's key\n");
 		expect(existsSync(join(root, ".usertrust", "audit", "anchors", "identity.json"))).toBe(false);
+	});
+
+	it("replaces a stale public copy left beside an earlier key at the same path", () => {
+		const root = vaultRoot();
+		const dir = tmp("anchor-setup-kf-");
+		const target = join(dir, "k.anchor.pem");
+		writeFileSync(join(dir, "k.anchor.pub.pem"), "STALE PUBLIC KEY\n");
+		const made = initAnchorIdentity(root, { keyFile: target });
+		expect(readFileSync(join(dir, "k.anchor.pub.pem"), "utf-8")).toBe(made.publicKeyPem);
 	});
 
 	it("control: a --key-file that does not exist yet is written", () => {
@@ -225,6 +300,42 @@ describe("anchor pubkey / anchor init --json", () => {
 		const sig = cryptoSign(null, msg, readFileSync(ra.keyFile, "utf-8"));
 		expect(cryptoVerify(null, msg, createPublicKey(pem), sig)).toBe(true);
 		expect(cryptoVerify(null, msg, createPublicKey(rb.publicKeyPem), sig)).toBe(false);
+	});
+
+	it("pubkey refuses a genesis key that is not a valid Ed25519 key for its keyId (no raw bytes printed)", async () => {
+		const root = vaultRoot();
+		const r = ensureAnchorIdentity(root);
+		if (r.status !== "created") throw new Error("setup");
+		const idPath = join(root, ".usertrust", "audit", "anchors", "identity.json");
+		const original = JSON.parse(readFileSync(idPath, "utf-8"));
+		process.chdir(root);
+		for (const bad of ["\u001b[2Jhello", "AAAA"]) {
+			const tampered = {
+				...original,
+				keyHistory: [{ ...original.keyHistory[0], publicKeySpki: bad }],
+			};
+			writeFileSync(idPath, JSON.stringify(tampered));
+			const c = capture();
+			process.exitCode = 0;
+			await anchorRun(["pubkey"], {});
+			expect(process.exitCode).toBe(1);
+			expect(c.out.join("")).toBe("");
+			expect(c.lines.join("\n")).not.toContain("\u001b[2J");
+			vi.restoreAllMocks();
+		}
+		// A different but valid key under the recorded keyId is refused too.
+		const other = ensureAnchorIdentity(vaultRoot());
+		if (other.status !== "created") throw new Error("setup");
+		const swapped = {
+			...original,
+			keyHistory: [{ ...original.keyHistory[0], publicKeySpki: other.identity.publicKeySpki }],
+		};
+		writeFileSync(idPath, JSON.stringify(swapped));
+		const c2 = capture();
+		process.exitCode = 0;
+		await anchorRun(["pubkey"], {});
+		expect(process.exitCode).toBe(1);
+		expect(c2.out.join("")).toBe("");
 	});
 
 	it("pubkey without an identity fails with exit 1", async () => {
