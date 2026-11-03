@@ -5,14 +5,29 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
-import { FilterBar } from "../src/app/filter-bar.js";
-import { SummaryStrip } from "../src/app/summary-strip.js";
+import { beforeAll, describe, expect, it } from "vitest";
 import type { SummaryPayload } from "../src/shared/api.js";
 import { activeFilterCount, EMPTY_FILTERS, type FilterState } from "../src/shared/filters.js";
 import { PHONE_MAX_WIDTH, PHONE_QUERY } from "../src/shared/layout.js";
 
 const CSS = readFileSync(join(import.meta.dirname, "..", "src", "app", "styles.css"), "utf-8");
+
+// The components are .tsx, which the tests' typecheck (no jsx) cannot import statically: they are loaded by a computed
+// path, as the other render tests do, and typed here by what these tests pass.
+type Component<P> = (props: P) => React.JSX.Element;
+async function load<P>(file: string, name: string): Promise<Component<P>> {
+	const mod = (await import(/* @vite-ignore */ `../src/app/${file}.js`)) as Record<
+		string,
+		Component<P>
+	>;
+	return mod[name] as Component<P>;
+}
+let SummaryStrip: Component<{ summary: SummaryPayload | null; live: string }>;
+let FilterBar: Component<{ rows: never[]; filters: FilterState; onChange: () => void }>;
+beforeAll(async () => {
+	SummaryStrip = await load("summary-strip", "SummaryStrip");
+	FilterBar = await load("filter-bar", "FilterBar");
+});
 
 /** The text between the braces of the block that opens at `open` (brace-matched). */
 function blockAt(css: string, open: number): { body: string; end: number } {
