@@ -188,11 +188,11 @@ export function describeBudgetSource(
 		case "config":
 			return "from usertrust.config.json; not confirmed as enforced";
 		case "several":
-			return `unknown: several governors with different budgets, as of ${b.writtenAt ?? "an unknown time"}`;
+			return `unknown: several controllers with different budgets, as of ${b.writtenAt ?? "an unknown time"}`;
 		case "unreadable":
 			return `unknown: the enforced-budget record could not be read; ${b.reason ?? "unreadable"}`;
 		case "unpublished":
-			return "unknown: not yet published; no governor has recorded the budget it enforces";
+			return "unknown: not yet published; no controller has recorded the budget it enforces";
 	}
 }
 
