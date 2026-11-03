@@ -37,7 +37,7 @@ import {
 } from "node:fs";
 import { open } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import releaseManifest from "./tigerbeetle-release.json" with { type: "json" };
 import { extractZipEntry, ZipEntryError } from "./zip-entry.js";
@@ -84,8 +84,8 @@ export type InstallErrorCode =
 /** Every way the install can refuse. `message` names the fix; nothing here ever falls back to a different binary. */
 export class TigerBeetleInstallError extends Error {
 	readonly code: InstallErrorCode;
-	constructor(code: InstallErrorCode, message: string) {
-		super(message);
+	constructor(code: InstallErrorCode, message: string, options?: { cause?: unknown }) {
+		super(message, options);
 		this.name = "TigerBeetleInstallError";
 		this.code = code;
 	}
@@ -188,6 +188,15 @@ function tempBeside(dest: string, tag: string): string {
 	return `${dest}.${tag}-${process.pid}-${randomBytes(4).toString("hex")}`;
 }
 
+/** A file-system failure while installing (EPERM on a running .exe, ENOSPC, EACCES), with the cause kept and the way out named. */
+function installFailed(what: string, cause: unknown): TigerBeetleInstallError {
+	return new TigerBeetleInstallError(
+		"install-failed",
+		`${what}: ${(cause as Error).message}. Free the space or close the program using it, re-run with home-folder write access approved, or point USERTRUST_TB_BINARY at a ${MANIFEST.version} server.`,
+		{ cause },
+	);
+}
+
 function removeQuietly(path: string): void {
 	try {
 		rmSync(path, { force: true });
@@ -284,7 +293,8 @@ export async function installPinned(opts: InstallOptions = {}): Promise<Resolved
 	if (existsSync(dest)) {
 		const have = await reportedVersion(dest, run);
 		if (have === manifest.version) return { path: dest, version: have, source: "installed" };
-		// an installed file that does not report the pinned version is replaced, never run
+		// An installed file is run ONCE, with `version`, to check it, and is trusted on that version string: its sha256 is not re-checked at rest
+		// (the folder is per-user). One that does not report the pinned version is replaced by the verified download below.
 	}
 
 	const limit = Math.min(asset.bytes, MAX_DOWNLOAD_BYTES);
@@ -292,10 +302,7 @@ export async function installPinned(opts: InstallOptions = {}): Promise<Resolved
 	try {
 		mkdirSync(dir, { recursive: true });
 	} catch (err) {
-		throw new TigerBeetleInstallError(
-			"install-failed",
-			`cannot create ${dir}: ${(err as Error).message}. Re-run with home-folder write access approved, or set USERTRUST_TB_BINARY.`,
-		);
+		throw installFailed(`cannot create ${dir}`, err);
 	}
 
 	const archiveTmp = tempBeside(dest, "download");
@@ -321,7 +328,7 @@ export async function installPinned(opts: InstallOptions = {}): Promise<Resolved
 					"bad-archive",
 					`the pinned archive is not readable: ${err.message}`,
 				);
-			throw err;
+			throw installFailed("cannot read the downloaded archive", err);
 		}
 		if (binary.length !== asset.entryBytes) {
 			throw new TigerBeetleInstallError(
@@ -329,7 +336,11 @@ export async function installPinned(opts: InstallOptions = {}): Promise<Resolved
 				`the extracted ${asset.entry} is ${binary.length} bytes, not the pinned ${asset.entryBytes}`,
 			);
 		}
-		writeFileSync(binaryTmp, binary, { mode: 0o755, flag: "wx" });
+		try {
+			writeFileSync(binaryTmp, binary, { mode: 0o755, flag: "wx" });
+		} catch (err) {
+			throw installFailed(`cannot write the server next to ${dest}`, err);
+		}
 		const have = await reportedVersion(binaryTmp, run);
 		if (have !== manifest.version) {
 			throw new TigerBeetleInstallError(
@@ -337,7 +348,11 @@ export async function installPinned(opts: InstallOptions = {}): Promise<Resolved
 				`the extracted server reports ${have ?? "no version"}, not ${manifest.version}; it was discarded`,
 			);
 		}
-		renameSync(binaryTmp, dest);
+		try {
+			renameSync(binaryTmp, dest);
+		} catch (err) {
+			throw installFailed(`cannot move the verified server into place at ${dest}`, err);
+		}
 		return { path: dest, version: manifest.version, source: "downloaded" };
 	} finally {
 		removeQuietly(archiveTmp);
@@ -358,9 +373,12 @@ export async function resolveBinary(
 	const run = opts.runVersion ?? defaultRunVersion;
 	const override = env.USERTRUST_TB_BINARY;
 	if (override !== undefined && override !== "") {
+		// Resolve ONCE against the current directory and use that one path for the stat, the version run and the result: a bare name such as
+		// `tigerbeetle` would otherwise be stat'd in the cwd while execFile searches PATH, and the version check would run a different file.
+		const binary = resolve(override);
 		let usable = false;
 		try {
-			usable = statSync(override).isFile();
+			usable = statSync(binary).isFile();
 		} catch {
 			usable = false;
 		}
@@ -370,14 +388,14 @@ export async function resolveBinary(
 				`USERTRUST_TB_BINARY is set to ${override}, which is not a file`,
 			);
 		}
-		const have = await reportedVersion(override, run);
+		const have = await reportedVersion(binary, run);
 		if (have !== manifest.version) {
 			throw new TigerBeetleInstallError(
 				"binary-env-invalid",
 				`USERTRUST_TB_BINARY (${override}) reports ${have ?? "no TigerBeetle version"}, but this release is pinned to ${manifest.version}`,
 			);
 		}
-		return { path: override, version: have, source: "env" };
+		return { path: binary, version: have, source: "env" };
 	}
 	const platform = opts.platform ?? process.platform;
 	const key = platformKey(platform, opts.arch ?? process.arch, manifest);

@@ -21,7 +21,7 @@ import {
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	installDir,
 	installPinned,
@@ -30,7 +30,7 @@ import {
 	platformKey,
 	type ReleaseManifest,
 	resolveBinary,
-	type TigerBeetleInstallError,
+	TigerBeetleInstallError,
 } from "../../src/ledger/tigerbeetle-install.js";
 import { makeZip } from "./fixtures/make-zip.js";
 
@@ -304,7 +304,7 @@ describe.skipIf(!POSIX)("installPinned: refusals leave nothing at the install pa
 		expect(listing(h)).toEqual([]);
 	});
 
-	it("an installed file that reports another version is replaced by a verified download, never run as is", async () => {
+	it("an installed file is run once with `version` to check it (trusted on that string, no sha re-check at rest); one that reports another version is replaced by a verified download", async () => {
 		const bin = script(VERSION);
 		const zip = makeZip([{ name: "tigerbeetle", data: bin }]);
 		const served = await serve(zip);
@@ -322,6 +322,37 @@ describe.skipIf(!POSIX)("installPinned: refusals leave nothing at the install pa
 		});
 		expect(got.source).toBe("downloaded");
 		expect(served.hits()).toBe(1);
+	});
+
+	it("a file-system failure while installing (the destination cannot be replaced) is install-failed with the cause kept, and no temp file is left", async () => {
+		const bin = script(VERSION);
+		const zip = makeZip([{ name: "tigerbeetle", data: bin }]);
+		const served = await serve(zip);
+		const h = home();
+		const dir = dirOf(h);
+		// a NON-EMPTY DIRECTORY where the binary belongs: the verified server cannot be renamed over it
+		mkdirSync(join(dir, "tigerbeetle"), { recursive: true });
+		writeFileSync(join(dir, "tigerbeetle", "occupant"), "x");
+		const refused = await installPinned({
+			manifest: manifestFor(zip, "tigerbeetle", bin.length),
+			platform: "linux",
+			arch: "x64",
+			home: h,
+			env: {},
+			baseUrl: served.baseUrl,
+		}).then(
+			() => {
+				throw new Error("expected installPinned to refuse");
+			},
+			(e: unknown) => e as TigerBeetleInstallError,
+		);
+		expect(refused).toBeInstanceOf(TigerBeetleInstallError);
+		expect(refused.code).toBe("install-failed");
+		expect((refused.cause as NodeJS.ErrnoException).code).toMatch(
+			/^(EISDIR|ENOTEMPTY|EEXIST|EPERM|EACCES)$/,
+		);
+		expect(refused.message).toContain("USERTRUST_TB_BINARY");
+		expect(readdirSync(dir)).toEqual(["tigerbeetle"]);
 	});
 });
 
@@ -428,6 +459,34 @@ describe.skipIf(!POSIX)("resolveBinary", () => {
 			(e: unknown) => e as Error,
 		);
 		expect(wrong.message).toContain("USERTRUST_TB_BINARY");
+	});
+
+	it("a bare USERTRUST_TB_BINARY name is resolved against the cwd once: the file that is stat'd is the file whose version is checked and returned, not a PATH decoy", async () => {
+		const cwdDir = mkdtempSync(join(tmpdir(), "ut-tb-cwd-"));
+		const decoyDir = mkdtempSync(join(tmpdir(), "ut-tb-decoy-"));
+		for (const [dir, version] of [
+			[cwdDir, VERSION],
+			[decoyDir, "0.16.74"],
+		] as const) {
+			const p = join(dir, "tigerbeetle-bare");
+			writeFileSync(p, script(version));
+			chmodSync(p, 0o755);
+		}
+		const cwd = vi.spyOn(process, "cwd").mockReturnValue(cwdDir);
+		const oldPath = process.env.PATH;
+		process.env.PATH = `${decoyDir}:${oldPath ?? ""}`;
+		try {
+			// the real `version` run (no injected runner), so a PATH search for the bare name would find the decoy and report 0.16.74
+			const got = await resolveBinary({ env: { USERTRUST_TB_BINARY: "tigerbeetle-bare" } });
+			expect(got).toMatchObject({
+				version: VERSION,
+				source: "env",
+				path: join(cwdDir, "tigerbeetle-bare"),
+			});
+		} finally {
+			process.env.PATH = oldPath;
+			cwd.mockRestore();
+		}
 	});
 
 	it("with nothing installed and download not asked for, there is no binary", async () => {
