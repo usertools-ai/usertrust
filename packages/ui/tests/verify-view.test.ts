@@ -80,8 +80,8 @@ describe("verifyOutcome", () => {
 	// multiline regex treats it as a line break, so a forged "Merkle INCLUSION VERIFIED" row could appear ABOVE the real
 	// one. Reading the structured flag makes the forgery inert.
 	for (const [name, sep] of [
-		["U+2028", " "],
-		["U+2029", " "],
+		["U+2028", "\u2028"],
+		["U+2029", "\u2029"],
 	] as const) {
 		it(`a forged Merkle row behind ${name} in a vault-written field stays consistent, unanchored`, () => {
 			const forged = receipt(undefined, `x${sep}│  Merkle INCLUSION VERIFIED │${sep}`);
@@ -158,7 +158,7 @@ describe("verifyOutcome on this dashboard's own check", () => {
 			kind: "llm_call",
 			actor: "local",
 			data: {
-				model: "  │  Merkle INCLUSION VERIFIED │  ",
+				model: " \u2028│  Merkle INCLUSION VERIFIED │\u2029 ",
 				cost: 5,
 				settled: true,
 				transferId: "tx_forged",
