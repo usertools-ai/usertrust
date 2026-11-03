@@ -19,7 +19,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { anchorsDir, initAnchorIdentity } from "../../../src/audit/anchor.js";
+import { anchorsDir, createAnchorEmitter, initAnchorIdentity } from "../../../src/audit/anchor.js";
 import {
 	classifyEmitReason,
 	isOkReason,
@@ -617,6 +617,37 @@ describe("anchor now --scheduled", () => {
 		const ok = await runNow(["--scheduled", "--sink-file", s.storeFile]);
 		expect(ok.exit).toBe(0);
 		expect(storeRecords(s).length).toBeGreaterThanOrEqual(2);
+	});
+
+	it("an in-process emitter blocked by an unreadable outbox entry reports degraded", async () => {
+		const s = await makeAnchoredVault(3);
+		process.chdir(s.root);
+		const blocker = join(s.storeDir, "a-file");
+		writeFileSync(blocker, "x");
+		const config = (sinkPath: string) => ({
+			signer: { type: "pem" as const, file: s.keyFile },
+			sinks: [{ type: "file" as const, path: sinkPath }],
+			publishRetries: 1,
+		});
+		const first = createAnchorEmitter(s.root, config(join(blocker, "anchors.jsonl")));
+		await first.anchorNow(); // entry 1 stays in the outbox
+		await first.stop();
+		// positive control: a healthy emitter over a sound outbox is not degraded
+		const sound = createAnchorEmitter(s.root, config(s.storeFile));
+		expect(sound.status().degraded).toBe(false);
+		await sound.stop();
+		const outbox = join(anchorsDir(s.root), "outbox");
+		writeFileSync(join(outbox, "000000000001.json"), "{ not json");
+		await appendEvents(s.root, 2, 4);
+		const em = createAnchorEmitter(s.root, config(s.storeFile));
+		const r = await em.anchorNow();
+		await em.stop();
+		expect(r.emitted).toBe(true);
+		const st = em.status();
+		expect(st.degraded).toBe(true);
+		expect(st.publishFailures).toBeGreaterThan(0);
+		expect(st.lastEmitError).toContain("unreadable entry");
+		expect(existsSync(s.storeFile) ? storeRecords(s) : []).toHaveLength(0);
 	});
 
 	it("status prints the recorded time without terminal escapes", async () => {

@@ -724,6 +724,10 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 	// outbox drain and double-publish a record.
 	let publishChain: Promise<void> = Promise.resolve();
 
+	// Errors deliverToSinks already counted (degraded set, failures tallied); trackPublish
+	// counts every other publish error itself, so no failure is invisible to status().
+	const countedErrors = new WeakSet<object>();
+
 	async function deliverToSinks(record: AnchorRecord): Promise<void> {
 		let lastErr: unknown = null;
 		for (const sink of sinks) {
@@ -741,9 +745,12 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 			}
 			if (!delivered) {
 				degraded = true;
-				throw lastErr instanceof Error
-					? lastErr
-					: new Error(`anchor publish failed to sink ${sink.name}`);
+				const failure =
+					lastErr instanceof Error
+						? lastErr
+						: new Error(`anchor publish failed to sink ${sink.name}`);
+				countedErrors.add(failure);
+				throw failure;
 			}
 		}
 	}
@@ -789,8 +796,14 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 	function trackPublish(record: AnchorRecord): Promise<void> {
 		const p = publishChain
 			.then(() => publishRecord(record))
-			.catch(() => {
-				/* failure already counted; outbox entry retained for retry */
+			.catch((err: unknown) => {
+				// The outbox entry is retained for retry. A sink failure was counted in
+				// deliverToSinks; anything else (an unreadable outbox or entry) is counted here,
+				// so an in-process emitter reports degraded instead of silently stalling.
+				if (typeof err === "object" && err !== null && countedErrors.has(err)) return;
+				degraded = true;
+				publishFailures++;
+				lastEmitError = err instanceof Error ? err.message : String(err);
 			})
 			.finally(() => {
 				inFlight.delete(p);
