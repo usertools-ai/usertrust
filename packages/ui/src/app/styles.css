@@ -1401,6 +1401,111 @@ body {
 			animation-name: ut-sheet-in;
 		}
 	}
+
+	/* ── Hit areas ──
+	   Every small control keeps its look and gets a larger tappable area: at least 32px on a desktop, at least 44px at the
+	   phone width. An invisible ::after (no other rule here uses ::after on these controls) is stretched past the control
+	   by a negative inset. An inset is measured from the PADDING box, inside the border, so each value below is the
+	   target size minus the control's padding box, halved: a 20px button with a 1px border has an 18px padding box, and
+	   an inset of -7px makes 32px. Each expansion stays inside the room its neighbours leave (a gap, the container's
+	   padding), so it never reaches another control's visible body. tests/hit-areas.test.ts reads these numbers. */
+	.ut-info-btn,
+	.ut-x,
+	.ut-chip,
+	.ut-cap button,
+	.ut-seg button,
+	.ut-btn,
+	.ut-ghost {
+		position: relative;
+	}
+	.ut-info-btn::after,
+	.ut-x::after,
+	.ut-chip::after,
+	.ut-cap button::after,
+	.ut-seg button::after,
+	.ut-btn::after,
+	.ut-ghost::after {
+		content: "";
+		position: absolute;
+	}
+	/* The sort row is a flex item of the column .ut-pane, and as a scroll box (overflow-x: auto) its automatic minimum
+	   height is 0, so with the long list beside it the row shrank to its content and clipped the area. It keeps its own
+	   height. */
+	.ut-cap {
+		flex: 0 0 auto;
+	}
+	/* Padding box 18px (20px, 1px border): 32px. Beside it only a title-only tag and a label. */
+	.ut-info-btn::after {
+		inset: -7px;
+	}
+	/* Padding box 28px (30px, 1px border): 32px. */
+	.ut-x::after {
+		inset: -2px;
+	}
+	/* Padding box 23.5px high (11.5px text, 6px padding, 1px border): 32.5px. Sideways it stays inside the 6px gap. */
+	.ut-chip::after {
+		inset: -4.5px -3px;
+	}
+	/* 20.5px high (10.5px text, 5px padding, no border): 32.5px, inside the 7px padding of the row. The 4px gap is split. */
+	.ut-cap button::after {
+		inset: -6px -2px;
+	}
+	/* 24px high (12px text, 6px padding): 32px. The 2px gap is split. */
+	.ut-seg button::after {
+		inset: -4px -1px;
+	}
+	/* The smaller bucket switch: 21px high (11px text, 5px padding): 32px. */
+	.ut-seg.small button::after {
+		inset: -5.5px -1px;
+	}
+	/* Padding box 28px high (12px text, 8px padding, 1px border): 32px. */
+	.ut-btn::after {
+		inset: -2px;
+	}
+	/* Padding box 25px high (11px text, 7px padding, 1px border): 32px. Sideways it stays inside the 6px gap. */
+	.ut-ghost::after {
+		inset: -3.5px -2px;
+	}
+
+	@media (max-width: 760px) {
+		/* Each chip owns its 44.5px band alone: its area reaches 9.5px past the border, so rows are 19px apart (two
+		   areas, no overlap, no neighbour painting over the end of this one), and the 10px of padding (plus the 1px
+		   border) at the top and bottom of each strip keeps the first and last row off the rows and controls next to
+		   the strip. Only spacing changes. */
+		.ut-bar,
+		.ut-active {
+			row-gap: 19px;
+			padding-block: 10px;
+		}
+		/* The sort row gets the room its buttons' area needs (12px each side), so nothing is clipped by its scroll box. */
+		.ut-cap {
+			padding-block: 12px;
+		}
+		.ut-info-btn::after {
+			inset: -13px;
+		}
+		.ut-x::after {
+			inset: -8px;
+		}
+		.ut-chip::after {
+			inset: -10.5px -3px;
+		}
+		.ut-cap button::after {
+			inset: -12px -2px;
+		}
+		.ut-seg button::after {
+			inset: -10px -1px;
+		}
+		.ut-seg.small button::after {
+			inset: -11.5px -1px;
+		}
+		.ut-btn::after {
+			inset: -8px;
+		}
+		.ut-ghost::after {
+			inset: -9.5px -2px;
+		}
+	}
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1419,110 +1524,5 @@ body {
 	.ut-row.fresh {
 		box-shadow: inset 2px 0 0 var(--intel);
 		background: rgba(155, 123, 255, 0.12);
-	}
-}
-
-/* ── Hit areas ──
-   Every small control keeps its look and gets a larger tappable area: at least 32px on a desktop, at least 44px at the
-   phone width. An invisible ::after (no other rule here uses ::after on these controls) is stretched past the control
-   by a negative inset. An inset is measured from the PADDING box, inside the border, so each value below is the
-   target size minus the control's padding box, halved: a 20px button with a 1px border has an 18px padding box, and
-   an inset of -7px makes 32px. Each expansion stays inside the room its neighbours leave (a gap, the container's
-   padding), so it never reaches another control's visible body. tests/hit-areas.test.ts reads these numbers. */
-.ut-info-btn,
-.ut-x,
-.ut-chip,
-.ut-cap button,
-.ut-seg button,
-.ut-btn,
-.ut-ghost {
-	position: relative;
-}
-.ut-info-btn::after,
-.ut-x::after,
-.ut-chip::after,
-.ut-cap button::after,
-.ut-seg button::after,
-.ut-btn::after,
-.ut-ghost::after {
-	content: "";
-	position: absolute;
-}
-/* The sort row is a flex item of the column .ut-pane, and as a scroll box (overflow-x: auto) its automatic minimum
-   height is 0, so with the long list beside it the row shrank to its content and clipped the area. It keeps its own
-   height. */
-.ut-cap {
-	flex: 0 0 auto;
-}
-/* Padding box 18px (20px, 1px border): 32px. Beside it only a title-only tag and a label. */
-.ut-info-btn::after {
-	inset: -7px;
-}
-/* Padding box 28px (30px, 1px border): 32px. */
-.ut-x::after {
-	inset: -2px;
-}
-/* Padding box 23.5px high (11.5px text, 6px padding, 1px border): 32.5px. Sideways it stays inside the 6px gap. */
-.ut-chip::after {
-	inset: -4.5px -3px;
-}
-/* 20.5px high (10.5px text, 5px padding, no border): 32.5px, inside the 7px padding of the row. The 4px gap is split. */
-.ut-cap button::after {
-	inset: -6px -2px;
-}
-/* 24px high (12px text, 6px padding): 32px. The 2px gap is split. */
-.ut-seg button::after {
-	inset: -4px -1px;
-}
-/* The smaller bucket switch: 21px high (11px text, 5px padding): 32px. */
-.ut-seg.small button::after {
-	inset: -5.5px -1px;
-}
-/* Padding box 28px high (12px text, 8px padding, 1px border): 32px. */
-.ut-btn::after {
-	inset: -2px;
-}
-/* Padding box 25px high (11px text, 7px padding, 1px border): 32px. Sideways it stays inside the 6px gap. */
-.ut-ghost::after {
-	inset: -3.5px -2px;
-}
-
-@media (max-width: 760px) {
-	/* Each chip owns its 44.5px band alone: its area reaches 9.5px past the border, so rows are 19px apart (two
-	   areas, no overlap, no neighbour painting over the end of this one), and the 10px of padding (plus the 1px
-	   border) at the top and bottom of each strip keeps the first and last row off the rows and controls next to
-	   the strip. Only spacing changes. */
-	.ut-bar,
-	.ut-active {
-		row-gap: 19px;
-		padding-block: 10px;
-	}
-	/* The sort row gets the room its buttons' area needs (12px each side), so nothing is clipped by its scroll box. */
-	.ut-cap {
-		padding-block: 12px;
-	}
-	.ut-info-btn::after {
-		inset: -13px;
-	}
-	.ut-x::after {
-		inset: -8px;
-	}
-	.ut-chip::after {
-		inset: -10.5px -3px;
-	}
-	.ut-cap button::after {
-		inset: -12px -2px;
-	}
-	.ut-seg button::after {
-		inset: -10px -1px;
-	}
-	.ut-seg.small button::after {
-		inset: -11.5px -1px;
-	}
-	.ut-btn::after {
-		inset: -8px;
-	}
-	.ut-ghost::after {
-		inset: -9.5px -2px;
 	}
 }

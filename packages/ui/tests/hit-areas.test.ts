@@ -20,12 +20,15 @@ const PHONE_MIN = 44;
 const PHONE_QUERY = "@media (max-width: 760px)";
 const MARKER = "/* ── Hit areas ──";
 
-// ── A small CSS reader: rules in source order, each with its at-rule (media) context ──────────────────────────────
+// ── A small CSS reader: rules in source order, each with its at-rule (media) and cascade-layer context ──────────────────────────────
 
 interface Rule {
 	selectors: string[];
 	decls: Map<string, string>;
 	media: string | undefined;
+	/** The cascade layer the rule sits in, or undefined when it is unlayered (an unlayered rule beats every layered one,
+	 * whatever its specificity). */
+	layer: string | undefined;
 }
 
 function parseRules(source: string): Rule[] {
@@ -41,7 +44,7 @@ function parseRules(source: string): Rule[] {
 			i++;
 		}
 	};
-	const block = (media: string | undefined): void => {
+	const block = (media: string | undefined, layer: string | undefined): void => {
 		while (i < css.length) {
 			while (i < css.length && /\s/.test(css[i] ?? "")) i++;
 			if (i >= css.length) return;
@@ -59,10 +62,10 @@ function parseRules(source: string): Rule[] {
 			i = j;
 			if (prelude.startsWith("@media")) {
 				i++;
-				block(prelude);
+				block(prelude, layer);
 			} else if (prelude.startsWith("@layer")) {
 				i++;
-				block(media);
+				block(media, prelude.slice("@layer".length).trim());
 			} else if (prelude.startsWith("@")) {
 				skipBlock();
 			} else {
@@ -83,12 +86,13 @@ function parseRules(source: string): Rule[] {
 					selectors: prelude.split(",").map((s) => s.replace(/\s+/g, " ").trim()),
 					decls,
 					media,
+					layer,
 				});
 				i = end + 1;
 			}
 		}
 	};
-	block(undefined);
+	block(undefined, undefined);
 	return rules;
 }
 
@@ -372,13 +376,29 @@ describe("hit areas (audit finding F4)", () => {
 	}
 
 	describe("the block", () => {
-		it("is the last thing in styles.css, under its comment", () => {
-			const at = CSS.lastIndexOf(MARKER);
-			expect(at).toBeGreaterThan(0);
-			expect(CSS.indexOf(MARKER)).toBe(at);
-			// Nothing else follows it but its own rules: no second comment header after the marker.
-			const after = CSS.slice(at + MARKER.length);
-			expect(after.match(/\/\* ── /g)).toBeNull();
+		it("sits INSIDE @layer components, as every component rule does, so it competes by specificity", () => {
+			// Appended after the layer, the block was unlayered and silently beat every layered rule whatever its
+			// specificity (a phone filter sheet lost its own padding, safe-area inset included). Every rule the block
+			// adds must carry the components layer.
+			expect(CSS.indexOf(MARKER)).toBe(CSS.lastIndexOf(MARKER));
+			const block = parseRules(CSS.slice(CSS.indexOf(MARKER)));
+			expect(block.length).toBeGreaterThan(0);
+			const inFile = RULES.filter((r) =>
+				block.some((b) => b.selectors.join(",") === r.selectors.join(",") && b.media === r.media),
+			);
+			for (const r of inFile)
+				expect(r.layer, `${r.selectors.join(", ")} (${r.media ?? "all"})`).toBe("components");
+		});
+
+		it("nothing outside the global base and the reduced-motion block is unlayered", () => {
+			// The page's base (tokens, body, the universal reset, selection, the focus ring) is deliberately unlayered;
+			// every component rule belongs in the layer. A new unlayered rule fails here before it wins a cascade it
+			// should not.
+			const base = new Set([":root", "html", "body", "*", "::selection", ":focus-visible"]);
+			const unlayered = RULES.filter(
+				(r) => r.layer === undefined && r.media !== "@media (prefers-reduced-motion: reduce)",
+			).flatMap((r) => r.selectors);
+			expect(unlayered.filter((sel) => !base.has(sel))).toEqual([]);
 		});
 
 		it("only adds position, the expander, the sort row's flex and phone spacing: it restyles nothing", () => {
