@@ -31,6 +31,13 @@ import {
 	type SinkConfig,
 } from "../audit/anchor.js";
 import { type DoctorReport, doctorFileSink, doctorS3Sink } from "../audit/anchor-doctor.js";
+import {
+	classifyEmitReason,
+	isOkReason,
+	type LastRunReason,
+	readLastRun,
+	writeLastRun,
+} from "../audit/anchor-last-run.js";
 import { parseAnchorsContent } from "../audit/anchor-verify.js";
 import { DEFAULT_REKOR_URL } from "../audit/rekor.js";
 import { parseRekorReceipt, type RekorReceipt } from "../audit/rekor-verify.js";
@@ -148,6 +155,66 @@ function emitterConfig(args: string[]): AnchoringConfig {
 		sinks: sinksFromArgs(args),
 		...(retries !== undefined ? { publishRetries: retries } : {}),
 	};
+}
+
+// ── scheduled run ──
+
+/**
+ * `anchor now --scheduled`: the form a timer runs. Nothing to anchor and "another run
+ * holds the lock" are not failures, so they exit 0; a real failure exits 1 and is also
+ * written to `last-run.json` so `anchor status` shows it after the run is gone. A
+ * human `anchor now` keeps its stricter exit codes.
+ */
+async function runScheduled(root: string, args: string[], json: boolean): Promise<void> {
+	let reason: LastRunReason;
+	let detail: string | undefined;
+	let result: { emitted: boolean; record?: { anchorSeq: number; treeSize: number } } = {
+		emitted: false,
+	};
+	try {
+		const emitter = createAnchorEmitter(root, emitterConfig(args));
+		const emitted = await emitter.anchorNow();
+		await emitter.stop();
+		const delivered = emitter.status().outboxDepth === 0;
+		result = emitted;
+		if (emitted.emitted) {
+			reason = delivered ? "anchored" : "sink-failed";
+		} else {
+			reason = classifyEmitReason(emitted.reason);
+			detail = emitted.reason;
+		}
+	} catch (err) {
+		detail = err instanceof Error ? err.message : String(err);
+		reason = detail.startsWith("No anchor private key") ? "no-key" : "other";
+	}
+	try {
+		writeLastRun(root, reason);
+	} catch {
+		/* the run's own result still reaches the exit code and the output below */
+	}
+	const ok = isOkReason(reason);
+	if (json) {
+		console.log(
+			toSafeJson({
+				command: "anchor now",
+				success: ok,
+				data: { scheduled: true, reason, ...(detail !== undefined ? { detail } : {}) },
+			}),
+		);
+	} else if (ok) {
+		console.log(
+			reason === "anchored" && result.record
+				? `Anchored: #${result.record.anchorSeq} treeSize ${result.record.treeSize}`
+				: `Nothing to do (${reason}).`,
+		);
+	} else {
+		console.log(
+			pc.red(
+				`Anchor run failed (${reason})${detail !== undefined ? `: ${scrubForTerminal(detail)}` : ""}`,
+			),
+		);
+	}
+	if (!ok) process.exitCode = 1;
 }
 
 // ── doctor ──
@@ -396,6 +463,10 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 				return;
 			}
 			case "now": {
+				if (args.includes("--scheduled")) {
+					await runScheduled(root, args, json);
+					return;
+				}
 				const emitter = createAnchorEmitter(root, emitterConfig(args));
 				const result = await emitter.anchorNow();
 				await emitter.stop();
@@ -489,6 +560,7 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 								lastAnchor: tail,
 								eventsSinceLastAnchor: tailEvents,
 								outboxDepth,
+								lastRun: readLastRun(root),
 								mirrorErrors: mirror.errors,
 							},
 						}),
@@ -506,6 +578,13 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 				}
 				console.log(`Unanchored tail: ${tailEvents} event(s)`);
 				console.log(`Outbox: ${outboxDepth} pending`);
+				const lastRun = readLastRun(root);
+				if (lastRun === null) {
+					console.log("Last scheduled run: none recorded");
+				} else {
+					const line = `Last scheduled run: ${lastRun.at} ${lastRun.ok ? "ok" : "FAILED"} (${lastRun.reason})`;
+					console.log(lastRun.ok ? line : pc.red(line));
+				}
 				if (mirror.errors.length > 0) {
 					console.log(pc.red(`Mirror parse errors: ${mirror.errors.length}`));
 					process.exitCode = 1;
@@ -684,7 +763,7 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 				console.log(`Usage: usertrust anchor <init|now|status|export|export-bundle|doctor|rotate|resume>
 
   init          [--key-file <path>]     Mint identity + Ed25519 key (outside the vault)
-  now           [sink flags]            Snapshot, sign, mirror, publish
+  now           [sink flags] [--scheduled]  Snapshot, sign, mirror, publish (--scheduled: for a timer)
   status                                Last anchor, unanchored tail, outbox
   export        [--since <anchorSeq>]   Print mirror records (pull-mode shipping)
   export-bundle [--since <anchorSeq>]   Records + Rekor receipts for \`verify --bundle\`

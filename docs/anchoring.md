@@ -28,8 +28,11 @@ aws s3 cp s3://audit-anchors/vault-a/anchors.jsonl - \
   | npx usertrust-verify .usertrust --anchors - --pubkey pinned-root.pem
 ```
 
-Run `usertrust anchor now` from cron/CI (it exits non-zero if the record was not delivered), or
-start the in-process scheduler via the SDK. Defaults: an anchor every **1000 events** or **60
+Run `usertrust anchor now` from cron/CI (it exits non-zero if the record was not delivered). From a
+timer, use `usertrust anchor now --scheduled`: nothing to anchor, or another run holding the lock,
+exits 0; a real failure exits 1 and is recorded in `audit/anchors/last-run.json`, which
+`usertrust anchor status` prints. Nothing in the CLI or `init` installs a timer yet; the SDK's
+`createAnchorEmitter(...).start()` runs a scheduler inside your own process. Defaults for that scheduler: an anchor every **1000 events** or **60
 seconds**, whichever comes first — the gap to the live head (the *unanchored tail*) is protected
 only by internal chain consistency and is always reported, never hidden.
 
