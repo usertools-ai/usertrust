@@ -1301,6 +1301,42 @@ body {
 		justify-content: space-between;
 		gap: 12px;
 	}
+	/* The chart's figures, shown on request under the chart. */
+	.ut-chart-foot {
+		display: flex;
+		justify-content: flex-end;
+		margin-top: 10px;
+	}
+	.ut-chart-table {
+		width: 100%;
+		margin-top: 10px;
+		border-collapse: collapse;
+		font: 400 12px/1.4 var(--mono);
+		color: var(--ink);
+	}
+	.ut-chart-table caption {
+		text-align: left;
+		padding-bottom: 6px;
+		color: var(--body);
+		font: 500 11px/1.4 var(--sans);
+	}
+	.ut-chart-table th,
+	.ut-chart-table td {
+		padding: 5px 8px;
+		border-bottom: 1px solid var(--line);
+		text-align: right;
+		font-weight: 400;
+	}
+	.ut-chart-table th:first-child {
+		text-align: left;
+	}
+	/* A figure never breaks between its digits and its unit. */
+	.ut-chart-table td {
+		white-space: nowrap;
+	}
+	.ut-chart-table thead th {
+		color: var(--body);
+	}
 	/* Text for a screen reader only: out of the layout, still in the accessibility tree. */
 	.ut-sr-only {
 		position: absolute;

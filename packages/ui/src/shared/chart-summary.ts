@@ -43,8 +43,13 @@ export interface ChartSummary {
 	caption: string;
 }
 
+/** Grouped digits in one fixed locale, as the UT figures print them: never the reader's browser locale. */
+function count(n: number): string {
+	return n.toLocaleString("en-US");
+}
+
 function plural(n: number, unit: string): string {
-	return `${n.toLocaleString()} ${unit}${n === 1 ? "" : "s"}`;
+	return `${count(n)} ${unit}${n === 1 ? "" : "s"}`;
 }
 
 /** A cost, dollars first, then its usertokens: `$2.8000 (28,000 UT)`. */
@@ -84,6 +89,6 @@ export function chartSummary(
 			? "No cost in view"
 			: `Cost per ${unit}, ${plural(total, unit)} with records, highest ${costWords(highest.costUt)} on ${labelOf(highest.t)}`;
 
-	const caption = `Cost per ${unit}, UTC${capped ? ` (newest ${SUMMARY_ROW_CAP.toLocaleString()} of ${total.toLocaleString()})` : ""}`;
+	const caption = `Cost per ${unit}, UTC${capped ? ` (newest ${count(SUMMARY_ROW_CAP)} of ${count(total)})` : ""}`;
 	return { label, rows, capped, total, caption };
 }

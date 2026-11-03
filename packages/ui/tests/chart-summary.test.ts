@@ -6,7 +6,7 @@
  * built by a pure function so what a screen reader is told is tested, not assumed.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { chartSummary, SUMMARY_ROW_CAP } from "../src/shared/chart-summary.js";
 
 const DAY = 86_400_000;
@@ -152,5 +152,30 @@ describe("chartSummary: the rows and the cap", () => {
 		expect(s.label).toBe(
 			`Cost per hour, 100 hours with records, highest $0.9999 (9,999 UT) on ${hourLabel(T0 + 3 * HOUR)}`,
 		);
+	});
+});
+
+describe("counts print in one fixed locale", () => {
+	it("grouped en-US digits whatever the reader's locale (review of #513, P3)", () => {
+		// A browser in another locale: a bare toLocaleString() would print its digits. Make that visible.
+		const real = Number.prototype.toLocaleString;
+		const spy = vi.spyOn(Number.prototype, "toLocaleString").mockImplementation(function (
+			this: number,
+			...args: Parameters<typeof real>
+		) {
+			return args[0] === undefined ? "LOCAL" : real.apply(this, args);
+		});
+		try {
+			const series = Array.from({ length: 1_200 }, (_, i) => ({
+				t: Date.UTC(2023, 0, 1) + i * 86_400_000,
+				costUt: i === 7 ? 50 : 0,
+			}));
+			const s = chartSummary(series, "day", (t) => new Date(t).toISOString().slice(0, 10));
+			expect(s.label).toContain("1,200 days with records");
+			expect(s.caption).toBe("Cost per day, UTC (newest 90 of 1,200)");
+			expect(s.label).not.toContain("LOCAL days");
+		} finally {
+			spy.mockRestore();
+		}
 	});
 });
