@@ -45,6 +45,7 @@ export type EnsureAnchorReason =
 	| "key-missing"
 	| "key-mismatch"
 	| "key-superseded"
+	| "env-key-set"
 	| "key-write-failed";
 
 export function ensureAnchorIdentity(
@@ -102,6 +103,18 @@ export function ensureAnchorIdentity(
 			};
 		}
 		return { status: "ready", identity, keyId: identity.keyId };
+	}
+
+	// The emitter prefers USERTRUST_ANCHOR_KEY over any key file, so a key minted now would
+	// never be the one it signs with (the next anchor would be refused as stale-signer-key).
+	// Adopting an environment key is a separate feature; until then mint nothing.
+	if ((process.env.USERTRUST_ANCHOR_KEY ?? "") !== "") {
+		return {
+			status: "needs-attention",
+			reason: "env-key-set",
+			message:
+				"USERTRUST_ANCHOR_KEY is set, and it overrides any key this would create. Unset it to set up anchoring here; nothing was created.",
+		};
 	}
 
 	try {

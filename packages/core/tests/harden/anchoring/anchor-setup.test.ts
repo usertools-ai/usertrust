@@ -156,6 +156,21 @@ describe("ensureAnchorIdentity", () => {
 		expect(keyFiles()).toEqual([]);
 	});
 
+	it("on a fresh vault with USERTRUST_ANCHOR_KEY set it mints nothing and says why (control: unset -> created)", () => {
+		const root = vaultRoot();
+		process.env.USERTRUST_ANCHOR_KEY = "/nonexistent/overriding.pem";
+		try {
+			const r = ensureAnchorIdentity(root);
+			expect(r.status).toBe("needs-attention");
+			if (r.status === "needs-attention") expect(r.reason).toBe("env-key-set");
+		} finally {
+			delete process.env.USERTRUST_ANCHOR_KEY;
+		}
+		expect(existsSync(join(root, ".usertrust", "audit", "anchors", "identity.json"))).toBe(false);
+		expect(keyFiles()).toEqual([]);
+		expect(ensureAnchorIdentity(root).status).toBe("created");
+	});
+
 	it("reports key-write-failed with a message when the key directory cannot be made", () => {
 		const root = vaultRoot();
 		// A regular file where the key directory must go.

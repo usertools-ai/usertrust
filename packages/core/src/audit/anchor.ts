@@ -357,34 +357,38 @@ export function initAnchorIdentity(
 		}
 		throw err;
 	}
-	// The public half sits beside the private key so it can be pinned or handed to a
-	// verifier without touching the secret. Best effort: the identity does not need it
-	// (`usertrust anchor pubkey` prints it again). `pubCopy` is null when nothing was
-	// written, so the race-loser cleanup below removes only what this call made.
-	const pubCopy = writePublicKeyCopy(keyFile, publicKeyPem);
-
-	mkdirPrivate(join(dir, "outbox"));
-	const identity: AnchorIdentity = {
-		v: 1,
-		vaultId,
-		keyId,
-		publicKeySpki,
-		createdAt: new Date().toISOString(),
-		keyHistory: [{ keyId, publicKeySpki }],
-	};
+	let createdIdentity: AnchorIdentity;
+	// From here until the identity is published, ANY failure removes the key this call just
+	// made (the exclusive create above proves it is ours): an orphaned key would make a
+	// retry with the same --key-file refuse as "existing", and nothing refers to it yet.
+	let pubCopy: string | null = null;
 	try {
+		// The public half sits beside the private key so it can be pinned or handed to a
+		// verifier without touching the secret. Best effort: the identity does not need it
+		// (`usertrust anchor pubkey` prints it again). `pubCopy` is null when nothing was
+		// written, so cleanup removes only what this call made.
+		pubCopy = writePublicKeyCopy(keyFile, publicKeyPem);
+		mkdirPrivate(join(dir, "outbox"));
+		const identity: AnchorIdentity = {
+			v: 1,
+			vaultId,
+			keyId,
+			publicKeySpki,
+			createdAt: new Date().toISOString(),
+			keyHistory: [{ keyId, publicKeySpki }],
+		};
 		createIdentityFileExclusive(rootDir, identity);
+		createdIdentity = identity;
 	} catch (err) {
-		// Lost a race to a concurrent init: the winner's identity stands. Remove the key
-		// pair THIS call just created (nothing else can be using it), so no orphan is left.
-		if ((err as NodeJS.ErrnoException).code === "EEXIST") {
-			for (const f of pubCopy === null ? [keyFile] : [keyFile, pubCopy]) {
-				try {
-					unlinkSync(f);
-				} catch {
-					/* never created */
-				}
+		for (const f of pubCopy === null ? [keyFile] : [keyFile, pubCopy]) {
+			try {
+				unlinkSync(f);
+			} catch {
+				/* never created */
 			}
+		}
+		// EEXIST: lost a race to a concurrent init, whose identity stands.
+		if ((err as NodeJS.ErrnoException).code === "EEXIST") {
 			throw new Error(`Anchor identity already exists: ${identityPath}`);
 		}
 		throw err;
@@ -395,7 +399,7 @@ export function initAnchorIdentity(
 	if (!existsSync(mirrorPath)) {
 		writeFileSync(mirrorPath, "", { mode: 0o600 });
 	}
-	return { identity, publicKeyPem, keyFile };
+	return { identity: createdIdentity, publicKeyPem, keyFile };
 }
 
 // ── Signer resolution ──
