@@ -1178,9 +1178,55 @@
 					"test": "emptying events.jsonl while .meta remains: the next append continues from the sidecar, and verification reports the gap"
 				}
 			]
+		},
+		{
+			"id": "verified-only-anchored-inclusion",
+			"kind": "guarantee",
+			"claim": "verifyTransaction's inclusionVerified is true only when the transaction's inclusion was proven against a verified anchor root, and the dashboard says \"verified\" only on that flag, never from the receipt text, so a vault-written field cannot make an unanchored pass read verified.",
+			"statements": [
+				{
+					"file": "CHANGELOG.md",
+					"text": "When the transaction is found, it is `true` only when its inclusion was proven against a verified anchor root (the receipt's `INCLUSION VERIFIED (anchor #n)`), and `false` otherwise."
+				},
+				{
+					"file": "CHANGELOG.md",
+					"text": "usertrust-ui says \"verified\" only for an explicit check that passed against an anchor; the CSV export's integrity value changes from `verified` to `chained`."
+				},
+				{
+					"file": "CHANGELOG.md",
+					"text": "The inspector's explicit check puts its verdict above the receipt, and says `verified` only when the verifier reports inclusion proven against an anchor (`inclusionVerified`); any other pass reads `consistent, unanchored`."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/harden/anchoring/anchor-corpus.test.ts",
+					"test": "30. happy paths: single anchor / full history / grown chain / post-rotation keyring → ANCHORED_VERIFIED"
+				},
+				{
+					"file": "packages/ui/tests/verify-view.test.ts",
+					"test": "found, valid and the verifier proved inclusion against an anchor: verified"
+				},
+				{
+					"file": "packages/ui/tests/verify-view.test.ts",
+					"test": "only the boolean true counts: absent (an older server), false, or a look-alike value is unanchored"
+				},
+				{
+					"file": "packages/ui/tests/verify-view.test.ts",
+					"test": "the receipt TEXT never decides it: a genuine-looking INCLUSION VERIFIED row without the flag is unanchored"
+				},
+				{
+					"file": "packages/ui/tests/verify-view.test.ts",
+					"test": "a vault-written model carrying a forged Merkle row behind a line separator: the real check still reads unanchored"
+				}
+			]
 		}
 	],
 	"nonclaims": [
+		{
+			"file": "CHANGELOG.md",
+			"text": "the integrity column of an intact row now holds `chained` where it held `verified`; update any filter or script that matches the old value.",
+			"why": "a data-format note for readers of the CSV export, not a statement about the chain"
+		},
 		{
 			"file": "CHANGELOG.md",
 			"text": "Each of these statements is now listed in `docs/claims.json` with the test that proves it, and a test fails when the documentation states an integrity claim the list does not hold (see `docs/CLAIMS.md`). ",
