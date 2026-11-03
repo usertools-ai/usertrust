@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { csvFilename, toCsv } from "../shared/csv.js";
 import { chainStatus } from "../shared/display.js";
 import { applyFilters, EMPTY_FILTERS, type FilterState, isFiltering } from "../shared/filters.js";
@@ -12,6 +12,7 @@ import { InspectorHint, RowPanel } from "./row-panel.js";
 import { useLedger } from "./store.js";
 import { SummaryStrip } from "./summary-strip.js";
 import { Trends } from "./trends.js";
+import { useMediaQuery } from "./use-media-query.js";
 
 export type View = "audit" | "trends";
 
@@ -22,18 +23,6 @@ const VIEWS: Array<{ id: View; label: string }> = [
 
 /** At this width the inspector docks beside the list; below it, it opens over the list. */
 const DOCK_QUERY = "(min-width: 1100px)";
-
-function useMediaQuery(query: string): boolean {
-	const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
-	useEffect(() => {
-		const m = window.matchMedia(query);
-		const on = (): void => setMatches(m.matches);
-		on();
-		m.addEventListener("change", on);
-		return () => m.removeEventListener("change", on);
-	}, [query]);
-	return matches;
-}
 
 export function App(): React.JSX.Element {
 	const { rows, summary, phase, live, liveIds } = useLedger();

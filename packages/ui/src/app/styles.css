@@ -1329,6 +1329,14 @@ body {
 		margin-bottom: 8px;
 	}
 
+	/* Phone-only controls: the details toggle, the Filters button and the sheet's header. Shown by the narrow-screen
+	   block below and by nothing else, so a wider window lays out exactly as before. */
+	.ut-more,
+	.ut-filters-btn,
+	.ut-sheet-head {
+		display: none;
+	}
+
 	/* ── Narrow screens ── */
 	.ut-range {
 		display: inline-flex;
@@ -1363,24 +1371,173 @@ body {
 			flex-basis: 100%;
 			padding: 0;
 		}
+
+		/* Facts: one row of three (spend, budget, integrity); chain and anchor open under a Details button. */
 		.ut-facts {
-			grid-template-columns: repeat(2, minmax(0, 1fr));
-			padding: 14px 16px;
+			grid-template-columns: repeat(3, minmax(0, 1fr));
+			gap: 10px;
+			padding: 12px;
 		}
+		.ut-facts .budget {
+			grid-column: auto;
+		}
+		.ut-facts .ut-fact > b {
+			flex-wrap: wrap;
+			gap: 4px 6px;
+			letter-spacing: 1px;
+			white-space: normal;
+		}
+		.ut-facts .ut-fact .v {
+			font-size: 15px;
+		}
+		.ut-facts .ut-more {
+			display: flex;
+			order: 1;
+			grid-column: 1 / -1;
+			align-items: center;
+			justify-self: start;
+			gap: 6px;
+			min-height: 32px;
+			padding: 0 2px;
+			border: 0;
+			background: transparent;
+			color: var(--body);
+			font: 500 11px/1 var(--sans);
+			letter-spacing: 1.5px;
+			text-transform: uppercase;
+			cursor: pointer;
+		}
+		.ut-facts .ut-more:hover {
+			color: var(--ink);
+		}
+		.ut-facts .ut-more .chev {
+			color: var(--faint-text);
+			font-size: 10px;
+		}
+		.ut-facts .ut-more[aria-expanded="true"] .chev {
+			transform: rotate(180deg);
+		}
+		.ut-facts .ut-fact.detail {
+			display: none;
+			order: 2;
+		}
+		.ut-facts[data-details="true"] .ut-fact.detail {
+			display: flex;
+		}
+		.ut-facts[data-details="true"] #ut-fact-anchor {
+			grid-column: span 2;
+		}
+
+		/* The list flows in the page: no height of its own, no scroller of its own. The sort bar stays at the top of the
+		   screen while the page scrolls past the records. */
 		.ut-work {
-			height: 78dvh;
+			height: auto;
+			min-height: 0;
 			flex: 0 0 auto;
 		}
+		.ut-body {
+			overflow: visible;
+			border-radius: 0;
+		}
+		.ut-list {
+			flex: 0 0 auto;
+			overflow: visible;
+		}
+		.ut-cap {
+			position: sticky;
+			top: 0;
+			z-index: 5;
+		}
+
+		/* Head: the view tabs and the count, then the search and Export on one row. */
 		.ut-head {
-			flex-wrap: wrap;
+			display: grid;
+			grid-template-columns: auto minmax(0, 1fr) auto;
+			gap: 8px 10px;
 			padding: 10px 12px;
 		}
+		.ut-head .ut-grow {
+			display: none;
+		}
+		.ut-head .ut-label {
+			grid-column: 2 / 4;
+		}
 		.ut-head .ut-search {
-			flex: 1 1 100%;
-			order: 5;
+			grid-column: 1 / 3;
+			min-width: 0;
+			width: 100%;
+		}
+		.ut-head .ut-btn {
+			grid-column: 3;
+		}
+
+		/* Filters: the bar is one button; the filters open in a sheet over the page. */
+		.ut-filters-btn {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			margin: 8px 12px;
+			padding: 11px 12px;
+			font-size: 13px;
+		}
+		.ut-filters-btn .chev {
+			color: var(--faint-text);
+			font-size: 10px;
 		}
 		.ut-bar {
-			padding: 8px 12px;
+			display: none;
+		}
+		.ut-bar[data-sheet="true"] {
+			display: flex;
+			position: fixed;
+			z-index: 50;
+			left: 0;
+			right: 0;
+			bottom: 0;
+			max-height: 80dvh;
+			overflow: auto;
+			gap: 10px;
+			padding: 14px 16px calc(18px + env(safe-area-inset-bottom));
+			background: var(--page);
+			border-top: 1px solid var(--line);
+			border-bottom: 0;
+			border-radius: 16px 16px 0 0;
+			box-shadow: 0 -20px 60px rgba(0, 0, 0, 0.6);
+			animation: ut-sheet-in 0.22s var(--ease-enter) both;
+		}
+		.ut-bar[data-sheet="true"] .ut-sheet-head {
+			display: flex;
+			flex: 1 1 100%;
+			align-items: center;
+			justify-content: space-between;
+			font: 600 13px/1 var(--sans);
+		}
+		.ut-bar[data-sheet="true"] .ut-facet,
+		.ut-bar[data-sheet="true"] .ut-field,
+		.ut-bar[data-sheet="true"] .ut-range {
+			flex: 1 1 100%;
+		}
+		.ut-bar[data-sheet="true"] .ut-field {
+			justify-content: space-between;
+		}
+		.ut-bar[data-sheet="true"] .ut-facet > .ut-chip {
+			width: 100%;
+			max-width: none;
+			padding: 10px 12px;
+		}
+		.ut-bar[data-sheet="true"] .ut-chip .chev {
+			margin-left: auto;
+		}
+		/* A facet's values list opens in place, under its chip, instead of floating: a floating list would be clipped by
+		   the sheet's own scrolling. The sizes it was given when it opened are inline styles, hence !important. */
+		.ut-bar[data-sheet="true"] .ut-pop {
+			position: static;
+			left: auto !important;
+			width: auto !important;
+			max-width: none;
+			max-height: none !important;
+			margin-top: 6px;
+			box-shadow: none;
 		}
 		.ut-sep {
 			display: none;
