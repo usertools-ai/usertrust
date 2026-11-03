@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A printed receipt no longer breaks its rows at a line or paragraph separator in a vault value.** The receipt renderer replaced control and format characters with `?` but not U+2028 and U+2029, which sit in neither class, so a value carrying one could start a new line in a terminal or a paste and forge a row under it. Both are now replaced with `?` like the rest.
+
+## [5.4.0] - 2026-11-03
+
+### Read before upgrading
+
+- **Text that said "governor" now says "controller".** Messages, CLI lines and `--json` prose changed (see Changed), so a script that matches one of the old strings needs the new word. The API names (`Governor`, `createGovernor()`, `budgetSource: "governor"`) are unchanged.
+
+- **A `grok-3` cost estimate drops from $3.00 in / $15.00 out to $1.25 / $2.50 per million tokens.** xAI now bills it at `grok-4.3`'s rates (see Added).
+
+- **Against a ledger that is not running, `trust()`, `createGovernor()` and `usertrust budget` now fail within seconds and print the fix.** They used to wait without end (see Fixed).
+
 ### Added
 
 - **The pricing table knows the current xAI models; `PRICING_TABLE_VERSION` is `2026-11-02`.** It carried only `grok-3`, so a call to any current Grok model matched no row and was metered at the fallback rate. It now has `grok-4.7`, `grok-4.6`, `grok-4.5`, `grok-4.3`, `grok-4.20-0309-reasoning`, `grok-4.20-0309-non-reasoning`, `grok-4.20-multi-agent-0309` and `grok-build-0.1`, from xAI's published model pricing: `grok-4.7` and `grok-4.6` are $2.00 in / $0.50 cached / $6.00 out per million tokens, `grok-4.5` $2.00 / $0.30 / $6.00, `grok-4.3` and the three `grok-4.20-0309` ids $1.25 / $0.20 / $2.50, `grok-build-0.1` $1.00 / $0.20 / $2.00. A prompt of 200,000 tokens or more pays xAI's long-context rates, exactly double in every category, as a per-request tier (the rows set the tier threshold to 199,999 because the table's tier is "longer than" and xAI's starts at 200,000). Calls to xAI's US regional endpoint bill at 1.1x these rates, which the estimate does not include. xAI publishes no cache-write price, so cache writes price at the input rate. `grok-3` and the six other retired slugs xAI still resolves (`grok-4-0709`, `grok-4-1-fast-reasoning`, `grok-4-1-fast-non-reasoning`, `grok-4-fast-reasoning`, `grok-4-fast-non-reasoning`, `grok-code-fast-1`) are now priced at `grok-4.3`, which xAI's May 15, 2026 retirement notice says bills them (`grok-code-fast-1` is routed to `grok-build-0.1`, but the notice's pricing paragraph says `grok-4.3`, and the higher price is metered); a `grok-3` estimate drops from $3.00 in / $15.00 out to $1.25 / $2.50 per million tokens. `grok-3-mini` and bare `grok-4` are not on that notice and are unchanged (no row).
@@ -24,8 +38,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **A controller with no ledger fails within seconds and prints its fix, instead of waiting without end.** The native TigerBeetle client retries a refused connection without end and sets no request timeout, so `trust()`, `createGovernor()` and `usertrust budget` against a ledger that was not running never returned. Each now opens a plain TCP connection to the configured addresses first, before any native client exists, and rejects at once with `No ledger is running at 127.0.0.1:3001. Fix: npx usertrust tb start` (for any other ledger, whether another address or port, `localhost`, more than one address, or a cluster other than 0, the fix names the configured address instead, and the cluster when one is set). It fails only when every address refuses. When something does listen but no usertrust ledger answers (another service on the port, or a cluster formatted with another id), the first request is bounded by the new `tigerbeetle.connectTimeoutMs` (default 5000): the client is closed and the error says "something is listening but no usertrust ledger answered in 5 s: run npx usertrust tb status". If the cluster evicts the client, the error says the evicted client cannot be released and the process must exit on its own. `tigerbeetle-node` is now pinned to exactly 0.17.9.
-
-- **A printed receipt no longer breaks its rows at a line or paragraph separator in a vault value.** The receipt renderer replaced control and format characters with `?` but not U+2028 and U+2029, which sit in neither class, so a value carrying one could start a new line in a terminal or a paste and forge a row under it. Both are now replaced with `?` like the rest.
 
 ## [5.3.0] - 2026-11-01
 
