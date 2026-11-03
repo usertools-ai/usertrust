@@ -801,6 +801,10 @@
 				{
 					"file": "site/content/docs/quickstart.mdx",
 					"text": "Every governed call appends a SHA-256-hashed event to `.usertrust/audit/events.jsonl` (a call whose event could not be written says so on its receipt, as `auditDegraded`)."
+				},
+				{
+					"file": "site/content/docs/api/trust.mdx",
+					"text": "returns a governed client where every governed call — the provider methods listed under [Provider detection](#provider-detection) — becomes an audited, budget-enforced financial transaction."
 				}
 			],
 			"proofs": [
@@ -1336,6 +1340,11 @@
 			"file": "site/content/docs/api/config.mdx",
 			"text": "Detected types: email, phone, SSN, credit card (Luhn-validated), IPv4, and the secret formats `api_key`, `aws_key`, `github_token`, `bearer_token`, `jwt`, `private_key` and `generic_secret`, plus `unscannable` for a value the patterns could not finish reading, which is treated as a secret.",
 			"why": "PII detection types"
+		},
+		{
+			"file": "site/content/docs/api/config.mdx",
+			"text": "and a variable already set in the environment is never overwritten.",
+			"why": "how the .env loader treats an existing environment variable; not about the audit chain"
 		},
 		{
 			"file": "site/content/docs/api/pricing.mdx",
