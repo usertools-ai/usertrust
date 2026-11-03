@@ -32,8 +32,9 @@ export function BarList(props: {
 							{t.key}
 						</span>
 						<span className="v" data-cost-ut={t.costUt}>
-							<span title={formatUsd(t.costUt)}>{formatUsdTotal(t.costUt)}</span>
-							<span className="ut-bl-ut"> · {formatUt(t.costUt)}</span> · {t.count}×
+							{/* Two short lines, not one long one: on a narrow card a one-line value pushed the name to 0 width. */}
+							<span title={formatUsd(t.costUt)}>{formatUsdTotal(t.costUt)}</span> · {t.count}×
+							<span className="ut-bl-ut">{formatUt(t.costUt)}</span>
 						</span>
 						<div className="ut-meter">
 							<i style={{ width: `${max > 0 ? (t.costUt / max) * 100 : 0}%` }} />

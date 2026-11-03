@@ -6,6 +6,7 @@
  * components to static markup, so what is asserted is what a reader sees, in the order a screen reader reads it.
  */
 
+import { readFile } from "node:fs/promises";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { PersistedAuditEvent } from "usertrust";
@@ -204,6 +205,25 @@ describe("the key", () => {
 		);
 		expect(html).toContain('title="$7.6045">$7.60</span>');
 		expect(at(html, "$7.60")).toBeLessThan(at(html, "76,045 UT"));
+	});
+
+	it("red-first (a one-line value pushed the name to 0 width at 320px): the UT figure is its own second line", async () => {
+		const BarList = await load<{
+			title: string;
+			totals: Array<{ key: string; costUt: number; count: number }>;
+		}>("bar-list", "BarList");
+		const html = renderToStaticMarkup(
+			createElement(BarList, {
+				title: "Cost by model",
+				totals: [{ key: "m", costUt: 12_045_500, count: 123 }],
+			}),
+		);
+		// first line: dollars and count; second line: the UT figure alone, with no separator of its own
+		expect(html).toMatch(/\$1,204\.55<\/span> · (<!-- -->)?123(<!-- -->)?×/);
+		expect(html).toContain('<span class="ut-bl-ut">12,045,500 UT</span>');
+		expect(at(html, "123")).toBeLessThan(at(html, "12,045,500 UT"));
+		const css = await readFile(new URL("../src/app/styles.css", import.meta.url), "utf8");
+		expect(css).toMatch(/\.ut-blist \.v \.ut-bl-ut \{[^}]*display: block;/);
 	});
 });
 

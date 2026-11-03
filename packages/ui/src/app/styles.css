@@ -1349,7 +1349,10 @@ body {
 		text-align: right;
 		white-space: nowrap;
 	}
+	/* The UT figure is the value's second line: dollars and count on the first, so the value is no wider than it was
+	   before dollars led and the name (.k) keeps its width on a narrow card. */
 	.ut-blist .v .ut-bl-ut {
+		display: block;
 		color: var(--faint-text);
 	}
 	.ut-blist .ut-meter {
