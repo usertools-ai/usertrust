@@ -6,10 +6,11 @@ description: How usertrust governs every LLM call — the banking patterns, cryp
 usertrust combines financial accounting patterns with cryptographic verification to make every AI agent call auditable and budget-safe. These pages explain the core mechanisms.
 
 <Cards>
-  <Card title="Two-Phase Spend" description="Banking-style authorization holds for atomic budget enforcement" href="/docs/concepts/two-phase-spend" />
-  <Card title="Audit Trail" description="SHA-256 hash-chained, append-only log for every governed call" href="/docs/concepts/audit-trail" />
-  <Card title="Merkle Proofs" description="RFC 6962 inclusion and consistency proofs for public verifiability" href="/docs/concepts/merkle-proofs" />
-  <Card title="Policy Engine" description="12 field operators, scope globs, and time windows for rule-based governance" href="/docs/concepts/policy-engine" />
-  <Card title="Pattern Memory" description="Cost-optimal model selection via SHA-256 prompt hash routing" href="/docs/concepts/pattern-memory" />
-  <Card title="Circuit Breaker" description="Per-provider failure isolation with automatic recovery" href="/docs/concepts/circuit-breaker" />
+  <Card title="Two-phase spend" description="Banking-style authorization holds for atomic budget enforcement" href="/docs/concepts/two-phase-spend" />
+  <Card title="Audit trail" description="SHA-256 hash-chained, append-only log for every governed call" href="/docs/concepts/audit-trail" />
+  <Card title="Merkle proofs" description="RFC 6962 inclusion and consistency proofs for public verifiability" href="/docs/concepts/merkle-proofs" />
+  <Card title="Local models" description="How usertrust classifies local endpoints and meters Ollama, vLLM, and LM Studio at nominal rates" href="/docs/concepts/local-models" />
+  <Card title="Policy engine" description="12 field operators, scope globs, and time windows for rule-based governance" href="/docs/concepts/policy-engine" />
+  <Card title="Pattern memory" description="SHA-256 prompt-hash history of model, cost, and outcome; suggestModel() returns the model with the best cost-adjusted success ratio for the caller to route on" href="/docs/concepts/pattern-memory" />
+  <Card title="Circuit breaker" description="Per-provider failure isolation with automatic recovery" href="/docs/concepts/circuit-breaker" />
 </Cards>

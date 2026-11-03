@@ -1,9 +1,9 @@
 ---
 title: Pattern Memory
-description: SHA-256 prompt hash routing for cost-optimal model selection.
+description: Per-prompt-hash memory of which model succeeded at what cost, with a suggestion API — usertrust records and suggests; it never routes.
 ---
 
-Pattern memory tracks the cost and success rate of LLM calls by prompt hash and model, enabling cost-optimal model selection over time. It learns which models perform best for which types of prompts without ever storing the prompts themselves.
+Pattern memory records the cost and outcome of each governed LLM call by prompt hash and model, and `suggestModel()` returns the model that scored best for a given hash. It only suggests: usertrust never routes, and nothing in the SDK reads the suggestion or changes which model a call uses. It never stores the prompts themselves.
 
 ## Privacy by Construction
 
@@ -13,7 +13,7 @@ Each record contains:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `promptHash` | string | SHA-256 hash of the prompt content |
+| `promptHash` | string | SHA-256 hex digest, but of what depends on the writer. `govern()` records `sha256(JSON.stringify(promptParts))` over the provider-normalized prompt parts (messages plus system prompt; Google `contents`); the headless controller records `sha256(transferId)`, a per-call id, so headless entries never repeat; `hashPrompt(text)` is `sha256(text)` of the raw string, so a hash of the raw prompt will not match a `govern()` entry |
 | `model` | string | Model used for the call |
 | `cost` | number | Usertokens spent |
 | `success` | boolean | Whether the call succeeded |
@@ -24,12 +24,12 @@ Each record contains:
 The `suggestModel()` function scores each model that has been used for a given prompt hash:
 
 ```
-score = successRate / avgCost
+score = avgCost > 0 ? successRate / avgCost : successRate * 1_000_000
 ```
 
 Higher scores indicate models that reliably succeed at lower cost. A model with a 95% success rate and an average cost of 50 usertokens scores higher than one with 98% success at 200 usertokens.
 
-If no patterns exist for a prompt hash, `suggestModel()` returns `null`.
+If no patterns exist for a prompt hash, `suggestModel()` returns `null`. It is synchronous and consults only the in-process cache, never `memory.json` directly: until `recordPattern()` or `getPatternStats()` has run in the current process, it returns `null` even when the file holds matching entries.
 
 ## API
 
@@ -41,8 +41,14 @@ import {
   getPatternStats,
 } from "usertrust";
 
-// Hash a prompt (SHA-256, irreversible)
+// Hash a prompt (SHA-256 of the raw string, irreversible). The SDK's own
+// recorded calls are NOT keyed by hashPrompt(), so this hash only matches
+// entries you record with recordPattern() yourself
 const hash = hashPrompt("Summarize this document...");
+
+// Load memory.json into this process's cache first; suggestModel() is
+// synchronous and never reads the file itself
+await getPatternStats();
 
 // Get a model suggestion based on historical patterns
 const suggested = suggestModel(hash);
@@ -58,14 +64,16 @@ await recordPattern({
 
 // Get aggregate statistics
 const stats = await getPatternStats();
-// { totalEntries, uniqueModels, hitCount }
+// { totalEntries: number, uniqueModels: number, hitCount: Map<string, number> } — hitCount is keyed by promptHash
 ```
 
 ## Storage
 
 Patterns are stored in `.usertrust/patterns/memory.json`. The file is capped at **10,000 entries**. When the cap is reached, the oldest entries are evicted first (FIFO).
 
-A process-local async mutex serializes writes to prevent concurrent corruption.
+A process-local async mutex serializes writes to prevent concurrent corruption. It offers no protection across processes: two processes sharing one vault can each read-modify-write the file and lose entries. Each write goes to a temp file and is renamed into place.
+
+`recordPattern`, `suggestModel`, and `getPatternStats` each take an optional trailing `vaultPath` argument (`recordPattern(entry, vaultPath?)`, `suggestModel(promptHash, vaultPath?)`, `getPatternStats(vaultPath?)`) that overrides the default `.usertrust` directory; the in-process cache is keyed per vault path. `hashPrompt(text)` takes no vault argument.
 
 ## Configuration
 
@@ -83,4 +91,4 @@ A process-local async mutex serializes writes to prevent concurrent corruption.
 | `patterns.enabled` | boolean | `true` | Enable or disable pattern recording |
 | `patterns.feedProxy` | boolean | `false` | Unused. Reserved for a removed remote-proxy aggregation path; has no effect. |
 
-When `patterns.enabled` is `false`, `recordPattern()` is a no-op and `suggestModel()` always returns `null`.
+When `patterns.enabled` is `false`, `trust()` and `createGovernor()` skip recording entirely. The exported functions do not read the config themselves: a direct `recordPattern()` call still writes to `memory.json`, and `suggestModel()` still answers from whatever the process cache holds.
