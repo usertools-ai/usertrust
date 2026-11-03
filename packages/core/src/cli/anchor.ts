@@ -176,13 +176,17 @@ async function runScheduled(root: string, args: string[], json: boolean): Promis
 		const emitted = await emitter.anchorNow();
 		// A quiet run makes no record, so nothing else retries an earlier failed
 		// delivery; retry it here so a recovered sink clears the backlog.
-		if (!emitted.emitted) await emitter.redeliverPending();
+		// Only after a benign outcome: a refusal (invalid outbox entry, mirror trouble) or
+		// contention (another run holds the lock) must not trigger delivery.
+		if (!emitted.emitted && (emitted.reason === "no-new-events" || emitted.reason === "empty")) {
+			await emitter.redeliverPending();
+		}
 		await emitter.stop();
 		const delivered = emitter.status().outboxDepth === 0;
 		result = emitted;
 		if (emitted.emitted) {
 			reason = delivered ? "anchored" : "sink-failed";
-		} else if (!delivered) {
+		} else if (!delivered && (emitted.reason === "no-new-events" || emitted.reason === "empty")) {
 			reason = "sink-failed";
 			detail = "an earlier anchor is still waiting in the outbox";
 		} else {
@@ -191,7 +195,11 @@ async function runScheduled(root: string, args: string[], json: boolean): Promis
 		}
 	} catch (err) {
 		detail = err instanceof Error ? err.message : String(err);
-		reason = detail.startsWith("No anchor private key") ? "no-key" : "other";
+		reason = detail.startsWith("No anchor private key")
+			? "no-key"
+			: detail.startsWith("anchor lock unavailable")
+				? "lock-unavailable"
+				: "other";
 	}
 	try {
 		writeLastRun(root, reason);

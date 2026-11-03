@@ -8,6 +8,7 @@
  */
 
 import {
+	chmodSync,
 	existsSync,
 	mkdirSync,
 	readdirSync,
@@ -27,8 +28,18 @@ import {
 	readLastRun,
 	writeLastRun,
 } from "../../../src/audit/anchor-last-run.js";
+import { canonicalize } from "../../../src/audit/canonical.js";
 import { run as anchorRun } from "../../../src/cli/anchor.js";
-import { cleanupAll, makeAnchoredVault, tmp } from "./fixtures.js";
+import {
+	anchorOnce,
+	appendEvents,
+	cleanupAll,
+	makeAnchoredVault,
+	nextPayload,
+	signRecord,
+	storeRecords,
+	tmp,
+} from "./fixtures.js";
 
 const origCwd = process.cwd();
 const origHome = process.env.HOME;
@@ -186,6 +197,76 @@ describe("anchor now --scheduled", () => {
 		const outbox = join(anchorsDir(s.root), "outbox");
 		expect(existsSync(outbox) ? readdirSync(outbox).length : 0).toBe(0);
 	});
+
+	it("never publishes an outbox record the emitter refused (invalid orphan); the entry stays and the run fails", async () => {
+		const s = await makeAnchoredVault(3);
+		process.chdir(s.root);
+		process.env.USERTRUST_ANCHOR_KEY = s.keyFile;
+		const first = await anchorOnce(s);
+		await appendEvents(s.root, 1, 4);
+		const attacker = await makeAnchoredVault(1);
+		const forged = signRecord(nextPayload(s, first), attacker.keyFile);
+		const entry = join(anchorsDir(s.root), "outbox", "000000000002.json");
+		writeFileSync(entry, canonicalize(forged), { mode: 0o600 });
+		const { out, exit } = await runNow(["--scheduled", "--sink-file", s.storeFile]);
+		expect(exit).toBe(1);
+		expect((out.data as { reason: string }).reason).toBe("other");
+		expect(existsSync(entry)).toBe(true);
+		expect(storeRecords(s).map((r) => r.anchorSeq)).toEqual([1]);
+		expect(readLastRun(s.root)).toMatchObject({ ok: false });
+	});
+
+	it("never publishes an outbox record that differs from the mirror's; quiet run fails, entry stays", async () => {
+		const s = await makeAnchoredVault(3);
+		process.chdir(s.root);
+		process.env.USERTRUST_ANCHOR_KEY = s.keyFile;
+		const first = await anchorOnce(s);
+		const { sig: _sig, ...unsigned } = first;
+		const divergent = signRecord({ ...unsigned, merkleRoot: "ab".repeat(32) }, s.keyFile);
+		const entry = join(anchorsDir(s.root), "outbox", "000000000001.json");
+		writeFileSync(entry, canonicalize(divergent), { mode: 0o600 });
+		const { out, exit } = await runNow(["--scheduled", "--sink-file", s.storeFile]);
+		expect(exit).toBe(1);
+		expect((out.data as { reason: string }).reason).toBe("sink-failed");
+		expect(existsSync(entry)).toBe(true);
+		expect(storeRecords(s)).toHaveLength(1);
+		expect(storeRecords(s)[0]?.merkleRoot).toBe(first.merkleRoot);
+	});
+
+	it("a live lock holder with a backlog is still just 'locked': exit 0, nothing delivered", async () => {
+		const s = await makeAnchoredVault(3);
+		process.chdir(s.root);
+		process.env.USERTRUST_ANCHOR_KEY = s.keyFile;
+		const blocker = join(s.storeDir, "a-file");
+		writeFileSync(blocker, "x");
+		const bad = ["--sink-file", join(blocker, "anchors.jsonl"), "--publish-retries", "1"];
+		await runNow(["--scheduled", ...bad]); // leaves one undelivered anchor in the outbox
+		process.exitCode = 0;
+		const lock = join(anchorsDir(s.root), ".anchor-writer.lock");
+		writeFileSync(lock, JSON.stringify({ pid: process.ppid, startedAt: new Date().toISOString() }));
+		const sched = await runNow(["--scheduled", "--sink-file", s.storeFile]);
+		expect(sched.exit).toBe(0);
+		expect((sched.out.data as { reason: string }).reason).toBe("locked");
+		expect(existsSync(s.storeFile) ? storeRecords(s) : []).toHaveLength(0);
+	});
+
+	it.skipIf(typeof process.getuid === "function" && process.getuid() === 0)(
+		"a lock that cannot be created is its own failing reason, not 'locked'",
+		async () => {
+			const s = await makeAnchoredVault(3);
+			process.chdir(s.root);
+			process.env.USERTRUST_ANCHOR_KEY = s.keyFile;
+			const dir = anchorsDir(s.root);
+			chmodSync(dir, 0o500);
+			try {
+				const { out, exit } = await runNow(["--scheduled", "--sink-file", s.storeFile]);
+				expect(exit).toBe(1);
+				expect((out.data as { reason: string }).reason).toBe("lock-unavailable");
+			} finally {
+				chmodSync(dir, 0o700);
+			}
+		},
+	);
 
 	it("status prints the recorded time without terminal escapes", async () => {
 		const s = await makeAnchoredVault(1);

@@ -21,6 +21,7 @@ export const LAST_RUN_REASONS = [
 	"empty",
 	"locked",
 	"no-key",
+	"lock-unavailable",
 	"mirror-missing",
 	"stale-signer-key",
 	"sink-failed",

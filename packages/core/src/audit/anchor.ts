@@ -507,8 +507,13 @@ function tryAcquireAnchorLock(dir: string): (() => void) | null {
 					/* already removed */
 				}
 			};
-		} catch {
-			return null;
+		} catch (err) {
+			// EEXIST means another run holds the lock. Anything else (an unwritable or
+			// missing anchors directory) is a fault to report, not a run to skip.
+			if ((err as NodeJS.ErrnoException).code === "EEXIST") return null;
+			throw new Error(
+				`anchor lock unavailable: ${err instanceof Error ? err.message : String(err)}`,
+			);
 		}
 	};
 	const first = attempt();
@@ -948,9 +953,33 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 		rotate: (next) => emit({ nextKeyId: next.keyId, nextPublicKeySpki: next.publicKeySpki }),
 		status,
 		async redeliverPending(): Promise<void> {
-			const backlog = pendingOutboxRecords(dir);
-			const newest = backlog.at(-1);
-			if (newest !== undefined) await trackPublish(newest);
+			// Under the writer lock, and only records the mirror already holds byte for
+			// byte: an outbox entry the mirror lacks, or holds differently, is one the
+			// emitter has not accepted (or refused), and must never reach the store.
+			const release = tryAcquireAnchorLock(dir);
+			if (release === null) return;
+			try {
+				await publishChain;
+				const mirror = readMirrorRecords(dir);
+				if (!mirror.present || mirror.errors.length > 0) return;
+				const held = new Map(mirror.records.map((r) => [r.anchorSeq, canonicalize(r)]));
+				for (const rec of pendingOutboxRecords(dir)) {
+					if (held.get(rec.anchorSeq) !== canonicalize(rec)) break;
+					try {
+						await deliverToSinks(rec);
+					} catch {
+						break; // failure already counted; the entry stays for the next run
+					}
+					try {
+						unlinkSync(outboxPath(dir, rec.anchorSeq));
+					} catch {
+						/* best effort */
+					}
+				}
+				if (outboxSeqs(dir).length === 0) degraded = false;
+			} finally {
+				release();
+			}
 		},
 		start(): void {
 			if (timer !== null) return;
