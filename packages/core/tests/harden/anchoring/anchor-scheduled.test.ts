@@ -392,6 +392,168 @@ describe("anchor now --scheduled", () => {
 		expect((damaged.out.data as { reason: string }).reason).toBe("other");
 	});
 
+	it("a damaged legacy log (no sidecar) is a failure before the first anchor; a zero-length one is not", async () => {
+		// positive control: zero-length log, no sidecar, nothing anchored: a fresh vault
+		const fresh = await makeAnchoredVault(0);
+		process.chdir(fresh.root);
+		process.env.USERTRUST_ANCHOR_KEY = fresh.keyFile;
+		mkdirSync(join(fresh.vaultPath, "audit"), { recursive: true });
+		writeFileSync(join(fresh.vaultPath, "audit", "events.jsonl"), "");
+		const ok = await runNow(["--scheduled", "--sink-file", fresh.storeFile]);
+		expect(ok.exit).toBe(0);
+		expect((ok.out.data as { reason: string }).reason).toBe("empty");
+		// malformed lines only, legacy log without a sidecar
+		const s = await makeAnchoredVault(3);
+		process.chdir(s.root);
+		process.env.USERTRUST_ANCHOR_KEY = s.keyFile;
+		const log = join(s.vaultPath, "audit", "events.jsonl");
+		renameSync(`${log}.meta`, join(s.storeDir, "meta.aside"));
+		writeFileSync(log, "not json\n{ also not\n");
+		const bad = await runNow(["--scheduled", "--sink-file", s.storeFile]);
+		expect(bad.exit).toBe(1);
+		expect((bad.out.data as { reason: string; detail?: string }).reason).toBe("other");
+		expect((bad.out.data as { detail?: string }).detail).toContain(
+			"has content but yields no events",
+		);
+	});
+
+	it.skipIf(typeof process.getuid === "function" && process.getuid() === 0)(
+		"an unreadable legacy log (no sidecar) is a failure before the first anchor",
+		async () => {
+			const s = await makeAnchoredVault(3);
+			process.chdir(s.root);
+			process.env.USERTRUST_ANCHOR_KEY = s.keyFile;
+			const log = join(s.vaultPath, "audit", "events.jsonl");
+			renameSync(`${log}.meta`, join(s.storeDir, "meta.aside"));
+			chmodSync(log, 0o000);
+			try {
+				const { out, exit } = await runNow(["--scheduled", "--sink-file", s.storeFile]);
+				expect(exit).toBe(1);
+				expect((out.data as { reason: string }).reason).toBe("other");
+			} finally {
+				chmodSync(log, 0o600);
+			}
+		},
+	);
+
+	it("a last-run record that cannot be written fails the run and says so on stderr", async () => {
+		const s = await makeAnchoredVault(3);
+		process.chdir(s.root);
+		process.env.USERTRUST_ANCHOR_KEY = s.keyFile;
+		// positive control: the same run with a writable record exits 0
+		const good = await runNow(["--scheduled", "--sink-file", s.storeFile]);
+		expect(good.exit).toBe(0);
+		// a directory where the record file belongs makes the atomic replace fail
+		renameSync(lastRunPath(s.root), join(s.storeDir, "last-run.aside"));
+		mkdirSync(lastRunPath(s.root), { recursive: true });
+		let err = "";
+		vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+			err += String(chunk);
+			return true;
+		});
+		const { out, exit } = await runNow(["--scheduled", "--sink-file", s.storeFile]);
+		expect(exit).toBe(1);
+		expect(out.success).toBe(false);
+		expect(err).toContain("could not record this run");
+		expect(err).not.toContain("\u001b");
+	});
+
+	it("table: an empty outcome is benign only with positive evidence of a never-used vault", async () => {
+		type Row = {
+			name: string;
+			setup: (s: Awaited<ReturnType<typeof makeAnchoredVault>>) => void;
+			exit: 0 | 1;
+			reason: string;
+		};
+		const log = (s: { vaultPath: string }) => join(s.vaultPath, "audit", "events.jsonl");
+		const rows: Row[] = [
+			{ name: "fresh vault, no log", setup: () => {}, exit: 0, reason: "empty" },
+			{
+				name: "zero-length log, no sidecar",
+				setup: (s) => {
+					mkdirSync(join(s.vaultPath, "audit"), { recursive: true });
+					writeFileSync(log(s), "");
+				},
+				exit: 0,
+				reason: "empty",
+			},
+			{
+				name: "zero-length log, sidecar at 0",
+				setup: (s) => {
+					mkdirSync(join(s.vaultPath, "audit"), { recursive: true });
+					writeFileSync(log(s), "");
+					writeFileSync(`${log(s)}.meta`, JSON.stringify({ lastHash: "", sequence: 0 }));
+				},
+				exit: 0,
+				reason: "empty",
+			},
+			{
+				name: "mirror missing",
+				setup: (s) =>
+					renameSync(join(anchorsDir(s.root), "anchors.jsonl"), join(s.storeDir, "m.aside")),
+				exit: 1,
+				reason: "mirror-missing",
+			},
+			{
+				name: "mirror holds a record",
+				setup: (s) => writeFileSync(join(anchorsDir(s.root), "anchors.jsonl"), '{"anchorSeq":1}\n'),
+				exit: 1,
+				reason: "other",
+			},
+			{
+				name: "log with malformed bytes only",
+				setup: (s) => {
+					mkdirSync(join(s.vaultPath, "audit"), { recursive: true });
+					writeFileSync(log(s), "garbage\n");
+				},
+				exit: 1,
+				reason: "other",
+			},
+			{
+				name: "rotated segment with bytes",
+				setup: (s) => {
+					mkdirSync(join(s.vaultPath, "audit"), { recursive: true });
+					writeFileSync(join(s.vaultPath, "audit", "events-2026.jsonl"), "garbage\n");
+				},
+				exit: 1,
+				reason: "other",
+			},
+			{
+				name: "emptied log, sidecar records events",
+				setup: (s) => {
+					mkdirSync(join(s.vaultPath, "audit"), { recursive: true });
+					writeFileSync(log(s), "");
+					writeFileSync(`${log(s)}.meta`, JSON.stringify({ lastHash: "ab", sequence: 4 }));
+				},
+				exit: 1,
+				reason: "other",
+			},
+			{
+				name: "unreadable sidecar",
+				setup: (s) => {
+					mkdirSync(join(s.vaultPath, "audit"), { recursive: true });
+					writeFileSync(log(s), "");
+					writeFileSync(`${log(s)}.meta`, "{ not json");
+				},
+				exit: 1,
+				reason: "other",
+			},
+		];
+		for (const row of rows) {
+			const s = await makeAnchoredVault(0);
+			process.chdir(s.root);
+			process.env.USERTRUST_ANCHOR_KEY = s.keyFile;
+			row.setup(s);
+			const r = await runNow(["--scheduled", "--sink-file", s.storeFile]);
+			expect([row.name, r.exit, (r.out.data as { reason: string }).reason]).toEqual([
+				row.name,
+				row.exit,
+				row.reason,
+			]);
+			process.exitCode = 0;
+		}
+	});
+
 	it("status prints the recorded time without terminal escapes", async () => {
 		const s = await makeAnchoredVault(1);
 		process.chdir(s.root);

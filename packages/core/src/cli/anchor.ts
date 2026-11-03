@@ -16,7 +16,7 @@
  * Spec: docs/superpowers/specs/2026-07-26-external-anchoring-design.md
  */
 
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import pc from "picocolors";
 import {
@@ -160,7 +160,38 @@ function emitterConfig(args: string[]): AnchoringConfig {
 
 // ── scheduled run ──
 
-/** Why an "empty" outcome is a fault rather than a fresh vault, or null when it is a fresh vault. */
+/**
+ * Positive evidence that no event was ever stored: every event segment file is absent or
+ * zero-length. A file with bytes that yield no events is damaged, not empty. Returns the
+ * failing check, or null.
+ */
+function eventFilesFault(root: string): string | null {
+	const auditDir = join(root, VAULT_DIR, "audit");
+	if (!existsSync(auditDir)) return null;
+	let names: string[];
+	try {
+		names = readdirSync(auditDir).filter((n) => n.endsWith(".jsonl"));
+	} catch {
+		return "the audit directory cannot be read";
+	}
+	for (const name of names) {
+		try {
+			const st = lstatSync(join(auditDir, name));
+			if (!st.isFile()) return `event file ${name} is not a regular file`;
+			if (st.size > 0) return `event file ${name} has content but yields no events`;
+		} catch {
+			return `event file ${name} cannot be inspected`;
+		}
+	}
+	return null;
+}
+
+/**
+ * Why an "empty" outcome is a fault rather than a fresh vault, or null when it is a fresh
+ * vault. A fresh vault needs POSITIVE evidence: the mirror present and empty, no anchor
+ * high-water, every event file absent or zero-length, and the log's sidecar absent or at
+ * sequence 0. Anything else fails, with a detail naming the check.
+ */
 function emptyVaultFault(root: string): { reason: LastRunReason; detail: string } | null {
 	const mirrorPath = join(anchorsDir(root), "anchors.jsonl");
 	if (!existsSync(mirrorPath)) {
@@ -177,6 +208,10 @@ function emptyVaultFault(root: string): { reason: LastRunReason; detail: string 
 			reason: "other",
 			detail: "the event log is empty but anchors exist: the log may have been lost",
 		};
+	}
+	const files = eventFilesFault(root);
+	if (files !== null) {
+		return { reason: "other", detail: `${files}: the log may be damaged` };
 	}
 	// Before the first anchor the mirror and high-water say nothing, so ask the log's own
 	// sidecar: a recorded sequence above 0 with no readable events is a lost or damaged log.
@@ -251,19 +286,25 @@ async function runScheduled(root: string, args: string[], json: boolean): Promis
 				? "lock-unavailable"
 				: "other";
 	}
+	// A record that cannot be written leaves `anchor status` showing an older run, possibly a
+	// success: say so on stderr (scrubbed) and fail the run.
+	let recordFailed = false;
 	try {
 		writeLastRun(root, reason, new Date(), (message) => {
 			process.stderr.write(`${scrubForTerminal(message)}\n`);
 		});
-	} catch {
-		/* the run's own result still reaches the exit code and the output below */
+	} catch (err) {
+		recordFailed = true;
+		process.stderr.write(
+			`${scrubForTerminal(`usertrust: could not record this run in last-run.json: ${err instanceof Error ? err.message : String(err)}`)}\n`,
+		);
 	}
 	const ok = isOkReason(reason);
 	if (json) {
 		console.log(
 			toSafeJson({
 				command: "anchor now",
-				success: ok,
+				success: ok && !recordFailed,
 				data: { scheduled: true, reason, ...(detail !== undefined ? { detail } : {}) },
 			}),
 		);
@@ -280,7 +321,7 @@ async function runScheduled(root: string, args: string[], json: boolean): Promis
 			),
 		);
 	}
-	if (!ok) process.exitCode = 1;
+	if (!ok || recordFailed) process.exitCode = 1;
 }
 
 // ── doctor ──
