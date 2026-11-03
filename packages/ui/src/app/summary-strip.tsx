@@ -15,6 +15,7 @@ import {
 import { formatUsd, formatUt, middleTruncate } from "../shared/format.js";
 import { KIT_MARK_URL, KIT_TIMEOUT_MS } from "../shared/kit.js";
 import type { LiveState } from "./store.js";
+import { useNow } from "./use-now.js";
 
 const LIVE_LABEL: Record<LiveState, string> = {
 	connecting: "connecting",
@@ -143,12 +144,21 @@ function AnchorFact(props: { anchorFile: SummaryPayload["anchorFile"] }): React.
 	);
 }
 
-function BudgetFact(props: { s: SummaryPayload }): React.JSX.Element {
+/**
+ * The Budget fact. A controller's record is a file written at one moment, so its age is shown against the clock (which
+ * ticks while the page is open), and past the freshness bound the source word is `recorded`, never `enforced`. The
+ * provenance sentence calls such a budget "enforced", so for a controller's record the tooltip is the exact time
+ * instead of that sentence.
+ */
+export function BudgetFact(props: { s: SummaryPayload }): React.JSX.Element {
 	const { s } = props;
+	const now = useNow();
 	const budget = budgetDisplay(s);
-	const word = budgetSourceWord(s.budgetSource);
+	const word = budgetSourceWord(s.budgetSource, s.budgetWrittenAt, now);
+	const asOf = budgetAsOf(s, now);
+	const title = asOf.isRecord ? (asOf.title ?? undefined) : s.budgetProvenance;
 	return (
-		<div className="ut-fact budget" title={s.budgetProvenance}>
+		<div className="ut-fact budget" title={title}>
 			<b>
 				Budget
 				<span className="ut-mark" data-tone={word.tone}>
@@ -173,13 +183,16 @@ function BudgetFact(props: { s: SummaryPayload }): React.JSX.Element {
 							{formatUt(s.remainingUt)} of {formatUt(s.budget)}
 						</span>
 					)}
-					<span className="ut-why">{budgetAsOf(s)}</span>
+					<span className="ut-why" title={asOf.title ?? undefined}>
+						{asOf.text}
+					</span>
 				</>
 			) : (
 				<>
 					<span className="v na">no remaining figure</span>
 					<span className={`ut-why${s.budgetSource === "unreadable" ? " info" : ""}`}>
-						{s.budgetProvenance.replace(/^unknown: /, "")}
+						{/* A controller's record with no usable figure still must not call itself "enforced" once stale. */}
+						{asOf.isRecord ? asOf.text : s.budgetProvenance.replace(/^unknown: /, "")}
 					</span>
 				</>
 			)}
