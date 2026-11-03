@@ -13,7 +13,7 @@ import {
 } from "../shared/display.js";
 import { type SortKey, sortRows } from "../shared/filters.js";
 import { compactActor, formatUtc } from "../shared/format.js";
-import { nextRowIndex, rowAccessibleName } from "../shared/row-nav.js";
+import { nextRowIndex, resolveActiveIndex, rowAccessibleName } from "../shared/row-nav.js";
 import { type LedgerRow, type RowStatus, statusOf } from "../shared/rows.js";
 
 const SORTS: Array<{ key: SortKey; label: string }> = [
@@ -259,13 +259,26 @@ export function AuditTable(props: {
 	// The row the arrow keys are on, by hash (an index would slide to another row when a live record arrives at the top).
 	// Until a key or a click sets one: the open row, else the first.
 	const [activeHash, setActiveHash] = useState<string | null>(null);
-	const activeIndex = useMemo(() => {
-		const find = (hash: string | null): number =>
-			hash === null ? -1 : sorted.findIndex((r) => r.hash === hash);
-		const i = find(activeHash);
-		return i >= 0 ? i : Math.max(0, find(props.selected));
-	}, [sorted, activeHash, props.selected]);
+	const activeIndex = useMemo(
+		() => resolveActiveIndex(sorted, activeHash, props.selected),
+		[sorted, activeHash, props.selected],
+	);
 	const activeRow = sorted[activeIndex];
+
+	// The active row must be RENDERED to be named (aria-activedescendant) and shown. While the list holds focus, a sort,
+	// filter or live insert that moves it scrolls it back into the virtualiser's window.
+	const listFocused = (): boolean =>
+		parentRef.current !== null && document.activeElement === parentRef.current;
+	// biome-ignore lint/correctness/useExhaustiveDependencies: re-run when the active row's index or the rows change
+	useEffect(() => {
+		if (activeRow !== undefined && listFocused()) virtualizer.scrollToIndex(activeIndex);
+	}, [activeIndex, sorted]);
+	// And when focus comes back by keyboard (Tab), the active row is scrolled in first. Only keyboard focus: a mouse
+	// click also focuses the list, and scrolling under the pointer before its click lands would open another row.
+	const onFocus = (e: React.FocusEvent<HTMLDivElement>): void => {
+		if (e.target !== e.currentTarget || activeRow === undefined) return;
+		if (e.currentTarget.matches(":focus-visible")) virtualizer.scrollToIndex(activeIndex);
+	};
 
 	const moveTo = (index: number): void => {
 		const row = sorted[index];
@@ -356,6 +369,7 @@ export function AuditTable(props: {
 									? rowDomId(activeRow.hash)
 									: undefined,
 							onKeyDown,
+							onFocus,
 						}
 					: {})}
 			>

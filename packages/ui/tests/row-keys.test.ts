@@ -167,6 +167,20 @@ describe("the inspector takes focus from the list", () => {
 		expect(src).toContain('addEventListener("keydown", onKey, true)');
 	});
 
+	it("the active row is scrolled back into the rendered window when keyboard focus returns, and when it moves while focused", async () => {
+		const src = await source("audit-table.tsx");
+		// the listbox takes onFocus; keyboard focus (focus-visible) scrolls the active row in, a mouse focus does not
+		const onFocus = src.slice(src.indexOf("const onFocus"), src.indexOf("const moveTo"));
+		expect(onFocus).toContain(':focus-visible")) virtualizer.scrollToIndex(activeIndex)');
+		expect(src).toMatch(/onKeyDown,\s*onFocus,/);
+		// while focused, a sort, filter or insert that moves the active row scrolls it in
+		expect(src).toMatch(
+			/if \(activeRow !== undefined && listFocused\(\)\) virtualizer\.scrollToIndex\(activeIndex\);\s*\}, \[activeIndex, sorted\]\);/,
+		);
+		// the active row is resolved by hash (see resolveActiveIndex in row-nav.test.ts)
+		expect(src).toContain("resolveActiveIndex(sorted, activeHash, props.selected)");
+	});
+
 	it("moving the active row never opens it: only Enter and Space call onOpen from a key", async () => {
 		const src = await source("audit-table.tsx");
 		const keys = src.slice(

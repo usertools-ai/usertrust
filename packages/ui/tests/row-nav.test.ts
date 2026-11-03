@@ -9,8 +9,34 @@
 
 import type { PersistedAuditEvent } from "usertrust";
 import { describe, expect, it } from "vitest";
-import { nextRowIndex, rowAccessibleName } from "../src/shared/row-nav.js";
+import { nextRowIndex, resolveActiveIndex, rowAccessibleName } from "../src/shared/row-nav.js";
 import { statusOf, toLedgerRows } from "../src/shared/rows.js";
+
+describe("resolveActiveIndex: the active row follows its hash through a sort, a filter or an insert", () => {
+	const rows = Array.from({ length: 60 }, (_, i) => ({ hash: `h${i}` }));
+
+	it("the last row stays active when the sort is reversed: its index becomes 0", () => {
+		expect(resolveActiveIndex(rows, "h59", null)).toBe(59);
+		const reversed = [...rows].reverse();
+		expect(resolveActiveIndex(reversed, "h59", null)).toBe(0);
+	});
+
+	it("a live insert at the top moves the index, not the row", () => {
+		expect(resolveActiveIndex([{ hash: "new" }, ...rows], "h10", null)).toBe(11);
+	});
+
+	it("an active row filtered out: the open row stands in, else the first row", () => {
+		const filtered = rows.slice(0, 20);
+		expect(resolveActiveIndex(filtered, "h59", "h7")).toBe(7);
+		expect(resolveActiveIndex(filtered, "h59", "h59")).toBe(0);
+		expect(resolveActiveIndex(filtered, "h59", null)).toBe(0);
+		expect(resolveActiveIndex(filtered, null, undefined)).toBe(0);
+	});
+
+	it("an empty list has no active row", () => {
+		expect(resolveActiveIndex([], "h1", "h1")).toBe(-1);
+	});
+});
 
 describe("nextRowIndex", () => {
 	const N = 60;

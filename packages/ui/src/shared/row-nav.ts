@@ -11,6 +11,24 @@ import { formatUtc } from "./format.js";
 import { type LedgerRow, statusOf } from "./rows.js";
 
 /**
+ * The index of the active row in the rows as now sorted and filtered. The active row is tracked by hash, so a sort, a
+ * filter or a live insert moves its index but not the row; when the row has left the set, the open (selected) row
+ * stands in, and failing that the first row. `-1` only for an empty list.
+ */
+export function resolveActiveIndex(
+	rows: readonly { hash: string }[],
+	activeHash: string | null,
+	selectedHash: string | null | undefined,
+): number {
+	if (rows.length === 0) return -1;
+	const find = (hash: string | null | undefined): number =>
+		hash === null || hash === undefined ? -1 : rows.findIndex((r) => r.hash === hash);
+	const i = find(activeHash);
+	if (i >= 0) return i;
+	return Math.max(0, find(selectedHash));
+}
+
+/**
  * Where the active row goes for a key, or `null` when the key is not one of the list's movement keys (or the list is
  * empty), so the caller leaves the key alone. A move past either end stays at the end. `current` may be stale or out
  * of range (the rows changed under it) and is clamped first; `pageSize` is how many rows a screenful holds and is
