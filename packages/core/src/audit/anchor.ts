@@ -213,6 +213,11 @@ export function defaultKeyPath(vaultId: string): string {
 	return join(homedir(), ".usertrust", "keys", `${vaultId}.anchor.pem`);
 }
 
+/** `<name>.anchor.pem` -> `<name>.anchor.pub.pem`, beside the private key. */
+export function publicKeyCopyPath(keyFile: string): string {
+	return keyFile.endsWith(".pem") ? `${keyFile.slice(0, -4)}.pub.pem` : `${keyFile}.pub.pem`;
+}
+
 /**
  * Resolve a path to its canonical absolute form, realpath-ing the deepest
  * EXISTING ancestor so symlinked parents (macOS /var → /private/var) compare
@@ -271,9 +276,26 @@ export function initAnchorIdentity(
 		throw new Error("Refusing to write the anchor private key inside the vault (AC-6.2)");
 	}
 	mkdirSync(keyDir, { recursive: true, mode: 0o700 });
-	writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }) as string, {
-		mode: 0o600,
-	});
+	// Exclusive create: an existing file at this path is somebody's key (or another
+	// vault's). Overwriting it would silently destroy the only copy of that signer.
+	try {
+		writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }) as string, {
+			mode: 0o600,
+			flag: "wx",
+		});
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+			throw new Error(`Refusing to overwrite an existing key file: ${keyFile}`);
+		}
+		throw err;
+	}
+	// The public half sits beside the private key so it can be pinned or handed to a
+	// verifier without touching the secret. Best effort: the identity does not need it.
+	try {
+		writeFileSync(publicKeyCopyPath(keyFile), publicKeyPem, { mode: 0o644, flag: "wx" });
+	} catch {
+		/* a missing copy is recoverable with `usertrust anchor pubkey` */
+	}
 
 	mkdirPrivate(join(dir, "outbox"));
 	const identity: AnchorIdentity = {

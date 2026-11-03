@@ -369,7 +369,12 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 						toSafeJson({
 							command: "anchor init",
 							success: true,
-							data: { vaultId: identity.vaultId, keyId: identity.keyId, keyFile: writtenKeyFile },
+							data: {
+								vaultId: identity.vaultId,
+								keyId: identity.keyId,
+								keyFile: writtenKeyFile,
+								publicKeyPem,
+							},
 						}),
 					);
 					return;
@@ -393,6 +398,29 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 				console.log("     usertrust anchor now --sink-file /mnt/worm/anchors.jsonl");
 				console.log("     Deployment invariant: the identity that writes the vault has");
 				console.log("     append-only (no delete/overwrite) access to the store.");
+				return;
+			}
+			case "pubkey": {
+				const identity = readAnchorIdentity(root);
+				const genesis = identity?.keyHistory?.[0];
+				if (identity === null || genesis === undefined) {
+					throw new Error(
+						"No anchor identity with a key history here: run `usertrust anchor init`.",
+					);
+				}
+				const body = genesis.publicKeySpki.match(/.{1,64}/g)?.join("\n") ?? "";
+				const publicKeyPem = `-----BEGIN PUBLIC KEY-----\n${body}\n-----END PUBLIC KEY-----\n`;
+				if (json) {
+					console.log(
+						toSafeJson({
+							command: "anchor pubkey",
+							success: true,
+							data: { keyId: genesis.keyId, publicKeyPem },
+						}),
+					);
+					return;
+				}
+				process.stdout.write(publicKeyPem);
 				return;
 			}
 			case "now": {
@@ -681,9 +709,10 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 				return;
 			}
 			default: {
-				console.log(`Usage: usertrust anchor <init|now|status|export|export-bundle|doctor|rotate|resume>
+				console.log(`Usage: usertrust anchor <init|pubkey|now|status|export|export-bundle|doctor|rotate|resume>
 
   init          [--key-file <path>]     Mint identity + Ed25519 key (outside the vault)
+  pubkey        [--json]                Print the vault's genesis public key (PEM)
   now           [sink flags]            Snapshot, sign, mirror, publish
   status                                Last anchor, unanchored tail, outbox
   export        [--since <anchorSeq>]   Print mirror records (pull-mode shipping)
