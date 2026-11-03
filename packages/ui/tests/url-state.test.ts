@@ -378,6 +378,14 @@ describe("addressHolds: what is written decodes to the same state", () => {
 
 describe("the page honours the address's limits", () => {
 	const app = readFileSync(new URL("../src/app/app.tsx", import.meta.url), "utf-8");
+	const hook = readFileSync(new URL("../src/app/use-url-state.ts", import.meta.url), "utf-8");
+	it("every applied navigation is adopted by the writer, unconditionally, before the state is set", () => {
+		const apply = /const apply = \(\): void => \{([\s\S]*?)\n\t\t\};/.exec(hook)?.[1] ?? "";
+		const adopt = apply.indexOf("sync.current?.adopt(next);");
+		expect(adopt).toBeGreaterThan(-1);
+		expect(adopt).toBeLessThan(apply.indexOf("setState("));
+		expect(apply.slice(0, adopt)).not.toMatch(/\bif\b/);
+	});
 	it("the search box stops at the length the address keeps", () => {
 		expect(app).toMatch(/type="search"[\s\S]{0,300}maxLength=\{MAX_SEARCH_LENGTH\}/);
 	});

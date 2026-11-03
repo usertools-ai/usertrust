@@ -2,7 +2,12 @@
 // Copyright 2026 Usertools, Inc.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { type AddressIo, AddressSync } from "../shared/address-sync.js";
+import {
+	type AddressIo,
+	type AddressNote,
+	AddressSync,
+	addressNoteFor,
+} from "../shared/address-sync.js";
 import type { FilterState } from "../shared/filters.js";
 import {
 	addressHolds,
@@ -11,9 +16,6 @@ import {
 	type UrlState,
 	type ViewId,
 } from "../shared/url-state.js";
-
-/** Why the address does not describe what the page shows, or null when it does. */
-export type AddressNote = "cannot-hold" | "behind" | null;
 
 const browserAddress: AddressIo = {
 	hash: () => window.location.hash,
@@ -58,9 +60,9 @@ export function useUrlState(): {
 
 	useEffect(() => {
 		const apply = (): void => {
-			// The user navigated: the address they went to wins over any write still waiting to be retried.
-			sync.current?.cancel();
+			// The user navigated: the address they went to is the truth now, whether or not the page's state changes.
 			const next = decodeUrlState(window.location.hash);
+			sync.current?.adopt(next);
 			setState((prev) => (sameUrlState(prev, next) ? prev : next));
 		};
 		window.addEventListener("hashchange", apply);
@@ -79,7 +81,7 @@ export function useUrlState(): {
 	);
 	const setOpenHash = useCallback((open: string | null) => setState((s) => ({ ...s, open })), []);
 	const holds = useMemo(() => addressHolds(state), [state]);
-	const addressNote: AddressNote = !holds ? "cannot-hold" : behind ? "behind" : null;
+	const addressNote: AddressNote = addressNoteFor(holds, behind);
 	return {
 		view: state.view,
 		setView,

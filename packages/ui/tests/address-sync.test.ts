@@ -7,9 +7,19 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { ADDRESS_RETRY_MS, type AddressIo, AddressSync } from "../src/shared/address-sync.js";
+import {
+	ADDRESS_RETRY_MS,
+	type AddressIo,
+	AddressSync,
+	addressNoteFor,
+} from "../src/shared/address-sync.js";
 import { EMPTY_FILTERS, type FilterState } from "../src/shared/filters.js";
-import { EMPTY_URL_STATE, encodeUrlState, type UrlState } from "../src/shared/url-state.js";
+import {
+	addressHolds,
+	EMPTY_URL_STATE,
+	encodeUrlState,
+	type UrlState,
+} from "../src/shared/url-state.js";
 
 function withFilters(f: Partial<FilterState>): UrlState {
 	return { ...EMPTY_URL_STATE, filters: { ...EMPTY_FILTERS, ...f } };
@@ -121,9 +131,9 @@ describe("AddressSync", () => {
 		const sync = new AddressSync(withFilters({ search: "a" }), io, (x) => b.behind.push(x));
 		b.refuse = 1;
 		sync.sync(withFilters({ search: "ab" }));
-		// The user presses Back before the retry fires.
+		// The user presses Back before the retry fires; the page adopts the address's state.
 		b.hash = "#view=trends";
-		sync.cancel();
+		sync.adopt({ ...EMPTY_URL_STATE, view: "trends" });
 		runTimers();
 		expect(b.writes).toEqual([]);
 		expect(b.hash).toBe("#view=trends");
@@ -133,6 +143,25 @@ describe("AddressSync", () => {
 		expect(sync.behind).toBe(false);
 	});
 
+	it("red-first: a refused view write, then a navigation TO that view, leaves nothing stale", () => {
+		// Review of #510, round 3: the page already shows Trends, so applying the navigation changes no state and no
+		// write runs; the writer must still learn that the address now says Trends.
+		const { b, io, runTimers } = stubBrowser("");
+		const sync = new AddressSync(EMPTY_URL_STATE, io, (x) => b.behind.push(x));
+		const trends: UrlState = { ...EMPTY_URL_STATE, view: "trends" };
+		b.refuse = 1;
+		sync.sync(trends); // the push is refused: the address still says Audit
+		expect(sync.behind).toBe(true);
+		b.hash = "#view=trends"; // the user follows a link to Trends
+		sync.adopt(trends);
+		expect(sync.behind).toBe(false); // the note comes down
+		runTimers();
+		expect(b.writes).toEqual([]); // the dropped retry does not write a duplicate entry
+		// The next change is planned from Trends: going back to Audit is a view change, so it is a push.
+		sync.sync(EMPTY_URL_STATE);
+		expect(b.writes).toEqual([{ kind: "push", hash: "" }]);
+	});
+
 	it("writes nothing when the address already describes the state", () => {
 		const s = withFilters({ statuses: ["failed"] });
 		const { b, io } = stubBrowser(encodeUrlState(s));
@@ -140,5 +169,26 @@ describe("AddressSync", () => {
 		sync.sync(s);
 		expect(b.writes).toEqual([]);
 		expect(sync.behind).toBe(false);
+	});
+});
+
+describe("addressNoteFor: which note the page shows", () => {
+	it("BEHIND wins: a refused write means the address still holds the previous view", () => {
+		expect(addressNoteFor(true, false)).toBeNull();
+		expect(addressNoteFor(false, false)).toBe("cannot-hold");
+		expect(addressNoteFor(true, true)).toBe("behind");
+		expect(addressNoteFor(false, true)).toBe("behind");
+	});
+
+	it("red-first: a refused CLEAR says the old address is still there, not that a reload opens a clean page", () => {
+		// Review of #510, round 3: the address held a filtered view; the next state cannot be held, so the page writes
+		// the empty hash, and the browser refuses that write.
+		const { b, io } = stubBrowser("#q=old");
+		const sync = new AddressSync(withFilters({ search: "old" }), io, (x) => b.behind.push(x));
+		const unholdable = withFilters({ search: `a${String.fromCodePoint(0x200b)}b` });
+		b.refuse = 1;
+		sync.sync(unholdable);
+		expect(b.hash).toBe("#q=old"); // a reload would open the OLD filtered view
+		expect(addressNoteFor(addressHolds(unholdable), sync.behind)).toBe("behind");
 	});
 });

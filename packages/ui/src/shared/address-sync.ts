@@ -16,6 +16,18 @@ import { planHistory, type UrlState } from "./url-state.js";
 /** How long to wait before retrying a refused write, in ms. */
 export const ADDRESS_RETRY_MS = 1000;
 
+/** Why the address does not describe the page, or null when it does. */
+export type AddressNote = "cannot-hold" | "behind" | null;
+
+/**
+ * Which note the page shows. BEHIND wins: while a write is refused the address still holds the PREVIOUS view, so "a
+ * reload opens a clean page" (the cannot-hold note) would be false until the clear lands.
+ */
+export function addressNoteFor(holds: boolean, behind: boolean): AddressNote {
+	if (behind) return "behind";
+	return holds ? null : "cannot-hold";
+}
+
 export interface AddressIo {
 	/** The address's current fragment (`location.hash`). */
 	hash(): string;
@@ -67,9 +79,19 @@ export class AddressSync {
 	}
 
 	/**
-	 * Drop a pending retry. Called when the user navigates (Back, Forward, an edited or followed link): the address they
-	 * went to wins, and an older state must not be written over it.
+	 * The user navigated (Back, Forward, an edited or followed link) and the page applied the address's state: the
+	 * address describes `state` now. The pending retry is dropped (an older state must not be written over where they
+	 * went), the address is no longer behind, and the next change is planned from `state`. Called on EVERY applied
+	 * navigation, also when the page already showed that state and so re-renders nothing: otherwise a refused write
+	 * followed by a navigation to the same view would leave the note up and the next push or replace wrong.
 	 */
+	adopt(state: UrlState): void {
+		this.cancel();
+		this.written = state;
+		this.setBehind(false);
+	}
+
+	/** Drop a pending retry (the page is going away). */
 	cancel(): void {
 		this.cancelRetry?.();
 		this.cancelRetry = null;
