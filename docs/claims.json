@@ -192,11 +192,15 @@
 		{
 			"id": "meta-catches-a-cut",
 			"kind": "guarantee",
-			"claim": "While .meta still records the longer head, a log cut short, deleted or emptied fails verification.",
+			"claim": "While .meta still records the longer head, a log cut short, deleted or emptied fails verification; a .meta that is present but unparseable fails verification instead of disabling the anchor.",
 			"statements": [
 				{
 					"file": "packages/verify/README.md",
 					"text": "While the sidecar still records the longer head and count, the verifier fails a log that has been **truncated or deleted**."
+				},
+				{
+					"file": "site/content/docs/concepts/audit-trail.mdx",
+					"text": "a log whose tail hash or event count no longer matches the sidecar is reported as truncated or deleted, and a sidecar that is present but unparseable fails verification rather than silently disabling the check."
 				}
 			],
 			"proofs": [
@@ -219,6 +223,10 @@
 				{
 					"file": "packages/core/tests/harden/integrity-claims-pins.test.ts",
 					"test": "emptying events.jsonl while .meta remains: the next append continues from the sidecar, and verification reports the gap"
+				},
+				{
+					"file": "packages/verify/tests/harden/tail-truncation.test.ts",
+					"test": "a .meta that is present but unparseable fails verification instead of silently disabling the anchor"
 				}
 			]
 		},
@@ -792,7 +800,7 @@
 				},
 				{
 					"file": "site/content/docs/concepts/local-models.mdx",
-					"text": "Every governed local call still places a PENDING hold, settles at least 1 usertoken, and is recorded on the audit chain (or, if that write fails, its receipt carries `auditDegraded`) -- so runaway loops burn budget, anomaly governance still fires, and every governed call has a receipt."
+					"text": "Every governed local call still places a PENDING hold, settles at least 1 usertoken, and is recorded on the audit chain (or, if that write fails, its receipt carries `auditDegraded`) — so runaway loops burn budget, anomaly governance still fires, and every governed call has a receipt."
 				},
 				{
 					"file": "site/content/docs/index.mdx",
@@ -1398,7 +1406,7 @@
 		},
 		{
 			"file": "site/content/docs/concepts/local-models.mdx",
-			"text": "Every call cost is floored at 1 usertoken -- zero-amount ledger transfers are invalid -- so a `{0,0}`-rate local call settles at **exactly 1 nominal usertoken**.",
+			"text": "Every call cost is floored at 1 usertoken — zero-amount ledger transfers are invalid — so a `{0,0}`-rate local call settles at **exactly 1 nominal usertoken**.",
 			"why": "pricing floor for local models"
 		},
 		{
@@ -1530,11 +1538,6 @@
 			"file": "site/content/docs/concepts/local-models.mdx",
 			"text": "Renaming a local model (`ollama cp llama3.2 gpt-4o`) cannot change the regime in either direction.",
 			"why": "pricing regime of local models"
-		},
-		{
-			"file": "site/content/docs/concepts/two-phase-spend.mdx",
-			"text": "Hold becomes permanent spend",
-			"why": "the POST step of a ledger hold; not an audit claim"
 		},
 		{
 			"file": "site/content/docs/schemas.mdx",
