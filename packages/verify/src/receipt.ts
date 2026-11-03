@@ -210,8 +210,18 @@ function wordWrap(text: string, maxWidth: number): string[] {
  */
 const FORMAT_CHARACTER = /^\p{Cf}$/u;
 
+/**
+ * LINE SEPARATOR (0x2028) and PARAGRAPH SEPARATOR (0x2029) are category Zl and Zp, so neither the control test nor
+ * `\p{Cf}` holds them, yet a terminal or a paste target that honours them starts a new line there. A vault string
+ * carrying one could break a printed receipt's row and forge a line under it. Compared by code point so this source
+ * carries no invisible character.
+ */
+function isLineSeparator(code: number): boolean {
+	return code === 0x2028 || code === 0x2029;
+}
+
 function isInvisibleFormat(ch: string): boolean {
-	return FORMAT_CHARACTER.test(ch);
+	return isLineSeparator(ch.codePointAt(0) as number) || FORMAT_CHARACTER.test(ch);
 }
 
 export function forDisplay(raw: string): string {
