@@ -176,7 +176,7 @@ describe("usertrust inspect", () => {
 		await run(tempDir);
 		const combined = logOutput.join("\n");
 		expect(combined).toContain(
-			"Budget: unknown: not yet published; no governor has recorded the budget it enforces",
+			"Budget: unknown: not yet published; no controller has recorded the budget it enforces",
 		);
 		expect(combined).not.toContain("-300");
 	});
@@ -240,7 +240,7 @@ describe("usertrust inspect", () => {
 		logOutput = [];
 		await run(tempDir);
 		expect(logOutput.join("\n")).toContain(
-			"Budget: unknown: several governors with different budgets",
+			"Budget: unknown: several controllers with different budgets",
 		);
 		expect(logOutput.join("\n")).not.toContain("none recorded or configured");
 	});

@@ -60,13 +60,20 @@ export const NOT_ANCHORED_NOTE = "hash links only · not anchored";
  */
 export const ANCHOR_VERIFY_COMMAND = "usertrust verify --anchors <file> --pubkey <genesis.pem>";
 
+/**
+ * The first sentence of the anchor explainer, the same for both states: anchoring is optional, and a missing file is
+ * not a fault. It has no backticks, because the popover renders only the verify command as code.
+ */
+export const ANCHOR_LEAD =
+	"Anchoring is optional: it adds signed checkpoints of this log, and usertrust anchor init sets it up in this project.";
+
 export function anchorView(anchorFile: SummaryPayload["anchorFile"]): {
-	label: "present" | "not present";
+	label: "present" | "not set up";
 	explainer: string;
 } {
 	return {
-		label: anchorFile === "present" ? "present" : "not present",
-		explainer: `An anchor file mirrors chain checkpoints outside this vault's log. This dashboard only checks whether the file exists; it does not verify anchors. To check the chain against anchors, run ${ANCHOR_VERIFY_COMMAND} in the project directory, where <genesis.pem> is the anchoring public key you pinned outside this vault, never one read from it.`,
+		label: anchorFile === "present" ? "present" : "not set up",
+		explainer: `${ANCHOR_LEAD} An anchor file mirrors chain checkpoints outside this vault's log. This dashboard only checks whether the file exists; it does not verify anchors. To check the chain against anchors, run ${ANCHOR_VERIFY_COMMAND} in the project directory, where <genesis.pem> is the anchoring public key you pinned outside this vault, never one read from it.`,
 	};
 }
 
