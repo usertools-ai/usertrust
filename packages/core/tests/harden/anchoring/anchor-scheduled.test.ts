@@ -268,6 +268,77 @@ describe("anchor now --scheduled", () => {
 		},
 	);
 
+	it("with no sink configured a scheduled run keeps an undelivered backlog and fails", async () => {
+		const s = await makeAnchoredVault(3);
+		process.chdir(s.root);
+		process.env.USERTRUST_ANCHOR_KEY = s.keyFile;
+		const blocker = join(s.storeDir, "a-file");
+		writeFileSync(blocker, "x");
+		await runNow([
+			"--scheduled",
+			"--sink-file",
+			join(blocker, "anchors.jsonl"),
+			"--publish-retries",
+			"1",
+		]);
+		process.exitCode = 0;
+		const outbox = join(anchorsDir(s.root), "outbox");
+		const before = readdirSync(outbox);
+		expect(before.length).toBe(1);
+		const { out, exit } = await runNow(["--scheduled"]);
+		expect(exit).toBe(1);
+		expect((out.data as { reason: string }).reason).toBe("sink-failed");
+		expect(readdirSync(outbox)).toEqual(before);
+	});
+
+	it("an empty event log is benign only for a vault that never anchored", async () => {
+		// a fresh vault, empty mirror present: benign (positive control, exit 0)
+		const fresh = await makeAnchoredVault(0);
+		process.chdir(fresh.root);
+		process.env.USERTRUST_ANCHOR_KEY = fresh.keyFile;
+		const ok = await runNow(["--scheduled", "--sink-file", fresh.storeFile]);
+		expect(ok.exit).toBe(0);
+		expect((ok.out.data as { reason: string }).reason).toBe("empty");
+		// the mirror file is gone: a fault
+		renameSync(join(anchorsDir(fresh.root), "anchors.jsonl"), join(fresh.storeDir, "mirror.aside"));
+		const gone = await runNow(["--scheduled", "--sink-file", fresh.storeFile]);
+		expect(gone.exit).toBe(1);
+		expect((gone.out.data as { reason: string }).reason).toBe("mirror-missing");
+		process.exitCode = 0;
+		// an anchored vault whose event log was lost: a fault
+		const s = await makeAnchoredVault(3);
+		process.chdir(s.root);
+		process.env.USERTRUST_ANCHOR_KEY = s.keyFile;
+		await anchorOnce(s);
+		const log = join(s.vaultPath, "audit", "events.jsonl");
+		writeFileSync(log, "");
+		const lost = await runNow(["--scheduled", "--sink-file", s.storeFile]);
+		expect(lost.exit).toBe(1);
+		expect((lost.out.data as { reason: string }).reason).toBe("other");
+	});
+
+	it.skipIf(typeof process.getuid === "function" && process.getuid() === 0)(
+		"a stale lock that cannot be reclaimed is lock-unavailable, not 'locked'",
+		async () => {
+			const s = await makeAnchoredVault(3);
+			process.chdir(s.root);
+			process.env.USERTRUST_ANCHOR_KEY = s.keyFile;
+			const dir = anchorsDir(s.root);
+			writeFileSync(
+				join(dir, ".anchor-writer.lock"),
+				JSON.stringify({ pid: 999999, startedAt: "x" }),
+			);
+			chmodSync(dir, 0o500);
+			try {
+				const { out, exit } = await runNow(["--scheduled", "--sink-file", s.storeFile]);
+				expect(exit).toBe(1);
+				expect((out.data as { reason: string }).reason).toBe("lock-unavailable");
+			} finally {
+				chmodSync(dir, 0o700);
+			}
+		},
+	);
+
 	it("status prints the recorded time without terminal escapes", async () => {
 		const s = await makeAnchoredVault(1);
 		process.chdir(s.root);

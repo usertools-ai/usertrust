@@ -159,6 +159,27 @@ function emitterConfig(args: string[]): AnchoringConfig {
 
 // ── scheduled run ──
 
+/** Why an "empty" outcome is a fault rather than a fresh vault, or null when it is a fresh vault. */
+function emptyVaultFault(root: string): { reason: LastRunReason; detail: string } | null {
+	const mirrorPath = join(anchorsDir(root), "anchors.jsonl");
+	if (!existsSync(mirrorPath)) {
+		return { reason: "mirror-missing", detail: "the anchor mirror file is missing" };
+	}
+	let mirrorBytes = 0;
+	try {
+		mirrorBytes = readFileSync(mirrorPath, "utf-8").trim().length;
+	} catch {
+		return { reason: "other", detail: "the anchor mirror cannot be read" };
+	}
+	if (mirrorBytes > 0 || (readAnchorIdentity(root)?.lastAnchorSeq ?? 0) > 0) {
+		return {
+			reason: "other",
+			detail: "the event log is empty but anchors exist: the log may have been lost",
+		};
+	}
+	return null;
+}
+
 /**
  * `anchor now --scheduled`: the form a timer runs. Nothing to anchor and "another run
  * holds the lock" are not failures, so they exit 0; a real failure exits 1 and is also
@@ -174,11 +195,17 @@ async function runScheduled(root: string, args: string[], json: boolean): Promis
 	try {
 		const emitter = createAnchorEmitter(root, emitterConfig(args));
 		const emitted = await emitter.anchorNow();
+		// "empty" means the event log has nothing. That is benign only for a vault that has
+		// never anchored; with a missing mirror or recorded anchors it is lost data, and the
+		// human command exits 1 for it too.
+		const emptyFault = emitted.reason === "empty" ? emptyVaultFault(root) : null;
 		// A quiet run makes no record, so nothing else retries an earlier failed
 		// delivery; retry it here so a recovered sink clears the backlog.
 		// Only after a benign outcome: a refusal (invalid outbox entry, mirror trouble) or
 		// contention (another run holds the lock) must not trigger delivery.
-		if (!emitted.emitted && (emitted.reason === "no-new-events" || emitted.reason === "empty")) {
+		const benign =
+			emitted.reason === "no-new-events" || (emitted.reason === "empty" && emptyFault === null);
+		if (!emitted.emitted && benign) {
 			await emitter.redeliverPending();
 		}
 		await emitter.stop();
@@ -186,7 +213,10 @@ async function runScheduled(root: string, args: string[], json: boolean): Promis
 		result = emitted;
 		if (emitted.emitted) {
 			reason = delivered ? "anchored" : "sink-failed";
-		} else if (!delivered && (emitted.reason === "no-new-events" || emitted.reason === "empty")) {
+		} else if (emptyFault !== null) {
+			reason = emptyFault.reason;
+			detail = emptyFault.detail;
+		} else if (!delivered && benign) {
 			reason = "sink-failed";
 			detail = "an earlier anchor is still waiting in the outbox";
 		} else {

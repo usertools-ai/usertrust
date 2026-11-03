@@ -546,12 +546,19 @@ function tryAcquireAnchorLock(dir: string): (() => void) | null {
 	// rename throws (ENOENT) and backs off. A bare check-then-unlink would let
 	// a slow contender delete the winner's freshly created lock (TOCTOU) and
 	// admit two emitters — the exact race the lock exists to prevent.
+	const reclaimPath = `${lockPath}.reclaim-${process.pid}-${Date.now()}`;
 	try {
-		const reclaimPath = `${lockPath}.reclaim-${process.pid}-${Date.now()}`;
 		renameSync(lockPath, reclaimPath);
+	} catch (err) {
+		// ENOENT: another contender won the reclaim, so the lock is held. Anything else
+		// (EACCES, EROFS) is a fault, not contention.
+		if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+		throw new Error(`anchor lock unavailable: ${err instanceof Error ? err.message : String(err)}`);
+	}
+	try {
 		unlinkSync(reclaimPath);
 	} catch {
-		return null;
+		/* the stale lock is already out of the way; a stray reclaim name is harmless */
 	}
 	return attempt();
 }
@@ -956,6 +963,9 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 			// Under the writer lock, and only records the mirror already holds byte for
 			// byte: an outbox entry the mirror lacks, or holds differently, is one the
 			// emitter has not accepted (or refused), and must never reach the store.
+			// With no sink configured delivery would succeed vacuously and erase the
+			// entry, so nothing is redelivered and the backlog stays.
+			if (sinks.length === 0) return;
 			const release = tryAcquireAnchorLock(dir);
 			if (release === null) return;
 			try {
