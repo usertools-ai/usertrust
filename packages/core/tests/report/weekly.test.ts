@@ -1025,6 +1025,7 @@ describe("every built-in pricing entry has a vendor family", () => {
 		expect(detectProvider("kimi-k3")).toBe("moonshot");
 		expect(detectProvider("deepseek-chat")).toBe("deepseek");
 		expect(detectProvider("grok-3")).toBe("xai");
+		expect(detectProvider("grok-4.7")).toBe("xai");
 		expect(detectProvider("totally-new-model")).toBe("unknown");
 	});
 });
