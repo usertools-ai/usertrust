@@ -64,6 +64,9 @@ vi.mock("tigerbeetle-node", () => ({
 	amount_max: (1n << 128n) - 1n,
 }));
 
+// The native client is faked, so there is no listener to reach: the TCP preflight is stood down.
+vi.mock("../../src/ledger/preflight.js", () => ({ preflightLedger: async () => {} }));
+
 import { run } from "../../src/cli/budget.js";
 import { COMMANDS } from "../../src/cli/main.js";
 

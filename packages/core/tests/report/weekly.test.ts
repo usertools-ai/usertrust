@@ -1025,6 +1025,7 @@ describe("every built-in pricing entry has a vendor family", () => {
 		expect(detectProvider("kimi-k3")).toBe("moonshot");
 		expect(detectProvider("deepseek-chat")).toBe("deepseek");
 		expect(detectProvider("grok-3")).toBe("xai");
+		expect(detectProvider("grok-4.7")).toBe("xai");
 		expect(detectProvider("totally-new-model")).toBe("unknown");
 	});
 });
@@ -1187,7 +1188,7 @@ describe("no definite over-budget claim when the governor's counter contradicts 
 		expect(text).not.toContain("(OVER BUDGET)");
 		expect(text).toContain("POSSIBLY OVER BUDGET");
 		expect(text).toContain(
-			"The chain and the governor's counter disagree: a crash between an SDK call's audit record and its budget commit, or a counter error.",
+			"The chain and the controller's counter disagree: a crash between an SDK call's audit record and its budget commit, or a counter error.",
 		);
 		// neutral: it never asserts the counter is wrong
 		expect(text).toContain("Either leg may be wrong.");

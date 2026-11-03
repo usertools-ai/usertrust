@@ -95,6 +95,7 @@ import {
 	trustConfigOverrides,
 } from "./govern.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
+import { preflightLedger } from "./ledger/preflight.js";
 import {
 	copyAppliedRates,
 	costFromRates,
@@ -1081,10 +1082,14 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 	const tbAddresses = config.tigerbeetle.addresses;
 	const tbClusterId = BigInt(config.tigerbeetle.clusterId);
 
+	// No ledger listening: say so in milliseconds, before any native client exists (it would retry forever).
+	await preflightLedger(tbAddresses, { clusterId: config.tigerbeetle.clusterId });
 	const tbClient = new TrustTBClient({
 		addresses: tbAddresses,
 		clusterId: tbClusterId,
 	});
+	// Something listening but not answering as a usertrust ledger: stop at the deadline (this client is closed).
+	await tbClient.connectDeadline(config.tigerbeetle.connectTimeoutMs);
 
 	// Treasury (unconstrained) funds a per-session enforcing holding wallet.
 	await tbClient.createTreasury();
@@ -1411,6 +1416,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// remaining budget so TigerBeetle atomically REJECTS an over-budget hold.
 			engine = await createTBEngine(config, Math.max(0, config.budget - budgetSpent));
 		} catch (err) {
+			// preflight and the connect deadline already say what is wrong and how to fix it.
+			if (err instanceof LedgerUnavailableError) throw err;
 			throw new LedgerUnavailableError(
 				err instanceof Error ? err.message : String(err),
 				config.tigerbeetle.addresses.join(","),
@@ -1959,7 +1966,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							denial.piiTypes = piiResult.types;
 							throw new PolicyDeniedError(
 								`PII detected: ${piiResult.types.join(", ")}`,
-								'PII enforcement blocked this call. Use { pii: "warn" } to log instead of block; the headless governor does not redact egress — redaction is the integrating host\'s responsibility.',
+								'PII enforcement blocked this call. Use { pii: "warn" } to log instead of block; the headless controller does not redact egress — redaction is the integrating host\'s responsibility.',
 							);
 						}
 					}

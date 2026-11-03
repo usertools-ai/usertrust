@@ -341,6 +341,9 @@ export const TrustConfigSchema = z.object({
 		.object({
 			addresses: z.array(z.string()).default([DEFAULT_TIGERBEETLE_ADDRESS]),
 			clusterId: z.number().int().nonnegative().default(0),
+			// How long a governor waits for the first answer from the ledger before it stops and says so.
+			// The native client retries a connection forever, so without a bound a missing ledger hangs.
+			connectTimeoutMs: z.number().int().positive().default(5_000),
 		})
 		.prefault({}),
 	providers: z

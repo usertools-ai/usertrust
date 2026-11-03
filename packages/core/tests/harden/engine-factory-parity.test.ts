@@ -70,6 +70,19 @@ describe("engine factory parity — govern.ts and headless.ts stay in lockstep",
 		},
 	);
 
+	it("both factories check for a ledger before they build a native client, and bound the first answer", () => {
+		for (const path of [governSourcePath, headlessSourcePath]) {
+			const body = extractFunction(path, "createTBEngine");
+			const preflight = body.indexOf("preflightLedger(");
+			const build = body.indexOf("new TrustTBClient(");
+			const deadline = body.indexOf("connectDeadline(config.tigerbeetle.connectTimeoutMs)");
+			// Order is the point: a TCP check first (no native client yet), then the client, then its deadline.
+			expect(preflight, path).toBeGreaterThanOrEqual(0);
+			expect(build, path).toBeGreaterThan(preflight);
+			expect(deadline, path).toBeGreaterThan(build);
+		}
+	});
+
 	it("still finds a real function body to compare (guards the extractor itself)", () => {
 		const body = extractFunction(governSourcePath, "createTBEngine");
 		// A silently-empty extraction would make every assertion above vacuous.

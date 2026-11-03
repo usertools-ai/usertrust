@@ -28,6 +28,10 @@ npm, and its version is its own: the `usertrust` packages and their
   only the banner is shown. The request never counts toward the circuit breaker and is not made while it
   is open. Claude Code saves injected context in the session transcript.
 
+### Fixed
+
+- **A hook launcher killed just after it started a child no longer leaves that child running.** This covered SessionStart's probe child and the child the other hooks send from. The launcher installed its SIGTERM, SIGINT and SIGHUP handlers (and, for the probe, its exit cleanup) after it started the child. A signal in between took the launcher down by the signal's default action, which runs no cleanup, so the child ran on, orphaned: the probe child until its own 3-second bound, a hook's child until that hook finished. The handlers are now in place before the child starts; a signal before the child exists ends the launcher as it would have, and after that the signal is forwarded to the child as before.
+
 ## [3.1.0] - 2026-10-27
 
 ### Added

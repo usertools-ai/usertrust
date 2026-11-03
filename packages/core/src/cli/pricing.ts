@@ -45,7 +45,10 @@ function longPromptPerM(tier: LongPromptTier) {
 		outputPerM: applied.outputPer1k / 10,
 		cacheReadPerM: applied.cacheReadPer1k / 10,
 		cacheWritePerM: applied.cacheWritePer1k / 10,
-		cacheWrite1hPerM: effectiveCacheWrite1hRate(tier.rates) / 10,
+		// null = the tier has no 1-hour rate (the row publishes none), as for the base tier.
+		cacheWrite1hPerM: supportsCacheWrite1h(tier.rates, false)
+			? effectiveCacheWrite1hRate(tier.rates) / 10
+			: null,
 	};
 }
 
@@ -87,7 +90,7 @@ export async function run(rootDir?: string, opts?: PricingOpts): Promise<void> {
 					outputPerM: number;
 					cacheReadPerM: number;
 					cacheWritePerM: number;
-					cacheWrite1hPerM: number;
+					cacheWrite1hPerM: number | null;
 				};
 				source: string;
 			}
@@ -155,7 +158,7 @@ export async function run(rootDir?: string, opts?: PricingOpts): Promise<void> {
 			console.log(
 				`  ${"".padEnd(24)} in $${long.inputPerM.toFixed(2)} out $${long.outputPerM.toFixed(2)} ` +
 					`cache-read $${long.cacheReadPerM.toFixed(2)} cache-write $${long.cacheWritePerM.toFixed(2)}` +
-					` (1h $${long.cacheWrite1hPerM.toFixed(2)}) per 1M ${pc.dim(`(${over})`)}`,
+					`${long.cacheWrite1hPerM === null ? "" : ` (1h $${long.cacheWrite1hPerM.toFixed(2)})`} per 1M ${pc.dim(`(${over})`)}`,
 			);
 		}
 	}

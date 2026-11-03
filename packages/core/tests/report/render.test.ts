@@ -409,7 +409,7 @@ describe("the spend-ledger leg is rendered only when it differs", () => {
 			data: { model: "m", cost: 100, settled: true, transferId: "t" },
 		} as unknown as PersistedAuditEvent,
 	];
-	it("silent when equal; labelled 'as recorded by the governor' and not chain-verified when it differs", () => {
+	it("silent when equal; labelled 'as recorded by the controller' and not chain-verified when it differs", () => {
 		const eq = render(
 			buildWeeklyReport(one, ok, { endMs: END, budget: 1000, spendLedger: { value: 100 } }),
 			"md",
@@ -419,7 +419,7 @@ describe("the spend-ledger leg is rendered only when it differs", () => {
 			buildWeeklyReport(one, ok, { endMs: END, budget: 1000, spendLedger: { value: 7 } }),
 			"md",
 		);
-		expect(diff).toMatch(/as recorded by the governor/);
+		expect(diff).toMatch(/as recorded by the controller/);
 		expect(diff).toMatch(/not chain-verified/);
 	});
 });

@@ -365,7 +365,156 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 	"deepseek-reasoner": { inputPer1k: 2.8, outputPer1k: 4.2 },
 
 	// ── xAI ──
-	"grok-3": { inputPer1k: 30, outputPer1k: 150 },
+	// Retrieved 2026-11-02 from xAI's published model pricing (its language-models listing),
+	// prices as $/MTok x 10 = usertokens per 1k: grok-4.7 and grok-4.6 $2.00 in / $0.50 cached /
+	// $6.00 out; grok-4.5 $2.00 / $0.30 / $6.00; grok-4.3 and the three grok-4.20-0309 ids
+	// $1.25 / $0.20 / $2.50; grok-build-0.1 $1.00 / $0.20 / $2.00. xAI publishes no cache-WRITE
+	// price (cacheWritePer1k omitted: writes price at input, D1). Every model has a 200,000-token
+	// long-context tier at exactly 2x each category, cached input included; it is carried as
+	// `longPrompt`. xAI's long-context rates apply once the prompt REACHES 200,000 tokens (>=), and
+	// `longPrompt` is "strictly greater than thresholdTokens", so these rows set the threshold to
+	// 199_999: a 199,999-token prompt pays the rates below, a 200,000-token prompt the doubled ones.
+	// Retired slugs: xAI's "Grok Model Retirement on May 15, 2026" notice says requests to any
+	// deprecated slug are billed at grok-4.3 pricing, so each of these carries the grok-4.3 row
+	// (including its tier). grok-code-fast-1 is routed to grok-build-0.1, but routing is not
+	// billing: where the notice's pricing paragraph ($1.25 / $2.50, grok-4.3) and its routing note
+	// differ, the higher price is metered (D1); this can drop to grok-build-0.1's row if xAI says
+	// so. grok-3-mini and bare grok-4 are not on that notice and are not priced here.
+	"grok-3": {
+		inputPer1k: 12.5,
+		outputPer1k: 25,
+		cacheReadPer1k: 2,
+		longPrompt: {
+			thresholdTokens: 199_999,
+			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
+		},
+	},
+	"grok-4-0709": {
+		inputPer1k: 12.5,
+		outputPer1k: 25,
+		cacheReadPer1k: 2,
+		longPrompt: {
+			thresholdTokens: 199_999,
+			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
+		},
+	},
+	"grok-4-1-fast-reasoning": {
+		inputPer1k: 12.5,
+		outputPer1k: 25,
+		cacheReadPer1k: 2,
+		longPrompt: {
+			thresholdTokens: 199_999,
+			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
+		},
+	},
+	"grok-4-1-fast-non-reasoning": {
+		inputPer1k: 12.5,
+		outputPer1k: 25,
+		cacheReadPer1k: 2,
+		longPrompt: {
+			thresholdTokens: 199_999,
+			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
+		},
+	},
+	"grok-4-fast-reasoning": {
+		inputPer1k: 12.5,
+		outputPer1k: 25,
+		cacheReadPer1k: 2,
+		longPrompt: {
+			thresholdTokens: 199_999,
+			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
+		},
+	},
+	"grok-4-fast-non-reasoning": {
+		inputPer1k: 12.5,
+		outputPer1k: 25,
+		cacheReadPer1k: 2,
+		longPrompt: {
+			thresholdTokens: 199_999,
+			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
+		},
+	},
+	"grok-code-fast-1": {
+		inputPer1k: 12.5,
+		outputPer1k: 25,
+		cacheReadPer1k: 2,
+		longPrompt: {
+			thresholdTokens: 199_999,
+			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
+		},
+	},
+	"grok-4.7": {
+		inputPer1k: 20,
+		outputPer1k: 60,
+		cacheReadPer1k: 5,
+		longPrompt: {
+			thresholdTokens: 199_999,
+			rates: { inputPer1k: 40, outputPer1k: 120, cacheReadPer1k: 10 },
+		},
+	},
+	"grok-4.6": {
+		inputPer1k: 20,
+		outputPer1k: 60,
+		cacheReadPer1k: 5,
+		longPrompt: {
+			thresholdTokens: 199_999,
+			rates: { inputPer1k: 40, outputPer1k: 120, cacheReadPer1k: 10 },
+		},
+	},
+	"grok-4.5": {
+		inputPer1k: 20,
+		outputPer1k: 60,
+		cacheReadPer1k: 3,
+		longPrompt: {
+			thresholdTokens: 199_999,
+			rates: { inputPer1k: 40, outputPer1k: 120, cacheReadPer1k: 6 },
+		},
+	},
+	"grok-4.3": {
+		inputPer1k: 12.5,
+		outputPer1k: 25,
+		cacheReadPer1k: 2,
+		longPrompt: {
+			thresholdTokens: 199_999,
+			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
+		},
+	},
+	"grok-4.20-0309-reasoning": {
+		inputPer1k: 12.5,
+		outputPer1k: 25,
+		cacheReadPer1k: 2,
+		longPrompt: {
+			thresholdTokens: 199_999,
+			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
+		},
+	},
+	"grok-4.20-0309-non-reasoning": {
+		inputPer1k: 12.5,
+		outputPer1k: 25,
+		cacheReadPer1k: 2,
+		longPrompt: {
+			thresholdTokens: 199_999,
+			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
+		},
+	},
+	"grok-4.20-multi-agent-0309": {
+		inputPer1k: 12.5,
+		outputPer1k: 25,
+		cacheReadPer1k: 2,
+		longPrompt: {
+			thresholdTokens: 199_999,
+			rates: { inputPer1k: 25, outputPer1k: 50, cacheReadPer1k: 4 },
+		},
+	},
+	"grok-build-0.1": {
+		inputPer1k: 10,
+		outputPer1k: 20,
+		cacheReadPer1k: 2,
+		longPrompt: {
+			thresholdTokens: 199_999,
+			rates: { inputPer1k: 20, outputPer1k: 40, cacheReadPer1k: 4 },
+		},
+	},
 
 	// ── Meta (via Bedrock) ──
 	"llama-4-maverick": { inputPer1k: 2.4, outputPer1k: 9.7 },
@@ -389,7 +538,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
  * Bump on every entry change; recorded on receipts so a metered cost can be
  * reproduced against the exact table that priced it.
  */
-export const PRICING_TABLE_VERSION = "2026-10-28";
+export const PRICING_TABLE_VERSION = "2026-11-02";
 
 /**
  * Reduce a model id to its base table key. Strips EXACTLY ONE trailing date

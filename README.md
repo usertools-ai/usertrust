@@ -87,13 +87,13 @@ npx usertrust init
 
 `npx usertrust init` does not install the package into your project, so the `npm install` line is required. `import { trust } from "usertrust"` fails until it runs.
 
-usertrust wraps your provider's own client and does not install it. Install the SDK for the provider you use beside it: `@anthropic-ai/sdk` for the example above, `openai`, or `@google/genai` for Google Gemini (`npm install usertrust @google/genai`). `@anthropic-ai/sdk` (0.116.0 or newer) and `openai` (7.4.0 or newer) are declared as optional peer dependencies. `@google/genai` is not declared at all: usertrust recognises a Google client by its shape (`models.generateContent`), so nothing in the install names that package, and you install it yourself.
+usertrust wraps your provider's own client and does not install it. Install the SDK for the provider you use beside it: `@anthropic-ai/sdk` for the example above, `openai`, or `@google/genai` for Google Gemini (`npm install usertrust @google/genai`). All three are declared as optional peer dependencies (`@anthropic-ai/sdk` 0.116.0 or newer, `openai` 7.4.0 or newer, `@google/genai` 1.52.0 or newer). Optional peers are not installed for you, so you install the one you use yourself.
 
 `init` is interactive in a terminal. It asks for your provider API key (Anthropic `sk-ant-`, OpenAI `sk-` and Google `AIza` keys are detected from their prefix; any other provider you name yourself) and writes it to `.usertrust/.env`. The key is typed masked, never echoed. The budget prompt offers a total of $5 (50,000 usertokens), which Enter accepts; it is a total for the project and does not reset. Without a terminal (`--json`, a pipe, CI), or when you give no key, `init` still creates `.usertrust/.env` as an owner-only template of commented lines, so `node --env-file=.usertrust/.env` always has a file to read; a `.env` that exists is left as it is, and running `init` again over an existing vault exits 0 and keeps its config. A new or rewritten `.env` is always owner-only (mode 600): `init --reconfigure` writes a fresh owner-only file and renames it over the old one, whatever the old file's mode, and replaces a symlinked `.env` rather than writing through it. An Anthropic, OpenAI or Google key is first checked against that provider's models endpoint (unless you pass `--skip-verify`); a key that fails the check is still written, with a warning. A key for a provider you name yourself is not checked at all, even though `init` reports it as valid, so a wrong key there shows up only on the first real call.
 
 Without a terminal (CI, scripts, a container build), run `npx usertrust init --json`: it creates the vault without prompting and without asking for a key.
 
-This creates a `.usertrust/` vault in your project root with default config, policies, and an empty audit chain.
+This creates a `.usertrust/` vault in your project root with the default config and policies; the audit chain, `audit/events.jsonl`, is created by the first governed call.
 
 The vault is owner-only on Linux and macOS: every directory usertrust creates in it is `0700` and every file `0600`, and a `.usertrust/` another user owns is refused. On Windows usertrust does not set or check permissions, because POSIX modes do not map to ACLs: the vault folder's inherited ACL governs who can read it. Keep the vault (and a usertrust-server's `stateDir`) under your own user profile, or give the folder an owner-only ACL yourself. See [LIMITATIONS.md](https://github.com/usertools-ai/usertrust/blob/master/LIMITATIONS.md).
 
@@ -136,7 +136,7 @@ const client = await trust(new Anthropic(), {
 
 On a Google client `models.generateContent` and `models.generateContentStream` are governed. `generateContentStream` resolves to the stream itself, as the SDK's does, with the settled receipt on it: `const stream = await google.models.generateContentStream({ ... })`, then `for await (const chunk of stream)` and `await stream.receipt`. Every other Google method is refused unless it is free, as on the other providers (below): the billable ones (`models.embedContent`, the image and video methods, `chats.create`, `live.connect`, `batches.create`, `interactions.create`, `tunings.tune`, `caches.create` / `update`, the `fileSearchStores` uploads, imports and creates), every `*Internal` method, `authTokens.create`, `files.upload`, and the SDK's raw transport (`apiClient`, `getNextGenClient()`, a next-gen resource's `_client`, `live.auth`, `live.webSocketFactory`) reject with a `PolicyDeniedError` naming the method, and record a `policy_denied` audit event, before the SDK is called. `files.upload` sends the file's bytes with no PII scan: to upload a file and then pass it to `generateContent`, list it, `allowUngoverned: ["files.upload"]` (audited as `ungoverned_call`, and unredacted), or upload on the original client. With automatic function calling (a callable tool in `config.tools`, AFC not disabled), `generateContent` is metered per round: usertrust runs the loop itself, each round its own governed call, and the envelope carries `receipts`, one per round. `generateContentStream` with automatic function calling is refused the same way for now, because a streamed loop is not yet metered round by round: use `generateContent`, or set `config.automaticFunctionCalling.disable: true` and run the tool calls yourself. Reads, lists, deletes, `models.countTokens` and cancels run free (`@google/genai` 1.52.0 or later).
 
-On every client, every SDK method usertrust does not govern is refused unless it cannot start work: `embeddings.create`, `messages.batches.create`, `chat.completions.parse` and the like return a promise that rejects with a `PolicyDeniedError` (`ungoverned_method: <path>`) and write a `policy_denied` audit event, and the SDK is never called. Methods that cannot start work run as before: reads, lists and deletes (every GET or DELETE request) and a few named POSTs such as `messages.countTokens`, `moderations.create` and cancels. To run a refused method unmetered, list it: `trust(client, { allowUngoverned: ["embeddings.create"] })`; each such call is audited as `ungoverned_call`. `client.withOptions(...)` returns a client governed by the same governor, unless it changes where or how calls are sent (`baseURL`, `fetch`, `fetchOptions`, …), which is refused.
+On every client, every SDK method usertrust does not govern is refused unless it cannot start work: `embeddings.create`, `messages.batches.create`, `chat.completions.parse` and the like return a promise that rejects with a `PolicyDeniedError` (`ungoverned_method: <path>`) and write a `policy_denied` audit event, and the SDK is never called. Methods that cannot start work run as before: reads, lists and deletes (every GET or DELETE request) and a few named POSTs such as `messages.countTokens`, `moderations.create` and cancels. To run a refused method unmetered, list it: `trust(client, { allowUngoverned: ["embeddings.create"] })`; each such call is audited as `ungoverned_call`. `client.withOptions(...)` returns a client governed by the same controller, unless it changes where or how calls are sent (`baseURL`, `fetch`, `fetchOptions`, …), which is refused.
 
 Clients in one process share their vault's audit writer. Separate processes cannot write to one vault: give each process its own vault (`vaultBase`), or send their calls through one `usertrust-server`.
 
@@ -161,7 +161,7 @@ Every call returns `{ response, receipt }`:
 
 - **Settings live in the config file.** Options such as `pii` are read from the config file `trust()` loads: `.usertrust/usertrust.config.json` by default, or the file you pass as `configPath`, which is read INSTEAD of the default (edit the one in use, or a setting such as `pii: "block"` stays off). See [Config](#config). `pii` can also be passed to `trust()` itself, e.g. `trust(client, { pii: "block" })`, which overrides the file; any option `trust()` does not declare is refused by name rather than ignored.
 - **A budget belongs to one `trust()` client, seeded from the spend the vault has recorded.** `trust(client, { budget })` gives that client its own budget, set when the client is created to the budget minus the spend already recorded in the vault (`.usertrust/spend-ledger.json`). Two clients created before either has settled a call each start with the full amount; a client created after another has settled starts with what is left; and a client that is already running does not see another client's later spend. To share one budget across callers, use `usertrust-server`.
-- **With TigerBeetle, do not create one `trust()` per agent.** Each ledger-backed client holds its own connection to the ledger. In our testing, the 9th simultaneously open ledger-backed client in one process never finished connecting, and no error was raised; a TigerBeetle replica also holds at most 64 registered clients and evicts the least recently used. For more than a few agents, run `usertrust-server` (see `packages/server/README.md`): agents call it over HTTP, and it keeps one governor and one ledger connection per tenant, shared by every agent of that tenant.
+- **With TigerBeetle, do not create one `trust()` per agent.** Each ledger-backed client holds its own connection to the ledger. In our testing, the 9th simultaneously open ledger-backed client in one process never finished connecting, and no error was raised; a TigerBeetle replica also holds at most 64 registered clients and evicts the least recently used. For more than a few agents, run `usertrust-server` (see `packages/server/README.md`): agents call it over HTTP, and it keeps one controller and one ledger connection per tenant, shared by every agent of that tenant.
 
 ## Inspect
 
@@ -170,18 +170,25 @@ npx usertrust inspect
 ```
 
 ```
-=== Vault Report ===
-Chain:    847 events · 12 segments
-Budget:   38,420 / 50,000 UT remaining
-Models:   claude-fable-5 (412) · gpt-5.6-sol (289) · kimi-k3 (146)
-Policy:   3 rules active · 0 violations
-PII:      2 warnings · 0 blocks
-Merkle:   a3f8c1...d92b (root)
++--------------------------------------------------------------+
+|  * usertrust vault                                           |
+|  Budget: 38,420 / 50,000 UT remaining (76.8%)                |
+|    (the enforced budget, as of 2026-03-16T12:00:00.000Z)     |
+|  Chain: 847 events | Integrity: SHA-256 verified             |
+|  Merkle root: a3f8c1d92b4e7f01...                            |
++----------+--------------+--------+---------------------------+
+| Time     | Model        | Cost   | Receipt                   |
++----------+--------------+--------+---------------------------+
+| 12:00:04 | claude-fable | 342 UT | tx_m5xunpc0_a1b2c3d4      |
+| 11:59:52 | gpt-5.6-sol  | 118 UT | tx_m5xunk1q_9f3e21ab      |
++----------+--------------+--------+---------------------------+
 ```
+
+The header gives the budget and where it came from, the chain length and integrity verdict, and the start of the Merkle root; the table lists the last 10 events, newest first. `usertrust inspect --json` returns the same data as JSON.
 
 ## CLI
 
-All commands support `--json` for machine-readable output.
+Every command except `ui` supports `--json` for machine-readable output.
 
 ```bash
 usertrust init          # Create .usertrust/ vault
@@ -198,7 +205,7 @@ usertrust completions   # Shell completions (bash, zsh, fish)
 
 ### JSON output
 
-Every command supports `--json` for scripting and CI:
+Every command except `ui` supports `--json` for scripting and CI:
 
 ```bash
 usertrust inspect --json | jq '.data.remaining'
@@ -228,7 +235,7 @@ Ledger unavailable: connection refused
   Docs: https://usertrust.ai/docs/errors/ledger-unavailable
 ```
 
-In 4.1.0, `usertrust tb start` only prints the manual steps, so the hint above refers to them. Start TigerBeetle as described in [Running TigerBeetle](#running-tigerbeetle), or use `{ dryRun: true }`.
+`usertrust tb start` only prints the manual steps and does not start TigerBeetle, so the hint above refers to them. Start TigerBeetle as described in [Running TigerBeetle](#running-tigerbeetle), or use `{ dryRun: true }`.
 
 ## Config
 
@@ -247,19 +254,17 @@ Create `.usertrust/usertrust.config.json`:
 
 `budget`, `pii`, `parentUserId` and `scope` can also be passed to `trust()` (and to `createGovernor()`), and override the file: `trust(client, { pii: "block" })` blocks PII whatever the file says. Every other setting (`circuitBreaker`, `patterns`, `audit`, …) is read from the file only. Besides these, its own options (`configPath`, `dryRun`, `vaultBase`, `endpoint`, `allowUngoverned`) and `tier` (accepted, but currently not applied), any key passed to `trust()` is refused by name: it throws a `TypeError` such as `trust(): unknown option "circuitBreaker" (set it in .usertrust/usertrust.config.json)` instead of being ignored. So does a `pii` value the config does not allow. `allowUngoverned` is for `trust()` only: `createGovernor()` refuses it by name.
 
-`defineConfig` is available as a TypeScript type-checking helper for validating config objects in your code. The actual config file must be `usertrust.config.json` (JSON format):
+`defineConfig` takes the fully resolved `TrustConfig`, in which every field that has a default is required, and returns it parsed through the schema, so it does not accept a partial object. To build a config in code, pass overrides to `loadConfig`: it reads `.usertrust/usertrust.config.json`, replaces each top-level field you give (the whole field, not a merge) and validates the result. The actual config file must be `usertrust.config.json` (JSON format):
 
 ```typescript
-import { defineConfig } from "usertrust";
+import { loadConfig } from "usertrust";
 
-// Type-check your config object — useful for programmatic overrides
-const config = defineConfig({
+// Read the config file, override some fields, validate the result
+const config = await loadConfig({
   budget: 50_000,
-  tier: "pro",
   pii: "block",
   circuitBreaker: { failureThreshold: 5, resetTimeout: 60_000 },
-  patterns: { enabled: true },
-  audit: { rotation: "daily", indexLimit: 10_000 },
+  audit: { rotation: "daily", indexLimit: 10_000, failClosed: false },
 });
 ```
 
@@ -273,13 +278,13 @@ const config = defineConfig({
 
 **External anchoring** — Ed25519-signed chain-head checkpoints pushed to an append-only store the vault operator cannot rewrite (S3 Object Lock, protected git branch, SIEM). Even a fully re-hashed, internally-consistent rewrite of the events an anchor covers fails verification against the externally-held root; events appended after the last anchor are covered only by the next one. Ships a native SigV4 S3 sink (no AWS SDK), an experimental [Rekor](https://docs.sigstore.dev/logging/overview/) transparency-log witness that publishes digests only, `anchor doctor` to probe whether the writer identity can actually delete or overwrite in the store, and `anchor export-bundle` to hand an auditor the records and receipts in one file. See the [anchoring guide](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md).
 
-**Policy engine** — 12 field operators (`eq`, `gt`, `in`, `regex`, etc.) with soft/hard enforcement. Block specific models, cap costs, require approvals.
+**Policy engine** — 12 field operators (`eq`, `gt`, `in`, `regex`, etc.) with soft/hard enforcement. Block specific models, cap costs. A rule's effect is `deny` or `warn`; there is no approval step.
 
 **PII detection** — a pattern scan of each request's prompt text for email, phone, SSN, Luhn-validated credit card, IPv4 and common secret formats (API keys, cloud and GitHub tokens, JWTs, private keys). Block, redact or warn before the prompt leaves your process. It reads the prompt (messages, input, contents), not tool definitions or other request fields, and never the response; see [what it does and does not cover](https://usertrust.ai/docs/policy/pii).
 
 **Circuit breakers** — Per-provider failure isolation. When a provider starts failing, the breaker opens and requests fail fast instead of cascading.
 
-**Pattern memory** — Learns optimal model routing from historical prompt-cost-success data. Feeds routing decisions when connected to proxy.
+**Pattern memory** — Records a hash of each prompt with the model, cost and outcome in `.usertrust/patterns/memory.json`, and can suggest a model from it (`suggestModel()`). It does not route calls: nothing in the SDK changes the model on the strength of what it recorded, and proxy mode is not implemented.
 
 ## Why this exists
 
@@ -326,7 +331,7 @@ unzip tigerbeetle.zip
 
 Format the data file once; start the replica each time you need it.
 
-**These commands start ONE replica in `--development` mode: a local full-mode run, not a production deployment.** A single replica has no replication and no high availability: lose its data file and the ledger is gone. For production, deploy a replicated TigerBeetle cluster following TigerBeetle's own guidance ([cluster recommendations](https://docs.tigerbeetle.com/operating/cluster/), [deploying](https://docs.tigerbeetle.com/operating/deploying/)), and give the governor all the replica addresses (`tigerbeetle.addresses`).
+**These commands start ONE replica in `--development` mode: a local full-mode run, not a production deployment.** A single replica has no replication and no high availability: lose its data file and the ledger is gone. For production, deploy a replicated TigerBeetle cluster following TigerBeetle's own guidance ([cluster recommendations](https://docs.tigerbeetle.com/operating/cluster/), [deploying](https://docs.tigerbeetle.com/operating/deploying/)), and give the controller all the replica addresses (`tigerbeetle.addresses`).
 
 TigerBeetle and its client need `io_uring` on Linux, and Docker's default seccomp profile blocks it; with it blocked, the client cannot start. In a container, run with `--security-opt seccomp=unconfined` (or a seccomp profile that allows `io_uring`). On a host where `kernel.io_uring_disabled` is set, it must be `0`.
 
@@ -358,7 +363,7 @@ With [external anchoring](https://github.com/usertools-ai/usertrust/blob/master/
 
 ```bash
 usertrust anchor init                                     # once: mint identity, pin the key
-usertrust anchor now --sink-file /mnt/worm/anchors.jsonl  # from cron/CI, or in-process
+usertrust anchor now --sink-file /mnt/worm/anchors.jsonl  # from cron or CI
 
 # or publish straight to S3, after checking the store really refuses deletes
 usertrust anchor doctor --sink-s3 bucket=audit-anchors,region=us-east-1
