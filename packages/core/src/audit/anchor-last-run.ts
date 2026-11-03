@@ -67,12 +67,19 @@ export function lastRunPath(rootDir: string): string {
 
 /**
  * Record a run. Does nothing when the anchors directory does not exist (no
- * identity yet): recording must not create a half-made anchor setup.
+ * identity yet): recording must not create a half-made anchor setup. `onWarning` receives
+ * the directory-sync warning, which carries the vault path; a CLI caller passes one that
+ * scrubs it for the terminal.
  */
-export function writeLastRun(rootDir: string, reason: LastRunReason, now: Date = new Date()): void {
+export function writeLastRun(
+	rootDir: string,
+	reason: LastRunReason,
+	now: Date = new Date(),
+	onWarning?: (message: string) => void,
+): void {
 	if (!existsSync(anchorsDir(rootDir))) return;
 	const entry: LastRun = { at: now.toISOString(), ok: isOkReason(reason), reason };
-	writePrivateFileAtomic(lastRunPath(rootDir), `${JSON.stringify(entry)}\n`);
+	writePrivateFileAtomic(lastRunPath(rootDir), `${JSON.stringify(entry)}\n`, onWarning);
 }
 
 /** Read the record back; null when absent or not a well-formed entry. */

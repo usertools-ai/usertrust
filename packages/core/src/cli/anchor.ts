@@ -252,7 +252,9 @@ async function runScheduled(root: string, args: string[], json: boolean): Promis
 				: "other";
 	}
 	try {
-		writeLastRun(root, reason);
+		writeLastRun(root, reason, new Date(), (message) => {
+			process.stderr.write(`${scrubForTerminal(message)}\n`);
+		});
 	} catch {
 		/* the run's own result still reaches the exit code and the output below */
 	}
