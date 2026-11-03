@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The dashboard's control borders now meet WCAG 1.4.11's 3:1 non-text contrast.** The search box, date and cost inputs, filter chips, buttons, close and info buttons and the Audit/Trends tabs drew their border in `--line` (`rgba(255, 255, 255, 0.11)`), a divider colour that measured 1.23:1 against the page. They now use the new `--control-line` token (`rgba(255, 255, 255, 0.36)`: 3.13:1 on the page, 3.32:1 on the surface), and a filter chip's hover border is the accent colour so it stays brighter than the new resting border. Panel edges, row rules and separators stay on `--line`.
+
 ## [5.4.0] - 2026-11-03
 
 ### Read before upgrading
