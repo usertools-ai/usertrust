@@ -197,7 +197,28 @@ export function demoLines(result: DemoResult): string[] {
 }
 
 export async function run(_rootDir?: string, opts?: CliOptions): Promise<void> {
-	const result = await runDemo();
+	let result: DemoResult;
+	try {
+		result = await runDemo();
+	} catch (err) {
+		// The demo could not even start (an unusable temporary directory, say): say so in the mode asked for, never a stack trace.
+		process.exitCode = 1;
+		const first = (err instanceof Error ? err.message : String(err)).split("\n")[0] ?? "";
+		if (opts?.json === true) {
+			console.log(
+				toSafeJson({
+					command: "demo",
+					success: false,
+					data: { notice: DEMO_PREFIX, error: first.slice(0, 200) },
+				}),
+			);
+		} else {
+			console.error(
+				`${DEMO_PREFIX}: the demo could not run: ${scrubForTerminal(first).slice(0, 200)}`,
+			);
+		}
+		return;
+	}
 	if (!result.ok) process.exitCode = 1;
 	if (opts?.json === true) {
 		console.log(

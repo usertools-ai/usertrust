@@ -145,6 +145,48 @@ describe("usertrust demo", () => {
 		expect(parsed.data.ui).toContain("h\u009b\u202e-");
 	});
 
+	it("an unusable temporary directory is reported in both modes, with exit code 1 and no stack trace", async () => {
+		const missing = join(tmpdir(), "no-such-dir-", "x\u001b[2Jy");
+		const saved = process.env.TMPDIR;
+		process.env.TMPDIR = missing;
+		const out: string[] = [];
+		const err: string[] = [];
+		vi.spyOn(console, "log").mockImplementation((line: unknown) => {
+			out.push(String(line));
+		});
+		vi.spyOn(console, "error").mockImplementation((line: unknown) => {
+			err.push(String(line));
+		});
+		try {
+			await run(undefined, { json: true });
+			expect(process.exitCode).toBe(1);
+			expect(out).toHaveLength(1);
+			const parsed = JSON.parse(out[0] as string) as {
+				command: string;
+				success: boolean;
+				data: { notice: string; error: string };
+			};
+			expect(parsed).toMatchObject({ command: "demo", success: false });
+			expect(parsed.data.notice).toBe(DEMO_PREFIX);
+			expect(parsed.data.error.length).toBeGreaterThan(0);
+			expect(out[0]).not.toContain("    at ");
+
+			process.exitCode = undefined;
+			out.length = 0;
+			await run(undefined, {});
+			expect(process.exitCode).toBe(1);
+			expect(out).toEqual([]);
+			expect(err).toHaveLength(1);
+			expect(err[0]).toMatch(new RegExp(`^${DEMO_PREFIX}: the demo could not run: `));
+			// the path in the message is scrubbed: no escape character reaches the terminal
+			expect(err[0]).not.toContain("\u001b");
+			expect(err[0]).not.toContain("    at ");
+		} finally {
+			if (saved === undefined) delete process.env.TMPDIR;
+			else process.env.TMPDIR = saved;
+		}
+	});
+
 	it("shellWord leaves a plain path alone and quotes anything else for the shell it is printed for", () => {
 		expect(shellWord("/tmp/usertrust-demo-abc123", "linux")).toBe("/tmp/usertrust-demo-abc123");
 		expect(shellWord("/tmp/a b", "linux")).toBe("'/tmp/a b'");
