@@ -174,11 +174,17 @@ async function runScheduled(root: string, args: string[], json: boolean): Promis
 	try {
 		const emitter = createAnchorEmitter(root, emitterConfig(args));
 		const emitted = await emitter.anchorNow();
+		// A quiet run makes no record, so nothing else retries an earlier failed
+		// delivery; retry it here so a recovered sink clears the backlog.
+		if (!emitted.emitted) await emitter.redeliverPending();
 		await emitter.stop();
 		const delivered = emitter.status().outboxDepth === 0;
 		result = emitted;
 		if (emitted.emitted) {
 			reason = delivered ? "anchored" : "sink-failed";
+		} else if (!delivered) {
+			reason = "sink-failed";
+			detail = "an earlier anchor is still waiting in the outbox";
 		} else {
 			reason = classifyEmitReason(emitted.reason);
 			detail = emitted.reason;
@@ -582,7 +588,7 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 				if (lastRun === null) {
 					console.log("Last scheduled run: none recorded");
 				} else {
-					const line = `Last scheduled run: ${lastRun.at} ${lastRun.ok ? "ok" : "FAILED"} (${lastRun.reason})`;
+					const line = `Last scheduled run: ${scrubForTerminal(lastRun.at)} ${lastRun.ok ? "ok" : "FAILED"} (${lastRun.reason})`;
 					console.log(lastRun.ok ? line : pc.red(line));
 				}
 				if (mirror.errors.length > 0) {

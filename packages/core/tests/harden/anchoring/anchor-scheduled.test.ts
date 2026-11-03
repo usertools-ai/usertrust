@@ -162,6 +162,45 @@ describe("anchor now --scheduled", () => {
 		expect(readLastRun(s.root)).toMatchObject({ ok: false, reason: "sink-failed" });
 	});
 
+	it("a quiet run after a failed delivery stays failed; a recovered sink clears it", async () => {
+		const s = await makeAnchoredVault(3);
+		process.chdir(s.root);
+		process.env.USERTRUST_ANCHOR_KEY = s.keyFile;
+		const blocker = join(s.storeDir, "a-file");
+		writeFileSync(blocker, "x");
+		const bad = ["--sink-file", join(blocker, "anchors.jsonl"), "--publish-retries", "1"];
+		const first = await runNow(["--scheduled", ...bad]);
+		expect((first.out.data as { reason: string }).reason).toBe("sink-failed");
+		process.exitCode = 0;
+		// Nothing new to anchor, but the earlier anchor is still undelivered.
+		const quiet = await runNow(["--scheduled", ...bad]);
+		expect(quiet.exit).toBe(1);
+		expect((quiet.out.data as { reason: string }).reason).toBe("sink-failed");
+		expect(readLastRun(s.root)).toMatchObject({ ok: false, reason: "sink-failed" });
+		process.exitCode = 0;
+		// The sink recovers: the backlog is delivered and the run is ok again.
+		const good = await runNow(["--scheduled", "--sink-file", s.storeFile]);
+		expect(good.exit).toBe(0);
+		expect(readLastRun(s.root)).toMatchObject({ ok: true });
+		expect(readFileSync(s.storeFile, "utf-8").trim().length).toBeGreaterThan(0);
+		const outbox = join(anchorsDir(s.root), "outbox");
+		expect(existsSync(outbox) ? readdirSync(outbox).length : 0).toBe(0);
+	});
+
+	it("status prints the recorded time without terminal escapes", async () => {
+		const s = await makeAnchoredVault(1);
+		process.chdir(s.root);
+		writeFileSync(
+			lastRunPath(s.root),
+			JSON.stringify({ at: "\u001b[31mEVIL", ok: true, reason: "anchored" }),
+		);
+		const lines = capture();
+		await anchorRun(["status"], {});
+		const text = lines.join("\n");
+		expect(text).toContain("Last scheduled run:");
+		expect(text).not.toContain("\u001b");
+	});
+
 	it("a failure is not hidden by the next quiet run's output, and status shows it", async () => {
 		const s = await makeAnchoredVault(3);
 		process.chdir(s.root);

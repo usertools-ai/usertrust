@@ -126,6 +126,8 @@ export interface AnchorEmitter {
 	/** Emit a rotation record cross-signed by the CURRENT key (spec §6). */
 	rotate(next: { keyId: string; publicKeySpki: string }): Promise<AnchorEmitResult>;
 	status(): AnchorEmitterStatus;
+	/** Retry delivery of records still in the outbox, oldest first (no new record is made). */
+	redeliverPending(): Promise<void>;
 	/** Start the cadence scheduler (unref'd timer; never blocks appends). */
 	start(): void;
 	stop(): Promise<void>;
@@ -945,6 +947,11 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 		anchorNow: () => emit(),
 		rotate: (next) => emit({ nextKeyId: next.keyId, nextPublicKeySpki: next.publicKeySpki }),
 		status,
+		async redeliverPending(): Promise<void> {
+			const backlog = pendingOutboxRecords(dir);
+			const newest = backlog.at(-1);
+			if (newest !== undefined) await trackPublish(newest);
+		},
 		start(): void {
 			if (timer !== null) return;
 			const everyMs = config.cadence?.everyMs ?? DEFAULT_ANCHOR_EVERY_MS;
