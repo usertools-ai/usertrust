@@ -1203,6 +1203,26 @@
 					"test": "30. happy paths: single anchor / full history / grown chain / post-rotation keyring → ANCHORED_VERIFIED"
 				},
 				{
+					"file": "packages/core/tests/harden/anchoring/anchor-corpus.test.ts",
+					"test": "1. F1 KILL: mutate anchored event + full re-chain + .meta rewrite → ANCHOR_MISMATCH/root-mismatch; --tx never prints INCLUSION VERIFIED"
+				},
+				{
+					"file": "packages/core/tests/harden/anchoring/inclusion-flag.test.ts",
+					"test": "a valid chain checked with NO anchor inputs: valid, and inclusionVerified false"
+				},
+				{
+					"file": "packages/core/tests/harden/anchoring/inclusion-flag.test.ts",
+					"test": "an anchored transaction whose inclusion proof holds, in a vault whose unanchored tail was edited: inclusionVerified false"
+				},
+				{
+					"file": "packages/core/tests/harden/anchoring/inclusion-flag.test.ts",
+					"test": "control: the same anchored transaction on the untouched vault: inclusionVerified true"
+				},
+				{
+					"file": "packages/ui/tests/verify-view.test.ts",
+					"test": "a real receipt from this dashboard's own check (no anchor) reads consistent, unanchored, never verified"
+				},
+				{
 					"file": "packages/ui/tests/verify-view.test.ts",
 					"test": "found, valid and the verifier proved inclusion against an anchor: verified"
 				},
