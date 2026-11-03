@@ -96,8 +96,11 @@ export function RowPanel(props: {
 	 * takes focus on its heading. Unset for a click, which leaves focus where it is.
 	 */
 	focusNonce?: number;
+	/** Called once the heading has taken focus for a request, so the request is cleared and a later remount (another
+	 * view and back) does not replay it and take focus from wherever the reader is. */
+	onFocusHandled?: () => void;
 }): React.JSX.Element {
-	const { row, docked, onClose, focusNonce } = props;
+	const { row, docked, onClose, focusNonce, onFocusHandled } = props;
 	// A verify response is held for the row VERSION it was requested for (the row object: a status correction replaces
 	// it) and shown only while the row is still that version. Clearing the panel when the status changed ran BEFORE an
 	// in-flight response landed, so the earlier status's receipt was then shown beside the corrected status.
@@ -112,7 +115,9 @@ export function RowPanel(props: {
 	// stop), so the next Tab lands on the inspector's own controls, not 20 rows away.
 	// biome-ignore lint/correctness/useExhaustiveDependencies: runs once per request (the nonce), not when docking changes
 	useEffect(() => {
-		if (docked && focusNonce !== undefined) headingRef.current?.focus();
+		if (!docked || focusNonce === undefined) return;
+		headingRef.current?.focus();
+		onFocusHandled?.();
 	}, [focusNonce]);
 
 	// A modal panel takes focus, and returns it to the invoking row on close. A docked one leaves it on the row.

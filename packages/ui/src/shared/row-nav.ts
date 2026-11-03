@@ -11,6 +11,21 @@ import { formatUtc } from "./format.js";
 import { type LedgerRow, statusOf } from "./rows.js";
 
 /**
+ * How many rows a PageUp or PageDown moves: the rows that fit wholly in the list's viewport, measured (each item's
+ * start and end as the virtualiser laid it out), less one so the row at the edge stays in view. At least 1. Under
+ * 560px a row wraps and is two or three times its desktop height, so a fixed row-height estimate would skip rows.
+ */
+export function pageSizeFromItems(
+	items: readonly { start: number; end: number }[],
+	scrollTop: number,
+	viewportHeight: number,
+): number {
+	const bottom = scrollTop + viewportHeight;
+	const whole = items.filter((v) => v.start >= scrollTop && v.end <= bottom).length;
+	return Math.max(1, whole - 1);
+}
+
+/**
  * The index of the active row in the rows as now sorted and filtered. The active row is tracked by hash, so a sort, a
  * filter or a live insert moves its index but not the row; when the row has left the set, the open (selected) row
  * stands in, and failing that the first row. `-1` only for an empty list.

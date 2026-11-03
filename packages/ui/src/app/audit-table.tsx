@@ -13,7 +13,12 @@ import {
 } from "../shared/display.js";
 import { type SortKey, sortRows } from "../shared/filters.js";
 import { compactActor, formatUtc } from "../shared/format.js";
-import { nextRowIndex, resolveActiveIndex, rowAccessibleName } from "../shared/row-nav.js";
+import {
+	nextRowIndex,
+	pageSizeFromItems,
+	resolveActiveIndex,
+	rowAccessibleName,
+} from "../shared/row-nav.js";
 import { type LedgerRow, type RowStatus, statusOf } from "../shared/rows.js";
 
 const SORTS: Array<{ key: SortKey; label: string }> = [
@@ -56,9 +61,6 @@ function Sep(): React.JSX.Element {
 export function rowDomId(hash: string): string {
 	return `ut-row-${hash}`;
 }
-
-/** Rows a screenful holds, by the list's height: what PageUp and PageDown move by (one row of overlap is kept). */
-const ROW_HEIGHT = 64;
 
 function RowBody(props: { row: LedgerRow }): React.JSX.Element {
 	const { row } = props;
@@ -297,7 +299,12 @@ export function AuditTable(props: {
 			props.onOpen(activeRow, true);
 			return;
 		}
-		const page = Math.max(1, Math.floor((parentRef.current?.clientHeight ?? 0) / ROW_HEIGHT) - 1);
+		// A screenful by the rows the virtualiser has MEASURED, not an estimate: under 560px rows stack and wrap and are far
+		// taller than a desktop row, so a fixed estimate made PageUp and PageDown skip rows.
+		const el = parentRef.current;
+		const page = el
+			? pageSizeFromItems(virtualizer.getVirtualItems(), el.scrollTop, el.clientHeight)
+			: 1;
 		const next = nextRowIndex(activeIndex, e.key, sorted.length, page);
 		if (next === null) return;
 		e.preventDefault();

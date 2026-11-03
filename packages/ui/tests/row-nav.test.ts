@@ -9,8 +9,50 @@
 
 import type { PersistedAuditEvent } from "usertrust";
 import { describe, expect, it } from "vitest";
-import { nextRowIndex, resolveActiveIndex, rowAccessibleName } from "../src/shared/row-nav.js";
+import {
+	nextRowIndex,
+	pageSizeFromItems,
+	resolveActiveIndex,
+	rowAccessibleName,
+} from "../src/shared/row-nav.js";
 import { statusOf, toLedgerRows } from "../src/shared/rows.js";
+
+describe("pageSizeFromItems: a screenful by the MEASURED rows", () => {
+	// rows as the virtualiser lays them out: each has a start and an end, with a 2px gap and 8px padding at the top
+	const lay = (heights: number[]) => {
+		let y = 8;
+		return heights.map((h) => {
+			const v = { start: y, end: y + h };
+			y += h + 2;
+			return v;
+		});
+	};
+
+	it("red-first (PageDown skipped rows): tall wrapped rows give a smaller page than desktop rows", () => {
+		// 116px rows (a phone's wrapped row) in a 600px viewport: 5 fit wholly, so a page moves 4 (one kept in view)
+		expect(pageSizeFromItems(lay(Array(20).fill(116)), 0, 600)).toBe(4);
+		// the old estimate, 600 / 64 - 1 = 8, would have skipped 4 of them
+		expect(Math.floor(600 / 64) - 1).toBeGreaterThan(
+			pageSizeFromItems(lay(Array(20).fill(116)), 0, 600),
+		);
+	});
+
+	it("desktop rows: the page is the rows that fit, less one", () => {
+		// 62px rows: 9 fit wholly in 600px from the top
+		expect(pageSizeFromItems(lay(Array(30).fill(62)), 0, 600)).toBe(8);
+	});
+
+	it("a row cut by either edge is not counted", () => {
+		const rows = lay(Array(30).fill(62));
+		// scrolled 30px: the first row is cut at the top
+		expect(pageSizeFromItems(rows, 30, 600)).toBe(pageSizeFromItems(rows, 0, 600) - 1);
+	});
+
+	it("never below 1: one row taller than the viewport still moves one", () => {
+		expect(pageSizeFromItems(lay([900, 900]), 0, 600)).toBe(1);
+		expect(pageSizeFromItems([], 0, 600)).toBe(1);
+	});
+});
 
 describe("resolveActiveIndex: the active row follows its hash through a sort, a filter or an insert", () => {
 	const rows = Array.from({ length: 60 }, (_, i) => ({ hash: `h${i}` }));

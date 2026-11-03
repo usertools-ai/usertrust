@@ -168,7 +168,14 @@ export function App(): React.JSX.Element {
 					{dock &&
 						(open ? (
 							// Keyed by the row: another row's inspector starts clean.
-							<RowPanel key={open.hash} row={open} docked onClose={close} focusNonce={kbOpen} />
+							<RowPanel
+								key={open.hash}
+								row={open}
+								docked
+								onClose={close}
+								focusNonce={kbOpen}
+								onFocusHandled={() => setKbOpen(undefined)}
+							/>
 						) : (
 							<InspectorHint />
 						))}

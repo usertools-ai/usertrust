@@ -181,6 +181,22 @@ describe("the inspector takes focus from the list", () => {
 		expect(src).toContain("resolveActiveIndex(sorted, activeHash, props.selected)");
 	});
 
+	it("red-first (a keyboard open replayed on remount): the focus request is cleared once handled", async () => {
+		// Enter opens a row, Trends and back remounts the inspector: a request still set would take focus from the tab.
+		const panel = await source("row-panel.tsx");
+		expect(panel).toMatch(/headingRef\.current\?\.focus\(\);\s*onFocusHandled\?\.\(\);/);
+		const app = await source("app.tsx");
+		expect(app).toContain("onFocusHandled={() => setKbOpen(undefined)}");
+	});
+
+	it("PageUp and PageDown move by the measured rows in view, not a fixed row height", async () => {
+		const src = await source("audit-table.tsx");
+		expect(src).toContain(
+			"pageSizeFromItems(virtualizer.getVirtualItems(), el.scrollTop, el.clientHeight)",
+		);
+		expect(src).not.toContain("ROW_HEIGHT");
+	});
+
 	it("moving the active row never opens it: only Enter and Space call onOpen from a key", async () => {
 		const src = await source("audit-table.tsx");
 		const keys = src.slice(
