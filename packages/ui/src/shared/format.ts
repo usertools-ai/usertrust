@@ -105,6 +105,13 @@ export function costBoundLabel(op: "≥" | "≤", ut: number): string {
 	return `cost ${op} ${ut} UT ${formatUsdApprox(ut)} · uncosted hidden`;
 }
 
+/**
+ * The cost axis plots whole usertokens, so its ticks are whole too. With decimals allowed, a 1 UT tallest bar gets
+ * ticks at 0, 0.25, 0.5, 0.75 and 1, and the dollar labels (exact to 1 UT) repeat and misstate their heights.
+ * Kept here, beside `formatUsdAxis`, so a test can import it without the chart's JSX module.
+ */
+export const Y_AXIS_ALLOW_DECIMALS = false;
+
 /** A chart axis tick in dollars: 4 dp with trailing zeros dropped, never fewer than 2 dp (`$2.00`, `$0.0005`). */
 export function formatUsdAxis(ut: number): string {
 	return formatUsd(ut).replace(/(\.\d\d)(\d*?)0+$/, "$1$2");

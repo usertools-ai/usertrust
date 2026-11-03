@@ -1,8 +1,7 @@
 import { readFileSync } from "node:fs";
 import { getNiceTickValues } from "recharts";
 import { describe, expect, it } from "vitest";
-import { Y_AXIS_ALLOW_DECIMALS } from "../src/app/trends.js";
-import { formatUsdAxis } from "../src/shared/format.js";
+import { formatUsdAxis, Y_AXIS_ALLOW_DECIMALS } from "../src/shared/format.js";
 
 // The chart's tick generator, as the cost axis calls it (domain from 0 to the tallest bucket, the default 5 ticks).
 const labels = (maxUt: number, allowDecimals: boolean) =>
