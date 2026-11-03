@@ -12,7 +12,7 @@ import {
 	transferView,
 } from "../shared/display.js";
 import { type SortKey, sortRows } from "../shared/filters.js";
-import { compactActor, formatUtc } from "../shared/format.js";
+import { compactActor, formatUtc, UT_KEY } from "../shared/format.js";
 import { type LedgerRow, type RowStatus, statusOf } from "../shared/rows.js";
 
 const SORTS: Array<{ key: SortKey; label: string }> = [
@@ -51,7 +51,7 @@ function Sep(): React.JSX.Element {
 	);
 }
 
-function Row(props: { row: LedgerRow }): React.JSX.Element {
+export function Row(props: { row: LedgerRow }): React.JSX.Element {
 	const { row } = props;
 	const status = statusOf(row);
 	const cost = costView(row);
@@ -102,14 +102,14 @@ function Row(props: { row: LedgerRow }): React.JSX.Element {
 					<span className="ut-amt na">no cost recorded</span>
 				) : (
 					<>
-						<span className="ut-amt">{cost.ut}</span>
+						<span className="ut-amt">{cost.usd}</span>
 						<span className="ut-recd">
 							{cost.estimated && (
 								<span className="ut-est" title={ESTIMATED_TITLE}>
 									est.
 								</span>
 							)}
-							{cost.usd}
+							{cost.ut}
 						</span>
 					</>
 				)}
@@ -281,6 +281,7 @@ export function AuditTable(props: {
 						? `${props.total.toLocaleString()} ${props.total === 1 ? "record" : "records"}`
 						: `${sorted.length.toLocaleString()} of ${props.total.toLocaleString()} records`}
 				</span>
+				<span>{UT_KEY}</span>
 				<span>times in UTC</span>
 			</div>
 		</>

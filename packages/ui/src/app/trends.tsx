@@ -11,7 +11,14 @@ import {
 	statTiles,
 	timeWindow,
 } from "../shared/aggregate.js";
-import { formatUsd, formatUt, formatUtcMinute } from "../shared/format.js";
+import {
+	formatUsd,
+	formatUsdAxis,
+	formatUsdTotal,
+	formatUt,
+	formatUtcMinute,
+	UT_KEY,
+} from "../shared/format.js";
 import { JOB_TYPE_CAVEAT, type LedgerRow } from "../shared/rows.js";
 import { BarList } from "./bar-list.js";
 
@@ -40,11 +47,18 @@ function Tile(props: {
 	value: string;
 	sub: string;
 	tone?: "red" | "alert";
+	/** The exact figure, on hover, behind a rounded one. */
+	valueTitle?: string;
 }): React.JSX.Element {
 	return (
 		<div className="ut-tile">
 			<span className="ut-tile-h">{props.label}</span>
-			<span className={`ut-tile-main${props.tone ? ` ${props.tone}` : ""}`}>{props.value}</span>
+			<span
+				className={`ut-tile-main${props.tone ? ` ${props.tone}` : ""}`}
+				title={props.valueTitle}
+			>
+				{props.value}
+			</span>
 			<span className="ut-sub">{props.sub}</span>
 		</div>
 	);
@@ -84,8 +98,9 @@ export function Trends(props: {
 				    only, over the whole vault, and is labelled as that: two rules, each named. */}
 				<Tile
 					label="Cost in view"
-					value={formatUt(tiles.totalCostUt)}
-					sub={`${formatUsd(tiles.totalCostUt)} · every costed record`}
+					value={formatUsdTotal(tiles.totalCostUt)}
+					valueTitle={formatUsd(tiles.totalCostUt)}
+					sub={`${formatUt(tiles.totalCostUt)} · every costed record`}
 				/>
 				<Tile
 					label="Records"
@@ -94,8 +109,8 @@ export function Trends(props: {
 				/>
 				<Tile
 					label="Avg cost"
-					value={`${tiles.avgCostUt.toFixed(1)} UT`}
-					sub={`per costed record (${tiles.costed.toLocaleString()})`}
+					value={formatUsd(tiles.avgCostUt)}
+					sub={`${tiles.avgCostUt.toFixed(1)} UT · per costed record (${tiles.costed.toLocaleString()})`}
 				/>
 				<Tile
 					label="Failed"
@@ -158,8 +173,8 @@ export function Trends(props: {
 								axisLine={{ stroke: "var(--line)" }}
 							/>
 							<YAxis
-								width={48}
-								tickFormatter={(v: number) => v.toLocaleString()}
+								width={64}
+								tickFormatter={(v: number) => formatUsdAxis(v)}
 								tick={{ fill: "var(--body)", fontSize: 10.5, fontFamily: "var(--mono)" }}
 								tickLine={false}
 								axisLine={false}
@@ -177,7 +192,10 @@ export function Trends(props: {
 								labelStyle={{ color: "var(--body)" }}
 								itemStyle={{ color: "var(--ink)" }}
 								labelFormatter={(label) => formatBucketUtc(Number(label), granularity)}
-								formatter={(value) => [formatUt(Number(value)), "cost"]}
+								formatter={(value) => [
+									`${formatUsd(Number(value))} · ${formatUt(Number(value))}`,
+									"cost",
+								]}
 							/>
 							<Bar
 								dataKey="costUt"
@@ -206,6 +224,7 @@ export function Trends(props: {
 				{props.rows.length.toLocaleString()} records {scope}
 				{window && ` · ${formatUtcMinute(window.first)} to ${formatUtcMinute(window.last)}`}
 			</div>
+			<div className="ut-sub mono">{UT_KEY}</div>
 		</div>
 	);
 }

@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import type { KeyTotal } from "../shared/aggregate.js";
-import { formatUt } from "../shared/format.js";
+import { formatUsd, formatUsdTotal, formatUt } from "../shared/format.js";
 
 /** How many buckets a list shows unless it says otherwise. */
 export const BAR_LIST_LIMIT = 8;
@@ -32,7 +32,8 @@ export function BarList(props: {
 							{t.key}
 						</span>
 						<span className="v" data-cost-ut={t.costUt}>
-							{formatUt(t.costUt)} · {t.count}×
+							<span title={formatUsd(t.costUt)}>{formatUsdTotal(t.costUt)}</span>
+							<span className="ut-bl-ut"> · {formatUt(t.costUt)}</span> · {t.count}×
 						</span>
 						<div className="ut-meter">
 							<i style={{ width: `${max > 0 ? (t.costUt / max) * 100 : 0}%` }} />

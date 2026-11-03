@@ -3,6 +3,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { EMPTY_FILTERS, type FilterState, isFiltering } from "../shared/filters.js";
+import { costBoundLabel } from "../shared/format.js";
 import {
 	JOB_TYPE_CAVEAT,
 	jobTypeOf,
@@ -184,12 +185,12 @@ export function FilterBar(props: {
 	// A cost bound hides every row WITHOUT a cost (an unknown cost is not 0), and the chip says so.
 	if (filters.costMin !== undefined)
 		chips.push({
-			label: `cost ≥ ${filters.costMin} UT · uncosted hidden`,
+			label: costBoundLabel("≥", filters.costMin),
 			clear: () => onChange({ ...filters, costMin: undefined }),
 		});
 	if (filters.costMax !== undefined)
 		chips.push({
-			label: `cost ≤ ${filters.costMax} UT · uncosted hidden`,
+			label: costBoundLabel("≤", filters.costMax),
 			clear: () => onChange({ ...filters, costMax: undefined }),
 		});
 

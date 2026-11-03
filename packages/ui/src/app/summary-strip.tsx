@@ -12,7 +12,7 @@ import {
 	verifiedAsOf,
 	windowNotice,
 } from "../shared/display.js";
-import { formatUsd, formatUt, middleTruncate } from "../shared/format.js";
+import { formatUsd, formatUsdTotal, formatUt, middleTruncate, UT_KEY } from "../shared/format.js";
 import { KIT_MARK_URL, KIT_TIMEOUT_MS } from "../shared/kit.js";
 import type { LiveState } from "./store.js";
 
@@ -94,9 +94,12 @@ function TopBar(props: {
 	);
 }
 
-/** The explainer a bare "absent" never had: a small popover, toggled by click or keyboard, closed by Escape. */
-function AnchorFact(props: { anchorFile: SummaryPayload["anchorFile"] }): React.JSX.Element {
-	const shown = anchorView(props.anchorFile);
+/** Open state for a small popover: closed by a press outside it or by Escape. */
+function usePopover(): {
+	open: boolean;
+	toggle(): void;
+	rootRef: React.RefObject<HTMLDivElement | null>;
+} {
 	const [open, setOpen] = useState(false);
 	const rootRef = useRef<HTMLDivElement>(null);
 	useEffect(() => {
@@ -114,6 +117,13 @@ function AnchorFact(props: { anchorFile: SummaryPayload["anchorFile"] }): React.
 			document.removeEventListener("keydown", esc);
 		};
 	}, [open]);
+	return { open, toggle: () => setOpen((o) => !o), rootRef };
+}
+
+/** The explainer a bare "absent" never had: a small popover, toggled by click or keyboard, closed by Escape. */
+function AnchorFact(props: { anchorFile: SummaryPayload["anchorFile"] }): React.JSX.Element {
+	const shown = anchorView(props.anchorFile);
+	const { open, toggle, rootRef } = usePopover();
 	const [before, after] = shown.explainer.split(ANCHOR_VERIFY_COMMAND);
 	return (
 		<div className="ut-fact">
@@ -127,7 +137,7 @@ function AnchorFact(props: { anchorFile: SummaryPayload["anchorFile"] }): React.
 					className="ut-info-btn"
 					aria-label="what the anchor file is"
 					aria-expanded={open}
-					onClick={() => setOpen((o) => !o)}
+					onClick={toggle}
 				>
 					i
 				</button>
@@ -139,6 +149,41 @@ function AnchorFact(props: { anchorFile: SummaryPayload["anchorFile"] }): React.
 					</div>
 				)}
 			</div>
+		</div>
+	);
+}
+
+/**
+ * The vault's spend: dollars lead (2 dp, the exact 4 dp figure on hover) and the ledger's own unit, usertokens,
+ * follows on the line below, with an info button that gives the key to the unit.
+ */
+function SpendFact(props: { spentUt: number }): React.JSX.Element {
+	const { open, toggle, rootRef } = usePopover();
+	return (
+		<div className="ut-fact" title="The cost of every llm_call record in the vault">
+			<b>Spend</b>
+			<span className="v" title={formatUsd(props.spentUt)}>
+				{formatUsdTotal(props.spentUt)}
+			</span>
+			<div className="ut-info" ref={rootRef}>
+				<span className="ut-sub mono">{formatUt(props.spentUt)}</span>
+				<button
+					type="button"
+					className="ut-info-btn"
+					title={UT_KEY}
+					aria-label={`what a UT is: ${UT_KEY}`}
+					aria-expanded={open}
+					onClick={toggle}
+				>
+					i
+				</button>
+				{open && (
+					<div className="ut-pop text start" role="note">
+						{UT_KEY}
+					</div>
+				)}
+			</div>
+			<span className="ut-sub">llm calls · whole vault</span>
 		</div>
 	);
 }
@@ -165,13 +210,29 @@ function BudgetFact(props: { s: SummaryPayload }): React.JSX.Element {
 						<i style={{ width: `${budget.usedPct}%`, background: `var(--${budget.fill})` }} />
 					</div>
 					{s.remainingUt < 0 ? (
-						<span className="ut-why red">
-							overspent by {formatUt(-s.remainingUt)} of {formatUt(s.budget)}
-						</span>
+						<>
+							<span
+								className="ut-why red"
+								title={`overspent by ${formatUsd(-s.remainingUt)} of ${formatUsd(s.budget)}`}
+							>
+								overspent by {formatUsdTotal(-s.remainingUt)} of {formatUsdTotal(s.budget)}
+							</span>
+							<span className="ut-sub mono">
+								{formatUt(-s.remainingUt)} of {formatUt(s.budget)}
+							</span>
+						</>
 					) : (
-						<span className="ut-sub mono">
-							{formatUt(s.remainingUt)} of {formatUt(s.budget)}
-						</span>
+						<>
+							<span
+								className="ut-amts"
+								title={`${formatUsd(s.remainingUt)} of ${formatUsd(s.budget)}`}
+							>
+								{formatUsdTotal(s.remainingUt)} of {formatUsdTotal(s.budget)}
+							</span>
+							<span className="ut-sub mono">
+								{formatUt(s.remainingUt)} of {formatUt(s.budget)}
+							</span>
+						</>
 					)}
 					<span className="ut-why">{budgetAsOf(s)}</span>
 				</>
@@ -237,12 +298,7 @@ export function SummaryStrip(props: {
 				</div>
 			)}
 			<section className="ut-facts" aria-label="vault summary">
-				<div className="ut-fact" title="The cost of every llm_call record in the vault">
-					<b>Spend</b>
-					<span className="v">{formatUt(s.spentUt)}</span>
-					<span className="ut-sub mono">{formatUsd(s.spentUt)}</span>
-					<span className="ut-sub">llm calls · whole vault</span>
-				</div>
+				<SpendFact spentUt={s.spentUt} />
 				<BudgetFact s={s} />
 				<div className="ut-fact">
 					<b>Chain</b>
