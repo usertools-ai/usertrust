@@ -371,8 +371,10 @@ export function initAnchorIdentity(
 	// The file exists and is ours from here: a write that fails part-way (ENOSPC, EIO) must
 	// not leave a partial key behind, or every retry with this --key-file would refuse.
 	try {
-		writeSync(keyFd, privateKey.export({ type: "pkcs8", format: "pem" }) as string);
+		// writeFileSync on the descriptor writes the WHOLE buffer (writeSync may write less).
+		writeFileSync(keyFd, privateKey.export({ type: "pkcs8", format: "pem" }) as string);
 		fsyncSync(keyFd);
+		closeSync(keyFd);
 	} catch (err) {
 		try {
 			closeSync(keyFd);
@@ -386,7 +388,6 @@ export function initAnchorIdentity(
 		}
 		throw err;
 	}
-	closeSync(keyFd);
 	let createdIdentity: AnchorIdentity;
 	// From here until the identity is published, ANY failure removes the key this call just
 	// made (the exclusive create above proves it is ours): an orphaned key would make a
