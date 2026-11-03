@@ -9,23 +9,30 @@ description: Install usertrust and make your first governed LLM call in 2 minute
 npm install usertrust @anthropic-ai/sdk
 ```
 
-usertrust wraps your provider's own client and does not install it. Install the SDK for the provider you use: `@anthropic-ai/sdk` for the example below, `openai`, or `@google/genai` for Google Gemini. `@anthropic-ai/sdk` (0.116.0 or newer) and `openai` (7.4.0 or newer) are declared as optional peer dependencies; `@google/genai` is not declared, so you install it yourself.
+usertrust wraps your provider's own client and does not install it. Install the SDK for the provider you use beside it: `@anthropic-ai/sdk` for the example below, `openai`, or `@google/genai` for Google Gemini. All three are declared as optional peer dependencies (`@anthropic-ai/sdk` 0.116.0 or newer, `openai` 7.4.0 or newer, `@google/genai` 1.52.0 or newer), so none of them is installed for you.
 
-## Initialize the Vault
+Requires Node 22 or later. The package ships a single ESM build; `require()` also works on Node 22.12+ via `require(esm)`.
+
+## Initialize the vault
 
 ```bash
 npx usertrust init
 ```
 
-This creates the `.usertrust/` directory with the default config, policy rules, and audit chain.
+In a terminal this runs an interactive wizard — paste one or more API keys, set a monthly budget in dollars, accept the recommended rates (or override them per model), and optionally point at a local Ollama / LM Studio / vLLM endpoint — then creates the `.usertrust/` vault: `usertrust.config.json`, `policies/default.yml`, a `.gitignore`, a mode-600 `.env` holding any keys you entered, and empty `audit/`, `patterns/`, `snapshots/`, `board/`, and `dlq/` directories. Anthropic, OpenAI and Google keys are checked against the provider (skip that with `--skip-verify`); a key that fails the check is still saved, with a warning. The chain itself, `audit/events.jsonl`, is created by the first governed call, not by `init`. Pass `--json`, or run it without a terminal, to skip the wizard and write a default vault (no keys, recommended rates, a 50,000-usertoken / $5 budget); `--reconfigure` re-runs the wizard over an existing vault, which `init` otherwise leaves untouched.
 
-## Wrap Your Client
+`trust()` does not read `.usertrust/.env`. `init` saves your keys there but does not export them, so in your own code either export them in your shell, start Node with `--env-file=.usertrust/.env`, or call `await loadConfig()` (exported from `usertrust`) before you construct the provider client — it loads `.usertrust/.env` into `process.env` and sets only variables that are not already set.
+
+## Wrap your client
 
 `trust()` is an async factory that returns a Proxy-wrapped client. It works with Anthropic, OpenAI, and Google SDKs via duck typing — no provider imports needed.
 
 ```ts
 import Anthropic from "@anthropic-ai/sdk";
-import { trust } from "usertrust";
+import { trust, loadConfig } from "usertrust";
+
+// trust() does not read .usertrust/.env — load the keys init stored, first
+await loadConfig();
 
 // trust() is async — it sets up the ledger + audit chain
 const client = await trust(new Anthropic(), {
@@ -51,43 +58,52 @@ await client.destroy();
 Always call `client.destroy()` when done. It releases the TigerBeetle connection, advisory locks, and pending transfers.
 </Callout>
 
-## What Happens Under the Hood
+## What happens under the hood
 
 Every governed call executes a two-phase spend:
 
-1. **PENDING** — Reserve tokens atomically before the LLM call
-2. **Forward** — Call the real SDK method
-3. **POST** — Settle the hold on success
-4. **VOID** — Release the hold on failure
+1. **PENDING** — reserve tokens atomically before the LLM call
+2. **Forward** — call the real SDK method
+3. **POST** — settle the hold on success
+4. **VOID** — release the hold on failure
 
-This is the same pattern banks use for credit card authorization holds.
+The hold is what makes concurrent agents safe: available budget is `budget − spent − Σ(holds)`, so the first call that would exceed what is actually available throws instead of settling past it.
 
-## The Governance Receipt
+## The governance receipt
 
 Every call returns a `TrustReceipt`:
 
 ```ts
 {
-  transferId: "tx_m4k7z_a1b2c3",
+  transferId: "tx_m5xunpc0_a1b2c3d4", // tx_<base36 ms>_<8 hex>
   cost: 342,                    // usertokens spent
   budgetRemaining: 49_658,      // tokens left
   auditHash: "a1b2c3d4...",     // SHA-256 hash in the chain
-  chainPath: ".usertrust/audit/events.jsonl",
+  chainPath: ".usertrust/audit", // the audit directory, not the file
+  receiptUrl: null,             // always null: remote proxy mode is not implemented
   settled: true,                // POST succeeded
   model: "claude-fable-5",
   provider: "anthropic",
-  timestamp: "2025-01-15T...",
+  timestamp: "2026-11-02T...",
+  usageSource: "provider",      // "estimated" (and no usage block) when the provider reported no counts
+  usage: { inputTokens: 420, outputTokens: 600, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  endpoint: { class: "cloud", runtime: "unknown" },
+  meter: { costBasis: "usd-proxy", rateSource: "table" },
+  pricing: {                    // ceil(Σ counts × rates / 1000), floored at 1, reproduces cost: 42 + 300 = 342
+    appliedRates: { inputPer1k: 100, outputPer1k: 500, cacheReadPer1k: 10, cacheWritePer1k: 125 },
+    tableVersion: "2026-10-28",
+  },
 }
 ```
 
-## Supported Providers
+## Supported providers
 
 usertrust detects your SDK by structural shape:
 
-| Provider | Detection | Method Intercepted |
+| Provider | Detection | Method intercepted |
 |----------|-----------|-------------------|
-| Anthropic | `client.messages.create` | `messages.create()` |
-| OpenAI | `client.chat.completions.create` | `chat.completions.create()` |
+| Anthropic | `client.messages.create` | `messages.create()`, `messages.stream()`, `messages.parse()`, and the same three under `beta.messages` |
+| OpenAI | `client.chat.completions.create` | `chat.completions.create()`, plus `responses.create()` when present (the `responses.stream()` and `responses.parse()` helpers are not governed and are refused) |
 | Google | `client.models.generateContent` | `models.generateContent()`, `models.generateContentStream()` |
 
 ```ts
@@ -102,9 +118,13 @@ const client = await trust(new GoogleGenAI({ apiKey }), { budget: 50_000 });
 const { response } = await client.models.generateContent({ ... });
 ```
 
+<Callout type="warn">
+Without `dryRun`, TigerBeetle must be running. These examples omit `dryRun: true`, so `trust()` opens a TigerBeetle client at `tigerbeetle.addresses` (default `127.0.0.1:3001`) and waits for it to answer. With nothing listening, `trust()` throws `LedgerUnavailableError` within 1 s on a loopback address (3 s on a remote one) (`No ledger is running at 127.0.0.1:3001. Fix: npx usertrust tb start`; for a different address or cluster the fix names it); when something listens but no usertrust ledger answers, it throws after `tigerbeetle.connectTimeoutMs` (default `5000`). `npx usertrust tb start` is a stub that only prints the manual commands: start TigerBeetle yourself on the address your config names, or pass `dryRun: true` (or set `USERTRUST_DRY_RUN=true`).
+</Callout>
+
 On a Google client `models.generateContent` and `models.generateContentStream` are governed; `generateContentStream` resolves to the stream itself with the settled receipt on it (`await stream.receipt`). Every other Google method is refused unless it is free, as on the other providers (below): the billable ones (`models.embedContent`, the image and video methods, `chats.create`, `live.connect`, `batches.create`, `interactions.create`, `tunings.tune`, `caches.create` / `update`, the `fileSearchStores` uploads, imports and creates), every `*Internal` method, `authTokens.create`, `files.upload`, and the SDK's raw transport (`apiClient`, `getNextGenClient()`, a next-gen resource's `_client`, `live.auth`, `live.webSocketFactory`) reject with a `PolicyDeniedError` naming the method, and record a `policy_denied` audit event, before the SDK is called. `files.upload` sends the file's bytes with no PII scan: to upload a file and then pass it to `generateContent`, list it, `allowUngoverned: ["files.upload"]` (audited as `ungoverned_call`, and unredacted), or upload on the original client. With automatic function calling (a callable tool in `config.tools`, AFC not disabled), `generateContent` is metered per round: usertrust runs the loop itself, each round its own governed call, and the envelope carries `receipts`, one per round. `generateContentStream` with automatic function calling is refused the same way for now, because a streamed loop is not yet metered round by round: use `generateContent`, or set `config.automaticFunctionCalling.disable: true` and run the tool calls yourself. Reads, lists, deletes, `models.countTokens` and cancels run free (`@google/genai` 1.52.0 or later).
 
-On every client, every SDK method usertrust does not govern is refused unless it cannot start work: `embeddings.create`, `messages.batches.create`, `chat.completions.parse` and the like return a promise that rejects with a `PolicyDeniedError` (`ungoverned_method: <path>`) and write a `policy_denied` audit event, and the SDK is never called. Methods that cannot start work run as before: reads, lists and deletes (every GET or DELETE request) and a few named POSTs such as `messages.countTokens`, `moderations.create` and cancels. To run a refused method unmetered, list it: `trust(client, { allowUngoverned: ["embeddings.create"] })`; each such call is audited as `ungoverned_call`. `client.withOptions(...)` returns a client governed by the same governor, unless it changes where or how calls are sent (`baseURL`, `fetch`, `fetchOptions`, …), which is refused.
+On every client, every SDK method usertrust does not govern is refused unless it cannot start work: `embeddings.create`, `messages.batches.create`, `chat.completions.parse` and the like return a promise that rejects with a `PolicyDeniedError` (`ungoverned_method: <path>`) and write a `policy_denied` audit event, and the SDK is never called. Methods that cannot start work run as before: reads, lists and deletes (every GET or DELETE request) and a few named POSTs such as `messages.countTokens`, `moderations.create` and cancels. To run a refused method unmetered, list it: `trust(client, { allowUngoverned: ["embeddings.create"] })`; each such call is audited as `ungoverned_call`. `client.withOptions(...)` returns a client governed by the same controller, unless it changes where or how calls are sent (`baseURL`, `fetch`, `fetchOptions`, …), which is refused.
 
 ## Streaming
 

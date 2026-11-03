@@ -257,7 +257,7 @@
 				},
 				{
 					"file": "site/content/docs/index.mdx",
-					"text": "- **SHA-256 hash-chained audit trail** — Append-only JSONL."
+					"text": "- **SHA-256 hash-chained audit trail** — append-only JSONL."
 				}
 			],
 			"proofs": [
@@ -593,6 +593,10 @@
 				{
 					"file": "site/content/docs/quickstart.mdx",
 					"text": "Vault integrity: VERIFIED (UNANCHORED — internal consistency only)"
+				},
+				{
+					"file": "site/content/docs/verify/index.mdx",
+					"text": "the verdict line reads `Vault integrity: VERIFIED (UNANCHORED — internal consistency only)`."
 				}
 			],
 			"proofs": [
@@ -626,6 +630,10 @@
 				{
 					"file": "packages/verify/README.md",
 					"text": "| `1` | Verification failed (tamper, truncation, or corrupt anchor) |"
+				},
+				{
+					"file": "site/content/docs/verify/index.mdx",
+					"text": "| `0` | Verified |"
 				}
 			],
 			"proofs": [
@@ -1200,6 +1208,11 @@
 			"why": "problem statement, about running without usertrust"
 		},
 		{
+			"file": "README.md",
+			"text": "| Chain: 847 events | Integrity: SHA-256 verified |",
+			"why": "sample header of `usertrust inspect`; it shows a chain check, not an anchoring or tamper-proof claim"
+		},
+		{
 			"file": "LIMITATIONS.md",
 			"text": "The exact, current boundary is enumerated at the source in `packages/core/src/detect.ts` and `packages/core/src/default-deny.ts`.",
 			"why": "PII and injection detection boundary, not the audit chain"
@@ -1451,12 +1464,12 @@
 		},
 		{
 			"file": "site/content/docs/index.mdx",
-			"text": "## Core Guarantees",
+			"text": "## Core guarantees",
 			"why": "a section heading"
 		},
 		{
 			"file": "site/content/docs/index.mdx",
-			"text": "- **Two-phase spend lifecycle** — Every governed LLM call follows `PENDING hold → LLM call → POST (success) or VOID (failure)`.",
+			"text": "- **Two-phase spend lifecycle** — every governed LLM call follows `PENDING hold → LLM call → POST (success) or VOID (failure)`.",
 			"why": "the spend lifecycle, not the audit chain"
 		},
 		{
@@ -1475,6 +1488,21 @@
 			"why": "SDK client detection"
 		},
 		{
+			"file": "site/content/docs/cli/index.mdx",
+			"text": "# acknowledge that a live TigerBeetle ledger is not rolled back",
+			"why": "what snapshot restore does to the ledger; not about the audit chain"
+		},
+		{
+			"file": "site/content/docs/cli/index.mdx",
+			"text": "`--force` bypasses only the refusal that a live `tigerbeetle/` ledger cannot be rolled back.",
+			"why": "what snapshot restore does to the ledger; not about the audit chain"
+		},
+		{
+			"file": "site/content/docs/cli/index.mdx",
+			"text": "(the output also reports whether the chain verified)",
+			"why": "says the command's output carries a verification line; the verification itself is documented on the verify page"
+		},
+		{
 			"file": "site/content/docs/schemas.mdx",
 			"text": "usertrust publishes JSON Schema (draft 2020-12) definitions for its two public interop shapes: the receipt returned by every governed call, and one persisted line of the hash-chained audit log.",
 			"why": "names the receipt every governed call returns; a schema, not an audit claim"
@@ -1483,6 +1511,11 @@
 			"file": "site/content/docs/schemas.mdx",
 			"text": "| Trust Receipt v1 | [receipt.v1.schema.json](https://usertrust.ai/schemas/receipt.v1.schema.json) | The `TrustReceipt` returned by every governed call |",
 			"why": "names the receipt every governed call returns; a schema, not an audit claim"
+		},
+		{
+			"file": "site/content/docs/verify/index.mdx",
+			"text": "Exit codes: `0` verified, `1` failed, `2` unverifiable, `3` usage error.",
+			"why": "exit codes of the signed-receipt verifier, a separate command from vault verification"
 		},
 		{
 			"file": "LIMITATIONS.md",
