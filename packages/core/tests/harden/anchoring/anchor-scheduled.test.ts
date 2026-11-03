@@ -339,6 +339,35 @@ describe("anchor now --scheduled", () => {
 		},
 	);
 
+	it("a corrupt oldest outbox entry holds back every later one", async () => {
+		const s = await makeAnchoredVault(3);
+		process.chdir(s.root);
+		process.env.USERTRUST_ANCHOR_KEY = s.keyFile;
+		const blocker = join(s.storeDir, "a-file");
+		writeFileSync(blocker, "x");
+		const bad = ["--sink-file", join(blocker, "anchors.jsonl"), "--publish-retries", "1"];
+		await runNow(["--scheduled", ...bad]); // entry 1 stays in the outbox
+		process.exitCode = 0;
+		await appendEvents(s.root, 2, 4);
+		await runNow(["--scheduled", ...bad]); // entry 2 joins it
+		process.exitCode = 0;
+		const outbox = join(anchorsDir(s.root), "outbox");
+		const names = readdirSync(outbox).sort();
+		expect(names).toEqual(["000000000001.json", "000000000002.json"]);
+		// positive control: with both intact a good sink delivers both
+		const first = readFileSync(join(outbox, names[0] as string), "utf-8");
+		writeFileSync(join(outbox, names[0] as string), "{ not json");
+		const held = await runNow(["--scheduled", "--sink-file", s.storeFile]);
+		expect(held.exit).toBe(1);
+		expect(readdirSync(outbox).sort()).toEqual(names);
+		expect(existsSync(s.storeFile) ? storeRecords(s) : []).toHaveLength(0);
+		writeFileSync(join(outbox, names[0] as string), first);
+		const ok = await runNow(["--scheduled", "--sink-file", s.storeFile]);
+		expect(ok.exit).toBe(0);
+		expect(storeRecords(s)).toHaveLength(2);
+		expect(readdirSync(outbox)).toEqual([]);
+	});
+
 	it("status prints the recorded time without terminal escapes", async () => {
 		const s = await makeAnchoredVault(1);
 		process.chdir(s.root);

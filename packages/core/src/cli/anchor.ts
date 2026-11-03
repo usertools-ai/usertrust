@@ -203,10 +203,13 @@ async function runScheduled(root: string, args: string[], json: boolean): Promis
 		// delivery; retry it here so a recovered sink clears the backlog.
 		// Only after a benign outcome: a refusal (invalid outbox entry, mirror trouble) or
 		// contention (another run holds the lock) must not trigger delivery.
+		let lockedMidRun = false;
 		const benign =
 			emitted.reason === "no-new-events" || (emitted.reason === "empty" && emptyFault === null);
 		if (!emitted.emitted && benign) {
-			await emitter.redeliverPending();
+			// Another run may take the lock between the two calls: that is contention, not a
+			// failed delivery.
+			lockedMidRun = (await emitter.redeliverPending()) === "locked";
 		}
 		await emitter.stop();
 		const delivered = emitter.status().outboxDepth === 0;
@@ -216,6 +219,9 @@ async function runScheduled(root: string, args: string[], json: boolean): Promis
 		} else if (emptyFault !== null) {
 			reason = emptyFault.reason;
 			detail = emptyFault.detail;
+		} else if (lockedMidRun) {
+			reason = "locked";
+			detail = "another run took the lock before redelivery";
 		} else if (!delivered && benign) {
 			reason = "sink-failed";
 			detail = "an earlier anchor is still waiting in the outbox";

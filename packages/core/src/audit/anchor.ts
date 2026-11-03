@@ -126,8 +126,11 @@ export interface AnchorEmitter {
 	/** Emit a rotation record cross-signed by the CURRENT key (spec §6). */
 	rotate(next: { keyId: string; publicKeySpki: string }): Promise<AnchorEmitResult>;
 	status(): AnchorEmitterStatus;
-	/** Retry delivery of records still in the outbox, oldest first (no new record is made). */
-	redeliverPending(): Promise<void>;
+	/**
+	 * Retry delivery of records still in the outbox, oldest first (no new record is made).
+	 * Resolves "locked" when another run holds the writer lock, so nothing was attempted.
+	 */
+	redeliverPending(): Promise<"done" | "locked">;
 	/** Start the cadence scheduler (unref'd timer; never blocks appends). */
 	start(): void;
 	stop(): Promise<void>;
@@ -959,21 +962,31 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 		anchorNow: () => emit(),
 		rotate: (next) => emit({ nextKeyId: next.keyId, nextPublicKeySpki: next.publicKeySpki }),
 		status,
-		async redeliverPending(): Promise<void> {
+		async redeliverPending(): Promise<"done" | "locked"> {
 			// Under the writer lock, and only records the mirror already holds byte for
 			// byte: an outbox entry the mirror lacks, or holds differently, is one the
 			// emitter has not accepted (or refused), and must never reach the store.
 			// With no sink configured delivery would succeed vacuously and erase the
 			// entry, so nothing is redelivered and the backlog stays.
-			if (sinks.length === 0) return;
+			if (sinks.length === 0) return "done";
 			const release = tryAcquireAnchorLock(dir);
-			if (release === null) return;
+			if (release === null) return "locked";
 			try {
 				await publishChain;
 				const mirror = readMirrorRecords(dir);
-				if (!mirror.present || mirror.errors.length > 0) return;
+				if (!mirror.present || mirror.errors.length > 0) return "done";
 				const held = new Map(mirror.records.map((r) => [r.anchorSeq, canonicalize(r)]));
-				for (const rec of pendingOutboxRecords(dir)) {
+				// Oldest first, and stop at the first entry that is unreadable, unparsable or
+				// not held by the mirror byte for byte: a later entry must never be delivered
+				// past one that was not.
+				for (const seq of outboxSeqs(dir).sort((a, b) => a - b)) {
+					let rec: AnchorRecord | null = null;
+					try {
+						rec = parseAnchorRecord(readFileSync(outboxPath(dir, seq), "utf-8").trim()).record;
+					} catch {
+						rec = null;
+					}
+					if (rec === null || rec.anchorSeq !== seq) break;
 					if (held.get(rec.anchorSeq) !== canonicalize(rec)) break;
 					try {
 						await deliverToSinks(rec);
@@ -987,6 +1000,7 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 					}
 				}
 				if (outboxSeqs(dir).length === 0) degraded = false;
+				return "done";
 			} finally {
 				release();
 			}
