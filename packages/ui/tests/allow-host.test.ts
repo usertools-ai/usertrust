@@ -146,7 +146,7 @@ describe("usertrust-ui --allow-host", () => {
 	// position and repeats none of it. mutant: the value is echoed (JSON.stringify) → this row fails.
 	it("a refused value is never echoed: no control character reaches the message", async () => {
 		// Built from code points, not written as characters: a bidi control in this source would reorder how it is read.
-		const ranges = [
+		const ranges: Array<[number, number?]> = [
 			[0x00, 0x1f],
 			[0x7f, 0x9f],
 			[0x61c],
