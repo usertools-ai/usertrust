@@ -6,7 +6,11 @@
  * header, the rows, the inspector and Trends cannot print the same figure two ways.
  */
 
-import { UT_TO_USD } from "./rows.js";
+// The usertoken and dollar formatters live in core, so the command line, the demo and this ledger print one figure one way.
+// The `usertrust/receipt` entry point is pure, so it is safe in the browser bundle.
+import { formatUsd, formatUt } from "usertrust/receipt";
+
+export { formatUsd, formatUt };
 
 function pad2(n: number): string {
 	return String(n).padStart(2, "0");
@@ -44,19 +48,6 @@ export function utcHour(iso: string): string {
 export function formatUtcMinute(iso: string): string {
 	const t = Date.parse(iso);
 	return Number.isNaN(t) ? iso : `${new Date(t).toISOString().slice(0, 16).replace("T", " ")}Z`;
-}
-
-/** Usertokens, with their unit. */
-export function formatUt(ut: number): string {
-	return `${ut.toLocaleString()} UT`;
-}
-
-/**
- * Dollars at 4 dp: 1 UT is exactly $0.0001, so 4 dp is exact. The header printed 2 dp and the rows 4, so a $0.0097
- * call summed into a "$0.95" that no row added up to.
- */
-export function formatUsd(ut: number): string {
-	return `$${(ut * UT_TO_USD).toFixed(4)}`;
 }
 
 /**
