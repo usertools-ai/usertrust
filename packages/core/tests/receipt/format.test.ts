@@ -51,6 +51,59 @@ describe("formatReceipt", () => {
 		expect(formatReceipt(receipt).split("\n")[0]).toBe("$0.0104 (104 usertokens)");
 	});
 
+	it("a nominal cost (a local model) is shown as units, never as dollars", () => {
+		const local = formatReceipt({
+			...receipt,
+			cost: 1,
+			budgetRemaining: 49_999,
+			meter: { costBasis: "nominal" },
+		});
+		const [first, , third] = local.split("\n");
+		expect(first).toBe("1 nominal usertoken (nominal units: no dollars were spent)");
+		expect(local).not.toContain("$");
+		expect(third).toBe(
+			"held, then charged 1 usertoken; 49,999 nominal usertokens left in the session budget",
+		);
+	});
+
+	it("a usd-proxy cost is dollars, like a receipt with no meter", () => {
+		const metered = formatReceipt({ ...receipt, cost: 104, meter: { costBasis: "usd-proxy" } });
+		expect(metered.split("\n")[0]).toBe("$0.0104 (104 usertokens)");
+		expect(formatReceipt(receipt).split("\n")[0]).toBe(metered.split("\n")[0]);
+	});
+
+	it("a cost-center call shows the envelope that paid, not the session wallet", () => {
+		const text = formatReceipt({
+			...receipt,
+			budgetRemaining: 50_000,
+			budget: { costCenter: "support", remaining: 1_200 },
+		});
+		expect(text).toContain("1,200 usertokens ($0.1200) left in the support cost center's envelope");
+		expect(text).not.toContain("session budget");
+		expect(text).not.toContain("50,000");
+	});
+
+	it("an exhausted envelope says so, whatever the session wallet holds", () => {
+		const text = formatReceipt({
+			...receipt,
+			budgetRemaining: 50_000,
+			budget: { costCenter: "support", remaining: 0 },
+		});
+		expect(text).toContain("0 usertokens ($0.0000) left in the support cost center's envelope");
+		expect(text).not.toContain("$5.0000");
+	});
+
+	it("a call outside any cost center labels its figure as the session budget", () => {
+		expect(formatReceipt(receipt)).toContain("left in the session budget");
+		expect(formatReceipt(receipt)).not.toContain("cost center");
+	});
+
+	it("a cost center's name is stripped of control characters", () => {
+		const text = formatReceipt({ ...receipt, budget: { costCenter: "a\u001b[2Jb", remaining: 5 } });
+		expect(text.split("\n")).toHaveLength(5);
+		expect(text).toContain("a?[2Jb cost center's envelope");
+	});
+
 	it("says one usertoken in the singular", () => {
 		expect(formatReceipt({ ...receipt, cost: 1 }).split("\n")[0]).toBe("$0.0001 (1 usertoken)");
 	});
@@ -59,7 +112,7 @@ describe("formatReceipt", () => {
 		expect(formatReceipt(receipt).split("\n")).toEqual([
 			"$0.0104 (104 usertokens)",
 			"claude-haiku-4-5 via anthropic",
-			"held, then charged 104 usertokens; 49,896 usertokens ($4.9896) left in the budget",
+			"held, then charged 104 usertokens; 49,896 usertokens ($4.9896) left in the session budget",
 			"sealed a3f8c1d92b4e... in the audit chain at .usertrust/audit",
 			"receipt tx_m4k7z_a1b2c3, 2026-03-16T12:00:00.000Z",
 		]);

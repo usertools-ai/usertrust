@@ -45,6 +45,16 @@ export interface ReceiptFields {
 	readonly usageSource?: "provider" | "estimated" | undefined;
 	/** Set on a governed action's receipt, which has no `usageSource`. */
 	readonly actionKind?: string | undefined;
+	/**
+	 * What the cost is denominated in: `usd-proxy` is a dollar-proxy (a metered provider), `nominal` is a bookkeeping unit
+	 * (a local model, where no dollar was spent). Absent on a receipt with no meter, which is read as dollars.
+	 */
+	readonly meter?: { readonly costBasis: "usd-proxy" | "nominal" } | undefined;
+	/**
+	 * The cost-center envelope that paid, read after the call settled. Present only for a call inside a cost-center scope.
+	 * `budgetRemaining` is the SESSION wallet, which an exhausted envelope does not touch.
+	 */
+	readonly budget?: { readonly costCenter: string; readonly remaining: number } | undefined;
 }
 
 /**
@@ -56,8 +66,8 @@ function plain(text: string): string {
 }
 
 /** A usertoken count as plain words: `1 usertoken`, `104 usertokens`, `1,000,000 usertokens`. */
-function usertokens(ut: number): string {
-	return `${ut.toLocaleString("en-US")} usertoken${ut === 1 ? "" : "s"}`;
+function usertokens(ut: number, nominal = false): string {
+	return `${ut.toLocaleString("en-US")} ${nominal ? "nominal " : ""}usertoken${ut === 1 ? "" : "s"}`;
 }
 
 /**
@@ -73,7 +83,13 @@ function usertokens(ut: number): string {
  * and a charge capped at its hold says what was posted.
  */
 export function formatReceipt(receipt: ReceiptFields): string {
-	const cost = `${formatUsd(receipt.cost)} (${usertokens(receipt.cost)})`;
+	// A local model's cost is a nominal unit, not a dollar: it is shown as units, never as money.
+	const nominal = receipt.meter?.costBasis === "nominal";
+	const cost = nominal
+		? `${usertokens(receipt.cost, true)} (nominal units: no dollars were spent)`
+		: `${formatUsd(receipt.cost)} (${usertokens(receipt.cost)})`;
+	const worth = (ut: number): string =>
+		nominal ? usertokens(ut, true) : `${usertokens(ut)} (${formatUsd(ut)})`;
 
 	const model = `${plain(receipt.model)} via ${plain(receipt.provider)}${
 		receipt.usageSource === "estimated" ? " (token counts estimated)" : ""
@@ -89,7 +105,12 @@ export function formatReceipt(receipt: ReceiptFields): string {
 	} else {
 		charge = `held, then charged ${usertokens(receipt.cost)}`;
 	}
-	const left = `${usertokens(receipt.budgetRemaining)} (${formatUsd(receipt.budgetRemaining)}) left in the budget`;
+	// The envelope that paid, when the call ran in a cost-center scope; otherwise the session budget, named as such, since
+	// an exhausted envelope leaves the session wallet untouched.
+	const left =
+		receipt.budget !== undefined
+			? `${worth(receipt.budget.remaining)} left in the ${plain(receipt.budget.costCenter)} cost center's envelope`
+			: `${worth(receipt.budgetRemaining)} left in the session budget`;
 
 	// Only a stream's estimate handle (unsettled, before the stream is consumed) carries a placeholder hash for a spend
 	// event that is not on the chain yet. Every final receipt of a call has a usageSource and every governed action has
