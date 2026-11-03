@@ -280,7 +280,9 @@ async function download(
 	});
 	let source: Readable;
 	let sink: ReturnType<typeof createWriteStream>;
-	let diskError: unknown;
+	// WHERE the first error came from. `pipeline` re-emits a failing stage's error on the stages it destroys, so the sink also sees a SOURCE error;
+	// only the first stream to emit tells a disk fault from a network one.
+	let origin: { from: "source" | "sink"; error: unknown } | undefined;
 	try {
 		source = Readable.fromWeb(res.body as unknown as WebReadableStream<Uint8Array>);
 		sink = (opts.createWriteStream ?? createWriteStream)(tmp, { flags: "wx", mode: 0o600 });
@@ -288,17 +290,19 @@ async function download(
 		await cancelBody();
 		throw installFailed(`cannot create the download file ${tmp}`, err);
 	}
-	// an error the write stream itself raises (open, write, close) is a DISK error; anything else that rejects the pipeline is not
+	source.on("error", (err) => {
+		origin ??= { from: "source", error: err };
+	});
 	sink.on("error", (err) => {
-		diskError ??= err;
+		origin ??= { from: "sink", error: err };
 	});
 	try {
 		await pipeline(source, counter, sink);
 	} catch (err) {
 		await cancelBody();
 		if (err instanceof TigerBeetleInstallError) throw err;
-		if (diskError !== undefined)
-			throw installFailed(`cannot create or write the download file ${tmp}`, diskError);
+		if (origin?.from === "sink")
+			throw installFailed(`cannot create or write the download file ${tmp}`, origin.error);
 		throw new TigerBeetleInstallError(
 			"download-failed",
 			`the download of ${url} broke after ${received} bytes: ${(err as Error).message}. ${BLOCKED_NETWORK_HINT}`,

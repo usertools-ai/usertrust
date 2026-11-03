@@ -522,6 +522,40 @@ describe.skipIf(!POSIX || process.getuid?.() === 0)(
 			expect(readFileSync(got.path).equals(bin)).toBe(true);
 		});
 
+		it("a network break MID-download (the body errors after some bytes) is download-failed with the blocked-network hint, not install-failed, and the temp file is removed", async () => {
+			const h = home();
+			const bin = script(VERSION);
+			const zip = makeZip([{ name: "tigerbeetle", data: bin }]);
+			let sent = false;
+			const body = new ReadableStream<Uint8Array>({
+				pull(controller) {
+					if (!sent) {
+						sent = true;
+						controller.enqueue(new Uint8Array(zip.subarray(0, Math.min(40, zip.length - 1))));
+						return;
+					}
+					controller.error(new Error("socket hang up"));
+				},
+			});
+			const refused = await installPinned({
+				manifest: manifestFor(zip, "tigerbeetle", bin.length),
+				platform: "linux",
+				arch: "x64",
+				home: h,
+				env: {},
+				fetch: (async () => new Response(body, { status: 200 })) as typeof fetch,
+			}).then(
+				() => {
+					throw new Error("expected installPinned to refuse");
+				},
+				(e: unknown) => e as TigerBeetleInstallError,
+			);
+			expect(refused.code).toBe("download-failed");
+			expect(refused.message).toContain("socket hang up");
+			expect(refused.message).toContain("release-assets.githubusercontent.com");
+			expect(readdirSync(dirOf(h))).toEqual([]);
+		});
+
 		it("the response body is cancelled on every early exit: a non-OK status, a file that cannot be created, and a write error", async () => {
 			const stream = () => {
 				const state = { cancelled: false };
