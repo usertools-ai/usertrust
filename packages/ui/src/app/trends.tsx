@@ -11,6 +11,7 @@ import {
 	statTiles,
 	timeWindow,
 } from "../shared/aggregate.js";
+import { chartSummary } from "../shared/chart-summary.js";
 import { formatUsd, formatUt, formatUtcMinute } from "../shared/format.js";
 import { JOB_TYPE_CAVEAT, type LedgerRow } from "../shared/rows.js";
 import { BarList } from "./bar-list.js";
@@ -69,6 +70,10 @@ export function Trends(props: {
 				.filter((b) => !Number.isNaN(b.t)),
 		[props.rows, granularity],
 	);
+	const summary = useMemo(
+		() => chartSummary(series, granularity, (t) => formatBucketUtc(t, granularity)),
+		[series, granularity],
+	);
 	const tiles = useMemo(() => statTiles(props.rows), [props.rows]);
 	const window = useMemo(() => timeWindow(props.rows), [props.rows]);
 	// Everything here is the rows in view: never the vault, when the server holds a window of it.
@@ -124,13 +129,15 @@ export function Trends(props: {
 			<div className="ut-card">
 				<div className="ut-card-h">
 					<span className="ut-tile-h">Cost over time · UTC</span>
-					<div className="ut-seg small" role="tablist" aria-label="bucket size">
+					{/* One chart, bucketed two ways: a toggle, not tabs (there is no panel to switch to). A fieldset would
+					    bring its own border and padding into a control that is styled as a segmented switch. */}
+					{/* biome-ignore lint/a11y/useSemanticElements: role="group" keeps the segmented look; a fieldset restyles it */}
+					<div className="ut-seg small" role="group" aria-label="Bucket size">
 						{(["day", "hour"] as const).map((g) => (
 							<button
 								key={g}
 								type="button"
-								role="tab"
-								aria-selected={granularity === g}
+								aria-pressed={granularity === g}
 								onClick={() => setGranularity(g)}
 							>
 								{g === "day" ? "By day" : "By hour"}
@@ -143,8 +150,15 @@ export function Trends(props: {
 						<b>No records in view</b>
 					</div>
 				) : (
-					<ResponsiveContainer width="100%" height={240}>
-						<BarChart data={series} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
+					// The container is the chart's image: the label states the series, and the table below lists every
+					// bucket (an image's children are not exposed, so the SVG is hidden and out of the tab order).
+					<ResponsiveContainer width="100%" height={240} role="img" aria-label={summary.label}>
+						<BarChart
+							data={series}
+							margin={{ top: 4, right: 4, bottom: 0, left: 0 }}
+							aria-hidden="true"
+							tabIndex={-1}
+						>
 							<CartesianGrid stroke="var(--line)" vertical={false} />
 							<XAxis
 								dataKey="t"
@@ -188,6 +202,27 @@ export function Trends(props: {
 							/>
 						</BarChart>
 					</ResponsiveContainer>
+				)}
+				{series.length > 0 && (
+					<table className="ut-sr-only">
+						<caption>{summary.caption}</caption>
+						<thead>
+							<tr>
+								<th scope="col">Bucket</th>
+								<th scope="col">Cost (USD)</th>
+								<th scope="col">Cost (UT)</th>
+							</tr>
+						</thead>
+						<tbody>
+							{summary.rows.map((r) => (
+								<tr key={r.label}>
+									<th scope="row">{r.label}</th>
+									<td>{r.usd}</td>
+									<td>{r.ut}</td>
+								</tr>
+							))}
+						</tbody>
+					</table>
 				)}
 			</div>
 			<div className="ut-split">
