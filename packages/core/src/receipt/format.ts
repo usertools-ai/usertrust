@@ -45,9 +45,12 @@ export interface ReceiptFields {
 	readonly usageSource?: "provider" | "estimated" | undefined;
 }
 
-/** Every C0 and C1 control character, DEL and the Unicode line and paragraph separators, replaced by `?`. */
+/**
+ * Every C0 and C1 control character, DEL, the Unicode line and paragraph separators and every format character
+ * (the bidirectional overrides among them, which reorder text without a glyph), replaced by `?`.
+ */
 function plain(text: string): string {
-	return text.replace(/[\p{Cc}\u2028\u2029]/gu, "?");
+	return text.replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, "?");
 }
 
 /** A usertoken count as plain words: `1 usertoken`, `104 usertokens`, `1,000,000 usertokens`. */
@@ -76,7 +79,9 @@ export function formatReceipt(receipt: ReceiptFields): string {
 
 	let charge: string;
 	if (!receipt.settled) {
-		charge = "not settled: the hold was not turned into a charge";
+		// A lost reply to the post is recorded as an ambiguous settlement whose charge stands on the ledger, so an
+		// unsettled receipt claims neither a charge nor a release.
+		charge = "settlement is not confirmed: the hold may still stand as a charge on the ledger";
 	} else if (receipt.postedCost !== undefined && receipt.postedCost < receipt.cost) {
 		charge = `held, then charged ${usertokens(receipt.postedCost)} (the hold capped the charge below the ${usertokens(receipt.cost)} metered)`;
 	} else {
@@ -84,10 +89,14 @@ export function formatReceipt(receipt: ReceiptFields): string {
 	}
 	const left = `${usertokens(receipt.budgetRemaining)} (${formatUsd(receipt.budgetRemaining)}) left in the budget`;
 
+	// An unsettled receipt (a stream's estimate, before settlement) carries a placeholder hash for a spend event that is
+	// not on the chain yet, so it is never called sealed.
 	const seal =
 		receipt.auditDegraded === true
 			? "not sealed: the audit record could not be written (auditDegraded)"
-			: `sealed ${plain(receipt.auditHash).slice(0, 12)}... in the audit chain at ${plain(receipt.chainPath)}`;
+			: !receipt.settled
+				? `provisional: not yet recorded in the audit chain at ${plain(receipt.chainPath)}`
+				: `sealed ${plain(receipt.auditHash).slice(0, 12)}... in the audit chain at ${plain(receipt.chainPath)}`;
 
 	const where =
 		receipt.receiptUrl !== undefined && receipt.receiptUrl !== null

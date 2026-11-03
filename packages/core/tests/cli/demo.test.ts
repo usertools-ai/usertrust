@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } fro
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DEMO_PREFIX, demoLines, run, runDemo } from "../../src/cli/demo.js";
+import { DEMO_PREFIX, demoLines, run, runDemo, shellWord } from "../../src/cli/demo.js";
 import { COMMANDS } from "../../src/cli/main.js";
 
 const CORE_VERSION = (
@@ -89,6 +89,33 @@ describe("usertrust demo", () => {
 		expect(text).toContain("a call with a social security number in it was refused before it left");
 		expect(text).toContain("a call that would overspend the budget was refused before it left");
 		expect(text).toContain(`npx usertrust-ui@${CORE_VERSION} ${result.vaultBase}`);
+	});
+
+	it("quotes the vault path in the ui command, so a path with a space is one word", async () => {
+		const spaced = mkdtempSync(join(tmpdir(), "a space "));
+		const saved = process.env.TMPDIR;
+		process.env.TMPDIR = spaced;
+		try {
+			const result = await runDemo();
+			expect(result.vaultBase).toContain("a space ");
+			expect(result.uiCommand).toBe(
+				`npx usertrust-ui@${CORE_VERSION} '${result.vaultBase.replace(/'/g, "'\\''")}'`,
+			);
+			expect(result.uiCommand).toContain("'");
+		} finally {
+			if (saved === undefined) delete process.env.TMPDIR;
+			else process.env.TMPDIR = saved;
+		}
+	});
+
+	it("shellWord leaves a plain path alone and quotes anything else for the shell it is printed for", () => {
+		expect(shellWord("/tmp/usertrust-demo-abc123", "linux")).toBe("/tmp/usertrust-demo-abc123");
+		expect(shellWord("/tmp/a b", "linux")).toBe("'/tmp/a b'");
+		expect(shellWord("/tmp/it's", "linux")).toBe("'/tmp/it'\\''s'");
+		expect(shellWord("/tmp/$(whoami)", "linux")).toBe("'/tmp/$(whoami)'");
+		expect(shellWord("/tmp/a\\b", "linux")).toBe("'/tmp/a\\b'");
+		expect(shellWord("C:\\Users\\A B\\Temp", "win32")).toBe('"C:\\Users\\A B\\Temp"');
+		expect(shellWord("C:\\Users\\Temp", "win32")).toBe("C:\\Users\\Temp");
 	});
 
 	it("prints the same facts as one JSON object with --json", async () => {

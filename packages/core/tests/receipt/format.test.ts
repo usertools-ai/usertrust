@@ -79,10 +79,39 @@ describe("formatReceipt", () => {
 	});
 
 	it("does not call an unsettled or unwritten receipt sealed", () => {
-		expect(formatReceipt({ ...receipt, settled: false })).toContain("not settled");
+		const unsettled = formatReceipt({ ...receipt, settled: false });
+		// a lost reply to the post is an ambiguous settlement whose charge stands: no claim of a release
+		expect(unsettled).toContain("settlement is not confirmed");
+		expect(unsettled).not.toContain("the hold was not turned into a charge");
 		const degraded = formatReceipt({ ...receipt, auditDegraded: true });
 		expect(degraded).toContain("not sealed: the audit record could not be written");
 		expect(degraded).not.toContain("sealed a3f8");
+	});
+
+	it("calls a stream's estimate provisional, not sealed: its hash is a placeholder for a spend event not yet on the chain", () => {
+		// the shape buildEstimatedStreamReceipt returns before settlement: settled false, auditHash a placeholder
+		const placeholderHash = "5f2b8c1e9a7d4036c1b2e3f4a5968778899aabbccddeeff00112233445566778";
+		const estimate = formatReceipt({
+			...receipt,
+			settled: false,
+			auditHash: placeholderHash,
+			usageSource: "estimated",
+		});
+		expect(estimate).toContain(
+			"provisional: not yet recorded in the audit chain at .usertrust/audit",
+		);
+		expect(estimate).not.toContain("sealed");
+		expect(estimate).not.toContain(placeholderHash.slice(0, 12));
+		// and a settled receipt with the same hash is sealed, so the line is chosen by `settled`, not by the hash
+		expect(formatReceipt({ ...receipt, auditHash: placeholderHash })).toContain(
+			"sealed 5f2b8c1e9a7d...",
+		);
+	});
+
+	it("strips format characters, the bidirectional overrides among them", () => {
+		const shown = formatReceipt({ ...receipt, model: "gpt\u202Eevil\u200B" });
+		expect(shown).not.toMatch(/[\p{Cf}]/u);
+		expect(shown).toContain("gpt?evil? via anthropic");
 	});
 
 	it("names a receipt url when there is one", () => {

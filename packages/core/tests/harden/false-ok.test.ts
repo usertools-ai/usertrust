@@ -255,7 +255,7 @@ describe("false OK — a documented count that stops matching reality", () => {
 		const repoRoot = join(import.meta.dirname, "..", "..", "..", "..");
 
 		const agents = await readFile(join(repoRoot, "AGENTS.md"), "utf-8");
-		const declared = agents.match(/There are \*\*(\w+)\*\* sanitizers/)?.[1];
+		const declared = agents.match(/There are \*\*([\w-]+)\*\* sanitizers/)?.[1];
 		expect(declared, "AGENTS.md no longer states a sanitizer count").toBeDefined();
 		// The two variants are declared and asserted SEPARATELY. Pinning only the
 		// total lets a strong sanitizer be replaced by a weak one — `strong` falls
@@ -282,6 +282,7 @@ describe("false OK — a documented count that stops matching reality", () => {
 			eighteen: 18,
 			nineteen: 19,
 			twenty: 20,
+			"twenty-one": 21,
 		};
 		const declaredCount = WORDS[declared as string];
 		expect(declaredCount, `unrecognised number word "${declared}"`).toBeDefined();
