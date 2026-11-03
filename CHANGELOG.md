@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **On a phone, usertrust-ui shows the first record on the first screen.** At 390 px wide the list used to start below the fold, inside a scroller nested in the page. On phones (760 px wide or less) the summary is one row (Spend, Budget, Integrity) with Chain and Anchor file behind a `Details` button, the filters sit behind one `Filters` button (with a count when any are set) that opens them as a sheet, search and Export share a row, and the page is the only scroller, with the sort bar sticky. Wider screens are unchanged, and no filter or fact was removed.
 - **The `@anthropic-ai/sdk` peer range is now `>=0.116.0 <2`, and CI runs the suite on both lines.** The floor (0.116.0) and the 1.x line classified in `CLASSIFIED_SDK_VERSIONS` (1.3.0) are each type-checked and tested in the `sdk-1x` job. A 1.x request method the free list does not name is refused by default; a 2.x SDK is outside the range until it is classified. On 1.3.0 the PII content schema does not yet name seven of the SDK's request additions, so `pii-content-sdk-types.test-d.ts` reports seven known diagnostics there; the 1.x leg pins exactly those seven by assertion name and location (any other, or a missing one, fails), and a field in one of them is covered by the fail-closed behaviour in LIMITATIONS section 11. Classifying them removes the pin.
 
 ### Fixed
