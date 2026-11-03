@@ -26,6 +26,7 @@ import {
 	initAnchorIdentity,
 	mintSuccessorKey,
 	readAnchorIdentity,
+	readMeta,
 	recordRotatedIdentity,
 	resumeAnchorMirror,
 	type SinkConfig,
@@ -175,6 +176,19 @@ function emptyVaultFault(root: string): { reason: LastRunReason; detail: string 
 		return {
 			reason: "other",
 			detail: "the event log is empty but anchors exist: the log may have been lost",
+		};
+	}
+	// Before the first anchor the mirror and high-water say nothing, so ask the log's own
+	// sidecar: a recorded sequence above 0 with no readable events is a lost or damaged log.
+	const meta = readMeta(root);
+	if (meta === "unreadable") {
+		return { reason: "other", detail: "the event log's sequence file cannot be read" };
+	}
+	if (meta !== "absent" && meta.sequence !== 0) {
+		return {
+			reason: "other",
+			detail:
+				"the event log is empty but its sequence file records events: the log may have been lost",
 		};
 	}
 	return null;

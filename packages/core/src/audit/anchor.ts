@@ -630,7 +630,8 @@ function writeOutboxEntry(dir: string, record: AnchorRecord): void {
 	}
 }
 
-function readMeta(
+/** The event log's `.meta` sidecar: its recorded sequence and last hash, or why there is none. */
+export function readMeta(
 	rootDir: string,
 ): { lastHash: string; sequence: number } | "absent" | "unreadable" {
 	const metaPath = join(rootDir, VAULT_DIR, "audit", "events.jsonl.meta");

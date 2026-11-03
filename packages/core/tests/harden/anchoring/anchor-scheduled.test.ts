@@ -368,6 +368,30 @@ describe("anchor now --scheduled", () => {
 		expect(readdirSync(outbox)).toEqual([]);
 	});
 
+	it("a lost or damaged event log is a failure even before the first anchor", async () => {
+		// positive control: a vault with no events and no sidecar is still benign
+		const fresh = await makeAnchoredVault(0);
+		process.chdir(fresh.root);
+		process.env.USERTRUST_ANCHOR_KEY = fresh.keyFile;
+		const ok = await runNow(["--scheduled", "--sink-file", fresh.storeFile]);
+		expect(ok.exit).toBe(0);
+		// events were recorded (sidecar says 3), the log file is now empty, nothing anchored yet
+		const s = await makeAnchoredVault(3);
+		process.chdir(s.root);
+		process.env.USERTRUST_ANCHOR_KEY = s.keyFile;
+		const log = join(s.vaultPath, "audit", "events.jsonl");
+		writeFileSync(log, "");
+		const lost = await runNow(["--scheduled", "--sink-file", s.storeFile]);
+		expect(lost.exit).toBe(1);
+		expect((lost.out.data as { reason: string }).reason).toBe("other");
+		process.exitCode = 0;
+		// an unreadable sidecar beside an empty log is a failure too
+		writeFileSync(`${log}.meta`, "{ not json");
+		const damaged = await runNow(["--scheduled", "--sink-file", s.storeFile]);
+		expect(damaged.exit).toBe(1);
+		expect((damaged.out.data as { reason: string }).reason).toBe("other");
+	});
+
 	it("status prints the recorded time without terminal escapes", async () => {
 		const s = await makeAnchoredVault(1);
 		process.chdir(s.root);
