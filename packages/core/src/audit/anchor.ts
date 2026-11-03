@@ -188,8 +188,8 @@ function writeIdentityFile(rootDir: string, identity: AnchorIdentity): void {
 /**
  * Write the public-key copy beside a freshly made private key, without ever touching
  * something that is not a stale public copy. Absent: create it exclusively. A regular
- * file that parses as a PUBLIC key only: replace it with tmp + rename (swaps the
- * directory entry, never follows a link or truncates through one). Anything else, a
+ * file that parses as a PUBLIC key only: replace it with a temp file and an atomic swap (the
+ * directory entry changes, never follows a link or truncates through one). Anything else, a
  * symlink, a private key, unreadable bytes, is left exactly as found. Returns the path
  * written, or null when no copy was made.
  */
