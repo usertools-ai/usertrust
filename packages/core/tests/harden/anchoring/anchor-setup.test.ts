@@ -17,6 +17,7 @@ import {
 	readFileSync,
 	renameSync,
 	statSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -27,6 +28,7 @@ import {
 	initAnchorIdentity,
 	mintSuccessorKey,
 	recordRotatedIdentity,
+	resolveSigner,
 } from "../../../src/audit/anchor.js";
 import { ensureAnchorIdentity } from "../../../src/audit/anchor-setup.js";
 import { run as anchorRun } from "../../../src/cli/anchor.js";
@@ -239,9 +241,37 @@ describe("initAnchorIdentity writes the private key exclusively", () => {
 		const root = vaultRoot();
 		const dir = tmp("anchor-setup-kf-");
 		const target = join(dir, "k.anchor.pem");
-		writeFileSync(join(dir, "k.anchor.pub.pem"), "STALE PUBLIC KEY\n");
+		const earlier = initAnchorIdentity(vaultRoot(), {
+			keyFile: join(tmp("anchor-setup-earlier-"), "e.pem"),
+		});
+		writeFileSync(join(dir, "k.anchor.pub.pem"), earlier.publicKeyPem);
 		const made = initAnchorIdentity(root, { keyFile: target });
 		expect(readFileSync(join(dir, "k.anchor.pub.pem"), "utf-8")).toBe(made.publicKeyPem);
+		expect(made.publicKeyPem).not.toBe(earlier.publicKeyPem);
+	});
+
+	it("leaves a PRIVATE key that sits at the .pub.pem path byte-identical (and still makes the vault)", () => {
+		const root = vaultRoot();
+		const dir = tmp("anchor-setup-kf-");
+		const other = initAnchorIdentity(vaultRoot(), {
+			keyFile: join(tmp("anchor-setup-ok-"), "o.pem"),
+		});
+		const privatePem = readFileSync(other.keyFile, "utf-8");
+		const pubPath = join(dir, "k.anchor.pub.pem");
+		writeFileSync(pubPath, privatePem, { mode: 0o600 });
+		const made = initAnchorIdentity(root, { keyFile: join(dir, "k.anchor.pem") });
+		expect(readFileSync(pubPath, "utf-8")).toBe(privatePem);
+		expect(readFileSync(made.keyFile, "utf-8")).toContain("PRIVATE KEY");
+	});
+
+	it("a .pub.pem symlink to the key file cannot clobber the new private key", () => {
+		const root = vaultRoot();
+		const dir = tmp("anchor-setup-kf-");
+		const keyFile = join(dir, "k.anchor.pem");
+		symlinkSync(keyFile, join(dir, "k.anchor.pub.pem"));
+		const made = initAnchorIdentity(root, { keyFile });
+		expect(readFileSync(keyFile, "utf-8")).toContain("PRIVATE KEY");
+		expect(resolveSigner({ type: "pem", file: keyFile }).keyId).toBe(made.identity.keyId);
 	});
 
 	it("control: a --key-file that does not exist yet is written", () => {

@@ -35,6 +35,7 @@ import {
 	constants as fsConstants,
 	fsyncSync,
 	linkSync,
+	lstatSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
@@ -185,6 +186,51 @@ function writeIdentityFile(rootDir: string, identity: AnchorIdentity): void {
 }
 
 /**
+ * Write the public-key copy beside a freshly made private key, without ever touching
+ * something that is not a stale public copy. Absent: create it exclusively. A regular
+ * file that parses as a PUBLIC key only: replace it with tmp + rename (swaps the
+ * directory entry, never follows a link or truncates through one). Anything else, a
+ * symlink, a private key, unreadable bytes, is left exactly as found. Returns the path
+ * written, or null when no copy was made.
+ */
+function writePublicKeyCopy(keyFile: string, publicKeyPem: string): string | null {
+	const path = publicKeyCopyPath(keyFile);
+	try {
+		let existing: ReturnType<typeof lstatSync> | null = null;
+		try {
+			existing = lstatSync(path);
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== "ENOENT") return null;
+		}
+		if (existing === null) {
+			writeFileSync(path, publicKeyPem, { mode: 0o644, flag: "wx" });
+			return path;
+		}
+		if (!existing.isFile()) return null;
+		const bytes = readFileSync(path);
+		createPublicKey(bytes);
+		let isPrivate = true;
+		try {
+			createPrivateKey(bytes);
+		} catch {
+			isPrivate = false;
+		}
+		if (isPrivate) return null;
+		const tmp = `${path}.new-${process.pid}-${randomUUID()}`;
+		writeFileSync(tmp, publicKeyPem, { mode: 0o644, flag: "wx" });
+		try {
+			renameSync(tmp, path);
+		} catch {
+			unlinkSync(tmp);
+			return null;
+		}
+		return path;
+	} catch {
+		return null;
+	}
+}
+
+/**
  * Create identity.json only if it does not exist: temp file + fsync + hard link (link(2)
  * fails with EEXIST instead of replacing). Two concurrent inits cannot both succeed.
  */
@@ -312,15 +358,10 @@ export function initAnchorIdentity(
 		throw err;
 	}
 	// The public half sits beside the private key so it can be pinned or handed to a
-	// verifier without touching the secret. It is REPLACED, never kept: a copy left over
-	// from an earlier key at the same --key-file would sit beside the new private key and
-	// be the file someone pins. Best effort: the identity does not need it.
-	const pubCopy = publicKeyCopyPath(keyFile);
-	try {
-		writeFileSync(pubCopy, publicKeyPem, { mode: 0o644 });
-	} catch {
-		/* a missing copy is recoverable with `usertrust anchor pubkey` */
-	}
+	// verifier without touching the secret. Best effort: the identity does not need it
+	// (`usertrust anchor pubkey` prints it again). `pubCopy` is null when nothing was
+	// written, so the race-loser cleanup below removes only what this call made.
+	const pubCopy = writePublicKeyCopy(keyFile, publicKeyPem);
 
 	mkdirPrivate(join(dir, "outbox"));
 	const identity: AnchorIdentity = {
@@ -337,7 +378,7 @@ export function initAnchorIdentity(
 		// Lost a race to a concurrent init: the winner's identity stands. Remove the key
 		// pair THIS call just created (nothing else can be using it), so no orphan is left.
 		if ((err as NodeJS.ErrnoException).code === "EEXIST") {
-			for (const f of [keyFile, pubCopy]) {
+			for (const f of pubCopy === null ? [keyFile] : [keyFile, pubCopy]) {
 				try {
 					unlinkSync(f);
 				} catch {
