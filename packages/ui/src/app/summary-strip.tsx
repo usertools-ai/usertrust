@@ -143,7 +143,7 @@ function AnchorFact(props: { anchorFile: SummaryPayload["anchorFile"] }): React.
 	);
 }
 
-function BudgetFact(props: { s: SummaryPayload }): React.JSX.Element {
+export function BudgetFact(props: { s: SummaryPayload }): React.JSX.Element {
 	const { s } = props;
 	const budget = budgetDisplay(s);
 	const word = budgetSourceWord(s.budgetSource);
@@ -158,11 +158,11 @@ function BudgetFact(props: { s: SummaryPayload }): React.JSX.Element {
 			{budget.kind === "known" && s.budget !== null && s.remainingUt !== null ? (
 				<>
 					<span className="v">
-						{budget.pct.toFixed(1)}% <small>left</small>
+						{budget.leftPct.toFixed(1)}% <small>left</small>
 					</span>
-					{/* Decorative: the figure above it is the value. The fill is what is USED; the figure says what is left. */}
+					{/* Decorative: the figure above it carries the number. The fill is what is LEFT, the same figure, so it drains as money is spent. */}
 					<div className="ut-meter" aria-hidden="true">
-						<i style={{ width: `${budget.usedPct}%`, background: `var(--${budget.fill})` }} />
+						<i style={{ width: `${budget.leftPct}%`, background: `var(--${budget.fill})` }} />
 					</div>
 					{s.remainingUt < 0 ? (
 						<span className="ut-why red">

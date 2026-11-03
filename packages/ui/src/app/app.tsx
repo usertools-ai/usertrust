@@ -43,7 +43,7 @@ export function App(): React.JSX.Element {
 	// Export what the operator is looking at — the filtered set, not the vault, and within the server's window: the
 	// filename says both. BOM first: Excel reads UTF-8 CSV as latin-1 without it.
 	function exportCsv(): void {
-		const blob = new Blob([`﻿${toCsv(filtered)}`], { type: "text/csv;charset=utf-8" });
+		const blob = new Blob([`\uFEFF${toCsv(filtered)}`], { type: "text/csv;charset=utf-8" });
 		const url = URL.createObjectURL(blob);
 		const a = document.createElement("a");
 		a.href = url;

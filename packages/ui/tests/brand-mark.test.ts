@@ -97,10 +97,10 @@ describe("usertrust gold", () => {
 		expect(defined("alert")).toBe("#ff7a2f");
 		const strip = readFileSync(join(PKG, "src", "app", "summary-strip.tsx"), "utf-8");
 		expect(strip).toMatch(/var\(--\$\{budget\.fill\}\)/);
-		// The bar FILLS with what is used: its width reads usedPct, never the remaining pct the figure prints.
-		// (Built by concatenation: the needles are source text containing a literal `${`.)
+		// The bar fills with what is LEFT: its width reads leftPct, the same field the figure prints. (Built by
+		// concatenation: the needle is source text containing a literal `${`.)
 		const width = (field: string): string => `width: \`$\{budget.${field}}%\``;
-		expect(strip).toContain(width("usedPct"));
-		expect(strip).not.toContain(width("pct"));
+		expect(strip).toContain(width("leftPct"));
+		expect(strip).not.toContain("usedPct");
 	});
 });

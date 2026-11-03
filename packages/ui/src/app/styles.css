@@ -21,6 +21,9 @@
 	--faint-text: #7e7e88;
 	--faint-deco: #5c5c64;
 	--line: rgba(255, 255, 255, 0.11);
+	/* Borders of interactive controls: 3:1 or better against the page, the surface and raised (WCAG 1.4.11). --line stays
+	   the decorative tier (panel edges, row rules, separators), which carries no meaning of its own. */
+	--control-line: rgba(255, 255, 255, 0.36);
 	--approve: #30d158;
 	--info: #ffb020;
 	--words: #4da3ff;
@@ -454,7 +457,7 @@ body {
 		width: 20px;
 		height: 20px;
 		border-radius: 50%;
-		border: 1px solid var(--line);
+		border: 1px solid var(--control-line);
 		background: transparent;
 		color: var(--body);
 		font: 600 11px/1 var(--sans);
@@ -536,7 +539,7 @@ body {
 		padding: 3px;
 		border-radius: 10px;
 		background: rgba(255, 255, 255, 0.05);
-		border: 1px solid var(--line);
+		border: 1px solid var(--control-line);
 		gap: 2px;
 	}
 	.ut-seg button {
@@ -564,7 +567,7 @@ body {
 		flex: 0 1 260px;
 		min-width: 140px;
 		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid var(--line);
+		border: 1px solid var(--control-line);
 		border-radius: 8px;
 		color: var(--ink);
 		font: 400 12.5px/1 var(--sans);
@@ -578,7 +581,7 @@ body {
 		border-color: var(--intel);
 	}
 	.ut-btn {
-		border: 1px solid var(--line);
+		border: 1px solid var(--control-line);
 		background: rgba(255, 255, 255, 0.04);
 		color: var(--ink);
 		font: 500 12px/1 var(--sans);
@@ -596,7 +599,7 @@ body {
 		cursor: default;
 	}
 	.ut-ghost {
-		border: 1px solid var(--line);
+		border: 1px solid var(--control-line);
 		background: transparent;
 		color: var(--body);
 		font: 500 11px/1 var(--sans);
@@ -631,7 +634,7 @@ body {
 		display: inline-flex;
 		align-items: center;
 		gap: 5px;
-		border: 1px solid var(--line);
+		border: 1px solid var(--control-line);
 		background: transparent;
 		color: var(--body);
 		font: 500 11.5px/1 var(--sans);
@@ -642,7 +645,7 @@ body {
 		max-width: 260px;
 	}
 	.ut-chip:hover {
-		border-color: rgba(155, 123, 255, 0.6);
+		border-color: var(--intel);
 	}
 	.ut-chip.on {
 		background: rgba(155, 123, 255, 0.22);
@@ -707,7 +710,7 @@ body {
 	.ut-field input,
 	.ut-field-bare {
 		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid var(--line);
+		border: 1px solid var(--control-line);
 		border-radius: 8px;
 		color: var(--ink);
 		font: 400 12px/1 var(--mono);
@@ -1081,7 +1084,7 @@ body {
 		width: 30px;
 		height: 30px;
 		border-radius: 9px;
-		border: 1px solid var(--line);
+		border: 1px solid var(--control-line);
 		background: transparent;
 		color: var(--body);
 		cursor: pointer;
