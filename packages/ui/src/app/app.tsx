@@ -4,16 +4,18 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { csvFilename, toCsv } from "../shared/csv.js";
 import { chainStatus } from "../shared/display.js";
-import { applyFilters, EMPTY_FILTERS, type FilterState, isFiltering } from "../shared/filters.js";
+import { applyFilters, EMPTY_FILTERS, isFiltering } from "../shared/filters.js";
 import type { LedgerRow } from "../shared/rows.js";
+import type { ViewId } from "../shared/url-state.js";
 import { AuditTable } from "./audit-table.js";
 import { FilterBar } from "./filter-bar.js";
 import { InspectorHint, RowPanel } from "./row-panel.js";
 import { useLedger } from "./store.js";
 import { SummaryStrip } from "./summary-strip.js";
 import { Trends } from "./trends.js";
+import { useUrlState } from "./use-url-state.js";
 
-export type View = "audit" | "trends";
+export type View = ViewId;
 
 const VIEWS: Array<{ id: View; label: string }> = [
 	{ id: "audit", label: "Audit" },
@@ -37,18 +39,17 @@ function useMediaQuery(query: string): boolean {
 
 export function App(): React.JSX.Element {
 	const { rows, summary, phase, live, liveIds } = useLedger();
-	const [view, setView] = useState<View>("audit");
-	const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS);
+	// The view, filters and open record live in the page address (`location.hash`): a reload keeps them, a link shares them.
+	const { view, setView, filters, setFilters, openHash, setOpenHash } = useUrlState();
 	// The selected row's event HASH (unique on the chain, where an id can repeat), resolved from the current rows: a
 	// `status` correction replaces the row object, and a panel holding the old one kept showing the old status.
-	const [openHash, setOpenHash] = useState<string | null>(null);
 	const open = useMemo(
 		() => (openHash === null ? null : (rows.find((r) => r.hash === openHash) ?? null)),
 		[rows, openHash],
 	);
 	const filtered = useMemo(() => applyFilters(rows, filters), [rows, filters]);
 	const docked = useMediaQuery(DOCK_QUERY);
-	const close = useCallback(() => setOpenHash(null), []);
+	const close = useCallback(() => setOpenHash(null), [setOpenHash]);
 	const newestOf = summary?.truncated ? summary.rowCount : undefined;
 
 	// Export what the operator is looking at — the filtered set, not the vault, and within the server's window: the
