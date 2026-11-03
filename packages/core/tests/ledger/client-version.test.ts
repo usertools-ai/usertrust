@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -18,6 +18,12 @@ function project(copies: Record<string, string>): string {
 		writeFileSync(join(at, "package.json"), JSON.stringify({ name: "tigerbeetle-node", version }));
 	}
 	return root;
+}
+
+/** A `usertrust` package directory at `dir` (a real directory), so the reader can find the install. */
+function installUsertrust(dir: string): void {
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "usertrust", version: "5.5.0" }));
 }
 
 /** The pinned server release the CI job downloads, read from its `TIGERBEETLE_VERSION` line. */
@@ -43,7 +49,56 @@ describe("the client version a project resolves", () => {
 			"node_modules/tigerbeetle-node": "0.17.8",
 			"node_modules/usertrust/node_modules/tigerbeetle-node": "0.17.9",
 		});
+		installUsertrust(join(root, "node_modules", "usertrust"));
 		expect(resolvedClientVersion(root)).toBe("0.17.9");
+	});
+
+	// Node resolves usertrust's require("tigerbeetle-node") from usertrust's REAL path, so these three
+	// layouts are read from there, not from the project's own directories.
+	it("pnpm: usertrust is a symlink into the store and its client is the store sibling", () => {
+		const root = project({
+			"node_modules/.pnpm/usertrust@5.5.0/node_modules/tigerbeetle-node": "0.17.9",
+		});
+		const real = join(
+			root,
+			"node_modules",
+			".pnpm",
+			"usertrust@5.5.0",
+			"node_modules",
+			"usertrust",
+		);
+		installUsertrust(real);
+		symlinkSync(real, join(root, "node_modules", "usertrust"), "dir");
+		expect(resolvedClientVersion(root)).toBe("0.17.9");
+	});
+
+	it("pnpm, and the project also depends on another tigerbeetle-node: usertrust still loads the store one", () => {
+		const root = project({
+			"node_modules/.pnpm/usertrust@5.5.0/node_modules/tigerbeetle-node": "0.17.9",
+			"node_modules/tigerbeetle-node": "0.16.0",
+		});
+		const real = join(
+			root,
+			"node_modules",
+			".pnpm",
+			"usertrust@5.5.0",
+			"node_modules",
+			"usertrust",
+		);
+		installUsertrust(real);
+		symlinkSync(real, join(root, "node_modules", "usertrust"), "dir");
+		expect(resolvedClientVersion(root)).toBe("0.17.9");
+	});
+
+	it("a workspace: usertrust and its nested client sit at the root, another client sits beside it", () => {
+		const root = project({
+			"node_modules/usertrust/node_modules/tigerbeetle-node": "0.17.9",
+			"node_modules/tigerbeetle-node": "0.17.8",
+		});
+		installUsertrust(join(root, "node_modules", "usertrust"));
+		const app = join(root, "packages", "app");
+		mkdirSync(app, { recursive: true });
+		expect(resolvedClientVersion(app)).toBe("0.17.9");
 	});
 
 	it("finds a copy hoisted into a parent directory's node_modules, as Node would", () => {
