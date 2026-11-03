@@ -10,6 +10,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **The dashboard's view, filters and open record now live in the page address, so a reload keeps them and a link shares them.** The Audit/Trends view, every filter (the facets, the dates, the cost bounds and the search text) and the open record are written to the URL fragment, for example `#from=2026-11-01&q=gpt&status=denied&status=failed&view=trends`; a clean page has an empty fragment. A reload restores the page, and a filtered view ("the 3 failed calls") can be bookmarked or sent to a colleague on the same machine, who sees the same filters over their own vault. The fragment is never sent to a server and nothing new is fetched. Changing the view or opening or closing a record adds a history entry, so Back returns to the previous view or record; changing a filter replaces the current entry, so typing in the search box does not fill the back button. A pasted link is treated as untrusted input: unknown keys are ignored, a date must be a real `YYYY-MM-DD` day, a cost bound a non-negative whole number, an open record a 64-character lowercase hex hash, and anything else is dropped; an address over 4 KB is ignored, and a malformed one never blanks the page. A record named in the link that is not in the vault is simply not opened.
+
+## [5.4.0] - 2026-11-03
+
+### Read before upgrading
+
+- **Text that said "governor" now says "controller".** Messages, CLI lines and `--json` prose changed (see Changed), so a script that matches one of the old strings needs the new word. The API names (`Governor`, `createGovernor()`, `budgetSource: "governor"`) are unchanged.
+
+- **A `grok-3` cost estimate drops from $3.00 in / $15.00 out to $1.25 / $2.50 per million tokens.** xAI now bills it at `grok-4.3`'s rates (see Added).
+
+- **Against a ledger that is not running, `trust()`, `createGovernor()` and `usertrust budget` now fail within seconds and print the fix.** They used to wait without end (see Fixed).
+
+### Added
+
 - **The pricing table knows the current xAI models; `PRICING_TABLE_VERSION` is `2026-11-02`.** It carried only `grok-3`, so a call to any current Grok model matched no row and was metered at the fallback rate. It now has `grok-4.7`, `grok-4.6`, `grok-4.5`, `grok-4.3`, `grok-4.20-0309-reasoning`, `grok-4.20-0309-non-reasoning`, `grok-4.20-multi-agent-0309` and `grok-build-0.1`, from xAI's published model pricing: `grok-4.7` and `grok-4.6` are $2.00 in / $0.50 cached / $6.00 out per million tokens, `grok-4.5` $2.00 / $0.30 / $6.00, `grok-4.3` and the three `grok-4.20-0309` ids $1.25 / $0.20 / $2.50, `grok-build-0.1` $1.00 / $0.20 / $2.00. A prompt of 200,000 tokens or more pays xAI's long-context rates, exactly double in every category, as a per-request tier (the rows set the tier threshold to 199,999 because the table's tier is "longer than" and xAI's starts at 200,000). Calls to xAI's US regional endpoint bill at 1.1x these rates, which the estimate does not include. xAI publishes no cache-write price, so cache writes price at the input rate. `grok-3` and the six other retired slugs xAI still resolves (`grok-4-0709`, `grok-4-1-fast-reasoning`, `grok-4-1-fast-non-reasoning`, `grok-4-fast-reasoning`, `grok-4-fast-non-reasoning`, `grok-code-fast-1`) are now priced at `grok-4.3`, which xAI's May 15, 2026 retirement notice says bills them (`grok-code-fast-1` is routed to `grok-build-0.1`, but the notice's pricing paragraph says `grok-4.3`, and the higher price is metered); a `grok-3` estimate drops from $3.00 in / $15.00 out to $1.25 / $2.50 per million tokens. `grok-3-mini` and bare `grok-4` are not on that notice and are unchanged (no row).
 
 ### Changed
