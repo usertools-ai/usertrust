@@ -817,6 +817,15 @@ body {
 		font: inherit;
 		transition: background 0.12s ease, border-color 0.12s ease;
 	}
+	/* The list is the one tab stop; its active row is named by aria-activedescendant and marked here while the list has focus. */
+	.ut-list:focus-visible {
+		outline-offset: -2px;
+	}
+	.ut-list:focus-visible .ut-row.act {
+		outline: 2px solid var(--words);
+		outline-offset: -2px;
+		border-radius: 12px;
+	}
 	.ut-row:hover {
 		background: rgba(255, 255, 255, 0.03);
 	}
