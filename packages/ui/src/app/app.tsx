@@ -40,7 +40,7 @@ function useMediaQuery(query: string): boolean {
 export function App(): React.JSX.Element {
 	const { rows, summary, phase, live, liveIds } = useLedger();
 	// The view, filters and open record live in the page address (`location.hash`): a reload keeps them, a link shares them.
-	const { view, setView, filters, setFilters, openHash, setOpenHash, addressKept } = useUrlState();
+	const { view, setView, filters, setFilters, openHash, setOpenHash, addressNote } = useUrlState();
 	// The selected row's event HASH (unique on the chain, where an id can repeat), resolved from the current rows: a
 	// `status` correction replaces the row object, and a panel holding the old one kept showing the old status.
 	const open = useMemo(
@@ -125,12 +125,19 @@ export function App(): React.JSX.Element {
 					</button>
 				</div>
 				<FilterBar rows={rows} filters={filters} onChange={setFilters} />
-				{/* Never a link that opens something else: a view the address cannot hold is not written, and we say so. */}
-				{!addressKept && (
+				{/* Never a link that opens something else: when the address does not describe this view, we say so. */}
+				{addressNote === "cannot-hold" && (
 					<div className="ut-notice ut-address-note" role="status">
 						<b>Not kept in the address</b>
 						This view is too long for a link, or its text has characters a link cannot carry. A
 						reload or a copied link opens a clean page.
+					</div>
+				)}
+				{addressNote === "behind" && (
+					<div className="ut-notice ut-address-note" role="status">
+						<b>Address not updated yet</b>
+						The browser refused to update the address, so a reload or a copied link would still open
+						the previous view. Trying again.
 					</div>
 				)}
 				<div className="ut-body" data-docked={dock}>

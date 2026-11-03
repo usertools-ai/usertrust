@@ -210,7 +210,11 @@ export function planHistory(
 	return { kind: navigated ? "push" : "replace", hash };
 }
 
-/** Two states that write the same hash are the same state. */
+/**
+ * The same state: every field equal, facet values compared as sets. Compared in full, never by the hash they write: the
+ * encoder leaves out what it cannot carry (a cost of 1e-7), so two states with the same hash can still differ, and
+ * Back or a followed link must not keep a filter the address never held.
+ */
 export function sameUrlState(a: UrlState, b: UrlState): boolean {
-	return encodeUrlState(a) === encodeUrlState(b);
+	return described(a) === described(b);
 }

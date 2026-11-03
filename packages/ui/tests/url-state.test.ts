@@ -381,9 +381,12 @@ describe("the page honours the address's limits", () => {
 	it("the search box stops at the length the address keeps", () => {
 		expect(app).toMatch(/type="search"[\s\S]{0,300}maxLength=\{MAX_SEARCH_LENGTH\}/);
 	});
-	it("says so when the address does not hold the view", () => {
+	it("says so when the address does not hold the view, and when the browser refused to update it", () => {
 		expect(app).toMatch(
-			/!addressKept && \([\s\S]{0,200}role="status"[\s\S]{0,120}Not kept in the address/,
+			/addressNote === "behind" && \([\s\S]{0,200}role="status"[\s\S]{0,120}Address not updated yet/,
+		);
+		expect(app).toMatch(
+			/addressNote === "cannot-hold" && \([\s\S]{0,200}role="status"[\s\S]{0,120}Not kept in the address/,
 		);
 	});
 });
@@ -436,8 +439,33 @@ describe("planHistory", () => {
 });
 
 describe("sameUrlState", () => {
-	it("compares by the hash they write", () => {
+	it("compares the full state, facet values as sets", () => {
 		expect(sameUrlState(FULL, decodeUrlState(encodeUrlState(FULL)))).toBe(true);
 		expect(sameUrlState(FULL, EMPTY_URL_STATE)).toBe(false);
+		expect(
+			sameUrlState(
+				withFilters({ statuses: ["failed", "denied", "failed"] }),
+				withFilters({ statuses: ["denied", "failed"] }),
+			),
+		).toBe(true);
+	});
+
+	/**
+	 * Review of #510: navigation applies the address's state unless it is the same as the page's. Compared by the hash
+	 * they write, a filter the encoder leaves out looked equal to none, so Back or a followed link kept it.
+	 */
+	it("red-first: a filter the address never held is not 'the same' as none, so Back or a link clears it", () => {
+		const applied = (prev: UrlState, hash: string): UrlState => {
+			const next = decodeUrlState(hash);
+			return sameUrlState(prev, next) ? prev : next; // what the page does on hashchange and popstate
+		};
+		const tiny = withFilters({ costMin: 1e-7 });
+		expect(encodeUrlState(tiny)).toBe(""); // the address cannot carry it...
+		expect(applied(tiny, "")).toEqual(EMPTY_URL_STATE); // ...and Back to a clean entry clears it
+		const invisible = withFilters({ search: `a${String.fromCodePoint(0x200b)}b` });
+		expect(applied(invisible, "#view=trends")).toEqual({ ...EMPTY_URL_STATE, view: "trends" });
+		// a followed link to the same view the page already shows keeps the page's own state object
+		const same = withFilters({ search: "gpt" });
+		expect(applied(same, "#q=gpt")).toBe(same);
 	});
 });

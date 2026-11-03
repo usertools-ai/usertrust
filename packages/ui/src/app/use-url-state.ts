@@ -2,20 +2,38 @@
 // Copyright 2026 Usertools, Inc.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type AddressIo, AddressSync } from "../shared/address-sync.js";
 import type { FilterState } from "../shared/filters.js";
 import {
 	addressHolds,
 	decodeUrlState,
-	planHistory,
 	sameUrlState,
 	type UrlState,
 	type ViewId,
 } from "../shared/url-state.js";
 
+/** Why the address does not describe what the page shows, or null when it does. */
+export type AddressNote = "cannot-hold" | "behind" | null;
+
+const browserAddress: AddressIo = {
+	hash: () => window.location.hash,
+	write(kind, hash) {
+		const url = `${window.location.pathname}${window.location.search}${hash}`;
+		if (kind === "push") window.history.pushState(null, "", url);
+		else window.history.replaceState(null, "", url);
+	},
+	later(fn, ms) {
+		const id = window.setTimeout(fn, ms);
+		return () => window.clearTimeout(id);
+	},
+};
+
 /**
  * The view, the filters and the open record, kept in the page address (`location.hash`). Starts from the hash; a
  * change writes it back (replace for a filter tweak, push for a view or record change, see `planHistory`); a hash the
  * user edits or navigates to (Back, Forward, a pasted link) is applied. The hash stays in the browser: nothing is sent.
+ * When the address does not describe the page (a state it cannot hold, or a write the browser refused and that is being
+ * retried), `addressNote` says why, and the page shows it.
  */
 export function useUrlState(): {
 	view: ViewId;
@@ -24,28 +42,24 @@ export function useUrlState(): {
 	setFilters(filters: FilterState): void;
 	openHash: string | null;
 	setOpenHash(hash: string | null): void;
-	/** False when the address cannot hold this state (see `addressHolds`): it is not written, and the page says so. */
-	addressKept: boolean;
+	/** Why the address does not describe the page right now, or null; the page shows it. */
+	addressNote: AddressNote;
 } {
 	const [state, setState] = useState<UrlState>(() => decodeUrlState(window.location.hash));
-	// The state as of the last write, to tell a view/record change (push) from a filter tweak (replace).
-	const written = useRef(state);
+	const [behind, setBehind] = useState(false);
+	// One writer for the page's life: it remembers the last state the address took (push or replace) and retries a
+	// write the browser refused.
+	const sync = useRef<AddressSync | null>(null);
+	if (sync.current === null) sync.current = new AddressSync(state, browserAddress, setBehind);
 
 	useEffect(() => {
-		const plan = planHistory(written.current, state, window.location.hash);
-		written.current = state;
-		if (plan.kind === "none") return;
-		const url = `${window.location.pathname}${window.location.search}${plan.hash}`;
-		try {
-			if (plan.kind === "push") window.history.pushState(null, "", url);
-			else window.history.replaceState(null, "", url);
-		} catch {
-			// A browser that refuses (a sandboxed frame, too many calls in a row): the page works, just unbookmarkable.
-		}
+		sync.current?.sync(state);
 	}, [state]);
 
 	useEffect(() => {
 		const apply = (): void => {
+			// The user navigated: the address they went to wins over any write still waiting to be retried.
+			sync.current?.cancel();
 			const next = decodeUrlState(window.location.hash);
 			setState((prev) => (sameUrlState(prev, next) ? prev : next));
 		};
@@ -54,6 +68,7 @@ export function useUrlState(): {
 		return () => {
 			window.removeEventListener("hashchange", apply);
 			window.removeEventListener("popstate", apply);
+			sync.current?.cancel();
 		};
 	}, []);
 
@@ -63,7 +78,8 @@ export function useUrlState(): {
 		[],
 	);
 	const setOpenHash = useCallback((open: string | null) => setState((s) => ({ ...s, open })), []);
-	const addressKept = useMemo(() => addressHolds(state), [state]);
+	const holds = useMemo(() => addressHolds(state), [state]);
+	const addressNote: AddressNote = !holds ? "cannot-hold" : behind ? "behind" : null;
 	return {
 		view: state.view,
 		setView,
@@ -71,6 +87,6 @@ export function useUrlState(): {
 		setFilters,
 		openHash: state.open,
 		setOpenHash,
-		addressKept,
+		addressNote,
 	};
 }
