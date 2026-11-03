@@ -145,7 +145,7 @@ describe("formatReceipt", () => {
 			provider: "p\u0007",
 			transferId: "t\u0000id",
 			chainPath: ".usertrust\u001b]0;pwn\u0007",
-			timestamp: "2026 ",
+			timestamp: "2026\u2028",
 			auditHash: "ab\u001b[31m",
 			receiptUrl: "u\u009brl",
 		});
