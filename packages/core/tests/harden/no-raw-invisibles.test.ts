@@ -21,8 +21,10 @@
  * and would move every later line number.
  *
  * FORBIDDEN, as code points: C0 except tab, LF and CR (0x00-0x08, 0x0B, 0x0C, 0x0E-0x1F); DEL (0x7F);
- * C1 (0x80-0x9F); U+061C; U+200B-U+200F; U+2028 and U+2029; U+202A-U+202E; U+2060-U+2064;
- * U+2066-U+2069; U+FEFF.
+ * C1 (0x80-0x9F); U+00AD (soft hyphen); U+061C; U+180E (Mongolian vowel separator); U+200B-U+200F;
+ * U+2028 and U+2029; U+202A-U+202E; U+2060-U+2064; U+2066-U+2069; U+FEFF; and the Unicode TAG block
+ * U+E0000-U+E007F, invisible in every editor and diff and the known "ASCII smuggling" carrier for hidden
+ * instructions in text a model reads. Variation selectors (U+FE00-U+FE0F) stay allowed: emoji use them.
  *
  * ALLOWED_RAW is a census with EXACT per-file counts. An entry that no longer matches (the file is
  * clean now, is untracked, or has a different count) FAILS, so the list cannot rot into a blanket
@@ -52,13 +54,16 @@ const FORBIDDEN_RANGES: ReadonlyArray<readonly [number, number]> = [
 	[0x0e, 0x1f],
 	[0x7f, 0x7f],
 	[0x80, 0x9f],
+	[0x00ad, 0x00ad],
 	[0x061c, 0x061c],
+	[0x180e, 0x180e],
 	[0x200b, 0x200f],
 	[0x2028, 0x2029],
 	[0x202a, 0x202e],
 	[0x2060, 0x2064],
 	[0x2066, 0x2069],
 	[0xfeff, 0xfeff],
+	[0xe0000, 0xe007f],
 ];
 
 export function isForbidden(codePoint: number): boolean {
@@ -259,9 +264,13 @@ describe("the scanner can see what it is meant to catch (positive controls)", ()
 			0x20,
 			0x7e,
 			0xa0,
+			0xac,
+			0xae,
 			0xe9,
 			0x061b,
 			0x061d,
+			0x180d,
+			0x180f,
 			0x200a,
 			0x2010,
 			0x2027,
@@ -270,6 +279,10 @@ describe("the scanner can see what it is meant to catch (positive controls)", ()
 			0x2065,
 			0x206a,
 			0xfeff - 1,
+			0xfe00,
+			0xfe0f,
+			0xdffff,
+			0xe0080,
 			0xfffd,
 			0x1f600,
 		]) {
@@ -283,7 +296,7 @@ describe("the scanner can see what it is meant to catch (positive controls)", ()
 	it("reports file:line and U+XXXX for a planted fixture of every class, with line numbers split on LF only", () => {
 		const planted = [
 			0x1b, 0x7f, 0x85, 0x061c, 0x200b, 0x200d, 0x200f, 0x2028, 0x2029, 0x202a, 0x202e, 0x2060,
-			0x2064, 0x2066, 0x2069, 0xfeff,
+			0x2064, 0x2066, 0x2069, 0xfeff, 0x00ad, 0x180e, 0xe0000, 0xe0041, 0xe007f,
 		];
 		// one planted character per line, with a clean line between each, and the U+2028 / U+2029 / form-feed line breakers INSIDE lines
 		const text = planted
@@ -302,7 +315,13 @@ describe("the scanner can see what it is meant to catch (positive controls)", ()
 		const problems = censusProblems(found, {}, new Set(["sub/planted.ts"]));
 		expect(problems).toHaveLength(planted.length);
 		expect(problems[0]).toBe("sub/planted.ts:2 U+001B (a raw invisible or control character)");
-		expect(problems.at(-1)).toBe("sub/planted.ts:32 U+FEFF (a raw invisible or control character)");
+		expect(problems.at(-1)).toBe(
+			`sub/planted.ts:${2 * planted.length} U+E007F (a raw invisible or control character)`,
+		);
+		// the TAG block built from a code point (the ASCII-smuggling carrier), one in the middle of the block too
+		expect(findInvisibles(`a${String.fromCodePoint(0xe0041)}b`)).toEqual([
+			{ line: 1, codePoint: 0xe0041 },
+		]);
 		// a NUL is a forbidden character in the text scan (a file holding one would be read as a binary and skipped, which the next case pins)
 		expect(findInvisibles(`x${String.fromCodePoint(0)}y`)).toEqual([{ line: 1, codePoint: 0 }]);
 	});
