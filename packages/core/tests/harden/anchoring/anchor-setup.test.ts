@@ -264,7 +264,7 @@ describe("concurrent callers", () => {
 		expect(statuses.filter((x) => x === "created")).toHaveLength(1);
 		expect(statuses.filter((x) => x === "ready")).toHaveLength(5);
 		expect(keyFiles()).toHaveLength(2);
-	}, 60_000);
+	}, 60_000); // timing: 60 s test budget for six child processes; the test took 0.36-0.43 s when measured (3 runs), over 100x headroom.
 });
 
 describe("initAnchorIdentity writes the private key exclusively", () => {
@@ -354,6 +354,26 @@ describe("anchor pubkey / anchor init --json", () => {
 		expect(pk.command).toBe("anchor pubkey");
 		expect(pk.data.publicKeyPem).toBe(init.data.publicKeyPem);
 		expect(pk.data.keyId).toBe(init.data.keyId);
+	});
+
+	it("pubkey refuses a path or unknown option (exit 2) and prints no key", async () => {
+		const root = vaultRoot();
+		process.chdir(root);
+		const c = capture();
+		await anchorRun(["init"], { json: true });
+		for (const extra of [["/some/other/vault"], ["-vault"]]) {
+			c.out.length = 0;
+			c.lines.length = 0;
+			process.exitCode = 0;
+			await anchorRun(["pubkey", ...extra], {});
+			expect(process.exitCode).toBe(2);
+			expect(c.out.join("")).not.toContain("BEGIN PUBLIC KEY");
+			expect(c.lines.join("\n")).not.toContain("BEGIN PUBLIC KEY");
+		}
+		// positive control: with no extra argument the same call prints the key
+		process.exitCode = 0;
+		await anchorRun(["pubkey"], {});
+		expect(c.out.join("")).toContain("BEGIN PUBLIC KEY");
 	});
 
 	it("the printed key verifies a signature from the vault's key; another vault's key does not", async () => {

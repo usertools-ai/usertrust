@@ -404,9 +404,12 @@ export function initAnchorIdentity(
 		// distinguishable from "fresh vault, no anchors yet". Done BEFORE the identity is
 		// published, so nothing that can fail runs after publication; a leftover empty
 		// mirror from a failed attempt is harmless.
-		const mirrorPath = join(dir, "anchors.jsonl");
-		if (!existsSync(mirrorPath)) {
-			writeFileSync(mirrorPath, "", { mode: 0o600 });
+		// Exclusive create: a concurrent winner may already have published and anchored,
+		// and a plain write would truncate the mirror it filled.
+		try {
+			writeFileSync(join(dir, "anchors.jsonl"), "", { mode: 0o600, flag: "wx" });
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
 		}
 		const identity: AnchorIdentity = {
 			v: 1,

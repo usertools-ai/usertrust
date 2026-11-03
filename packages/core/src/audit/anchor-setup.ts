@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
 /**
  * ensureAnchorIdentity: the one idempotent entry point that init (and later the
  * scheduler) calls to make sure a vault can anchor.

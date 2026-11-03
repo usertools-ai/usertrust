@@ -84,6 +84,26 @@ describe("a write that returns a short count", () => {
 	});
 });
 
+describe("a mirror that already exists", () => {
+	it("is left byte for byte as it is (a concurrent winner's anchors are never truncated)", () => {
+		const root = tmp("anchor-mirror-keep-");
+		const anchors = join(root, ".usertrust", "audit", "anchors");
+		mkdirSync(anchors, { recursive: true });
+		const mirror = join(anchors, "anchors.jsonl");
+		const existing = '{"anchorSeq":1}\n{"anchorSeq":2}\n';
+		writeFileSync(mirror, existing);
+		const keyFile = join(tmp("anchor-mirror-keep-keys-"), "k.anchor.pem");
+		initAnchorIdentity(root, { keyFile });
+		expect(readFileSync(mirror, "utf-8")).toBe(existing);
+		// positive control: with no mirror yet, init creates an empty one
+		const fresh = tmp("anchor-mirror-new-");
+		initAnchorIdentity(fresh, { keyFile: join(tmp("anchor-mirror-new-keys-"), "k.anchor.pem") });
+		expect(
+			readFileSync(join(fresh, ".usertrust", "audit", "anchors", "anchors.jsonl"), "utf-8"),
+		).toBe("");
+	});
+});
+
 describe("a failure creating the mirror", () => {
 	it("is reported by initAnchorIdentity with nothing published and the key removed", () => {
 		const root = tmp("anchor-partial-mirror-");

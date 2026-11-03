@@ -37,7 +37,7 @@ import { DEFAULT_REKOR_URL } from "../audit/rekor.js";
 import { parseRekorReceipt, type RekorReceipt } from "../audit/rekor-verify.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { CliOptions } from "./init.js";
-import { scrubForTerminal, toSafeJson, warnIfVaultLoose } from "./target.js";
+import { refuseStrayPositional, scrubForTerminal, toSafeJson, warnIfVaultLoose } from "./target.js";
 
 const REKOR_FLAG = "--sink-rekor";
 const S3_KEYS = new Set(["bucket", "region", "prefix", "endpoint"]);
@@ -402,6 +402,9 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 				return;
 			}
 			case "pubkey": {
+				// It prints THIS directory's vault key: a path argument must be refused, not
+				// ignored, or an operator could pin the wrong vault's key.
+				if (refuseStrayPositional("anchor pubkey", args.slice(1), json)) return;
 				const identity = readAnchorIdentity(root);
 				if (identity === null) {
 					throw new Error("No anchor identity here: run `usertrust anchor init`.");
