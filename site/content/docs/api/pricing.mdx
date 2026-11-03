@@ -80,6 +80,9 @@ counts it prices, so every estimate, settle and stream applies the same rule, an
 still reproduces its `cost`. Only built-in table rows carry a tier; `customRates` are flat, and a
 `longPrompt` on a custom row (for example one built by spreading a table row) is ignored.
 
+The xAI rows use the same mechanism with `thresholdTokens: 199_999`: xAI applies its doubled long-context rates once a
+prompt reaches 200,000 tokens, so a prompt of 200,000 tokens or more pays the higher row and 199,999 or fewer pays the lower one (see [xAI](#xai)).
+
 **One settle is one request.** A settle prices the counts it is given as a single request. A
 caller that settles several requests' usage together, such as the Claude Code plugin's
 transcript windows, is priced at the tier of their combined prompt. Before rounding, that is
@@ -414,7 +417,7 @@ interface LongPromptTier {
 ### PRICING_TABLE_VERSION
 
 ```typescript
-const PRICING_TABLE_VERSION: string  // e.g. "2026-10-28"
+const PRICING_TABLE_VERSION: string  // e.g. "2026-11-02"
 ```
 
 Date-stamped version of the built-in `PRICING_TABLE`, bumped whenever any entry's rates change.
@@ -457,7 +460,7 @@ exactly reproduces usertrust's own configured metered cost (counts × `appliedRa
 1-hour cache writes are priced at the 1-hour rate only when the provider reports the 5m/1h split
 (a flat write total, or a host with no TTL split, bills at the 5-minute rate); long-context, service-tier, regional, modality, and cache-STORAGE charges (Gemini
 hourly storage, prompt-size-dependent rates; `gpt-5.6-sol`'s >272k long-context uplift, 2× in / 1.5× out) not modeled — fixed
-per-model rates by design, except `claude-haiku-5-5`, which is priced per request by prompt length
+per-model rates by design, except `claude-haiku-5-5` and the xAI rows, which are priced per request by prompt length
 (see "Per-request prompt tiers" at `/docs/api/pricing`); fast mode is not priced (Opus 5.5 fast is $8 / $40, Opus 5 and
 Opus 4.8 fast $10 / $50; `speed` is a usage field, not a model id); per-call `ceil` + 1-UT floor
 differs from provider-side aggregation. Estimates never model cache state.
