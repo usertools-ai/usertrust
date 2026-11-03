@@ -9,13 +9,13 @@ Free inference stays inside governance, not exempt from it.
 
 ## Endpoint Classification
 
-Every governed client is classified `local` or `cloud` by inspecting its `baseURL`. Classification runs in a fixed order -- the first rule that applies wins:
+Every governed client is classified `local` or `cloud` by inspecting its `baseURL`. Classification runs in a fixed order — the first rule that applies wins:
 
-1. **Explicit override** -- an override passed by the caller wins over everything.
-2. **No readable `baseURL`** -- absent or malformed URLs classify as cloud. Never throws.
-3. **`endpoints[]` matchers** -- first matching config entry wins.
-4. **Loopback autodetect** -- `localhost`, `127.0.0.1`, `::1`, and the IPv4-mapped IPv6 loopback classify as local when `local.autoDetectLoopback` is `true` (the default). The port hints the runtime: `11434` = ollama, `1234` = lmstudio, `8000` = vllm, anything else = openai-compat.
-5. **Cloud default** -- anything unmatched is cloud.
+1. **Explicit override** — the `endpoint` option of `trust()` (`trust(client, { endpoint: { class: "local", runtime: "vllm" } })`) wins over everything once `class` is set; `runtime` defaults to `"unknown"` when omitted.
+2. **No readable `baseURL`** — absent or malformed URLs classify as cloud. Never throws.
+3. **`endpoints[]` matchers** — first matching config entry wins.
+4. **Loopback autodetect** — `localhost`, `127.0.0.1`, `::1`, and the IPv4-mapped IPv6 loopback classify as local when `local.autoDetectLoopback` is `true` (the default). The port hints the runtime: `11434` = ollama, `1234` = lmstudio, `8000` = vllm, anything else = openai-compat.
+5. **Cloud default** — anything unmatched is cloud.
 
 The default is **fail-expensive** by design: over-charging free inference at cloud rates is recoverable; under-charging a paid endpoint is not.
 
@@ -48,30 +48,30 @@ Local-scope rate resolution never touches the cloud pricing table:
 
 1. `local.models` exact match
 2. Longest trailing-star glob (`"llama3.3*"`, `"*"`)
-3. `local.defaultRate` -- `{ inputPer1k: 0, outputPer1k: 0 }` by default
+3. `local.defaultRate` — `{ inputPer1k: 0, outputPer1k: 0 }` by default
 
-Every call cost is floored at 1 usertoken -- zero-amount ledger transfers are invalid -- so a `{0,0}`-rate local call settles at **exactly 1 nominal usertoken**. Real token counts are still metered: for local OpenAI-compatible streams, `stream_options: { include_usage: true }` is auto-injected (`local.injectUsageOptions`, default `true`) so settlement uses server-truth counts instead of estimates.
+Every call cost is floored at 1 usertoken — zero-amount ledger transfers are invalid — so a `{0,0}`-rate local call settles at **exactly 1 nominal usertoken**. Real token counts are still metered: for local OpenAI-compatible `chat.completions` streams (not the Responses API, which reports usage on its own), `stream_options: { include_usage: true }` is auto-injected (`local.injectUsageOptions`, default `true`) so settlement uses server-truth counts instead of estimates; an explicit `include_usage` is respected, and a server that rejects the field gets one retry without it.
 
 ### Why Budgets Still Bind
 
-Nominal metering is not an exemption. Every governed local call still places a PENDING hold, settles at least 1 usertoken, and is recorded on the audit chain (or, if that write fails, its receipt carries `auditDegraded`) -- so runaway loops burn budget, anomaly governance still fires, and every governed call has a receipt. The receipt carries the provenance:
+Nominal metering is not an exemption. Every governed local call still places a PENDING hold, settles at least 1 usertoken, and is recorded on the audit chain (or, if that write fails, its receipt carries `auditDegraded`) — so runaway loops burn budget, anomaly governance still fires, and every governed call has a receipt. The receipt carries the provenance:
 
 | Receipt field | Local value |
 |---------------|-------------|
-| `endpoint` | `{ class: "local", runtime: "ollama" \| "vllm" \| "lmstudio" \| "openai-compat" }` |
+| `endpoint` | `{ class: "local", runtime: "ollama" \| "vllm" \| "lmstudio" \| "openai-compat" \| "unknown" }`; `"unknown"` when an `endpoints[]` entry or override omits `runtime` |
 | `meter.costBasis` | `"nominal"` (or `"usd-proxy"` with `rateClass: "amortized-usd"`) |
 | `meter.rateSource` | `"local-model"` or `"local-default"` |
 | `usageSource` | `"provider"` or `"estimated"` |
 
-For GPU showback, set `local.rateClass: "amortized-usd"` and per-model rates in `local.models` -- local calls then settle at your amortized chargeback rate (1 usertoken = $0.0001, as usual) instead of the nominal floor.
+For GPU showback, set `local.rateClass: "amortized-usd"` and per-model rates in `local.models` — local calls then settle at your amortized chargeback rate (1 usertoken = $0.0001, as usual) instead of the nominal floor.
 
 ## unknownModelPolicy
 
-Only cloud-scope calls can hit an unknown model -- local scope always resolves to local rates. When a model misses `customRates` and the pricing table (an exact id, or the id with one trailing `-YYYYMMDD` / `-YYYY-MM-DD` date stripped; there is no prefix matching), `unknownModelPolicy` decides:
+Only cloud-scope calls can hit an unknown model — local scope always resolves to local rates. When a model misses `customRates` (consulted only when `pricing` is `"custom"`) and the pricing table (an exact id, or the id with one trailing `-YYYYMMDD` / `-YYYY-MM-DD` date stripped; there is no prefix matching), `unknownModelPolicy` decides:
 
 | Policy | Behavior |
 |--------|----------|
-| `"fallback"` | Silent dearest-known fallback rate (the pricing-table maximum) |
+| `"fallback"` | Silent dearest-known fallback rate (the pricing-table maximum); the receipt still carries `meter.rateSource: "fallback"` |
 | `"warn"` (default) | Same rate, one-time console warning per model per process, `meter.rateSource: "fallback"` on the receipt |
 | `"deny"` | `PolicyDeniedError` thrown before any PENDING hold is placed |
 

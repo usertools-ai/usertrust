@@ -7,6 +7,8 @@ description: Define governance rules in YAML with enforcement levels, severity, 
 
 Rules are defined in YAML (or JSON) and loaded from `.usertrust/policies/default.yml` by default.
 
+The file is read when the controller is built (`trust()` / `createGovernor()`). Its path is the `policies` key of `usertrust.config.json` (default `./policies/default.yml`, relative to the `.usertrust/` vault); a `.yml` or `.yaml` extension parses as YAML, anything else as JSON. The document is either a bare list of rules or an object with a single `rules` key. No file means built-in defaults only. A file that is present but unreadable, unparseable, or contains any invalid rule throws `PolicyLoadError` and the controller does not start; no partial rule set is ever loaded. Check a file ahead of time with `usertrust policy validate [path] [--json]`.
+
 ```yaml
 # Requires operator scope on the controller/config, e.g. scope: ["production/api"]
 - name: block-expensive-models
@@ -32,20 +34,26 @@ Rules are defined in YAML (or JSON) and loaded from `.usertrust/policies/default
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| name | string | yes | — | Unique rule identifier |
+| id | `string` | no | — | Unique rule identifier; when set, the denial reason is labelled `[id]` instead of `[name]` |
+| name | `string` | yes | — | Rule name (non-empty) |
+| description | `string` | no | — | Human-readable rationale, appended to the denial reason |
 | effect | `"deny"` or `"warn"` | yes | — | What happens when matched |
 | enforcement | `"hard"` or `"soft"` | yes | — | Hard = block, Soft = allow with warnings |
 | severity | `"critical" \| "high" \| "medium" \| "low" \| "info"` | no | — | Severity level |
 | priority | number | no | 100 | Lower = higher priority |
 | enabled | boolean | no | true | Toggle rule on/off |
-| conditions | FieldCondition[] | yes | — | Conditions to match (ALL must match) |
-| scopePatterns | string[] | no | — | Minimatch glob patterns |
-| timeWindows | TimeWindow[] | no | — | Time-based restrictions |
+| conditions | `FieldCondition[]` | yes | — | Conditions to match (ALL must match; on a `hard` rule an unevaluable condition counts as matched, see Enforcement) |
+| scopePatterns | `string[]` | no | — | Minimatch glob patterns |
+| timeWindows | `TimeWindow[]` | no | — | Time-based restrictions |
+
+A rule may carry only the keys above, and a condition only `field`, `operator`, and `value`. An unknown key (for example `scopePattern`, singular) is a load error rather than something the loader drops, and one invalid rule fails the whole file.
 
 ## Enforcement
 
-- **Hard** — Returns `decision: "deny"`. The LLM call is blocked.
-- **Soft** — Returns `decision: "allow"` with `hasWarnings: true`. The call proceeds but warnings are logged.
+- **Hard** — Returns `decision: "deny"`. The call (LLM or governed action) is blocked: the SDK throws `PolicyDeniedError` whose `reason` is the matched rules' reasons joined with `"; "`.
+- **Soft** — Returns `decision: "allow"` with `hasWarnings: true` and the rule listed in `softViolations`. The call proceeds. Nothing in the SDK reads `softViolations`, `hasWarnings`, or the `[WARN]` reasons after evaluation: a soft match is not logged, not written to the audit chain, and not carried on the receipt. A soft rule is observational only; use a hard rule when the match must have an effect.
+
+Hard rules fail closed. A condition whose field is absent from the context, or is the wrong type for `gt`, `gte`, `lt`, `lte`, `contains` or `regex` (`eq`, `neq`, `in` and `not_in` compare strictly, so a value of another type is a determinate comparison: false for `eq` and `in`, true for `neq` and `not_in`), cannot be evaluated; on a `hard` rule it counts as satisfied and the rule fires, on a `soft` rule it counts as unmet. `governAction()` calls carry no `model` field, so the hard `model in [...]` rule above denies every governed action inside its scope; lead such a rule with `{ field: model, operator: exists }` when it must apply only to LLM calls. Every hard denial throws `PolicyDeniedError`.
 
 ## Scope Matching
 
@@ -70,6 +78,8 @@ timeWindows:
     endHour: 17                      # 5 PM
 ```
 
+Hours are read from the process's local clock, not UTC. `startHour` is inclusive and `endHour` exclusive, so 9 to 17 covers 09:00 through 16:59; either bound may be omitted. A window whose `startHour` is greater than its `endHour` (for example 22 to 6) matches on both sides of midnight, with `daysOfWeek` checked against the timestamp's own day. Valid values: `daysOfWeek` integers 0–6, `startHour` 0–23, `endHour` 0–24. A rule with several windows is active when any one matches.
+
 ## Default Rules
 
 Three rules ship by default:
@@ -77,6 +87,8 @@ Three rules ship by default:
 1. **block-budget-overshoot** — Deny when `budget_remaining_after` `lt` 0 (hard)
 2. **block-budget-exhausted** — Deny when `budget_remaining` `lte` 0 (hard)
 3. **warn-high-cost** — Warn when `estimated_cost` `gt` 1000 (soft)
+
+These three are built into the SDK and are always enforced: rules loaded from the policy file are appended after them, never merged over them. A file rule that reuses a default's `id`, or sets `enabled: false` on it, adds a second rule and leaves the built-in active. `usertrust init` also writes the same three rules into `policies/default.yml`; deleting them there removes the copies, not the built-ins.
 
 ## PolicyResult
 
@@ -91,3 +103,18 @@ interface PolicyResult {
   evaluatedAt: string;
 }
 ```
+
+### RuleMatch
+
+```typescript
+interface RuleMatch {
+  id?: string;         // omitted when the rule has no id
+  name: string;
+  effect: "deny" | "warn";
+  enforcement: "hard" | "soft";
+  severity: "critical" | "high" | "medium" | "low" | "info" | undefined;
+  fields: string[];   // field names of the matched rule's conditions
+}
+```
+
+`evaluatedAt` is the context timestamp when one was supplied, otherwise the evaluation time as an ISO string. Neither `PolicyResult` nor `RuleMatch` is exported from the `usertrust` package entry points; they describe the result the controller evaluates internally.

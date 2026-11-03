@@ -1,9 +1,9 @@
 ---
 title: Errors
-description: Seven domain error classes with structured hints and documentation URLs.
+description: Twelve domain error classes with structured hints and documentation URLs.
 ---
 
-usertrust defines seven domain-specific error classes. All extend `Error` and include structured `hint` and `docsUrl` properties for actionable diagnostics.
+usertrust defines twelve domain-specific error classes. All extend `Error` and include structured `hint` and `docsUrl` properties for actionable diagnostics. A thirteenth exported class, `UnheldSettlementRateLimitedError`, is thrown only when `recordUnheldSettlement()` refuses a record because too many arrived in a window; it carries `retryAfterMs` instead of a hint.
 
 ## Catching Errors
 
@@ -34,7 +34,7 @@ try {
 }
 ```
 
-Every error class follows the same pattern: a descriptive message, a `hint` with a suggested fix, and a `docsUrl` pointing to detailed documentation.
+Each of the twelve follows the same pattern: a descriptive message, a `hint` with a suggested fix, and a `docsUrl` pointing to detailed documentation.
 
 ---
 
@@ -56,13 +56,13 @@ class InsufficientBalanceError extends Error {
 
 **When it fires:** During the PENDING hold phase, before the LLM call is forwarded to the provider. No tokens are consumed.
 
-**Hint:** `"Increase the budget in trust() options or add funds via the ledger."`
+**Hint:** `"Increase the budget in trust() options or add funds via the ledger."` for an unattributed call. For a call attributed to a cost center, the controller substitutes `"Fund this cost center with allocateBudget(parent, costCenter, amount) — or reclaim from another envelope. Raising the trust()/createGovernor() budget funds the session wallet, which an attributed call never debits."`, because the default advice does not fund the wallet an attributed call debits.
 
 ---
 
 ## PolicyDeniedError
 
-Thrown when a policy rule or PII detector blocks the request.
+Thrown when a policy rule (including the built-in budget rules), the PII detector, the injection detector, or `unknownModelPolicy: "deny"` blocks the request.
 
 ```typescript
 class PolicyDeniedError extends Error {
@@ -74,9 +74,9 @@ class PolicyDeniedError extends Error {
 }
 ```
 
-**When it fires:** During policy evaluation, before the LLM call. The `reason` field describes which rule or PII type triggered the denial. On any client (Anthropic, OpenAI or Google) it also fires when you call an SDK method usertrust does not govern and does not list as free: the `reason` starts `ungoverned_method: <path>` (for example `ungoverned_method: embeddings.create`), the promise rejects without calling the SDK, and `trust({ allowUngoverned: ["<path>"] })` lets that method through, audited as `ungoverned_call`.
+**When it fires:** During policy evaluation, before the LLM call. The `reason` field describes which rule, PII type, injection pattern, or unknown model triggered the denial. On any client (Anthropic, OpenAI or Google) it also fires when you call an SDK method usertrust does not govern and does not list as free: the `reason` starts `ungoverned_method: <path>` (for example `ungoverned_method: embeddings.create`), the promise rejects without calling the SDK, and `trust({ allowUngoverned: ["<path>"] })` lets that method through, audited as `ungoverned_call`.
 
-**Hint:** `'Check your policy rules in .usertrust/policies/default.yml, or set "pii": "warn" in .usertrust/usertrust.config.json (or pass { pii: "warn" } to trust()) to downgrade PII enforcement.'`
+**Hint:** depends on what denied the call. The class default is `'Check your policy rules in .usertrust/policies/default.yml, or set "pii": "warn" in .usertrust/usertrust.config.json (or pass { pii: "warn" } to trust()) to downgrade PII enforcement.'`, but the controller overrides it at its throw sites. A budget-family rule points at the `trust()` budget and `max_tokens` (or at `allocateBudget` for an attributed call), PII at `{ pii: "warn" }` or `{ pii: "redact" }`, injection at `{ injection: "warn" }`, and an unknown model at `pricing: "custom"` with a `customRates` entry.
 
 To change PII enforcement, set `pii` in the config file `trust()` reads: `.usertrust/usertrust.config.json` by default, or the file you pass as `configPath` (which is read instead, so edit that one), or pass `pii` to `trust()` itself (e.g. `{ pii: "warn" }`), which overrides the file.
 
@@ -125,7 +125,7 @@ ACS adapter convert the error to a wire response and do not forward
 
 ## AccountNotFoundError
 
-Thrown when the TigerBeetle account for the given user does not exist.
+Reserved for a missing TigerBeetle account for the given user. Exported, but never thrown.
 
 ```typescript
 class AccountNotFoundError extends Error {
@@ -135,7 +135,7 @@ class AccountNotFoundError extends Error {
 }
 ```
 
-**When it fires:** During ledger initialization or the first spend attempt.
+**When it fires:** Never. The class is defined and exported, but no code path throws it: a missing cost-center envelope account is reported as `InsufficientBalanceError` with `available: 0`, and any other failure of the hold, including a missing session wallet, surfaces as `LedgerUnavailableError`. Keep the `instanceof` branch only for forward compatibility.
 
 **Hint:** `'Run "npx usertrust init" to create accounts, or verify the userId matches your config.'`
 
@@ -143,7 +143,7 @@ class AccountNotFoundError extends Error {
 
 ## IdempotencyConflictError
 
-Thrown when a transfer with the same ID has already been submitted to TigerBeetle.
+Reserved for a transfer ID that has already been submitted to TigerBeetle. Exported, but never thrown.
 
 ```typescript
 class IdempotencyConflictError extends Error {
@@ -153,7 +153,7 @@ class IdempotencyConflictError extends Error {
 }
 ```
 
-**When it fires:** During the PENDING hold phase, if the generated `transferId` collides with an existing transfer.
+**When it fires:** Never. The class is defined and exported, but no code path throws it. A transfer id the ledger already holds is answered by the ledger client with subclasses of `TBTransferError` instead: `TransferReplayMismatchError` when the stored transfer differs from the replay, `PendingReplayError` when a PENDING id is replayed (it is not read as a live hold), and `TransferIdRetiredError` when the first attempt under that id failed.
 
 **Hint:** `"This transfer was already submitted. Use a unique transferId for retries."`
 
@@ -171,9 +171,15 @@ class LedgerUnavailableError extends Error {
 }
 ```
 
-**When it fires:** Before any LLM call, during the connection check or PENDING hold attempt. This is failure mode 15.4 -- no tokens are at risk because no hold was placed.
+**When it fires:** Before any LLM call, during the connection check or PENDING hold attempt. This is failure mode 15.4 -- no tokens are at risk because no hold was placed. `trust()`, `createGovernor()` and `usertrust budget` first open a plain TCP connection to each configured address; when every one refuses (within 1 s for a loopback address, 3 s for a remote one), they throw with `No ledger is running at <address>. Fix: ...`. When something is listening but no usertrust ledger answers (another service on the port, or a cluster formatted with another id), the first request is bounded by `tigerbeetle.connectTimeoutMs` (default `5000`) and the error says so. When the cluster evicts the client, the error says the evicted client cannot be released and the process must exit on its own.
 
-**Hint:** `'Start TigerBeetle 0.17.x (tigerbeetle format … then tigerbeetle start --addresses=<address>) or use { dryRun: true } to skip the ledger.'`, where `<address>` is the ledger the controller was configured with (`127.0.0.1:3001` by default).
+**Hint:** the hint depends on what the controller found. It says to:
+
+- Nothing listening at the default ledger (`127.0.0.1:3001`, cluster 0): run `npx usertrust tb start`, or pass `{ dryRun: true }` to skip the ledger
+- Nothing listening at any other address or cluster: start TigerBeetle at the named address and cluster, or pass `{ dryRun: true }` to skip the ledger
+- Something listens, but no usertrust ledger answers: run `npx usertrust tb status`, or pass `{ dryRun: true }` to skip the ledger
+- The cluster evicts the client: run a TigerBeetle server of the same release as the bundled client (`0.17.9`)
+- Any other ledger failure, with no hint of its own: `Start TigerBeetle 0.17.x (tigerbeetle format … then tigerbeetle start --addresses=<address>) or use { dryRun: true } to skip the ledger.`, where `<address>` is the ledger the controller was configured with (`127.0.0.1:3001` by default).
 
 <Callout type="warn">
 `usertrust tb start` does not manage TigerBeetle in this version: it prints the same
@@ -211,7 +217,7 @@ By default usertrust does not fail a call because the audit write degraded: if t
 
 ## VaultNotInitializedError
 
-Thrown when the `.usertrust/` vault directory does not exist.
+Reserved for a missing `.usertrust/` vault directory. Exported, but never thrown.
 
 ```typescript
 class VaultNotInitializedError extends Error {
@@ -221,9 +227,131 @@ class VaultNotInitializedError extends Error {
 }
 ```
 
-**When it fires:** During `trust()` initialization, before any LLM calls.
+**When it fires:** Never. `trust()` does not require an initialized vault: a missing `usertrust.config.json` falls back to defaults and the audit writer creates `.usertrust/audit/` itself. The class is defined and exported but no code path throws it; the credential vault throws `VaultKeyMissingError` instead when the master-key env var is unset.
 
 **Hint:** `'Run "npx usertrust init" to create the vault directory.'`
+
+---
+
+## VaultKeyMissingError
+
+Thrown when the vault is opened and the environment variable that holds the vault master key is not set.
+
+```typescript
+class VaultKeyMissingError extends Error {
+  readonly envVar: string;     // the variable that was checked, e.g. USERTRUST_VAULT_KEY
+  readonly hint: string;
+  readonly docsUrl: string;
+}
+```
+
+**When it fires:** In `createVaultStore()`, before any credential is read or written. The variable name comes from `vault.masterKeyEnv` in config (default `USERTRUST_VAULT_KEY`). The only caller is the `usertrust secret` command, so this error surfaces from the CLI rather than from an LLM call. No tokens are consumed.
+
+**Hint:** `"Set the USERTRUST_VAULT_KEY environment variable to the vault master key."` — the variable named in the hint is whichever one was checked.
+
+**Docs URL:** `https://usertrust.ai/docs/errors/vault-key-missing`
+
+---
+
+## SpendLedgerUnreadableError
+
+Thrown when `.usertrust/spend-ledger.json` exists but cannot be read or interpreted: a read error other than a missing file, invalid JSON, no numeric `budgetSpent` field, or a negative or non-finite value.
+
+```typescript
+class SpendLedgerUnreadableError extends Error {
+  readonly cause_message: string;   // "<path>: not valid JSON", "<path>: EACCES ...", ...
+  readonly hint: string;
+  readonly docsUrl: string;
+}
+```
+
+**When it fires:** At startup, inside `trust()` or `createGovernor()`, when the persisted cumulative spend is loaded to seed the in-process budget and the TigerBeetle enforcing wallet. No LLM call has been made.
+
+**Hint:** `"Fix permissions on .usertrust/spend-ledger.json, restore it from a snapshot, or delete it to reset cumulative spend to zero."`
+
+**Docs URL:** `https://usertrust.ai/docs/errors/spend-ledger-unreadable`
+
+<Callout type="warn">
+**Why not zero.** A missing ledger means nothing has been spent yet, which is true on a first run, so it reads as zero. An unreadable ledger means an unknown amount has been spent. Defaulting that to zero would re-grant the full budget both in-process and in the enforcing wallet, which is seeded with `max(0, budget - budgetSpent)`. Deleting the file is a deliberate reset; usertrust will not make that choice for you.
+</Callout>
+
+---
+
+## CredentialAccessDeniedError
+
+Represents a credential whose vault scope does not permit the requesting agent or action.
+
+```typescript
+class CredentialAccessDeniedError extends Error {
+  readonly credentialName: string;
+  readonly reason: string;
+  readonly hint: string;
+  readonly docsUrl: string;
+}
+```
+
+**When it fires:** It does not. The class is exported from `usertrust` but no code path constructs it. A scope denial in `vault.get()` returns `{ granted: false, reason }` and appends a `credential_denied` audit event instead of throwing. You will only see this error if your own code, or a later release, throws it.
+
+**Hint:** ``"Check the credential scope in .usertrust/credentials.enc or update the scope with `usertrust secret add --scope`."``
+
+**Docs URL:** `https://usertrust.ai/docs/errors/credential-access-denied`
+
+<Callout type="warn">
+**No such flag.** That hint is the error's own text, quoted verbatim, and `usertrust secret add` takes only `<name> <value>`; there is no `--scope` flag, and a credential added from the CLI always receives the `vault.defaultScope` from config. Set the scope there.
+</Callout>
+
+---
+
+## SkillVerificationError
+
+Thrown when a skill manifest fails schema validation during supply-chain enforcement.
+
+```typescript
+class SkillVerificationError extends Error {
+  readonly skillId: string;    // manifest.id, or "unknown" when the manifest has none
+  readonly reason: string;     // "Schema validation failed: ..."
+  readonly hint: string;
+  readonly docsUrl: string;
+}
+```
+
+**When it fires:** In `enforceSkillLoad()`, at the first step of the verification pipeline, and only while `supplyChain.enabled` is `true` (the default). `usertrust skill verify` does not raise it: the CLI checks the manifest with `validateManifest()` first, prints `Schema error: ...` for malformed input and returns before it reaches `enforceSkillLoad()`. `enforceSkillLoad()` is exported, so an SDK caller that passes it a manifest failing the schema meets this error directly, before any code is executed. A missing registered key, a bad signature, an `entryHash` mismatch, or a denied permission does *not* throw; those come back as a `SkillVerification` result with `valid: false` and an `error` string.
+
+**Hint:** `"Verify the skill manifest is signed by a trusted publisher, or add the publisher to supplyChain.trustedPublishers."`
+
+**Docs URL:** `https://usertrust.ai/docs/errors/skill-verification`
+
+<Callout type="warn">
+**Hint vs cause.** The hint talks about signatures and `supplyChain.trustedPublishers`, but the only condition that throws is a manifest that does not match the schema. Read `reason` first: it names the failing fields. Publisher trust is anchored by `supplyChain.publisherKeys`, the hex-encoded Ed25519 keys you register per publisher, not by a key embedded in the manifest.
+</Callout>
+
+---
+
+## AnomalyError
+
+Thrown mid-stream when the streaming anomaly detector trips on token rate, spend velocity, or an injection cascade. Detection is off by default.
+
+```typescript
+class AnomalyError extends Error {
+  readonly kind: "token_rate" | "spend_velocity" | "injection_cascade";
+  readonly metric: number;      // the observed value that tripped
+  readonly threshold: number;   // the configured limit it crossed
+  readonly hint: string;
+  readonly docsUrl: string;
+}
+```
+
+**When it fires:** After the LLM call has been forwarded, while chunks are being consumed from a streaming response, and only when `anomaly.enabled` is `true` (default `false`). The detector observes every chunk; on a tripped verdict usertrust appends an `anomaly_detected` audit event, throws this error from the stream, releases the in-flight hold and voids it, records a breaker failure, and appends a `stream_partial_delivery` event. The provider has already produced the chunks delivered so far; the ledger hold is voided rather than settled.
+
+**Hint:** `"The streaming circuit breaker tripped on anomalous behavior. Tune anomaly thresholds in config or call detector.reset() to clear the trip."`
+
+**Docs URL:** `https://usertrust.ai/docs/errors/anomaly-detected` — note the slug is `anomaly-detected`, not the class name.
+
+Thresholds live under `anomaly` in config: `tokenRate.thresholdTokPerSec` (default 500; 5000 for local models), `spendVelocity.thresholdDollarsPerMin` (default 1.0), `injectionCascade.eventCount` (default 3 in 60 s), and `cooldownMs` (default 30000), after which the detector resets itself.
+
+<Callout type="warn">
+**Two breakers.** This is not the per-provider circuit breaker on the [Circuit Breaker](/docs/concepts/circuit-breaker) page, which raises `CircuitOpenError`. The detector that `trust()` builds is internal and is not returned to you, so the hint's `detector.reset()` applies only to a detector you construct yourself with the exported `createAnomalyDetector()`; for the built-in one, wait out `cooldownMs`. On the Anthropic `messages.stream()` helper path a trip aborts the stream instead of throwing this error.
+</Callout>
 
 ---
 
@@ -233,10 +361,15 @@ class VaultNotInitializedError extends Error {
 |-------|-------------|--------------------|-----------------|
 | `InsufficientBalanceError` | Pre-call | No | No |
 | `PolicyDeniedError` | Pre-call | No | No |
-| `AccountNotFoundError` | Pre-call | No | No |
-| `IdempotencyConflictError` | Pre-call | No | No |
+| `AccountNotFoundError` | Not thrown | — | — |
+| `IdempotencyConflictError` | Not thrown | — | — |
 | `LedgerUnavailableError` | 15.4 | No | No |
 | `AuditDegradedError` | 15.3 | Yes when it fires after the provider call (the usual case, and a failed primary record under `audit.failClosed`); No when `audit.failClosed` refuses a call at its start on an already-degraded client | Settled and charged in the usual case; nothing is charged on a start-of-call refusal or a failed primary record (the hold is released by a best-effort void request, see above) |
-| `VaultNotInitializedError` | Pre-call | No | No |
+| `VaultNotInitializedError` | Not thrown | — | — |
+| `SpendLedgerUnreadableError` | Startup | No | No |
+| `AnomalyError` | Mid-stream | Yes (aborted) | No (the ledger hold is voided; the provider can still bill the tokens it generated) |
+| `VaultKeyMissingError` | Vault open | No | No |
+| `SkillVerificationError` | Skill verification | No | No |
+| `CredentialAccessDeniedError` | Not thrown | — | — |
 
 All pre-call errors are thrown before any interaction with the LLM provider. No tokens are consumed and no budget is affected.
