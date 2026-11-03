@@ -9,6 +9,10 @@
  * Pure: no `window`, no `history`. The encoding is canonical (sorted keys, sorted de-duplicated values, defaults
  * omitted, so a clean page has an empty hash). Decoding reads UNTRUSTED input (a pasted link), so it never throws and
  * checks every value against the domain the filters use; anything outside it is dropped, never repaired.
+ *
+ * The encoder never writes a link that decodes to something else: `addressHolds` says whether a state survives the
+ * trip, and a state that does not (text a link cannot carry, a facet value past the caps, a fragment past the length
+ * cap) is not written at all; the page says so instead.
  */
 
 import { EMPTY_FILTERS, type FilterState } from "./filters.js";
@@ -26,17 +30,26 @@ export interface UrlState {
 
 export const EMPTY_URL_STATE: UrlState = { view: DEFAULT_VIEW, filters: EMPTY_FILTERS, open: null };
 
-/** A hash longer than this is ignored whole: a real state is a few hundred characters. */
-export const MAX_HASH_LENGTH = 4096;
+/** The longest search text kept (UTF-16 code units, as `String.length` and an input's `maxLength` count them). */
+export const MAX_SEARCH_LENGTH = 512;
+/**
+ * A hash longer than this is ignored whole. A real state is a few hundred characters; the cap leaves room for the
+ * longest search the box allows in any script: each code unit percent-encodes to at most 9 characters (a 3-byte UTF-8
+ * character, `%E3%81%82`), so 512 of them take 4,608.
+ */
+export const MAX_HASH_LENGTH = 8192;
 /** Facet values kept per key and the longest one kept; the search text has its own cap. */
 const MAX_VALUES_PER_KEY = 100;
 const MAX_VALUE_LENGTH = 256;
-const MAX_SEARCH_LENGTH = 512;
 
 const VIEWS: readonly ViewId[] = ["audit", "trends"];
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
-/** Canonical non-negative integer text: no sign, no leading zeros, no exponent, no fraction. */
-const INTEGER = /^(0|[1-9]\d*)$/;
+/**
+ * Canonical non-negative decimal text: no sign, no leading zeros, no exponent, no trailing zeros in a fraction (`0`,
+ * `12`, `1.5`; never `1.50`, `.5`, `1e3` or `-0`). A cost bound is a number the filter bar takes as typed, fractions
+ * included.
+ */
+const DECIMAL = /^(0|[1-9]\d*)(\.\d*[1-9])?$/;
 const EVENT_HASH = /^[0-9a-f]{64}$/;
 /** Control, format (zero-width and bidirectional marks) and line/paragraph separator characters. */
 const INVISIBLE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
@@ -58,8 +71,14 @@ function isDay(s: string): boolean {
 	return !Number.isNaN(t) && new Date(t).toISOString().slice(0, 10) === s;
 }
 
-function isCost(n: number | undefined): n is number {
-	return n !== undefined && Number.isSafeInteger(n) && n >= 0;
+/**
+ * The text for a cost bound, or null when it has none a link can carry: not finite, negative, or a number whose
+ * shortest form is not plain decimal (`1e-7`, `1e+21`). Decoding accepts exactly the texts this returns.
+ */
+function costText(n: number | undefined): string | null {
+	if (n === undefined || !Number.isFinite(n) || n < 0) return null;
+	const t = String(n);
+	return DECIMAL.test(t) ? t : null;
 }
 
 function cleanText(s: string, max: number): string | null {
@@ -75,8 +94,10 @@ export function encodeUrlState(state: UrlState): string {
 	}
 	if (f.from !== undefined && isDay(f.from)) pairs.push(["from", f.from]);
 	if (f.to !== undefined && isDay(f.to)) pairs.push(["to", f.to]);
-	if (isCost(f.costMax)) pairs.push(["max", String(f.costMax)]);
-	if (isCost(f.costMin)) pairs.push(["min", String(f.costMin)]);
+	const max = costText(f.costMax);
+	const min = costText(f.costMin);
+	if (max !== null) pairs.push(["max", max]);
+	if (min !== null) pairs.push(["min", min]);
 	if (state.open !== null && EVENT_HASH.test(state.open)) pairs.push(["open", state.open]);
 	if (f.search !== "") pairs.push(["q", f.search]);
 	if (state.view !== DEFAULT_VIEW) pairs.push(["view", state.view]);
@@ -111,9 +132,10 @@ export function decodeUrlState(hash: string): UrlState {
 		};
 		const cost = (key: string): number | undefined => {
 			const v = params.get(key);
-			if (v === null || !INTEGER.test(v)) return undefined;
+			if (v === null || !DECIMAL.test(v)) return undefined;
+			// Only the text the encoder would write for the number: `9007199254740993` reads as ...992 and is refused.
 			const n = Number(v);
-			return isCost(n) ? n : undefined;
+			return costText(n) === v ? n : undefined;
 		};
 
 		const filters: FilterState = {
@@ -142,18 +164,47 @@ export function decodeUrlState(hash: string): UrlState {
 	}
 }
 
+/** Everything the address can say about a state, before any check: facet values de-duplicated and sorted. */
+function described(s: UrlState): string {
+	const f = s.filters;
+	const opt = (v: string | number | undefined): string | null =>
+		v === undefined ? null : String(v);
+	return JSON.stringify([
+		s.view,
+		s.open,
+		f.search,
+		opt(f.from),
+		opt(f.to),
+		opt(f.costMin),
+		opt(f.costMax),
+		FACETS.map(([, field]) => [...new Set(f[field])].sort()),
+	]);
+}
+
+/**
+ * Whether the address can hold this state: its hash is within the cap and decodes back to the same state. False for
+ * search text or a facet value with characters a link cannot carry (invisible marks, a lone surrogate), a value past
+ * its cap, more facet values than are kept, a cost with no plain decimal form, or a hash past `MAX_HASH_LENGTH`.
+ */
+export function addressHolds(state: UrlState): boolean {
+	const hash = encodeUrlState(state);
+	return hash.length <= MAX_HASH_LENGTH && described(decodeUrlState(hash)) === described(state);
+}
+
 /**
  * What to do with the address when the state changes from `prev` to `next` while the address reads `currentHash`.
  * Changing the view or the open record pushes an entry, so Back returns to the previous view or record; a filter
  * tweak replaces the current one, so typing in the search box does not flood the back button. Nothing is written when
- * the address already describes `next` (the state came from the address, or a write already landed).
+ * the address already describes `next` (the state came from the address, or a write already landed). A state the
+ * address cannot hold (`addressHolds`) writes the empty hash: a reload or a copied link opens a clean page, never a
+ * different filter set, and the page tells the user.
  */
 export function planHistory(
 	prev: UrlState,
 	next: UrlState,
 	currentHash: string,
 ): { kind: "push" | "replace" | "none"; hash: string } {
-	const hash = encodeUrlState(next);
+	const hash = addressHolds(next) ? encodeUrlState(next) : "";
 	if (encodeUrlState(decodeUrlState(currentHash)) === hash) return { kind: "none", hash };
 	const navigated = prev.view !== next.view || prev.open !== next.open;
 	return { kind: navigated ? "push" : "replace", hash };

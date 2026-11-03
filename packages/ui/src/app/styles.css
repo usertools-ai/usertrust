@@ -740,6 +740,9 @@ body {
 	.ut-active .ut-label {
 		margin-right: 4px;
 	}
+	.ut-address-note {
+		margin: 8px 16px;
+	}
 
 	/* ── Body: list beside a docked inspector ── */
 	.ut-body {

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FilterState } from "../shared/filters.js";
 import {
+	addressHolds,
 	decodeUrlState,
 	planHistory,
 	sameUrlState,
@@ -23,6 +24,8 @@ export function useUrlState(): {
 	setFilters(filters: FilterState): void;
 	openHash: string | null;
 	setOpenHash(hash: string | null): void;
+	/** False when the address cannot hold this state (see `addressHolds`): it is not written, and the page says so. */
+	addressKept: boolean;
 } {
 	const [state, setState] = useState<UrlState>(() => decodeUrlState(window.location.hash));
 	// The state as of the last write, to tell a view/record change (push) from a filter tweak (replace).
@@ -60,6 +63,7 @@ export function useUrlState(): {
 		[],
 	);
 	const setOpenHash = useCallback((open: string | null) => setState((s) => ({ ...s, open })), []);
+	const addressKept = useMemo(() => addressHolds(state), [state]);
 	return {
 		view: state.view,
 		setView,
@@ -67,5 +71,6 @@ export function useUrlState(): {
 		setFilters,
 		openHash: state.open,
 		setOpenHash,
+		addressKept,
 	};
 }

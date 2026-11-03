@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { EMPTY_FILTERS, type FilterState } from "../src/shared/filters.js";
 import {
+	addressHolds,
 	decodeUrlState,
 	EMPTY_URL_STATE,
 	encodeUrlState,
 	MAX_HASH_LENGTH,
+	MAX_SEARCH_LENGTH,
 	planHistory,
 	sameUrlState,
 	type UrlState,
@@ -144,11 +147,18 @@ describe("decodeUrlState on untrusted input", () => {
 		expect(decodeUrlState("#from=2024-02-29").filters.from).toBe("2024-02-29");
 	});
 
-	it("drops a cost bound that is not a finite non-negative integer", () => {
+	it("drops a cost bound that is not canonical non-negative decimal text", () => {
 		for (const c of [
 			"-1",
 			"-0",
-			"1.5",
+			"-1.5",
+			"1.50",
+			".5",
+			"1.",
+			"0.0",
+			"01.5",
+			"1e-7",
+			"1,5",
 			"1e3",
 			"0x10",
 			"+5",
@@ -169,6 +179,12 @@ describe("decodeUrlState on untrusted input", () => {
 			expect(f.costMax, `max=${c}`).toBeUndefined();
 		}
 		expect(decodeUrlState("#max=9007199254740991").filters.costMax).toBe(Number.MAX_SAFE_INTEGER);
+		// A fraction the filter bar accepts is kept: the bar takes 1.5 as typed.
+		expect(decodeUrlState("#min=1.5&max=0.25").filters).toMatchObject({
+			costMin: 1.5,
+			costMax: 0.25,
+		});
+		expect(decodeUrlState("#min=0").filters.costMin).toBe(0);
 	});
 
 	it("drops an open hash that is not 64 lowercase hex", () => {
@@ -263,8 +279,112 @@ describe("decodeUrlState on untrusted input", () => {
 
 describe("encodeUrlState on bad state", () => {
 	it("leaves out what decoding would refuse", () => {
-		const bad = withFilters({ from: "tomorrow", costMin: -1, costMax: 1.5 });
+		const bad = withFilters({ from: "tomorrow", costMin: -1, costMax: 1e-7 });
 		expect(encodeUrlState({ ...bad, open: "nope" })).toBe("");
+		expect(encodeUrlState(withFilters({ costMin: Number.NaN, costMax: 1e21 }))).toBe("");
+	});
+
+	it("writes a fractional cost bound the filter bar accepted", () => {
+		expect(encodeUrlState(withFilters({ costMin: 1.5 }))).toBe("#min=1.5");
+		expect(encodeUrlState(withFilters({ costMax: 0.1 + 0.2 }))).toBe("#max=0.30000000000000004");
+	});
+});
+
+/**
+ * The encoder never writes a link that decodes to something else (review of #510: a search past 512 characters
+ * vanished on reload, and about 460 Japanese characters pushed the fragment past the old 4 KiB cap, resetting
+ * everything). Every cap is tested on both sides, with multi-byte text.
+ */
+describe("addressHolds: what is written decodes to the same state", () => {
+	const JA = String.fromCodePoint(0x3042); // a 3-byte UTF-8 character: 9 characters percent-encoded
+	const EMOJI = String.fromCodePoint(0x1f600); // two UTF-16 code units, 4 UTF-8 bytes
+	const roundTrips = (s: UrlState): void => {
+		expect(addressHolds(s)).toBe(true);
+		const hash = encodeUrlState(s);
+		expect(hash.length).toBeLessThanOrEqual(MAX_HASH_LENGTH);
+		expect(sameUrlState(decodeUrlState(hash), s)).toBe(true);
+		expect(decodeUrlState(hash).filters.search).toBe(s.filters.search);
+		expect(planHistory(EMPTY_URL_STATE, s, "").hash).toBe(hash);
+	};
+	const notHeld = (s: UrlState): void => {
+		expect(addressHolds(s)).toBe(false);
+		// Nothing is written for it: a reload opens a clean page, never a different filter set.
+		expect(planHistory(EMPTY_URL_STATE, s, "#q=old")).toEqual({ kind: "replace", hash: "" });
+		expect(planHistory(EMPTY_URL_STATE, s, "").kind).toBe("none");
+	};
+
+	it("the full state and the empty state", () => {
+		roundTrips(FULL);
+		expect(addressHolds(EMPTY_URL_STATE)).toBe(true);
+	});
+
+	it("search: the box's cap round-trips in any script; one past it is not written", () => {
+		roundTrips(withFilters({ search: "a".repeat(MAX_SEARCH_LENGTH) }));
+		roundTrips(withFilters({ search: JA.repeat(MAX_SEARCH_LENGTH) }));
+		roundTrips({ ...FULL, filters: { ...FULL.filters, search: JA.repeat(MAX_SEARCH_LENGTH) } });
+		roundTrips(withFilters({ search: EMOJI.repeat(MAX_SEARCH_LENGTH / 2) }));
+		// The review's case: about 460 Japanese characters once reset the whole page.
+		roundTrips(withFilters({ search: JA.repeat(460) }));
+		notHeld(withFilters({ search: "a".repeat(MAX_SEARCH_LENGTH + 1) }));
+		notHeld(withFilters({ search: JA.repeat(MAX_SEARCH_LENGTH + 1) }));
+	});
+
+	it("search: characters a link cannot carry are not written", () => {
+		notHeld(withFilters({ search: `a${String.fromCodePoint(0x200b)}b` }));
+		notHeld(withFilters({ search: `a${String.fromCodePoint(0x202e)}b` }));
+		notHeld(withFilters({ search: `a${String.fromCharCode(0xd800)}b` })); // a lone surrogate
+	});
+
+	it("facets: the value-length and value-count caps, both sides, multi-byte included", () => {
+		roundTrips(withFilters({ actors: ["x".repeat(256)] }));
+		roundTrips(withFilters({ actors: [JA.repeat(256)] }));
+		notHeld(withFilters({ actors: ["x".repeat(257)] }));
+		const n = (k: number): string[] =>
+			Array.from({ length: k }, (_, i) => `m${String(i).padStart(3, "0")}`);
+		roundTrips(withFilters({ models: n(100) }));
+		notHeld(withFilters({ models: n(101) }));
+		notHeld(withFilters({ kinds: [`a${String.fromCodePoint(0x2028)}b`] }));
+		// Duplicates are one value, not a loss.
+		roundTrips(withFilters({ statuses: ["failed", "failed"] }));
+	});
+
+	it("the whole fragment: past the cap it is not written", () => {
+		const big = withFilters({
+			actors: Array.from({ length: 10 }, (_, i) => `${i}${JA.repeat(100)}`),
+		});
+		expect(encodeUrlState(big).length).toBeGreaterThan(MAX_HASH_LENGTH);
+		notHeld(big);
+	});
+
+	it("costs: a fraction round-trips; a bound with no plain decimal form is not written", () => {
+		roundTrips(withFilters({ costMin: 1.5, costMax: 2.25 }));
+		roundTrips(withFilters({ costMax: 0.1 + 0.2 }));
+		roundTrips(withFilters({ costMin: 0 }));
+		notHeld(withFilters({ costMin: -1 }));
+		notHeld(withFilters({ costMin: 1e-7 }));
+		notHeld(withFilters({ costMax: Number.NaN }));
+		notHeld(withFilters({ costMax: Number.POSITIVE_INFINITY }));
+	});
+
+	it("a view or record change for a state the address cannot hold writes nothing new", () => {
+		const long = withFilters({ search: "a".repeat(MAX_SEARCH_LENGTH + 1) });
+		expect(planHistory(long, { ...long, view: "trends" }, "")).toEqual({ kind: "none", hash: "" });
+		expect(planHistory(EMPTY_URL_STATE, { ...long, view: "trends" }, "#view=trends")).toEqual({
+			kind: "push",
+			hash: "",
+		});
+	});
+});
+
+describe("the page honours the address's limits", () => {
+	const app = readFileSync(new URL("../src/app/app.tsx", import.meta.url), "utf-8");
+	it("the search box stops at the length the address keeps", () => {
+		expect(app).toMatch(/type="search"[\s\S]{0,300}maxLength=\{MAX_SEARCH_LENGTH\}/);
+	});
+	it("says so when the address does not hold the view", () => {
+		expect(app).toMatch(
+			/!addressKept && \([\s\S]{0,200}role="status"[\s\S]{0,120}Not kept in the address/,
+		);
 	});
 });
 
