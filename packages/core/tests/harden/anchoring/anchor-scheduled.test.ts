@@ -554,6 +554,71 @@ describe("anchor now --scheduled", () => {
 		}
 	});
 
+	it.skipIf(typeof process.getuid === "function" && process.getuid() === 0)(
+		"an outbox that cannot be listed is a failure, not an empty backlog",
+		async () => {
+			const s = await makeAnchoredVault(3);
+			process.chdir(s.root);
+			process.env.USERTRUST_ANCHOR_KEY = s.keyFile;
+			const blocker = join(s.storeDir, "a-file");
+			writeFileSync(blocker, "x");
+			await runNow([
+				"--scheduled",
+				"--sink-file",
+				join(blocker, "anchors.jsonl"),
+				"--publish-retries",
+				"1",
+			]); // one undelivered anchor
+			process.exitCode = 0;
+			const outbox = join(anchorsDir(s.root), "outbox");
+			expect(readdirSync(outbox)).toHaveLength(1);
+			chmodSync(outbox, 0o000);
+			try {
+				const r = await runNow(["--scheduled", "--sink-file", s.storeFile]);
+				expect(r.exit).toBe(1);
+				expect((r.out.data as { reason: string }).reason).toBe("sink-failed");
+				expect(readLastRun(s.root)).toMatchObject({ ok: false, reason: "sink-failed" });
+				// status does not report "0 pending" either
+				process.exitCode = 0;
+				const lines = capture();
+				await anchorRun(["status"], { json: true });
+				const st = JSON.parse(lines.at(-1) as string);
+				expect(st.data.outboxUnreadable).toBe(true);
+				process.exitCode = 0;
+			} finally {
+				chmodSync(outbox, 0o700);
+			}
+			// positive control: readable again, the same run delivers the backlog
+			vi.restoreAllMocks();
+			const ok = await runNow(["--scheduled", "--sink-file", s.storeFile]);
+			expect(ok.exit).toBe(0);
+			expect(storeRecords(s)).toHaveLength(1);
+		},
+	);
+
+	it("a new anchor is never delivered past an unreadable earlier outbox entry", async () => {
+		const s = await makeAnchoredVault(3);
+		process.chdir(s.root);
+		process.env.USERTRUST_ANCHOR_KEY = s.keyFile;
+		const blocker = join(s.storeDir, "a-file");
+		writeFileSync(blocker, "x");
+		const bad = ["--sink-file", join(blocker, "anchors.jsonl"), "--publish-retries", "1"];
+		await runNow(["--scheduled", ...bad]); // entry 1 stays
+		process.exitCode = 0;
+		const outbox = join(anchorsDir(s.root), "outbox");
+		const first = readFileSync(join(outbox, "000000000001.json"), "utf-8");
+		writeFileSync(join(outbox, "000000000001.json"), "{ not json");
+		await appendEvents(s.root, 2, 4);
+		const r = await runNow(["--scheduled", "--sink-file", s.storeFile]);
+		expect(r.exit).toBe(1);
+		expect(existsSync(s.storeFile) ? storeRecords(s) : []).toHaveLength(0);
+		// positive control: with entry 1 intact the same run delivers everything
+		writeFileSync(join(outbox, "000000000001.json"), first);
+		const ok = await runNow(["--scheduled", "--sink-file", s.storeFile]);
+		expect(ok.exit).toBe(0);
+		expect(storeRecords(s).length).toBeGreaterThanOrEqual(2);
+	});
+
 	it("status prints the recorded time without terminal escapes", async () => {
 		const s = await makeAnchoredVault(1);
 		process.chdir(s.root);

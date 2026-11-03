@@ -107,6 +107,8 @@ export interface AnchorEmitterStatus {
 	eventsSinceLastAnchor: number;
 	msSinceLastAnchor: number | null;
 	outboxDepth: number;
+	/** True when the outbox directory exists but cannot be listed: the depth is then unknown. */
+	outboxUnreadable: boolean;
 	anchorSkips: number;
 	publishFailures: number;
 	degraded: boolean;
@@ -601,16 +603,51 @@ function pendingOutboxRecords(dir: string): AnchorRecord[] {
 		});
 }
 
+/** Thrown (message prefix) when the outbox directory exists but cannot be listed. */
+export const OUTBOX_UNREADABLE = "anchor outbox cannot be read";
+
+/**
+ * The pending outbox sequence numbers. A missing directory is an empty backlog; any other
+ * listing failure THROWS, because "cannot read" must never look like "nothing waiting".
+ */
 function outboxSeqs(dir: string): number[] {
 	const outDir = join(dir, "outbox");
-	if (!existsSync(outDir)) return [];
+	let names: string[];
 	try {
-		return readdirSync(outDir)
-			.filter((f) => f.endsWith(".json"))
-			.map((f) => Number.parseInt(f.slice(0, -5), 10))
-			.filter((n) => Number.isSafeInteger(n) && n >= 1);
+		names = readdirSync(outDir);
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+		throw new Error(`${OUTBOX_UNREADABLE}: ${err instanceof Error ? err.message : String(err)}`);
+	}
+	return names
+		.filter((f) => f.endsWith(".json"))
+		.map((f) => Number.parseInt(f.slice(0, -5), 10))
+		.filter((n) => Number.isSafeInteger(n) && n >= 1);
+}
+
+function outboxReadable(dir: string): boolean {
+	try {
+		outboxSeqs(dir);
+		return true;
 	} catch {
-		return [];
+		return false;
+	}
+}
+
+function outboxDepthOrZero(dir: string): number {
+	try {
+		return outboxSeqs(dir).length;
+	} catch {
+		return 0;
+	}
+}
+
+/** True only when the outbox is readable and holds nothing. */
+function outboxIsEmpty(dir: string): boolean {
+	try {
+		return outboxSeqs(dir).length === 0;
+	} catch {
+		return false;
 	}
 }
 
@@ -729,6 +766,11 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 		// first failure to preserve store ordering; the emitter stays degraded
 		// until the whole backlog clears.
 		const backlog = pendingOutboxRecords(dir);
+		// An entry that is present but unreadable or unparsable is not in `backlog`: delivering
+		// past it would leave a gap in the store, so stop here and keep everything queued.
+		if (backlog.length < outboxSeqs(dir).length) {
+			throw new Error("anchor outbox holds an unreadable entry; nothing is delivered past it");
+		}
 		const queue = backlog.some((r) => r.anchorSeq === record.anchorSeq)
 			? backlog
 			: [...backlog, record].sort((a, b) => a.anchorSeq - b.anchorSeq);
@@ -741,7 +783,7 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 			}
 		}
 		// Clear degraded only when nothing is left undelivered.
-		if (outboxSeqs(dir).length === 0) degraded = false;
+		if (outboxIsEmpty(dir)) degraded = false;
 	}
 
 	function trackPublish(record: AnchorRecord): Promise<void> {
@@ -951,7 +993,8 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 					: { anchorSeq: tail.anchorSeq, treeSize: tail.treeSize, timestamp: tail.timestamp },
 			eventsSinceLastAnchor: headSeq === null ? 0 : Math.max(0, headSeq - (tail?.treeSize ?? 0)),
 			msSinceLastAnchor: Number.isFinite(ts) ? Math.max(0, Date.now() - ts) : null,
-			outboxDepth: outboxSeqs(dir).length,
+			outboxDepth: outboxDepthOrZero(dir),
+			outboxUnreadable: !outboxReadable(dir),
 			anchorSkips,
 			publishFailures,
 			degraded,
@@ -1000,7 +1043,7 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 						/* best effort */
 					}
 				}
-				if (outboxSeqs(dir).length === 0) degraded = false;
+				if (outboxIsEmpty(dir)) degraded = false;
 				return "done";
 			} finally {
 				release();

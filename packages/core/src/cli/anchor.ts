@@ -25,6 +25,7 @@ import {
 	createAnchorEmitter,
 	initAnchorIdentity,
 	mintSuccessorKey,
+	OUTBOX_UNREADABLE,
 	readAnchorIdentity,
 	readMeta,
 	recordRotatedIdentity,
@@ -261,7 +262,8 @@ async function runScheduled(root: string, args: string[], json: boolean): Promis
 			lockedMidRun = (await emitter.redeliverPending()) === "locked";
 		}
 		await emitter.stop();
-		const delivered = emitter.status().outboxDepth === 0;
+		const finalStatus = emitter.status();
+		const delivered = finalStatus.outboxDepth === 0 && !finalStatus.outboxUnreadable;
 		result = emitted;
 		if (emitted.emitted) {
 			reason = delivered ? "anchored" : "sink-failed";
@@ -273,7 +275,9 @@ async function runScheduled(root: string, args: string[], json: boolean): Promis
 			detail = "another run took the lock before redelivery";
 		} else if (!delivered && benign) {
 			reason = "sink-failed";
-			detail = "an earlier anchor is still waiting in the outbox";
+			detail = finalStatus.outboxUnreadable
+				? "the outbox cannot be read, so undelivered anchors cannot be ruled out"
+				: "an earlier anchor is still waiting in the outbox";
 		} else {
 			reason = classifyEmitReason(emitted.reason);
 			detail = emitted.reason;
@@ -284,7 +288,9 @@ async function runScheduled(root: string, args: string[], json: boolean): Promis
 			? "no-key"
 			: detail.startsWith("anchor lock unavailable")
 				? "lock-unavailable"
-				: "other";
+				: detail.startsWith(OUTBOX_UNREADABLE)
+					? "sink-failed"
+					: "other";
 	}
 	// A record that cannot be written leaves `anchor status` showing an older run, possibly a
 	// success: say so on stderr (scrubbed) and fail the run.
@@ -582,7 +588,7 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 					// Delivery-gated: emitted-but-undelivered (all sinks failed,
 					// outbox retained) is a FAILURE in the mode cron/CI consumes —
 					// mirror the non-JSON contract exactly (spec §5.3).
-					const delivered = status.outboxDepth === 0;
+					const delivered = status.outboxDepth === 0 && !status.outboxUnreadable;
 					console.log(
 						toSafeJson({
 							command: "anchor now",
@@ -648,13 +654,14 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 				const tailEvents = Math.max(0, headSeq - (tail?.treeSize ?? 0));
 				const outboxDir = join(anchorsDir(root), "outbox");
 				let outboxDepth = 0;
+				let outboxUnreadable = false;
 				try {
 					outboxDepth = existsSync(outboxDir)
-						? (await import("node:fs")).readdirSync(outboxDir).filter((f) => f.endsWith(".json"))
-								.length
+						? readdirSync(outboxDir).filter((f) => f.endsWith(".json")).length
 						: 0;
 				} catch {
-					/* ignore */
+					// Not "0 pending": the depth is unknown, and status must say so.
+					outboxUnreadable = true;
 				}
 				if (json) {
 					console.log(
@@ -667,6 +674,7 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 								lastAnchor: tail,
 								eventsSinceLastAnchor: tailEvents,
 								outboxDepth,
+								outboxUnreadable,
 								lastRun: readLastRun(root),
 								mirrorErrors: mirror.errors,
 							},
@@ -684,7 +692,12 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 					console.log("Last anchor: none");
 				}
 				console.log(`Unanchored tail: ${tailEvents} event(s)`);
-				console.log(`Outbox: ${outboxDepth} pending`);
+				console.log(
+					outboxUnreadable
+						? pc.red("Outbox: cannot be read (pending anchors cannot be ruled out)")
+						: `Outbox: ${outboxDepth} pending`,
+				);
+				if (outboxUnreadable) process.exitCode = 1;
 				const lastRun = readLastRun(root);
 				if (lastRun === null) {
 					console.log("Last scheduled run: none recorded");
@@ -797,7 +810,7 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 					keyId: successor.keyId,
 					publicKeySpki: successor.publicKeySpki,
 				});
-				const rotateDelivered = rotateStatus.outboxDepth === 0;
+				const rotateDelivered = rotateStatus.outboxDepth === 0 && !rotateStatus.outboxUnreadable;
 				if (json) {
 					console.log(
 						toSafeJson({
