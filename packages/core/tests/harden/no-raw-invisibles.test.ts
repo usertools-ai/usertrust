@@ -28,7 +28,7 @@
  *
  * ALLOWED_RAW is a census with EXACT per-file counts. An entry that no longer matches (the file is
  * clean now, is untracked, or has a different count) FAILS, so the list cannot rot into a blanket
- * exemption. It is meant to shrink to nothing.
+ * exemption. It is empty today.
  *
  * WHAT A GREEN RUN CLAIMS: no tracked text file outside ALLOWED_RAW contains a forbidden code point,
  * and every ALLOWED_RAW count and code point set is exact. It does not look at binaries, at files git
@@ -180,43 +180,12 @@ export function censusProblems(
 }
 
 /**
- * Files that hold a raw character today, each with its exact count and why it is still there. Every
- * entry is a bug to fix by writing the character as an escape sequence; none is intended to stay.
+ * Files that hold a raw character, each with its exact count, code point set and why it is still there. EMPTY: the six files that held one
+ * were fixed by writing the character as an escape sequence. An entry added here is a bug to fix, not a place to hide one; it must say why.
  */
 const ALLOWED_RAW: Readonly<
 	Record<string, { count: number; codePoints: readonly number[]; why: string }>
-> = {
-	"packages/core/tests/integration/tigerbeetle.tb.test.ts": {
-		count: 2,
-		codePoints: [0x200b],
-		why: "two zero-width spaces inside a glob in a doc comment (line 16)",
-	},
-	"packages/ui/src/app/app.tsx": {
-		count: 1,
-		codePoints: [0xfeff],
-		why: "a byte-order mark inside the CSV blob template literal (line 57)",
-	},
-	"packages/verify/tests/harden/receipt-terminal-injection.test.ts": {
-		count: 3,
-		codePoints: [0x0000, 0x001b, 0x009b],
-		why: "a raw NUL, a raw ESC and a raw C1 CSI planted as terminal-injection inputs; the NUL made the old heuristic skip the whole file",
-	},
-	"packages/verify/tests/receipt/formats.test.ts": {
-		count: 1,
-		codePoints: [0x200b],
-		why: "a zero-width space in a doc comment (line 1046)",
-	},
-	"packages/verify/tests/receipt/reader.test.ts": {
-		count: 1,
-		codePoints: [0xfeff],
-		why: "a byte-order mark inside an expected string literal (line 165)",
-	},
-	"scripts/fleet/collect.mts": {
-		count: 1,
-		codePoints: [0x001b],
-		why: "a raw ESC (0x1B) inside an ANSI-stripping regex literal (line 416)",
-	},
-};
+> = {};
 
 function trackedFiles(): string[] {
 	const r = spawnSync("git", ["ls-files", "-z"], {
@@ -380,11 +349,8 @@ describe("the scanner can see what it is meant to catch (positive controls)", ()
 		]);
 	});
 
-	it("the census names the file the old heuristic missed, with its three code points", () => {
-		const entry = ALLOWED_RAW["packages/verify/tests/harden/receipt-terminal-injection.test.ts"];
-		expect(entry?.count).toBe(3);
-		expect([...(entry?.codePoints ?? [])].sort((a, b) => a - b)).toEqual([0x0000, 0x001b, 0x009b]);
-		expect(Object.keys(ALLOWED_RAW)).toHaveLength(6);
+	it("the allowlist is empty: no tracked text file holds a raw invisible or control character", () => {
+		expect(Object.keys(ALLOWED_RAW)).toEqual([]);
 	});
 });
 
@@ -441,12 +407,5 @@ describe("the census cannot rot", () => {
 		expect(censusProblems(new Map([["a.ts", [worse]]]), allowed, tracked)).toEqual([
 			"ALLOWED_RAW says a.ts holds U+200B, it holds U+202E",
 		]);
-	});
-
-	it("every ALLOWED_RAW entry carries a reason and a positive count", () => {
-		for (const [file, entry] of Object.entries(ALLOWED_RAW)) {
-			expect(entry.why.trim().length, file).toBeGreaterThan(10);
-			expect(entry.count, file).toBeGreaterThan(0);
-		}
 	});
 });
