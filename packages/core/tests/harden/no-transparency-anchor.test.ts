@@ -4,7 +4,7 @@
 /**
  * The receipt format reserves an `anchorEvidence` member for an external transparency anchor provided as a service. This
  * package never sets it: no source file outside the receipt verifier's read side mentions the member, and the only mentions
- * of the removed Rekor feature are the two refusals of an old bundle's `rekorReceipts` field.
+ * of the removed Rekor feature are the refusals of an old bundle's `rekorReceipts` field and of the two removed options.
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -56,11 +56,13 @@ describe("no source in this package writes transparency-anchor evidence", () => 
 		]);
 	});
 
-	it("the removed Rekor feature is mentioned only where an old bundle is refused", () => {
+	it("the removed Rekor feature is mentioned only where an old bundle or option is refused", () => {
 		const hits = [...files].filter(([, text]) => /rekor/i.test(text)).map(([f]) => f);
 		expect(hits.sort()).toEqual([
+			join("core", "src", "audit", "verify.ts"),
 			join("core", "src", "cli", "verify.ts"),
 			join("verify", "src", "cli.ts"),
+			join("verify", "src", "index.ts"),
 		]);
 	});
 });

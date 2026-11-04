@@ -107,3 +107,20 @@ describe("HARDEN: core vs verify pkg produce identical ANCHOR verdicts", () => {
 		expect(assertAgree(legacy.vaultPath, {})).toBe("UNANCHORED");
 	});
 });
+
+describe("HARDEN: a removed option is refused, never silently ignored", () => {
+	it.each(["rekorReceiptsRaw", "rekorLogPubkeysPem"])(
+		"%s is refused by both verifiers, naming the option",
+		async (key) => {
+			const s = await makeAnchoredVault(3);
+			await anchorOnce(s);
+			const removed = { externalAnchorsRaw: [storeRaw(s)], trust: s.trust, [key]: ["not JSON"] };
+			const message = new RegExp(`"${key}" option was removed`);
+			expect(() => coreVerify(s.vaultPath, removed as CoreParams)).toThrow(message);
+			expect(() => pkgVerify(s.vaultPath, removed as PkgParams)).toThrow(message);
+			// the same call without the removed option is unchanged: both verify it
+			const normal = { externalAnchorsRaw: [storeRaw(s)], trust: s.trust };
+			expect(assertAgree(s.vaultPath, normal)).toBe("ANCHORED_VERIFIED");
+		},
+	);
+});

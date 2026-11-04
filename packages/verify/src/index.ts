@@ -448,6 +448,19 @@ export function verifyVaultWithAnchors(
 	return verifyVaultWithAnchorsReading(vaultPath, params).result;
 }
 
+/** Options an earlier release took, now removed. Passing one is refused: ignoring it would drop evidence the caller expects checked. */
+const REMOVED_ANCHOR_PARAMS = ["rekorReceiptsRaw", "rekorLogPubkeysPem"] as const;
+
+function refuseRemovedAnchorParams(params: AnchorVerifyParams): void {
+	for (const key of REMOVED_ANCHOR_PARAMS) {
+		if (key in (params as object)) {
+			throw new Error(
+				`verifyVaultWithAnchors: the "${key}" option was removed; transparency-log receipts are no longer verified`,
+			);
+		}
+	}
+}
+
 /**
  * {@link verifyVaultWithAnchors}, handing back the events it verified. The anchors are checked
  * against THOSE events' hashes: gathering them with a second read of the log let a log swapped
@@ -458,6 +471,7 @@ export function verifyVaultWithAnchorsReading(
 	vaultPath: string,
 	params: AnchorVerifyParams = {},
 ): AnchoredVaultReading {
+	refuseRemovedAnchorParams(params);
 	const reading = verifyVaultReading(vaultPath);
 	const base = reading.result;
 	const externalRecords: AnchorRecord[] = [];
