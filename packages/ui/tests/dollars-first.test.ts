@@ -10,7 +10,7 @@ import { readFile } from "node:fs/promises";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { PersistedAuditEvent } from "usertrust";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { SummaryPayload } from "../src/shared/api.js";
 import { EMPTY_FILTERS, type FilterState } from "../src/shared/filters.js";
 import { UT_KEY } from "../src/shared/format.js";
@@ -154,18 +154,27 @@ describe("an audit row and the inspector", () => {
 describe("the key", () => {
 	it("is in the Audit view's list foot beside 'times in UTC'", async () => {
 		const AuditTable = await load<Record<string, unknown>>("audit-table", "AuditTable");
-		const html = renderToStaticMarkup(
-			createElement(AuditTable, {
-				rows: [],
-				total: 0,
-				phase: "loaded",
-				chain: "empty",
-				selected: null,
-				onOpen: () => {},
-				onClearFilters: () => {},
-			}),
-		);
-		expect(html).toContain(`<span>${UT_KEY}</span><span>times in UTC</span>`);
+		// The list asks whether it is on a phone (window.matchMedia) as it first renders; these tests run without a
+		// browser, so the answer is stubbed: a desktop window.
+		vi.stubGlobal("window", {
+			matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+		});
+		try {
+			const html = renderToStaticMarkup(
+				createElement(AuditTable, {
+					rows: [],
+					total: 0,
+					phase: "loaded",
+					chain: "empty",
+					selected: null,
+					onOpen: () => {},
+					onClearFilters: () => {},
+				}),
+			);
+			expect(html).toContain(`<span>${UT_KEY}</span><span>times in UTC</span>`);
+		} finally {
+			vi.unstubAllGlobals();
+		}
 	});
 
 	it("is on the Trends view, whose tiles lead in dollars with the exact figure on hover", async () => {
