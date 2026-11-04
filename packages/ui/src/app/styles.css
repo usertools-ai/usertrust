@@ -3,9 +3,9 @@
 /*
  * Violet accent on black, dark only: there is no light theme. usertrust gold marks the brand and the budget: the logo,
  * the rule beside the title and a healthy budget bar. The bar turns orange past 80% used and red past 95%.
- * Green (--approve, aliased --verify) is EARNED by verification only: the integrity pill and row marks, the Verify
- * button and the VERIFIED verdict. The accent marks selection, the active tab, progress fills, chart marks and the live
- * pill; blue (--words) is the focus ring. Fonts are named, never shipped or fetched: a family is used only where it is
+ * Green (--approve, aliased --verify) is kept for the chain's integrity and an anchored check: the integrity pills, the
+ * Verify button and the anchored verdict. An unanchored pass is neutral. The accent marks selection, the active tab,
+ * progress fills, chart marks and the live pill; blue (--words) is the focus ring. Fonts are named, never shipped or fetched: a family is used only where it is
  * already installed, else the system stack after it.
  */
 
@@ -936,7 +936,6 @@ body {
 		text-overflow: ellipsis;
 	}
 	.ut-meta > .d,
-	.ut-meta > .ok,
 	.ut-meta > .bad {
 		flex: none;
 	}
@@ -946,9 +945,6 @@ body {
 	.ut-meta .d {
 		color: var(--faint-deco);
 		margin: 0 6px;
-	}
-	.ut-meta .ok {
-		color: var(--approve);
 	}
 	.ut-meta .bad {
 		color: var(--stakes);
