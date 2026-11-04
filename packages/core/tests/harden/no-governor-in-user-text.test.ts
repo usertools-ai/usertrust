@@ -178,44 +178,72 @@ function sourceFiles(root: string): string[] {
 	return [...new Set(out)].sort();
 }
 
+/**
+ * Whether `text` could hold a literal that says "governor": one cheap pass over the file's own text,
+ * so only the files that can are parsed (a parse of every shipped source is what made this scan
+ * slow). It looks at the text a reader or the cooked literal could produce: escape sequences
+ * (`\u0067`, `\x67`, `\u{67}`, `\g`) are decoded the way a string literal cooks them, then entities
+ * and invisible characters are removed as `visibleText` does. It is deliberately a superset of
+ * what the syntax-tree scan reports, never a subset: a file this skips holds no such literal.
+ */
+function mightSayGovernor(text: string): boolean {
+	const cooked = text.replace(
+		/\\(?:u\{([0-9a-fA-F]+)\}|u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|(\r\n|[\s\S]))/g,
+		(_whole, braced, four, two, other) => {
+			const hex = braced ?? four ?? two;
+			if (hex === undefined) {
+				if (/^[\n\r\u2028\u2029]/.test(other)) return ""; // a line continuation
+				return /^[nrtbfv0]$/.test(other) ? " " : (other as string); // \n etc. are not letters; \g is "g"
+			}
+			const code = Number.parseInt(hex, 16);
+			return code <= 0x10ffff ? String.fromCodePoint(code) : "";
+		},
+	);
+	// A plain string keeps invisible characters and entities as written; JSX text has them removed or
+	// decoded. Either reading is a reason to parse.
+	return WORD.test(cooked) || WORD.test(visibleText(cooked));
+}
+
 /** Every literal in one file whose text names the governor, as the literal's own text. */
 function scanSource(file: string, text: string): Hit[] {
+	if (!mightSayGovernor(text)) return [];
 	const kind = /\.tsx$/.test(file) ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
-	const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, kind);
+	// No parent pointers: the walk below passes the parent down, which is cheaper than building them.
+	const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, false, kind);
 	const hits: Hit[] = [];
-	const record = (node: ts.Node, raw: string): void => {
+	const record = (node: ts.Node, parent: ts.Node, raw: string): void => {
 		// JSX text, and a JSX attribute's string, are entity-decoded when rendered; a plain
 		// JS string is not.
 		const value =
-			ts.isJsxText(node) || (ts.isStringLiteral(node) && ts.isJsxAttribute(node.parent))
+			ts.isJsxText(node) || (ts.isStringLiteral(node) && ts.isJsxAttribute(parent))
 				? visibleText(raw)
 				: raw;
 		if (!WORD.test(value)) return;
 		const line = source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
 		hits.push({ file, line, text: value });
 	};
-	const visit = (node: ts.Node): void => {
+	const visit = (node: ts.Node, parent: ts.Node): void => {
 		// A module specifier or `import("...")` type is a path, not text anyone reads.
 		if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
 			node.forEachChild((c) => {
-				if (c !== node.moduleSpecifier) visit(c);
+				if (c !== node.moduleSpecifier) visit(c, node);
 			});
 			return;
 		}
 		if (ts.isImportTypeNode(node)) return;
 		if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
-			record(node, node.text);
+			record(node, parent, node.text);
 		} else if (
 			ts.isTemplateHead(node) ||
 			ts.isTemplateMiddle(node) ||
 			ts.isTemplateTail(node) ||
 			ts.isJsxText(node)
 		) {
-			record(node, node.text);
+			record(node, parent, node.text);
 		}
-		node.forEachChild(visit);
+		node.forEachChild((c) => visit(c, node));
 	};
-	visit(source);
+	visit(source, source);
 	return hits;
 }
 
@@ -435,6 +463,31 @@ describe("no 'governor' in text a person reads", () => {
 			expect(found.filter((p) => p.startsWith("packages/x/src/a.ts:"))).toHaveLength(2);
 			expect(found.filter((p) => p.startsWith("packages/x/src/b.tsx:"))).toHaveLength(1);
 			expect(found.join("\n")).not.toContain("comment");
+		});
+
+		it("still finds a literal written with escapes or entities, which the cheap pre-check must not skip", () => {
+			const a = [
+				'export const a = "gov\\u0065rnor";',
+				'export const b = "\\x67overnor";',
+				'export const c = "gove\\u{72}nor";',
+				'export const d = "gover\\',
+				'nor";',
+				'export const e = "line\\ngovernor";',
+				'export const f = "a\\u200bgovernor";',
+			].join("\n");
+			// Six literals that say the word once cooked; the first four never spell it in the file.
+			expect(a.split("\n").slice(0, 5).join("\n")).not.toMatch(/governor/i);
+			expect(scanSource("a.ts", a)).toHaveLength(6);
+			const root = fixture({
+				"packages/x/src/b.tsx": "export const B = () => <p>govern&#111;r</p>;\n",
+				"packages/x/src/clean.ts": 'export const ok = "nothing to see";\n',
+			});
+			const found = checkLiterals(root, []);
+			expect(found).toHaveLength(1);
+			expect(found[0]).toContain("packages/x/src/b.tsx");
+			// the pre-check itself: skips a file with no way to say the word, keeps one that has
+			expect(mightSayGovernor('export const ok = "nothing to see";')).toBe(false);
+			expect(mightSayGovernor(a)).toBe(true);
 		});
 
 		it("scans exactly what a package's `files` publishes (bin, hooks, a file), not dist or a README", () => {
