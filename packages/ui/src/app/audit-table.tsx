@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { useVirtualizer } from "@tanstack/react-virtual";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizer, useWindowVirtualizer } from "@tanstack/react-virtual";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
 	type ChainStatus,
 	costView,
@@ -12,7 +12,8 @@ import {
 	transferView,
 } from "../shared/display.js";
 import { type SortKey, sortRows } from "../shared/filters.js";
-import { compactActor, formatUtc } from "../shared/format.js";
+import { compactActor, formatUtc, UT_KEY } from "../shared/format.js";
+import { PHONE_QUERY } from "../shared/layout.js";
 import {
 	nextRowIndex,
 	pageSizeFromItems,
@@ -20,6 +21,7 @@ import {
 	rowAccessibleName,
 } from "../shared/row-nav.js";
 import { type LedgerRow, type RowStatus, statusOf } from "../shared/rows.js";
+import { useMediaQuery } from "./use-media-query.js";
 
 const SORTS: Array<{ key: SortKey; label: string }> = [
 	{ key: "seq", label: "Position" },
@@ -113,14 +115,14 @@ function RowBody(props: { row: LedgerRow }): React.JSX.Element {
 					<span className="ut-amt na">no cost recorded</span>
 				) : (
 					<>
-						<span className="ut-amt">{cost.ut}</span>
+						<span className="ut-amt">{cost.usd}</span>
 						<span className="ut-recd">
 							{cost.estimated && (
 								<span className="ut-est" title={ESTIMATED_TITLE}>
 									est.
 								</span>
 							)}
-							{cost.usd}
+							{cost.ut}
 						</span>
 					</>
 				)}
@@ -246,17 +248,42 @@ export function AuditTable(props: {
 	// Stable while the rows are: the virtualizer's measurement cache is keyed on this callback's identity, and a new one
 	// each render (a scroll re-renders) re-scanned every row of a large vault.
 	const getItemKey = useCallback((i: number) => (sorted[i] as LedgerRow).hash, [sorted]);
-	const virtualizer = useVirtualizer({
+	// On a phone the list has no scroller of its own: it flows in the page, so a swipe on it scrolls the page, and the
+	// window is what the virtualizer follows. It then needs the list's distance from the top of the page, which moves
+	// when anything above it changes height (the details, the filter chips), so it is re-measured as the page resizes.
+	const phone = useMediaQuery(PHONE_QUERY);
+	const [scrollMargin, setScrollMargin] = useState(0);
+	useLayoutEffect(() => {
+		if (!phone) return;
+		const measure = (): void => {
+			const top = parentRef.current?.getBoundingClientRect().top;
+			if (top !== undefined) setScrollMargin(Math.round(top + window.scrollY));
+		};
+		measure();
+		if (typeof ResizeObserver === "undefined") return;
+		const watch = new ResizeObserver(measure);
+		watch.observe(document.body);
+		return () => watch.disconnect();
+	}, [phone]);
+
+	// Two-line rows; a narrow list stacks the cost under them, so each row is measured.
+	const shared = {
 		count: sorted.length,
-		getScrollElement: () => parentRef.current,
-		// Two-line rows; a narrow list stacks the cost under them, so each row is measured.
 		estimateSize: () => 62,
 		getItemKey,
 		gap: 2,
 		paddingStart: 8,
 		paddingEnd: 24,
 		overscan: 12,
+	};
+	// Both hooks always run (hooks cannot be conditional); only the one in use observes anything.
+	const inList = useVirtualizer<HTMLDivElement, Element>({
+		...shared,
+		enabled: !phone,
+		getScrollElement: () => parentRef.current,
 	});
+	const inPage = useWindowVirtualizer<Element>({ ...shared, enabled: phone, scrollMargin });
+	const virtualizer = phone ? inPage : inList;
 
 	// The row the arrow keys are on, by hash (an index would slide to another row when a live record arrives at the top).
 	// Until a key or a click sets one: the open row, else the first.
@@ -410,7 +437,7 @@ export function AuditTable(props: {
 										top: 0,
 										left: 8,
 										right: 8,
-										transform: `translateY(${item.start}px)`,
+										transform: `translateY(${item.start - virtualizer.options.scrollMargin}px)`,
 									}}
 								/>
 							);
@@ -424,8 +451,12 @@ export function AuditTable(props: {
 						? `${props.total.toLocaleString()} ${props.total === 1 ? "record" : "records"}`
 						: `${sorted.length.toLocaleString()} of ${props.total.toLocaleString()} records`}
 				</span>
+				<span>{UT_KEY}</span>
 				<span>times in UTC</span>
 			</div>
 		</>
 	);
 }
+
+/** One ledger row's body as the list draws it, exported so its marks can be rendered in a test. */
+export const Row = RowBody;
