@@ -808,6 +808,13 @@ export function worseAnchorState(a: AnchorState, b: AnchorState): AnchorState {
  */
 export function evaluateAnchoredVault(input: AnchorEvaluationInput): AnchorEvaluation {
 	const opts = input.opts ?? {};
+	// A removed option is refused, never ignored: a caller written for an earlier release
+	// would otherwise get a fresher verdict than the input supports.
+	if ("attestedTimeMs" in (opts as object)) {
+		throw new Error(
+			'evaluateAnchoredVault: the "attestedTimeMs" option was removed; freshness is measured from the anchor record\'s own timestamp',
+		);
+	}
 	const nowMs = opts.nowMs ?? Date.now();
 	const reasons: string[] = [];
 	const warnings: string[] = [];

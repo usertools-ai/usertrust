@@ -12,10 +12,12 @@
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { evaluateAnchoredVault as pkgEvaluate } from "../../../../verify/src/anchor-verify.js";
 import {
 	type AnchorVerifyParams as PkgParams,
 	verifyVaultWithAnchors as pkgVerify,
 } from "../../../../verify/src/index.js";
+import { evaluateAnchoredVault as coreEvaluate } from "../../../src/audit/anchor-verify.js";
 import {
 	type AnchorVerifyParams as CoreParams,
 	verifyVaultWithAnchors as coreVerify,
@@ -123,4 +125,26 @@ describe("HARDEN: a removed option is refused, never silently ignored", () => {
 			expect(assertAgree(s.vaultPath, normal)).toBe("ANCHORED_VERIFIED");
 		},
 	);
+});
+
+describe("HARDEN: the removed attested-time option is refused by both evaluators", () => {
+	const input = {
+		orderedHashes: [],
+		externalAnchors: [],
+		externalErrors: [],
+		mirrorAnchors: [],
+		mirrorErrors: [],
+		trust: null,
+		witness: { requested: false },
+	};
+
+	it("throws, naming the option, and a call without it is unchanged", () => {
+		const removed = { ...input, opts: { attestedTimeMs: 1_760_000_000_000 } };
+		expect(() => coreEvaluate(removed as never)).toThrow(/"attestedTimeMs" option was removed/);
+		expect(() => pkgEvaluate(removed as never)).toThrow(/"attestedTimeMs" option was removed/);
+		const normal = { ...input, opts: { nowMs: 1_760_000_000_000 } };
+		expect(coreEvaluate(normal as never).anchorState).toBe(
+			pkgEvaluate(normal as never).anchorState,
+		);
+	});
 });
