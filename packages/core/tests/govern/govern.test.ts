@@ -1095,16 +1095,16 @@ describe("trust()", () => {
 			).rejects.toThrow('trust(): options must be an object, got "config.json"');
 		});
 
-		it("accepts tier, which TrustOpts declares, without refusing it", async () => {
+		it("accepts a tier from the config file's set", async () => {
 			const { err } = await refusal({ tier: "pro" });
 			expect(err).toBeUndefined();
 		});
 
-		it("does not advertise tier (accepted, not applied) in a refusal's list", async () => {
+		it("advertises tier, which is applied, in a refusal's list", async () => {
 			const { err } = await refusal({ pi: "block" });
 			const accepts = /accepts only: (.*)\.$/.exec((err as Error).message)?.[1];
 			expect(accepts).toBe(
-				"allowUngoverned, budget, configPath, dryRun, endpoint, parentUserId, pii, scope, vaultBase",
+				"allowUngoverned, budget, configPath, dryRun, endpoint, parentUserId, pii, scope, tier, vaultBase",
 			);
 		});
 

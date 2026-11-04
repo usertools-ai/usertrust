@@ -17,6 +17,9 @@
 // Exit 0 when every job passed by that rule (the annotation printed once), 1 otherwise (each failing job
 // named, NO annotation), 2 on unusable input.
 
+import { realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
 export function verdict(results, required) {
 	if (
 		results === null ||
@@ -58,6 +61,19 @@ export function main(env, out = console.log, err = console.error) {
 	return 0;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Is this file the command being run? import.meta.url is percent-encoded and has its symlinks resolved; process.argv[1] is neither. A plain
+// string comparison is false under a path with a space or a symlinked directory (macOS /tmp and /var), and then the script exits 0 without doing
+// anything. Compare through realpath; a path that cannot be resolved means "not run as a command".
+const runAsCommand = (() => {
+	try {
+		return (
+			process.argv[1] !== undefined &&
+			import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
+		);
+	} catch {
+		return false;
+	}
+})();
+if (runAsCommand) {
 	process.exitCode = main(process.env);
 }

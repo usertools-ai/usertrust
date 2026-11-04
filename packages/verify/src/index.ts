@@ -564,6 +564,12 @@ export interface TransactionVerificationResult {
 	readonly anchoring?: AnchoringReport | undefined;
 	/** The transfer's verdict (`transferVerdict`), when found: the status the receipt prints. */
 	readonly status?: TransferStatus | undefined;
+	/**
+	 * When found: true only when this transaction's inclusion was proven against a verified anchor root (the receipt's
+	 * `INCLUSION VERIFIED (anchor #n)`). A reader must take this from here, never by parsing the receipt text: the
+	 * receipt also prints fields the vault under audit wrote.
+	 */
+	readonly inclusionVerified?: boolean | undefined;
 }
 
 /**
@@ -831,6 +837,8 @@ export function verifyTransaction(
 	let anchorState: AnchorState | undefined;
 	let anchoring: AnchoringReport | undefined;
 	const anchorErrors: string[] = [];
+	// Set ONLY where inclusion is proven against a verified anchor root; every other branch leaves it false.
+	let inclusionVerified = false;
 
 	if (anchorParams === undefined) {
 		merkleVerified = chainVerified;
@@ -894,6 +902,7 @@ export function verifyTransaction(
 					],
 				});
 				merkleVerified = ok;
+				inclusionVerified = ok;
 				merkleRoot = covering.merkleRoot;
 				merkleLabel = ok
 					? `INCLUSION VERIFIED (anchor #${covering.anchorSeq})`
@@ -955,6 +964,7 @@ export function verifyTransaction(
 		receipt: renderReceipt(receiptData),
 		status: eventStatus(targetEvent),
 		errors: allErrors,
+		inclusionVerified: inclusionVerified && chainVerified && anchorsValid,
 		...(anchorState !== undefined ? { anchorState } : {}),
 		...(anchoring !== undefined ? { anchoring } : {}),
 	};
