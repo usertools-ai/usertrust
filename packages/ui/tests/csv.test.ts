@@ -35,6 +35,13 @@ describe("toCsv", () => {
 		expect(lines[1]).toContain("claude-sonnet-4-6");
 	});
 
+	it("writes an intact row's integrity as chained, never verified, and a row after a break as after-break", () => {
+		const integrityAt = (r: LedgerRow) =>
+			toCsv([r]).split("\r\n")[1]?.split(",")[CSV_HEADERS.indexOf("integrity")];
+		expect(integrityAt(row())).toBe("chained");
+		expect(integrityAt(row({ integrity: "after-break" }))).toBe("after-break");
+	});
+
 	it("writes numeric cost columns unquoted so spreadsheets sum them", () => {
 		const cells = toCsv([row()]).split("\r\n")[1]?.split(",") as string[];
 		expect(cells).toContain("336");

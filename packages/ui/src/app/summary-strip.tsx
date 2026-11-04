@@ -8,7 +8,9 @@ import { budgetAsOf, budgetDisplay, budgetSourceWord } from "../shared/budget-di
 import {
 	ANCHOR_VERIFY_COMMAND,
 	anchorView,
+	CHAINED_TITLE,
 	chainStatus,
+	NOT_ANCHORED_NOTE,
 	verifiedAsOf,
 	windowNotice,
 } from "../shared/display.js";
@@ -344,11 +346,16 @@ export function SummaryStrip(props: {
 				</div>
 				<div className="ut-fact">
 					<b>Integrity</b>
+					{/* "chained", never "verified": this is the hash links re-checked by the dashboard, not an explicit,
+					    anchored check. Without an anchor file it says so under the pill. */}
 					{status === "verified" && (
-						<span className="ut-pill" data-tone="approve">
-							<i />
-							verified
-						</span>
+						<>
+							<span className="ut-pill" data-tone="approve" title={CHAINED_TITLE}>
+								<i />
+								chained
+							</span>
+							{s.anchorFile !== "present" && <span className="ut-sub">{NOT_ANCHORED_NOTE}</span>}
+						</>
 					)}
 					{status === "broken" && (
 						<span className="ut-pill" data-tone="stakes">
