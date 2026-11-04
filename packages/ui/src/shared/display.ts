@@ -33,8 +33,22 @@ export function verifiedAsOf(
 ): string {
 	if (verifiedAt === null) return "not yet read in full";
 	const t = Date.parse(verifiedAt);
-	return Number.isNaN(t) ? `verified as of ${verifiedAt}` : `verified as of ${local(new Date(t))}`;
+	// "checked", never "verified": a full read re-checks the hash links, which is not an anchored check.
+	return Number.isNaN(t)
+		? `links checked as of ${verifiedAt}`
+		: `links checked as of ${local(new Date(t))}`;
 }
+
+/**
+ * The summary's integrity pill says "chained" when every hash link is intact, never "verified": the dashboard re-runs
+ * the chain's self-consistency check, which a log cut short and rewritten to match also passes. Its hover text says
+ * what the word covers.
+ */
+export const CHAINED_TITLE =
+	"Every hash link in the vault is intact. This is not an anchored check.";
+
+/** Under the "chained" pill when the vault has no anchor file: the links are all there is. */
+export const NOT_ANCHORED_NOTE = "hash links only · not anchored";
 
 /**
  * The anchor file's presence is all the dashboard knows about anchors: the server has no operator-pinned genesis, so

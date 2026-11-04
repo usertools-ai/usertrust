@@ -25,59 +25,57 @@ describe("budgetDisplay", () => {
 		],
 		["a NaN budget: unknown", Number.NaN, 500, { kind: "unknown" }],
 		["an infinite remaining figure: unknown", 1_000, Number.POSITIVE_INFINITY, { kind: "unknown" }],
-		["remaining well above 20%: gold", 2_000, 1_700, { kind: "known", pct: 85, fill: "gold" }],
-		["50% used: gold", 1_000, 500, { kind: "known", pct: 50, fill: "gold" }],
+		["remaining well above 20%: gold", 2_000, 1_700, { kind: "known", leftPct: 85, fill: "gold" }],
+		["50% used: gold", 1_000, 500, { kind: "known", leftPct: 50, fill: "gold" }],
 		// The cut points are strict on the remaining fraction. 79.9% used (0.201 left) is gold; exactly 80% used
 		// (0.2 left) is STILL gold; MORE than 80% used (0.199 left) is warn.
-		["79.9% used (0.201 left): gold", 1_000, 201, { kind: "known", pct: 20.1, fill: "gold" }],
+		["79.9% used (0.201 left): gold", 1_000, 201, { kind: "known", leftPct: 20.1, fill: "gold" }],
 		[
 			"exactly 80% used (0.2 left): still gold",
 			1_000,
 			200,
-			{ kind: "known", pct: 20, fill: "gold" },
+			{ kind: "known", leftPct: 20, fill: "gold" },
 		],
-		["80.1% used (0.199 left): warn", 1_000, 199, { kind: "known", pct: 19.9, fill: "warn" }],
-		["90% used: warn", 1_000, 100, { kind: "known", pct: 10, fill: "warn" }],
+		["80.1% used (0.199 left): warn", 1_000, 199, { kind: "known", leftPct: 19.9, fill: "warn" }],
+		["90% used: warn", 1_000, 100, { kind: "known", leftPct: 10, fill: "warn" }],
 		// Exactly 95% used (0.05 left) is STILL warn; MORE than 95% used (0.049 left) is danger.
-		["94.9% used (0.051 left): warn", 1_000, 51, { kind: "known", pct: 5.1, fill: "warn" }],
+		["94.9% used (0.051 left): warn", 1_000, 51, { kind: "known", leftPct: 5.1, fill: "warn" }],
 		[
 			"exactly 95% used (0.05 left): still warn",
 			1_000,
 			50,
-			{ kind: "known", pct: 5, fill: "warn" },
+			{ kind: "known", leftPct: 5, fill: "warn" },
 		],
-		["95.1% used (0.049 left): danger", 1_000, 49, { kind: "known", pct: 4.9, fill: "danger" }],
-		["99% used: danger", 1_000, 10, { kind: "known", pct: 1, fill: "danger" }],
-		["fully used (nothing left): danger", 1_000, 0, { kind: "known", pct: 0, fill: "danger" }],
+		["95.1% used (0.049 left): danger", 1_000, 49, { kind: "known", leftPct: 4.9, fill: "danger" }],
+		["99% used: danger", 1_000, 10, { kind: "known", leftPct: 1, fill: "danger" }],
+		["fully used (nothing left): danger", 1_000, 0, { kind: "known", leftPct: 0, fill: "danger" }],
 		[
 			"overspent: clamped to 0%, danger, never a negative bar",
 			1_000,
 			-50,
-			{ kind: "known", pct: 0, fill: "danger" },
+			{ kind: "known", leftPct: 0, fill: "danger" },
 		],
 	] as const)("%s", (_n, budget, remainingUt, expected) => {
 		const shown = budgetDisplay({ budget, remainingUt, budgetProvenance: "P" });
-		// pct is a float (79.9 + 0.1 style noise, e.g. 19.900000000000002); the fill is the exact, load-bearing part.
-		const { pct, ...rest } = expected as { pct?: number };
+		// leftPct is a float (79.9 + 0.1 style noise, e.g. 19.900000000000002); the fill is the exact, load-bearing part.
+		const { leftPct, ...rest } = expected as { leftPct?: number };
 		expect(shown).toMatchObject({ ...rest, provenance: "P" });
-		if (pct !== undefined && shown.kind === "known") {
-			expect(shown.pct).toBeCloseTo(pct, 9);
-			// The bar fills with what is USED, the complement of what the strip says is left, clamped to 0-100.
-			expect(shown.usedPct).toBeCloseTo(100 - pct, 9);
-		}
+		if (leftPct !== undefined && shown.kind === "known")
+			expect(shown.leftPct).toBeCloseTo(leftPct, 9);
 	});
 
-	it("the bar fill is the USED percentage: 85% used is 85, a full budget is 100, overspent stays 100", () => {
-		const used = (budget: number, remainingUt: number) => {
+	it("the one figure is what is LEFT: a full budget is 100, 36.6% left is 36.6, nothing left and overspent are 0", () => {
+		const left = (budget: number, remainingUt: number) => {
 			const shown = budgetDisplay({ budget, remainingUt, budgetProvenance: "P" });
-			return shown.kind === "known" ? shown.usedPct : Number.NaN;
+			return shown.kind === "known" ? shown.leftPct : Number.NaN;
 		};
-		expect(used(1_000, 1_000)).toBe(0);
-		expect(used(2_000, 300)).toBeCloseTo(85, 9);
-		expect(used(1_000, 0)).toBe(100);
-		expect(used(1_000, -50)).toBe(100);
-		// A remaining figure above the budget cannot draw a negative bar.
-		expect(used(1_000, 1_500)).toBe(0);
+		expect(left(1_000, 1_000)).toBe(100);
+		expect(left(1_000, 366)).toBeCloseTo(36.6, 9);
+		expect(left(2_000, 300)).toBeCloseTo(15, 9);
+		expect(left(1_000, 0)).toBe(0);
+		expect(left(1_000, -50)).toBe(0);
+		// A remaining figure above the budget cannot draw a bar wider than the track.
+		expect(left(1_000, 1_500)).toBe(100);
 	});
 
 	it("red-first (no reason): an unknown budget is shown WITH which unknown it is", () => {

@@ -69,7 +69,8 @@ export function toCsv(rows: LedgerRow[]): string {
 				num(r.costUt),
 				num(r.costUsd),
 				cell(statusOf(r)),
-				cell(r.integrity),
+				// "chained", never "verified": an intact hash link is not an explicit, anchored check.
+				cell(r.integrity === "verified" ? "chained" : r.integrity),
 				cell(r.transferId),
 				cell(r.id),
 				cell(r.hash),
