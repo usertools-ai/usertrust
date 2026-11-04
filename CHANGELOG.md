@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.5.0] - 2026-11-04
+
 ### Read before upgrading
 
 - **Policy rules that match on `tier` now see the tier you set, so some calls may be allowed or denied that were not before.** The `tier` option of `trust()` and `createGovernor()`, and a `tier` on a `usertrust-server` tenant, were accepted and ignored: every rule was evaluated at the config file's tier (`"mini"` when the file names none). A deny rule written for a tier you configured therefore never fired for that client or tenant. They are now evaluated at the tier you set, and a rule that matched `"mini"` by accident no longer does for a client set to another tier. Before you upgrade, list the rules in your policy files that use `field: "tier"`, and check each client's and tenant's tier against them. A `tier` that is not one of `free`, `mini`, `pro`, `mega`, `ultra` is now refused when the client is built (`trust()`, `createGovernor()`) and when `usertrust-server` loads its config; it used to be ignored. A request cannot set its own tier: a `tier` in a call's params is still not what rules see.
