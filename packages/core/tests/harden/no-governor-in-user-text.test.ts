@@ -182,14 +182,15 @@ function sourceFiles(root: string): string[] {
  * Whether `text` could hold a literal that says "governor": one cheap pass over the file's own text,
  * so only the files that can are parsed (a parse of every shipped source is what made this scan
  * slow). It looks at the text a reader or the cooked literal could produce: escape sequences
- * (`\u0067`, `\x67`, `\u{67}`, `\g`) are decoded the way a string literal cooks them, then entities
+ * (`\u0067`, `\x67`, `\u{67}`, a legacy octal such as `\147`, `\g`) are decoded the way a string literal cooks them, then entities
  * and invisible characters are removed as `visibleText` does. It is deliberately a superset of
  * what the syntax-tree scan reports, never a subset: a file this skips holds no such literal.
  */
 function mightSayGovernor(text: string): boolean {
 	const cooked = text.replace(
-		/\\(?:u\{([0-9a-fA-F]+)\}|u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|(\r\n|[\s\S]))/g,
-		(_whole, braced, four, two, other) => {
+		/\\(?:u\{([0-9a-fA-F]+)\}|u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|([0-3][0-7]{0,2}|[4-7][0-7]?)|(\r\n|[\s\S]))/g,
+		(_whole, braced, four, two, octal, other) => {
+			if (octal !== undefined) return String.fromCharCode(Number.parseInt(octal, 8)); // legacy octal escape
 			const hex = braced ?? four ?? two;
 			if (hex === undefined) {
 				if (/^[\n\r\u2028\u2029]/.test(other)) return ""; // a line continuation
@@ -201,7 +202,13 @@ function mightSayGovernor(text: string): boolean {
 	);
 	// A plain string keeps invisible characters and entities as written; JSX text has them removed or
 	// decoded. Either reading is a reason to parse.
-	return WORD.test(cooked) || WORD.test(visibleText(cooked));
+	// JSX text and a JSX attribute's string keep a backslash as written, so the raw text counts too.
+	return (
+		WORD.test(cooked) ||
+		WORD.test(visibleText(cooked)) ||
+		WORD.test(text) ||
+		WORD.test(visibleText(text))
+	);
 }
 
 /** Every literal in one file whose text names the governor, as the literal's own text. */
@@ -485,6 +492,24 @@ describe("no 'governor' in text a person reads", () => {
 			const found = checkLiterals(root, []);
 			expect(found).toHaveLength(1);
 			expect(found[0]).toContain("packages/x/src/b.tsx");
+			// JSX text and attribute strings keep a backslash as written; a legacy octal escape cooks to a letter
+			// or a control character in a string and in a template.
+			const jsx = [
+				"export const A = () => <p>budget\\governor</p>;",
+				'export const B = () => <p title="budget\\governor" />;',
+				"export const C = () => <p>governor\\a</p>;",
+			].join("\n");
+			expect(scanSource("a.tsx", jsx)).toHaveLength(3);
+			expect(mightSayGovernor(jsx)).toBe(true);
+			const octal = [
+				'export const a = "\\147overnor";',
+				"export const b = `\\147overnor`;",
+				'export const c = "\\147\\157vernor";',
+				'export const d = "governor\\1";',
+				'export const e = "x\\7governor";',
+			].join("\n");
+			expect(scanSource("o.ts", octal)).toHaveLength(5);
+			for (const line of octal.split("\n")) expect(mightSayGovernor(line), line).toBe(true);
 			// the pre-check itself: skips a file with no way to say the word, keeps one that has
 			expect(mightSayGovernor('export const ok = "nothing to see";')).toBe(false);
 			expect(mightSayGovernor(a)).toBe(true);
