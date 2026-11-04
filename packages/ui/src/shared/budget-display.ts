@@ -48,26 +48,89 @@ export function budgetDisplay(
 }
 
 /**
- * The budget's source as one word, beside the figure; the full provenance sentence is in its tooltip. Only a
- * governor's record of what it enforces reads as enforced.
+ * How old the controller's budget record may be and still read as `enforced`. The record is a file the controller wrote
+ * at one point in time; it says nothing about the controller still running, so past this age the budget reads
+ * `recorded`, never `enforced`. This is the ruling's bound, kept in one place; the controller's publish interval may
+ * replace it later.
  */
-export function budgetSourceWord(source: SummaryPayload["budgetSource"]): {
+export const BUDGET_RECORD_FRESH_MS = 15 * 60 * 1000;
+
+/** How the controller's record reads right now: its age in words, whether it is fresh, and its exact UTC time. */
+export type BudgetRecordAge = {
+	/** Within BUDGET_RECORD_FRESH_MS of `now`, either side (a clock that runs ahead counts as fresh only that far). */
+	fresh: boolean;
+	/** `recorded 12 min ago`; never a negative age. */
+	line: string;
+	/** `as of 2026-11-02 23:33Z`, for a tooltip. */
+	exact: string;
+};
+
+/** An age as words: `just now` under a minute, then minutes, then hours (`1 h 5 min ago`), then days. */
+export function formatRecordAge(ageMs: number): string {
+	const minutes = Math.floor(Math.max(0, ageMs) / 60_000);
+	if (minutes < 1) return "just now";
+	if (minutes < 60) return `${minutes} min ago`;
+	const hours = Math.floor(minutes / 60);
+	if (hours < 24) {
+		const rest = minutes % 60;
+		return rest === 0 ? `${hours} h ago` : `${hours} h ${rest} min ago`;
+	}
+	const days = Math.floor(hours / 24);
+	return days === 1 ? "1 day ago" : `${days} days ago`;
+}
+
+/**
+ * The age of a controller's record at `now` (ms since the epoch; passed in so the result is testable). A time that
+ * cannot be read is never fresh. A time in the future (clock skew) reads `recorded just now` and is fresh only within
+ * the same window, so a record dated far ahead cannot hold `enforced` indefinitely.
+ */
+export function budgetRecordAge(writtenAt: string, now: number): BudgetRecordAge {
+	const t = Date.parse(writtenAt);
+	if (Number.isNaN(t))
+		return { fresh: false, line: "recorded at a time that cannot be read", exact: writtenAt };
+	const age = now - t;
+	return {
+		fresh: Math.abs(age) <= BUDGET_RECORD_FRESH_MS,
+		line: `recorded ${formatRecordAge(age)}`,
+		exact: `as of ${formatUtcMinute(writtenAt)}`,
+	};
+}
+
+/**
+ * The budget's source as one word, beside the figure; the full provenance sentence is in its tooltip. Only a
+ * controller's FRESH record of what it enforces reads as enforced: an older one (or one with no readable time) reads
+ * `recorded`, in the amber tone, because the file cannot say the controller is still running.
+ */
+export function budgetSourceWord(
+	source: SummaryPayload["budgetSource"],
+	writtenAt: string | null,
+	now: number,
+): {
 	word: string;
 	tone: "ink" | "info" | "body";
 } {
-	if (source === "governor") return { word: "enforced", tone: "ink" };
+	if (source === "governor")
+		return writtenAt !== null && budgetRecordAge(writtenAt, now).fresh
+			? { word: "enforced", tone: "ink" }
+			: { word: "recorded", tone: "info" };
 	if (source === "config") return { word: "config · unconfirmed", tone: "info" };
 	return { word: "unknown", tone: "body" };
 }
 
 /**
- * The line under a known budget. A governor's record says when it was written, WITH its year: a record surviving from an
- * earlier year must not read as current. Any other source shows its provenance sentence.
+ * The line under a known budget, with the exact time for its tooltip. A controller's record gives its AGE relative to
+ * `now`, not a clock time to do sums on; the exact UTC time (with its year) is the tooltip. The provenance sentence
+ * calls a controller's budget "enforced", so a controller's record never shows it: the age line is shown instead. Any
+ * other source shows its provenance sentence. `isRecord` says which of the two it is.
  */
 export function budgetAsOf(
 	s: Pick<SummaryPayload, "budgetSource" | "budgetWrittenAt" | "budgetProvenance">,
-): string {
-	return s.budgetSource === "governor" && s.budgetWrittenAt !== null
-		? `published by the controller, as of ${formatUtcMinute(s.budgetWrittenAt)}`
-		: s.budgetProvenance;
+	now: number,
+): { text: string; title: string | null; isRecord: boolean } {
+	if (s.budgetSource !== "governor")
+		return { text: s.budgetProvenance, title: null, isRecord: false };
+	if (s.budgetWrittenAt === null)
+		return { text: "recorded at an unknown time", title: null, isRecord: true };
+	const age = budgetRecordAge(s.budgetWrittenAt, now);
+	return { text: age.line, title: age.exact, isRecord: true };
 }
