@@ -366,6 +366,19 @@ body {
 		letter-spacing: 0;
 		text-transform: none;
 	}
+	/* The dollar amounts under a fact's headline figure; the usertoken line follows in .ut-sub.mono. */
+	.ut-amts {
+		font: 400 12.5px/1.3 var(--mono);
+		font-variant-numeric: tabular-nums;
+		color: var(--body);
+		overflow-wrap: anywhere;
+	}
+	/* The one-line key to the usertoken unit, where a panel shows UT without a foot of its own. */
+	.ut-key {
+		font: 400 11px/1.4 var(--mono);
+		color: var(--faint-text);
+		overflow-wrap: anywhere;
+	}
 	.ut-why {
 		font: 400 12px/1.45 var(--sans);
 		color: var(--body);
@@ -493,6 +506,12 @@ body {
 		color: #d6d6db;
 		right: 0;
 		width: 300px;
+	}
+	/* Opens from the left edge of its anchor, for a fact in the first column. */
+	.ut-pop.text.start {
+		left: 0;
+		right: auto;
+		width: min(300px, calc(100vw - 48px));
 	}
 	.ut-pop.text code {
 		font: 400 11.5px/1.5 var(--mono);
@@ -1016,12 +1035,18 @@ body {
 	}
 	.ut-foot {
 		display: flex;
-		gap: 10px;
+		flex-wrap: wrap;
+		gap: 4px 10px;
 		padding: 8px 16px;
 		border-top: 1px solid var(--line);
-		font: 400 11px/1 var(--mono);
+		font: 400 11px/1.3 var(--mono);
 		color: var(--faint-text);
 		font-variant-numeric: tabular-nums;
+	}
+	/* A dot between the foot's facts: with the key there are three, and a bare gap reads as one run-on line. */
+	.ut-foot > span + span::before {
+		content: "·";
+		margin-right: 10px;
 	}
 
 	/* ── Inspector ── */
@@ -1326,6 +1351,12 @@ body {
 		color: var(--body);
 		text-align: right;
 		white-space: nowrap;
+	}
+	/* The UT figure is the value's second line: dollars and count on the first, so the value is no wider than it was
+	   before dollars led and the name (.k) keeps its width on a narrow card. */
+	.ut-blist .v .ut-bl-ut {
+		display: block;
+		color: var(--faint-text);
 	}
 	.ut-blist .ut-meter {
 		grid-column: 1 / -1;
