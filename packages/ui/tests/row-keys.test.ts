@@ -205,9 +205,13 @@ describe("the inspector takes focus from the list", () => {
 			"pageSizeFromItems(virtualizer.getVirtualItems(), el.scrollTop, el.clientHeight)",
 		);
 		// On a phone the page is the scroller (the list flows in it), so a screenful is the window's, not the list's.
+		// ...below the sort bar, which sticks to the top of the window over the rows (its height, capH): a row the keyboard
+		// brings into view is placed below the bar, and a screenful counts only the rows below it.
 		expect(src).toMatch(
-			/phone\s*\?\s*pageSizeFromItems\(virtualizer\.getVirtualItems\(\), window\.scrollY, window\.innerHeight\)/,
+			/phone\s*\?\s*pageSizeFromItems\(\s*virtualizer\.getVirtualItems\(\),\s*window\.scrollY \+ capH,\s*window\.innerHeight - capH,?\s*\)/,
 		);
+		expect(src).toMatch(/useWindowVirtualizer<Element>\(\{[^}]*scrollPaddingStart: capH/);
+		expect(src).toContain('<div className="ut-cap" ref={capRef}>');
 		expect(src).not.toContain("ROW_HEIGHT");
 	});
 

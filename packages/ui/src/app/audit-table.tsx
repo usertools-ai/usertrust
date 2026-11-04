@@ -253,11 +253,16 @@ export function AuditTable(props: {
 	// when anything above it changes height (the details, the filter chips), so it is re-measured as the page resizes.
 	const phone = useMediaQuery(PHONE_QUERY);
 	const [scrollMargin, setScrollMargin] = useState(0);
+	// The sort bar sticks to the top of the window on a phone, over the rows that scroll under it: a row brought into view
+	// by the keyboard is placed below it (scrollPaddingStart), and a screenful counts only the rows below it.
+	const capRef = useRef<HTMLDivElement>(null);
+	const [capH, setCapH] = useState(0);
 	useLayoutEffect(() => {
 		if (!phone) return;
 		const measure = (): void => {
 			const top = parentRef.current?.getBoundingClientRect().top;
 			if (top !== undefined) setScrollMargin(Math.round(top + window.scrollY));
+			setCapH(capRef.current?.offsetHeight ?? 0);
 		};
 		measure();
 		if (typeof ResizeObserver === "undefined") return;
@@ -282,7 +287,12 @@ export function AuditTable(props: {
 		enabled: !phone,
 		getScrollElement: () => parentRef.current,
 	});
-	const inPage = useWindowVirtualizer<Element>({ ...shared, enabled: phone, scrollMargin });
+	const inPage = useWindowVirtualizer<Element>({
+		...shared,
+		enabled: phone,
+		scrollMargin,
+		scrollPaddingStart: capH,
+	});
 	const virtualizer = phone ? inPage : inList;
 
 	// The row the arrow keys are on, by hash (an index would slide to another row when a live record arrives at the top).
@@ -328,10 +338,15 @@ export function AuditTable(props: {
 		}
 		// A screenful by the rows the virtualiser has MEASURED, not an estimate: under 560px rows stack and wrap and are far
 		// taller than a desktop row, so a fixed estimate made PageUp and PageDown skip rows.
-		// On a phone the page is the scroller (the list flows in it), so the screenful is the window's.
+		// On a phone the page is the scroller (the list flows in it), so the screenful is the window's, below the sticky
+		// sort bar.
 		const el = parentRef.current;
 		const page = phone
-			? pageSizeFromItems(virtualizer.getVirtualItems(), window.scrollY, window.innerHeight)
+			? pageSizeFromItems(
+					virtualizer.getVirtualItems(),
+					window.scrollY + capH,
+					window.innerHeight - capH,
+				)
 			: el
 				? pageSizeFromItems(virtualizer.getVirtualItems(), el.scrollTop, el.clientHeight)
 				: 1;
@@ -372,7 +387,7 @@ export function AuditTable(props: {
 
 	return (
 		<>
-			<div className="ut-cap">
+			<div className="ut-cap" ref={capRef}>
 				<span className="lead">Sort</span>
 				{SORTS.map((s) => (
 					<button
