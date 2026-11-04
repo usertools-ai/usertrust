@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { csvFilename, toCsv } from "../shared/csv.js";
 import { chainStatus } from "../shared/display.js";
 import { applyFilters, EMPTY_FILTERS, isFiltering } from "../shared/filters.js";
@@ -38,7 +38,20 @@ export function App(): React.JSX.Element {
 	);
 	const filtered = useMemo(() => applyFilters(rows, filters), [rows, filters]);
 	const docked = useMediaQuery(DOCK_QUERY);
-	const close = useCallback(() => setOpenHash(null), [setOpenHash]);
+	// Enter or Space on a row asks the docked inspector to take focus; a click clears the request. The restore request
+	// sends focus back to the row when the inspector closes. Each carries a counter so a repeat of the same row counts.
+	const [kbOpen, setKbOpen] = useState<number | undefined>(undefined);
+	const [restoreFocus, setRestoreFocus] = useState<{ hash: string; n: number } | null>(null);
+	const requests = useRef(0);
+	const close = useCallback(
+		(returnFocus: boolean) => {
+			if (returnFocus && openHash !== null)
+				setRestoreFocus({ hash: openHash, n: ++requests.current });
+			setOpenHash(null);
+			setKbOpen(undefined);
+		},
+		[openHash, setOpenHash],
+	);
 	const newestOf = summary?.truncated ? summary.rowCount : undefined;
 
 	// Export what the operator is looking at — the filtered set, not the vault, and within the server's window: the
@@ -88,7 +101,10 @@ export function App(): React.JSX.Element {
 							</button>
 						))}
 					</div>
-					<span className="ut-label">{count}</span>
+					{/* A live region: a filter that changes how many rows are in view says so to a screen reader. */}
+					<span className="ut-label" role="status">
+						{count}
+					</span>
 					<span className="ut-grow" />
 					<input
 						type="search"
@@ -144,7 +160,11 @@ export function App(): React.JSX.Element {
 								chain={summary === null ? null : chainStatus(summary.chain)}
 								liveIds={liveIds}
 								selected={openHash}
-								onOpen={(r: LedgerRow) => setOpenHash(r.hash)}
+								restoreFocus={restoreFocus}
+								onOpen={(r: LedgerRow, viaKeyboard: boolean) => {
+									setOpenHash(r.hash);
+									setKbOpen(viaKeyboard ? ++requests.current : undefined);
+								}}
 								onClearFilters={() => setFilters(EMPTY_FILTERS)}
 							/>
 						) : (
@@ -154,7 +174,14 @@ export function App(): React.JSX.Element {
 					{dock &&
 						(open ? (
 							// Keyed by the row: another row's inspector starts clean.
-							<RowPanel key={open.hash} row={open} docked onClose={close} />
+							<RowPanel
+								key={open.hash}
+								row={open}
+								docked
+								onClose={close}
+								focusNonce={kbOpen}
+								onFocusHandled={() => setKbOpen(undefined)}
+							/>
 						) : (
 							<InspectorHint />
 						))}
