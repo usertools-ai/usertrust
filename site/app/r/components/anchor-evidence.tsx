@@ -1,19 +1,14 @@
 import {
-	ANCHOR_BINDING_RESOLVER_ASSERTED,
-	ANCHOR_EXTERNAL_VISIBILITY,
-	ANCHOR_NOT_PROOF_OF_UNIQUENESS,
-	ANCHOR_PARTIAL_MITIGATION,
 	EQUIVOCATION_CAVEAT,
 	EQUIVOCATION_NON_GOAL,
 	EXTENSION_FAILURE_MEANING,
 	HISTORY_WALK_PROVED,
-	REKOR_EVIDENCE_MEANING,
 	RESULT_LABEL,
 	rungDisclaimers,
 	S3_OPERATOR_ASSERTED,
 	UNAVAILABLE_MEANING,
 } from "../lib/claims";
-import { type Bag, bagList, isBag, num, str } from "../lib/unsigned-reads";
+import { type Bag, bagList, num, str } from "../lib/unsigned-reads";
 import type {
 	AnchorEvidence,
 	CheckEntry,
@@ -21,28 +16,24 @@ import type {
 	SegmentCheckpointV2,
 	Verification,
 } from "../lib/wire";
-import HashValue from "./hash-value";
 
 /**
  * R32 / R7 / R8 / R10 — the extension EVIDENCE, rendered per format and per
  * RESULT.
  *
- * Two rules shape this component, and both are about not overclaiming.
+ * One rule shapes this component, and it is about not overclaiming.
  *
  * **S3 Object Lock evidence "must never render as a green anchor claim" (R8).**
- * The two formats therefore share no container, no color and no heading: Rekor
- * renders in the emerald voice as the resolver's passed attachment check; the
- * S3 probes render in the steel voice under their own operator-asserted label.
- * C4 (`commit-s3-only.json`) is the fixture that proves the split — S3 evidence
- * with no Rekor member must produce no anchor claim anywhere on the page. R41:
- * an upheld Rekor card still carries the resolver-asserted qualifier, because
- * no normative binding is defined between that log entry and this checkpoint.
+ * The S3 probes render in the steel voice under their own operator-asserted
+ * label. C4 (`commit-s3-only.json`) is the fixture that proves it: S3 evidence
+ * alone must produce no anchor claim anywhere on the page.
  *
  * **A served member is not a passed check (R10).** `commit-anchor-failed.json`
- * carries a full Rekor attachment whose check result is `failed` /
- * `ANCHOR_INVALID`, and `commit-history-failed.json` carries a history whose
- * walk did not pass. Rendering either in the emerald "this is what earned the
- * rung" voice would be exactly the green anchor chip R10 forbids — so the
+ * carries an anchor attachment whose check result is `failed` /
+ * `ANCHOR_INVALID` (not rendered here), and `commit-history-failed.json`
+ * carries a history whose walk did not pass. Rendering such evidence in the
+ * emerald "this is what earned the rung" voice would be exactly the green
+ * anchor chip R10 forbids — so the
  * evidence's VOICE is a function of the check result, the failure is NAMED, and
  * the base verdict is stated as preserved. The evidence still renders: hiding
  * it would deny the reader the material the resolver actually examined.
@@ -123,72 +114,6 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 		<div className="flex flex-col gap-1">
 			<dt className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">{label}</dt>
 			<dd>{children}</dd>
-		</div>
-	);
-}
-
-function RekorPanel({ rekor, standing }: { rekor: Bag; standing: Standing }) {
-	const log = isBag(rekor.log) ? rekor.log : undefined;
-	const artifactHash = str(rekor, "artifactHash");
-	const url = log ? str(log, "url") : undefined;
-	const logIndex = log ? num(log, "logIndex") : undefined;
-	const integratedTime = log ? num(log, "integratedTime") : undefined;
-	const rootHash = log ? str(log, "rootHash") : undefined;
-	return (
-		<div
-			className={standing.frame}
-			data-testid="rekor-evidence"
-			data-anchor-standing={standing.upheld ? "upheld" : "not-upheld"}
-		>
-			<ExtensionHeader title="rekor anchor evidence" standing={standing} />
-			<p className="mt-2 text-[13px] leading-relaxed text-white/85">{REKOR_EVIDENCE_MEANING}</p>
-			{standing.note ? (
-				<p className="mt-2 text-[13px] leading-relaxed text-white/70">{standing.note}</p>
-			) : null}
-
-			<dl className="mt-3 grid gap-3 sm:grid-cols-2">
-				{url ? (
-					<Row label="log">
-						<span className="font-mono text-[13px] text-white/85">{url}</span>
-					</Row>
-				) : null}
-				{logIndex !== undefined ? (
-					<Row label="log index">
-						<span className="font-mono text-[13px] text-white/85">{logIndex}</span>
-					</Row>
-				) : null}
-				{integratedTime !== undefined ? (
-					<Row label="integratedTime (unix seconds)">
-						<span className="font-mono text-[13px] text-white/85">{integratedTime}</span>
-					</Row>
-				) : null}
-				{artifactHash ? (
-					<Row label="artifact hash">
-						<HashValue value={artifactHash} label="Rekor artifactHash" head={20} />
-					</Row>
-				) : null}
-				{rootHash ? (
-					<Row label="log root hash">
-						<HashValue value={rootHash} label="Rekor log rootHash" head={20} />
-					</Row>
-				) : null}
-			</dl>
-
-			{/* R8 + R41 — the caveat travels WITH an UPHELD anchor. On a failed
-			    or unavailable one there is no anchor claim to caveat. R41 sits
-			    here as well as the masthead: this card is a standalone green
-			    panel and otherwise reasserts independently verified anchoring. */}
-			{standing.upheld ? (
-				<div className="mt-3 flex flex-col gap-2" data-testid="anchor-caveat">
-					<p className="text-[13px] leading-relaxed text-white/70">
-						{ANCHOR_BINDING_RESOLVER_ASSERTED}
-					</p>
-					<p className="text-[13px] leading-relaxed text-white/70">
-						{ANCHOR_PARTIAL_MITIGATION}: {ANCHOR_EXTERNAL_VISIBILITY} —{" "}
-						{ANCHOR_NOT_PROOF_OF_UNIQUENESS}
-					</p>
-				</div>
-			) : null}
 		</div>
 	);
 }
@@ -324,7 +249,6 @@ export default function AnchorEvidencePanels({
 	/** The rung, so a claim's caveat never depends on the masthead carrying it. */
 	rung: LadderStatus;
 }) {
-	const rekor = anchorEvidence && isBag(anchorEvidence.rekor) ? anchorEvidence.rekor : undefined;
 	const probes =
 		anchorEvidence && Array.isArray(anchorEvidence.s3ObjectLock)
 			? anchorEvidence.s3ObjectLock
@@ -333,7 +257,7 @@ export default function AnchorEvidencePanels({
 	// unrecognized member renders as absent — the check RESULT still renders in
 	// the ledger, which is where the authority was in the first place (R9/R10).
 	const history = bagList(checkpointHistory).length > 0 ? checkpointHistory : undefined;
-	if (!rekor && !probes && !history) return null;
+	if (!probes && !history) return null;
 
 	return (
 		<div className="flex flex-col gap-4" data-testid="extension-evidence">
@@ -344,7 +268,6 @@ export default function AnchorEvidencePanels({
 					rung={rung}
 				/>
 			) : null}
-			{rekor ? <RekorPanel rekor={rekor} standing={standingFor(checks.anchorEvidence)} /> : null}
 			{probes ? <S3Panel probes={probes} /> : null}
 		</div>
 	);

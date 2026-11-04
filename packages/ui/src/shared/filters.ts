@@ -53,6 +53,26 @@ export function isFiltering(f: FilterState): boolean {
 	);
 }
 
+/**
+ * How many filters are applied besides the search box (which stays on screen in its own field): one per selected
+ * value and one per date or cost bound, the same count as the chips under the filter bar. A phone shows it on the
+ * button that opens the filters.
+ */
+export function activeFilterCount(f: FilterState): number {
+	return (
+		f.kinds.length +
+		f.models.length +
+		f.actors.length +
+		f.statuses.length +
+		f.jobTypes.length +
+		f.typeSources.length +
+		(f.from !== undefined ? 1 : 0) +
+		(f.to !== undefined ? 1 : 0) +
+		(f.costMin !== undefined ? 1 : 0) +
+		(f.costMax !== undefined ? 1 : 0)
+	);
+}
+
 function haystack(r: LedgerRow): string {
 	return [
 		r.id,

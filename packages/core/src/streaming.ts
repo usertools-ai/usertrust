@@ -349,12 +349,28 @@ export function wrapStream<T>(
 	onError: (error: unknown, partial: StreamCompletion) => void,
 	onChunk?: ChunkHook,
 	callerAborted?: () => boolean,
+	withholdUsageTail?: boolean,
 ): AsyncIterable<T> {
 	return endsBeforeStart(
-		wrapStreamImpl(stream, kind, onComplete, onError, onChunk, callerAborted),
+		wrapStreamImpl(stream, kind, onComplete, onError, onChunk, callerAborted, withholdUsageTail),
 		stream,
 		onComplete,
 		onError,
+	);
+}
+
+/**
+ * The final chunk an OpenAI chat completion sends when usage was requested: no choices, and a
+ * usage object. Anything else (a chunk with choices, or with no usage) is not one.
+ */
+function isUsageOnlyChunk(chunk: unknown): boolean {
+	if (chunk == null || typeof chunk !== "object") return false;
+	const c = chunk as { choices?: unknown; usage?: unknown };
+	return (
+		Array.isArray(c.choices) &&
+		c.choices.length === 0 &&
+		c.usage != null &&
+		typeof c.usage === "object"
 	);
 }
 
@@ -442,6 +458,7 @@ async function* wrapStreamImpl<T>(
 	onError: (error: unknown, partial: StreamCompletion) => void,
 	onChunk?: ChunkHook,
 	callerAborted?: () => boolean,
+	withholdUsageTail?: boolean,
 ): AsyncGenerator<T> {
 	// Set when OUR per-chunk hook (the anomaly detector) is what threw: that is a governance
 	// cutoff and always voids, whatever state the caller's abort signal is in.
@@ -569,6 +586,10 @@ async function* wrapStreamImpl<T>(
 				hookThrew = false;
 			}
 
+			// A usage chunk the caller did not ask for (we added the request for it) is read for
+			// settlement above and is not shown: the caller's stream keeps the shape it had.
+			if (withholdUsageTail === true && kind === "openai" && isUsageOnlyChunk(chunk)) continue;
+
 			yield chunk;
 			chunksDelivered++;
 		}
@@ -638,6 +659,12 @@ export interface GovernedStreamOptions {
 	 * far, as a `break` does, instead of a void. Absent: every throw voids, as before.
 	 */
 	callerAborted?: () => boolean;
+	/**
+	 * The request for usage was added by the controller, not written by the caller: the usage-only
+	 * chunk (OpenAI chat completions) is used for settlement and not yielded, so a consumer that
+	 * reads `chunk.choices[0]` on every chunk sees the stream it would have had without it.
+	 */
+	withholdUsageTail?: boolean;
 }
 
 export function createGovernedStream<T>(
@@ -692,6 +719,7 @@ export function createGovernedStream<T>(
 		},
 		onChunk,
 		options.callerAborted,
+		options.withholdUsageTail,
 	);
 
 	return Object.assign(wrapped, {

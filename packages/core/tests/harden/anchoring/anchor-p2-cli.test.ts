@@ -2,34 +2,26 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * HARDEN — `anchor doctor`, the S3/Rekor sink flags, and `anchor export-bundle`
- * (plan T6 + deltas D8/D9/D10).
+ * HARDEN — `anchor doctor`, the S3 sink flags, and `anchor export-bundle`
+ * (plan T6 + deltas D9/D10).
  *
  * These properties are worth more than the surface area they sit on:
  *
- *   1. `--sink-rekor` NEVER consumes the token after it. A flag that swallows
- *      the next argv entry turns `--sink-rekor --sink-file /mnt/worm/a.jsonl`
- *      into a run with NO file sink, and the operator would only find out at
- *      audit time (D8).
+ *   1. An option an action does not read is refused (exit 2), never ignored: a
+ *      dropped sink flag would run the action with fewer sinks than asked for.
  *   2. A sink flag whose value is missing is fatal. The mirror-image failure of
  *      (1): `anchor now --sink-s3` parsing to zero sinks means the anchor is
  *      signed, mirrored locally, published NOWHERE, and reported as success.
  *   3. `export-bundle` is all-or-nothing on stdout. A bundle is what an auditor
- *      receives INSTEAD of the vault, so a partial one — records present,
- *      receipts silently dropped because a file failed to parse — is worse than
- *      no bundle at all. Any parse error means diagnostics on stderr, exit 1,
- *      and not one byte on stdout (D9).
- *   4. …with exactly one exception, which is not a parse failure: receipts
- *      orphaned by `anchor resume` are excluded with a warning, because
- *      including them would make the verifier reject the whole bundle.
+ *      receives INSTEAD of the vault, so a partial one is worse than no bundle
+ *      at all. Any error means diagnostics on stderr, exit 1, and not one byte
+ *      on stdout (D9).
  */
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { anchorsDir } from "../../../src/audit/anchor.js";
 import type { AnchorRecord } from "../../../src/audit/anchor-verify.js";
-import type { RekorReceipt } from "../../../src/audit/rekor-verify.js";
 import { verifyVaultWithAnchors } from "../../../src/audit/verify.js";
 import { run as anchorRun } from "../../../src/cli/anchor.js";
 import {
@@ -40,7 +32,6 @@ import {
 	makeAnchoredVault,
 	tmp,
 } from "./fixtures.js";
-import { makeRekorReceipt } from "./rekor-fixtures.js";
 
 const origCwd = process.cwd();
 
@@ -88,7 +79,6 @@ const doctorJson = (o: CliOutput): DoctorJson => JSON.parse(o.out.at(-1) as stri
 interface Bundle {
 	v: number;
 	records: AnchorRecord[];
-	rekorReceipts: RekorReceipt[];
 }
 
 /** A vault with two anchors in its local mirror. */
@@ -98,13 +88,6 @@ async function twoAnchorVault(): Promise<{ s: AnchoredSetup; records: AnchorReco
 	await appendEvents(s.root, 2, 4);
 	const second = await anchorOnce(s);
 	return { s, records: [first, second] };
-}
-
-/** Place a receipt where the Rekor sink writes them: audit/anchors/rekor/<seq12>.json */
-function placeReceipt(root: string, anchorSeq: number, body: string): void {
-	const dir = join(anchorsDir(root), "rekor");
-	mkdirSync(dir, { recursive: true });
-	writeFileSync(join(dir, `${String(anchorSeq).padStart(12, "0")}.json`), body);
 }
 
 describe("HARDEN: `anchor doctor` reports what this identity can do to the store", () => {
@@ -137,7 +120,7 @@ describe("HARDEN: `anchor doctor` reports what this identity can do to the store
 		expect(process.exitCode).toBe(1);
 	});
 
-	it("3. url and transparency-log sinks report info rows instead of a probe", async () => {
+	it("3. url sinks report info rows instead of a probe", async () => {
 		const o = await cli(["doctor", "--sink-url", "https://ingest.example/anchors"], true);
 
 		const parsed = doctorJson(o);
@@ -157,7 +140,7 @@ describe("HARDEN: `anchor doctor` reports what this identity can do to the store
 	});
 });
 
-describe("HARDEN: sink flag parsing (--sink-s3, --sink-rekor)", () => {
+describe("HARDEN: sink flag parsing (--sink-s3)", () => {
 	it("5. --sink-s3 without a region fails loudly instead of guessing one", async () => {
 		const o = await cli(["doctor", "--sink-s3", "bucket=b"], true);
 
@@ -175,57 +158,49 @@ describe("HARDEN: sink flag parsing (--sink-s3, --sink-rekor)", () => {
 		expect(process.exitCode).toBe(1);
 	});
 
-	it("7. bare --sink-rekor takes the default log and does NOT eat the next token", async () => {
-		const dir = tmp("rekor-flag-");
+	it("7. a sink flag that was removed is refused as an unknown option (exit 2)", async () => {
+		for (const flag of ["--sink-rekor", "--sink-rekor=https://log.internal:8443"]) {
+			for (const action of ["now", "doctor"]) {
+				const o = await cli([action, flag], true);
+
+				const parsed = JSON.parse(o.out.at(-1) as string);
+				expect(parsed.success).toBe(false);
+				expect(parsed.data.message).toMatch(/has no option/);
+				expect(parsed.data.message).toContain(flag);
+				expect(process.exitCode).toBe(2);
+			}
+		}
+	});
+
+	it("8. a removed flag is refused even beside valid sink flags", async () => {
+		const dir = tmp("unknown-flag-");
 		const sink = join(dir, "anchors.jsonl");
 		writeFileSync(sink, "");
 
 		const o = await cli(["doctor", "--sink-rekor", "--sink-file", sink], true);
 
-		const reports = doctorJson(o).data.reports;
-		expect(reports.map((r) => r.sink)).toEqual([
-			"rekor:https://rekor.sigstore.dev",
-			`file:${sink}`,
-		]);
-	});
-
-	it("8. --sink-rekor=<url> pins a custom log", async () => {
-		const o = await cli(["doctor", "--sink-rekor=https://log.internal:8443"], true);
-
-		expect(doctorJson(o).data.reports[0]?.sink).toBe("rekor:https://log.internal:8443");
-		expect(process.exitCode).toBe(0);
-	});
-
-	it("9. the space-separated form is refused rather than silently routed to the default", async () => {
-		const o = await cli(["doctor", "--sink-rekor", "https://log.internal"], true);
-
-		expect(JSON.parse(o.out.at(-1) as string).data.message).toMatch(/--sink-rekor=<url>/);
-		expect(process.exitCode).toBe(1);
+		expect(JSON.parse(o.out.at(-1) as string).data.message).toMatch(/has no option/);
+		expect(process.exitCode).toBe(2);
 	});
 });
 
 describe("HARDEN: `anchor export-bundle`", () => {
-	it("10. bundles the mirror records together with the receipts on disk", async () => {
-		const { s, records } = await twoAnchorVault();
-		const f = makeRekorReceipt(records[1] as AnchorRecord);
-		placeReceipt(s.root, 2, JSON.stringify(f.receipt));
+	it("10. bundles the mirror records, and nothing else", async () => {
+		const { s } = await twoAnchorVault();
 		process.chdir(s.root);
 
 		const o = await cli(["export-bundle"]);
 
 		expect(o.out).toHaveLength(1);
 		const bundle = JSON.parse(o.out[0] as string) as Bundle;
+		expect(Object.keys(bundle).sort()).toEqual(["records", "v"]);
 		expect(bundle.v).toBe(1);
-		expect(bundle.records).toHaveLength(2);
 		expect(bundle.records.map((r) => r.anchorSeq)).toEqual([1, 2]);
-		expect(bundle.rekorReceipts).toHaveLength(1);
 		expect(process.exitCode).toBe(0);
 	});
 
 	it("11. the exported bundle verifies the vault it came from (round trip)", async () => {
-		const { s, records } = await twoAnchorVault();
-		const f = makeRekorReceipt(records[1] as AnchorRecord);
-		placeReceipt(s.root, 2, JSON.stringify(f.receipt));
+		const { s } = await twoAnchorVault();
 		process.chdir(s.root);
 
 		const bundle = JSON.parse((await cli(["export-bundle"])).out[0] as string) as Bundle;
@@ -233,62 +208,30 @@ describe("HARDEN: `anchor export-bundle`", () => {
 
 		const result = verifyVaultWithAnchors(s.vaultPath, {
 			externalAnchorsRaw: [bundle.records.map((r) => JSON.stringify(r)).join("\n")],
-			rekorReceiptsRaw: bundle.rekorReceipts.map((r) => JSON.stringify(r)),
-			rekorLogPubkeysPem: [f.logPubkeyPem],
 			trust: s.trust,
 			witness: { requested: false },
 		});
 
 		expect(result.anchorState).toBe("ANCHORED_VERIFIED");
-		expect(result.anchoring.rekor?.receiptsVerified).toBe(1);
-		expect(result.anchoring.rekor?.receiptsFailed).toBe(0);
 	});
 
 	it("12. --since drops everything already shipped, and an empty bundle is still valid", async () => {
-		const { s, records } = await twoAnchorVault();
-		placeReceipt(s.root, 2, JSON.stringify(makeRekorReceipt(records[1] as AnchorRecord).receipt));
+		const { s } = await twoAnchorVault();
 		process.chdir(s.root);
 
 		const since1 = JSON.parse(
 			(await cli(["export-bundle", "--since", "1"])).out[0] as string,
 		) as Bundle;
 		expect(since1.records.map((r) => r.anchorSeq)).toEqual([2]);
-		expect(since1.rekorReceipts).toHaveLength(1);
 
 		const since2 = JSON.parse(
 			(await cli(["export-bundle", "--since", "2"])).out[0] as string,
 		) as Bundle;
 		expect(since2.records).toEqual([]);
-		expect(since2.rekorReceipts).toEqual([]);
 		expect(process.exitCode).toBe(0);
 	});
 
-	it("13. a corrupt receipt file fails the export closed — stderr, exit 1, NO stdout", async () => {
-		const { s, records } = await twoAnchorVault();
-		placeReceipt(s.root, 1, JSON.stringify(makeRekorReceipt(records[0] as AnchorRecord).receipt));
-		placeReceipt(s.root, 2, "{ this is not a receipt");
-		process.chdir(s.root);
-
-		const o = await cli(["export-bundle"]);
-
-		expect(o.out).toEqual([]);
-		expect(o.err.join("\n")).toMatch(/000000000002\.json/);
-		expect(process.exitCode).toBe(1);
-	});
-
-	it("14. a receipt that parses but is structurally invalid also fails closed", async () => {
-		const { s } = await twoAnchorVault();
-		placeReceipt(s.root, 2, JSON.stringify({ v: 1, vaultId: "x", anchorSeq: 2 }));
-		process.chdir(s.root);
-
-		const o = await cli(["export-bundle"], true);
-
-		expect(o.out).toEqual([]);
-		expect(o.err.join("\n")).toMatch(/rekor-receipt-invalid/);
-		expect(process.exitCode).toBe(1);
-	});
-
-	it("15. --since must be a non-negative integer", async () => {
+	it("13. --since must be a non-negative integer", async () => {
 		const { s } = await twoAnchorVault();
 		process.chdir(s.root);
 
@@ -299,7 +242,7 @@ describe("HARDEN: `anchor export-bundle`", () => {
 		expect(process.exitCode).toBe(1);
 	});
 
-	it("16. a vault with no mirror exports nothing at all", async () => {
+	it("14. a vault with no mirror exports nothing at all", async () => {
 		const root = tmp("bundle-empty-");
 		await appendEvents(root, 2);
 		process.chdir(root);
@@ -313,14 +256,14 @@ describe("HARDEN: `anchor export-bundle`", () => {
 });
 
 describe("HARDEN: usage text", () => {
-	it("17. lists the new actions and sink flags", async () => {
+	it("15. lists the actions and sink flags", async () => {
 		const o = await cli([]);
 
 		const usage = o.out.join("\n");
 		expect(usage).toMatch(/export-bundle/);
 		expect(usage).toMatch(/doctor/);
 		expect(usage).toMatch(/--sink-s3/);
-		expect(usage).toMatch(/--sink-rekor/);
+		expect(usage).not.toMatch(/rekor/i);
 	});
 });
 
@@ -362,54 +305,6 @@ describe("HARDEN: `anchor export` --since", () => {
 		const o = await cli(["export", "--since", "1"]);
 
 		expect(o.out.map((line) => (JSON.parse(line) as AnchorRecord).anchorSeq)).toEqual([2]);
-		expect(process.exitCode).toBe(0);
-	});
-});
-
-describe("HARDEN: export-bundle never ships a receipt the verifier would reject", () => {
-	it("23. a receipt with no record in the mirror is excluded with a stderr warning", async () => {
-		const { s, records } = await twoAnchorVault();
-		placeReceipt(s.root, 1, JSON.stringify(makeRekorReceipt(records[0] as AnchorRecord).receipt));
-		placeReceipt(s.root, 2, JSON.stringify(makeRekorReceipt(records[1] as AnchorRecord).receipt));
-		// The shape `anchor resume` leaves behind: receipts on disk for anchors
-		// whose records are no longer in the re-seeded mirror. Bundling one makes
-		// the verifier hard-fail with "receipt for unknown anchorSeq".
-		const orphan: RekorReceipt = {
-			...makeRekorReceipt(records[1] as AnchorRecord).receipt,
-			anchorSeq: 3,
-		};
-		placeReceipt(s.root, 3, JSON.stringify(orphan));
-		process.chdir(s.root);
-
-		const o = await cli(["export-bundle"]);
-
-		const bundle = JSON.parse(o.out[0] as string) as Bundle;
-		expect(bundle.records.map((r) => r.anchorSeq)).toEqual([1, 2]);
-		expect(bundle.rekorReceipts.map((r) => r.anchorSeq)).toEqual([1, 2]);
-		expect(o.err.join("\n")).toContain(
-			"export-bundle: excluding receipt for anchorSeq 3 (no matching record in mirror — " +
-				"re-fetch the full history to include it)",
-		);
-		// Expected after a resume, so it is a warning and not a failure (D9's
-		// fail-closed rule covers PARSE errors, which this is not).
-		expect(process.exitCode).toBe(0);
-	});
-
-	it("24. receipts are keyed by the anchorSeq inside them, not by their filename", async () => {
-		const { s, records } = await twoAnchorVault();
-		const dir = join(anchorsDir(s.root), "rekor");
-		mkdirSync(dir, { recursive: true });
-		writeFileSync(
-			join(dir, "000000000002.a1b2c3d4.json"),
-			JSON.stringify(makeRekorReceipt(records[1] as AnchorRecord).receipt),
-		);
-		process.chdir(s.root);
-
-		const o = await cli(["export-bundle"]);
-
-		const bundle = JSON.parse(o.out[0] as string) as Bundle;
-		expect(bundle.rekorReceipts.map((r) => r.anchorSeq)).toEqual([2]);
-		expect(o.err).toEqual([]);
 		expect(process.exitCode).toBe(0);
 	});
 });

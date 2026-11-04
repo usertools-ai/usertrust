@@ -43,7 +43,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
@@ -448,6 +448,17 @@ function main(): number {
 	return 1;
 }
 
-if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// realpath on both sides: see changelog-guard.mjs (a symlinked or space-containing path otherwise skips main silently)
+const invokedDirectly = (() => {
+	try {
+		return (
+			process.argv[1] !== undefined &&
+			realpathSync(resolve(process.argv[1])) === realpathSync(fileURLToPath(import.meta.url))
+		);
+	} catch {
+		return false;
+	}
+})();
+if (invokedDirectly) {
 	process.exitCode = main();
 }

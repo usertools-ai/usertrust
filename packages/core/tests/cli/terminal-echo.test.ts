@@ -78,8 +78,6 @@ const VECTORS: Array<[string, string[][]]> = [
 			["verify", "--anchor", H],
 			["verify", "--bundle", H],
 			["verify", "--pubkey", H],
-			["verify", "--rekor-pubkey", H],
-			["verify", "--rekor-receipts", H],
 			["verify", "--successor-pin", H],
 			["verify", "--max-anchor-age", H],
 			["verify", "--max-unanchored-events", H],

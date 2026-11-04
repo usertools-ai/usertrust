@@ -3,7 +3,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { costView, transferView, usageView } from "../shared/display.js";
-import { formatUtc } from "../shared/format.js";
+import { formatUtc, UT_KEY } from "../shared/format.js";
+import { popoverOwnsEscape } from "../shared/row-nav.js";
 import { JOB_TYPE_CAVEAT, type LedgerRow, statusOf } from "../shared/rows.js";
 import { type Held, heldFor, type VerifyOutcome, verifyOutcome } from "../shared/verify-view.js";
 import { STATUS_TONE } from "./audit-table.js";
@@ -32,22 +33,40 @@ function CopyHash(props: { hash: string }): React.JSX.Element {
 	);
 }
 
-function Verdict(props: { outcome: VerifyOutcome; delayMs: number }): React.JSX.Element {
+/**
+ * The verdict of an explicit check. Green `verified` only for a pass whose receipt is anchored; a pass without an
+ * anchor is `consistent, unanchored`, in the neutral colour of a routine state, because the chain agreeing with itself
+ * is what a log cut short and rewritten to match also does.
+ */
+function Verdict(props: { outcome: VerifyOutcome }): React.JSX.Element {
 	const { outcome } = props;
-	const style = { animationDelay: `${props.delayMs}ms` };
 	switch (outcome.kind) {
 		case "verified":
 			return (
-				<div className="ut-verdict" style={style}>
+				<div className="ut-verdict">
 					<span className="ut-pill" data-tone="approve">
 						<i />
 						verified
+					</span>
+					<span className="ut-why">Checked against an anchor recorded outside this vault.</span>
+				</div>
+			);
+		case "consistent-unanchored":
+			return (
+				<div className="ut-verdict">
+					<span className="ut-pill">
+						<i />
+						consistent, unanchored
+					</span>
+					<span className="ut-why">
+						The chain agrees with itself up to this record. With no anchor to check it against, a
+						log cut short and rewritten to match would read the same.
 					</span>
 				</div>
 			);
 		case "failed":
 			return (
-				<div className="ut-verdict" style={style}>
+				<div className="ut-verdict">
 					<span className="ut-pill" data-tone="stakes">
 						<i />
 						failed
@@ -57,7 +76,7 @@ function Verdict(props: { outcome: VerifyOutcome; delayMs: number }): React.JSX.
 			);
 		case "not-found":
 			return (
-				<div className="ut-verdict" style={style}>
+				<div className="ut-verdict">
 					<span className="ut-pill" data-tone="info">
 						<i />
 						not found
@@ -71,7 +90,7 @@ function Verdict(props: { outcome: VerifyOutcome; delayMs: number }): React.JSX.
 			);
 		case "request-failed":
 			return (
-				<div className="ut-verdict" style={style}>
+				<div className="ut-verdict">
 					<span className="ut-pill" data-tone="info">
 						<i />
 						not checked
@@ -83,15 +102,54 @@ function Verdict(props: { outcome: VerifyOutcome; delayMs: number }): React.JSX.
 }
 
 /**
+ * A check's result: the verdict first, then the receipt it rests on, so the verdict is read before the receipt. The
+ * live region is there before any result (`outcome` null), so the verdict is announced when it lands.
+ */
+export function VerifyResult(props: {
+	outcome: VerifyOutcome | null;
+	verdictRef?: React.Ref<HTMLDivElement>;
+}): React.JSX.Element {
+	const { outcome } = props;
+	const lines =
+		outcome === null || outcome.kind === "request-failed" ? [] : outcome.receipt.split("\n");
+	return (
+		<>
+			<div aria-live="polite" ref={props.verdictRef}>
+				{outcome !== null && <Verdict outcome={outcome} />}
+			</div>
+			{lines.length > 0 && (
+				<pre className="ut-receipt">
+					{lines.map((line, i) => (
+						// biome-ignore lint/suspicious/noArrayIndexKey: receipt lines are static per response and never reorder
+						<span key={i} className="ut-receipt-line" style={{ animationDelay: `${i * 26}ms` }}>
+							{`${line}\n`}
+						</span>
+					))}
+				</pre>
+			)}
+		</>
+	);
+}
+
+/**
  * The selected row. Docked beside the list on a wide screen (a region, the list stays usable); otherwise a modal
  * drawer, a bottom sheet on a phone, that takes focus and returns it to the row on close.
  */
 export function RowPanel(props: {
 	row: LedgerRow;
 	docked: boolean;
-	onClose(): void;
+	/** `returnFocus`: focus was in the inspector (or nowhere), so it goes back to the row the inspector showed. */
+	onClose(returnFocus: boolean): void;
+	/**
+	 * Set (to a number that changes on each request) when the row was opened with the keyboard: a docked inspector then
+	 * takes focus on its heading. Unset for a click, which leaves focus where it is.
+	 */
+	focusNonce?: number;
+	/** Called once the heading has taken focus for a request, so the request is cleared and a later remount (another
+	 * view and back) does not replay it and take focus from wherever the reader is. */
+	onFocusHandled?: () => void;
 }): React.JSX.Element {
-	const { row, docked, onClose } = props;
+	const { row, docked, onClose, focusNonce, onFocusHandled } = props;
 	// A verify response is held for the row VERSION it was requested for (the row object: a status correction replaces
 	// it) and shown only while the row is still that version. Clearing the panel when the status changed ran BEFORE an
 	// in-flight response landed, so the earlier status's receipt was then shown beside the corrected status.
@@ -99,7 +157,17 @@ export function RowPanel(props: {
 	const shown = heldFor(verify, row);
 	const closeRef = useRef<HTMLButtonElement>(null);
 	const panelRef = useRef<HTMLElement>(null);
-	const verdictRef = useRef<HTMLElement>(null);
+	const verdictRef = useRef<HTMLDivElement>(null);
+	const headingRef = useRef<HTMLHeadingElement>(null);
+
+	// Enter or Space on a row opens it here: focus goes to the heading (a tabindex of -1: reachable by script, not a tab
+	// stop), so the next Tab lands on the inspector's own controls, not 20 rows away.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: runs once per request (the nonce), not when docking changes
+	useEffect(() => {
+		if (!docked || focusNonce === undefined) return;
+		headingRef.current?.focus();
+		onFocusHandled?.();
+	}, [focusNonce]);
 
 	// A modal panel takes focus, and returns it to the invoking row on close. A docked one leaves it on the row.
 	useEffect(() => {
@@ -114,7 +182,16 @@ export function RowPanel(props: {
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent): void => {
 			if (e.key === "Escape") {
-				onClose();
+				// An open popover (a filter's choices, an explainer) owns this Escape: it closes, the inspector stays.
+				if (popoverOwnsEscape(document)) return;
+				const active = document.activeElement;
+				const inside =
+					active === null ||
+					active === document.body ||
+					panelRef.current?.contains(active) === true;
+				// A modal panel returns focus on its own (below); a docked one hands it back to its row. Focus in the search box
+				// or elsewhere stays there: closing must not take it.
+				onClose(docked && inside);
 				return;
 			}
 			// aria-modal promises modality: keep Tab cycling inside the panel.
@@ -135,8 +212,9 @@ export function RowPanel(props: {
 				}
 			}
 		};
-		document.addEventListener("keydown", onKey);
-		return () => document.removeEventListener("keydown", onKey);
+		// Capture: this sees Escape before a popover's own listener closes it, whichever of them was registered first.
+		document.addEventListener("keydown", onKey, true);
+		return () => document.removeEventListener("keydown", onKey, true);
 	}, [onClose, docked]);
 
 	const runVerify = async (): Promise<void> => {
@@ -166,20 +244,21 @@ export function RowPanel(props: {
 	const tx = transferView(row);
 	const result = shown !== null && shown !== "loading" ? shown : null;
 
-	// The receipt and verdict land below the button, often below the panel's fold: bring them into view.
+	// The verdict lands below the button, often below the panel's fold, with the receipt under it: bring the verdict
+	// to the top of the view, the receipt following.
 	useEffect(() => {
 		if (result === null) return;
 		const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-		verdictRef.current?.scrollIntoView({ block: "end", behavior: reduce ? "auto" : "smooth" });
+		verdictRef.current?.scrollIntoView({ block: "start", behavior: reduce ? "auto" : "smooth" });
 	}, [result]);
-	const lines =
-		result !== null && result.kind !== "request-failed" ? result.receipt.split("\n") : [];
 
 	const body = (
 		<div className="ut-insp-in">
 			<div className="ut-dhead">
 				<div>
-					<h2>{row.model ?? row.kind}</h2>
+					<h2 ref={headingRef} tabIndex={-1}>
+						{row.model ?? row.kind}
+					</h2>
 					<div className="ut-dkind">
 						{row.kind} · seq {row.seq ?? "?"} · {formatUtc(row.ts)}
 					</div>
@@ -188,7 +267,7 @@ export function RowPanel(props: {
 					ref={closeRef}
 					type="button"
 					className="ut-x"
-					onClick={onClose}
+					onClick={() => onClose(true)}
 					aria-label="close the inspector"
 				>
 					✕
@@ -203,10 +282,10 @@ export function RowPanel(props: {
 					<span
 						className="ut-pill"
 						data-tone="approve"
-						title="hash chain verified up to this record"
+						title="every hash link up to this record is intact"
 					>
 						<i />
-						chain verified
+						chained up to here
 					</span>
 				) : (
 					<span className="ut-pill" data-tone="stakes">
@@ -275,15 +354,16 @@ export function RowPanel(props: {
 				) : (
 					<>
 						<div className="ut-rcpt">
-							<span>Usertokens</span>
-							<span className="dots" />
-							<span className="v">{cost.ut}</span>
-						</div>
-						<div className="ut-rcpt">
 							<span>Dollars</span>
 							<span className="dots" />
 							<span className="v">{cost.usd}</span>
 						</div>
+						<div className="ut-rcpt">
+							<span>Usertokens</span>
+							<span className="dots" />
+							<span className="v">{cost.ut}</span>
+						</div>
+						<div className="ut-key">{UT_KEY}</div>
 						<div className="ut-rcpt">
 							<span>Usage</span>
 							<span className="dots" />
@@ -311,8 +391,8 @@ export function RowPanel(props: {
 					</dd>
 				</dl>
 			</section>
-			<section className="ut-sec" ref={verdictRef}>
-				<div className="ut-lbl">Independent verification</div>
+			<section className="ut-sec">
+				<div className="ut-lbl">Explicit check</div>
 				{tx.kind === "transfer" ? (
 					<>
 						<span className="ut-why">
@@ -331,19 +411,7 @@ export function RowPanel(props: {
 				) : (
 					<span className="ut-why">No transfer id: there is no transaction to verify.</span>
 				)}
-				{lines.length > 0 && (
-					<pre className="ut-receipt">
-						{lines.map((line, i) => (
-							// biome-ignore lint/suspicious/noArrayIndexKey: receipt lines are static per response and never reorder
-							<span key={i} className="ut-receipt-line" style={{ animationDelay: `${i * 26}ms` }}>
-								{`${line}\n`}
-							</span>
-						))}
-					</pre>
-				)}
-				<div aria-live="polite">
-					{result !== null && <Verdict outcome={result} delayMs={lines.length * 26 + 150} />}
-				</div>
+				<VerifyResult outcome={result} verdictRef={verdictRef} />
 			</section>
 		</div>
 	);
@@ -365,7 +433,7 @@ export function RowPanel(props: {
 				className="ut-scrim"
 				aria-hidden="true"
 				tabIndex={-1}
-				onClick={onClose}
+				onClick={() => onClose(false)}
 			/>
 			<aside
 				ref={panelRef}
@@ -386,8 +454,8 @@ export function InspectorHint(): React.JSX.Element {
 		<aside className="ut-insp" aria-label="transaction inspector">
 			<div className="ut-hint">
 				<b>Select a record</b>
-				Its call, its cost and its place on the chain show here, with an independent verification of
-				its receipt.
+				Its call, its cost and its place on the chain show here, with an explicit check of its
+				transaction and the receipt it prints.
 			</div>
 		</aside>
 	);

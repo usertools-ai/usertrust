@@ -110,8 +110,15 @@ describe("forDisplay — characters that reorder or hide text are replaced too",
 	it.each(INVISIBLE.map(hex))("U+%s is replaced with ? (red-first: passed through)", (_h, code) => {
 		expect(forDisplay(`a${String.fromCodePoint(code)}b`)).toBe("a?b");
 	});
+	// Zl and Zp, so neither the control test nor the format class holds them (the generative test below is about Cf).
+	it.each([
+		["U+2028", 0x2028],
+		["U+2029", 0x2029],
+	])("%s (line and paragraph separator) is replaced with ?", (_name, code) => {
+		expect(forDisplay(`a${String.fromCodePoint(code)}b`)).toBe("a?b");
+	});
 	it("control: the neighbours of each range are printable and left alone", () => {
-		for (const code of [0x200a, 0x2010, 0x2029, 0x202f, 0x2065, 0x2070, 0xfefe, 0xff01]) {
+		for (const code of [0x200a, 0x2010, 0x202f, 0x2065, 0x2070, 0xfefe, 0xff01]) {
 			const ch = String.fromCodePoint(code);
 			expect(forDisplay(`a${ch}b`)).toBe(`a${ch}b`);
 		}
@@ -204,9 +211,7 @@ describe("a failed read of an argv-named anchor input is printed scrubbed", () =
 	// Each flag with what makes the CLI READ its file (anchor mode on; a successor pin is read only beside a pubkey):
 	// without them the file is never opened, and a row would pass on the hostile vault's own exit 1.
 	it.each([
-		["--rekor-pubkey", ["--require-anchor"]],
 		["--anchor", []],
-		["--rekor-receipts", []],
 		["--pubkey", []],
 		["--successor-pin", ["--pubkey", "READABLE_PEM"]],
 	] as const)(
