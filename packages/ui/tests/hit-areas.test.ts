@@ -403,18 +403,32 @@ describe("hit areas (audit finding F4)", () => {
 
 		it("only adds position, the expander, the sort row's flex and phone spacing: it restyles nothing", () => {
 			const block = parseRules(CSS.slice(CSS.lastIndexOf(MARKER)));
-			const allowed = new Set(["position", "content", "inset", "flex", "row-gap", "padding-block"]);
+			const allowed = new Set([
+				"position",
+				"content",
+				"inset",
+				"flex",
+				"row-gap",
+				"padding-block",
+				"margin-bottom",
+			]);
 			for (const r of block) {
 				for (const prop of r.decls.keys()) {
 					expect(allowed.has(prop), `${r.selectors.join(", ")} sets ${prop}`).toBe(true);
 				}
 			}
-			// The two spacing properties appear only in the phone query, on the two containers that need room.
-			const spacing = block.filter((r) => r.decls.has("row-gap") || r.decls.has("padding-block"));
+			// The spacing properties appear only in the phone query, on the containers that need room: the two filter strips,
+			// the sort row, and the phone's filter sheet and its head.
+			const spacing = block.filter(
+				(r) =>
+					r.decls.has("row-gap") || r.decls.has("padding-block") || r.decls.has("margin-bottom"),
+			);
 			for (const r of spacing) expect(r.media).toBe(PHONE_QUERY);
 			expect(spacing.flatMap((r) => r.selectors).sort()).toEqual([
 				".ut-active",
 				".ut-bar",
+				'.ut-bar[data-sheet="true"]',
+				'.ut-bar[data-sheet="true"] .ut-sheet-head',
 				".ut-cap",
 			]);
 		});
@@ -467,6 +481,40 @@ describe("hit areas (audit finding F4)", () => {
 					expect(box).toBeGreaterThanOrEqual(area);
 				});
 			}
+		});
+
+		// The phone's filter sheet stacks one full-width chip per facet with its own padding (10px) and its own 10px gap;
+		// with the strip's expander the chips' areas overlapped 11px and the Done button's met the first chip's (measured in
+		// a browser at 390x844). Its chips get their own expander, inside a gap widened for it.
+		describe("the phone's filter sheet", () => {
+			const SHEET = '.ut-bar[data-sheet="true"]';
+			const first = (selector: string, prop: string): number => {
+				const v = cascade(selector, "phone").get(prop);
+				if (v === undefined) throw new Error(`${selector} has no ${prop}`);
+				return Math.abs(pxList(v)[0] ?? 0);
+			};
+			// Read when a check runs, so a missing rule fails that check by name instead of the whole file.
+			const chip = (): Control => control("filter chip");
+			// The sheet chip is the strip chip with the sheet's padding: same font, same border.
+			const sheetChipHeight = (): number =>
+				visible(chip(), "phone").height -
+				2 * first(chip().host, "padding") +
+				2 * first(`${SHEET} .ut-facet > .ut-chip`, "padding");
+			const sheetInset = (): number => first(`${SHEET} .ut-chip::after`, "inset");
+
+			it("a sheet chip's area is at least 44px tall", () => {
+				expect(
+					sheetChipHeight() - 2 * visible(chip(), "phone").border + 2 * sheetInset(),
+				).toBeGreaterThanOrEqual(PHONE_MIN);
+			});
+			it("two stacked chips' areas stay apart: both fit the sheet's row gap", () => {
+				expect(2 * sheetInset()).toBeLessThanOrEqual(gap(SHEET, "phone", "row"));
+			});
+			it("the head's Done button and the first chip keep their areas apart", () => {
+				expect(beyond("button", "phone") + sheetInset()).toBeLessThanOrEqual(
+					gap(SHEET, "phone", "row") + first(`${SHEET} .ut-sheet-head`, "margin-bottom"),
+				);
+			});
 		});
 
 		describe("wrapped chips on a phone", () => {

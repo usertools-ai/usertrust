@@ -1757,6 +1757,18 @@ body {
 		.ut-ghost::after {
 			inset: -9.5px -2px;
 		}
+		/* The filter sheet stacks one full-width chip per facet (33.5px with the sheet's 10px padding, a 31.5px padding box):
+		   each chip's area reaches 44px with 6.25px above and below, inside a row gap widened to 13px, and the head (its Done
+		   button's area reaches 8px down) keeps 2px more room so the first chip's area does not meet it. */
+		.ut-bar[data-sheet="true"] {
+			row-gap: 13px;
+		}
+		.ut-bar[data-sheet="true"] .ut-sheet-head {
+			margin-bottom: 2px;
+		}
+		.ut-bar[data-sheet="true"] .ut-chip::after {
+			inset: -6.25px -3px;
+		}
 	}
 }
 
