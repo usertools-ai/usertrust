@@ -109,6 +109,8 @@ jobs:
           git diff --exit-code
       # The tested-tree stamp's verdict and ci.yml's wiring of it (scripts/tested-tree.test.mjs).
       - run: node --test scripts/tested-tree.test.mjs
+      # The "is this file the command being run?" guard of the CI scripts, from a path with a space and through a symlink.
+      - run: node --test scripts/entry-guards.test.mjs
       # A pull request cut from a base that predates a CHANGELOG cut can merge its Unreleased entry into the
       # released section (git places it next to the heading the cut inserted). So the MERGE result is graded against
       # the base it merges into: every line a change adds sits under [Unreleased], no line of a released section
@@ -188,16 +190,11 @@ jobs:
           cache: npm
       - run: npm ci
       # scan-linear.test.ts runs in the scan-linear job below, not here (see that job).
-      - name: Run tests with coverage
+      # ONE run: the coverage thresholds (lines 92, branches 84, functions 90, statements 92) are in vitest.config.ts
+      # under `coverage.thresholds`, which vitest enforces in this same run by exiting non-zero below them. They used
+      # to be checked by a second, identical run of the whole suite, which doubled the job's wall time.
+      - name: Run tests with coverage and enforce the thresholds
         run: npx vitest run --coverage --exclude packages/core/tests/harden/scan-linear.test.ts
-      - name: Check coverage thresholds
-        run: >-
-          npx vitest run --coverage
-          --exclude packages/core/tests/harden/scan-linear.test.ts
-          --coverage.thresholds.lines=92
-          --coverage.thresholds.branches=84
-          --coverage.thresholds.functions=90
-          --coverage.thresholds.statements=92
       - name: Upload coverage artifact
         if: always()
         uses: actions/upload-artifact@v7

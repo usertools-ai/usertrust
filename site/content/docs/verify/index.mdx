@@ -37,9 +37,7 @@ Reads every audit segment, verifies the chain, finds the event whose `data.trans
 | `--anchor <file\|->` | Caller-fetched anchor artifact (repeatable; `-` reads stdin) |
 | `--anchors <file>` | Anchor history file (JSONL; repeatable) |
 | `--anchor-url <url>` | Opt-in: fetch one anchor artifact over HTTPS |
-| `--bundle <file\|->` | Auditor bundle `{v, records, rekorReceipts}` from `usertrust anchor export-bundle` |
-| `--rekor-receipts <file\|->` | Transparency-log receipt(s), JSON or JSONL (repeatable) |
-| `--rekor-pubkey <pem-file>` | Pinned transparency-log public key (repeatable) |
+| `--bundle <file\|->` | Auditor bundle `{v, records}` from `usertrust anchor export-bundle` |
 | `--pubkey <pem-file>` | Pinned genesis root public key (out-of-band, never read from the vault) |
 | `--successor-pin <pem-file>` | Pinned rotation-successor key (repeatable) |
 | `--vault-id <uuid>` | Expected `vaultId` |
@@ -48,7 +46,7 @@ Reads every audit segment, verifies the chain, finds the event whose `data.trans
 | `--max-anchor-age <dur>` | Freshness policy, e.g. `1h`, `30m` (operator-claimed time) |
 | `--max-unanchored-events <n>` | Freshness policy (clock-independent; preferred) |
 
-Giving `--anchor`, `--anchors`, `--anchor-url`, `--bundle`, `--rekor-receipts`, `--pubkey`, `--require-anchor` or `--require-external-anchor` switches the CLI to anchored verification (`verifyVaultWithAnchors`), which reports one of `ANCHORED_VERIFIED`, `UNANCHORED`, `ANCHOR_UNVERIFIABLE`, `ANCHOR_STALE`, `ANCHOR_INVALID` or `ANCHOR_MISMATCH`. `--rekor-pubkey`, `--successor-pin`, `--vault-id`, `--max-anchor-age` and `--max-unanchored-events` take effect only alongside one of those.
+Giving `--anchor`, `--anchors`, `--anchor-url`, `--bundle`, `--pubkey`, `--require-anchor` or `--require-external-anchor` switches the CLI to anchored verification (`verifyVaultWithAnchors`), which reports one of `ANCHORED_VERIFIED`, `UNANCHORED`, `ANCHOR_UNVERIFIABLE`, `ANCHOR_STALE`, `ANCHOR_INVALID` or `ANCHOR_MISMATCH`. `--successor-pin`, `--vault-id`, `--max-anchor-age` and `--max-unanchored-events` take effect only alongside one of those.
 
 The `usertrust verify` command in the main CLI takes the same anchor flags, plus `--receipts <file>` to cross-check receipts you kept against the chain.
 
@@ -129,8 +127,6 @@ process.exit(exitCodeForAnchored(result, { requireExternalAnchor: true }));
 ```typescript
 interface AnchorVerifyParams {
   readonly externalAnchorsRaw?: readonly string[];
-  readonly rekorReceiptsRaw?: readonly string[];
-  readonly rekorLogPubkeysPem?: readonly string[];
   readonly trust?: { rootPem: string; successorPinsPem?: readonly string[] };
   readonly witness?: { requested: boolean; ok?: boolean; error?: string };
   readonly maxAnchorAgeMs?: number;
@@ -145,7 +141,7 @@ interface AnchoredVaultVerificationResult extends VaultVerificationResult {
 }
 ```
 
-Runs `verifyVault` unchanged, then layers the anchor state machine on top. `exitCodeFor(result)` maps a plain vault result to `0` or `1`; `exitCodeForAnchored(result, { requireAnchor?, requireExternalAnchor? })` also returns `1` when a strict gate is not met. The anchor, Rekor and receipt-rendering helpers (`verifyAnchorChain`, `verifyAnchorSignature`, `verifyRekorReceipt`, `renderReceipt`, and the rest) are exported as well.
+Runs `verifyVault` unchanged, then layers the anchor state machine on top. `exitCodeFor(result)` maps a plain vault result to `0` or `1`; `exitCodeForAnchored(result, { requireAnchor?, requireExternalAnchor? })` also returns `1` when a strict gate is not met. The anchor and receipt-rendering helpers (`verifyAnchorChain`, `verifyAnchorSignature`, `renderReceipt`, and the rest) are exported as well.
 
 ## Re-exported Functions
 

@@ -12,7 +12,9 @@ const TenantSchema = z.object({
 	/** SHA-256 hex of the tenant's bearer key. Keys are never stored in plaintext. */
 	keyHash: z.string().regex(/^[0-9a-f]{64}$/),
 	budget: z.number().int().positive().optional(),
-	tier: z.string().optional(),
+	// The same set as the core config's `tier`: a value outside it fails when the server loads, rather than
+	// being passed on and replaced by a default.
+	tier: z.enum(["free", "mini", "pro", "mega", "ultra"]).optional(),
 	configPath: z.string().optional(),
 });
 

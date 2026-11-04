@@ -8,6 +8,8 @@
  * typo cannot silently weaken a CI gate (spec §7.5).
  */
 
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { run as anchorRun } from "../../../src/cli/anchor.js";
 import { run as verifyRun } from "../../../src/cli/verify.js";
@@ -88,6 +90,41 @@ describe("HARDEN: core `verify` CLI rejects unknown flags", () => {
 			restore();
 		}
 		expect(lines.join("\n")).toMatch(/Unknown flag: --require-anchro/);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("the removed receipt flags are refused like any unknown option", async () => {
+		const root = tmp("verify-removed-flag-");
+		await appendEvents(root, 2);
+		for (const flag of ["--rekor-receipts", "--rekor-pubkey"]) {
+			process.exitCode = 0;
+			process.argv = ["node", "usertrust", "verify", flag, "x"];
+			const { lines, restore } = captureLog();
+			try {
+				await verifyRun(root, { json: false });
+			} finally {
+				restore();
+			}
+			expect(lines.join("\n"), flag).toMatch(new RegExp(`Unknown flag: ${flag}`));
+			expect(process.exitCode, flag).toBe(1);
+		}
+	});
+
+	it("a bundle that still carries the removed field is refused, naming it", async () => {
+		const root = tmp("verify-old-bundle-");
+		await appendEvents(root, 2);
+		const bundle = join(root, "old-bundle.json");
+		writeFileSync(bundle, JSON.stringify({ v: 1, records: [], rekorReceipts: [] }));
+		process.argv = ["node", "usertrust", "verify", "--bundle", bundle];
+		const { lines, restore } = captureLog();
+		try {
+			await verifyRun(root, { json: false });
+		} finally {
+			restore();
+		}
+		const out = lines.join("\n");
+		expect(out).toMatch(/--bundle: the "rekorReceipts" field was removed; re-export the bundle/);
+		expect(out.split("\n")).toHaveLength(1);
 		expect(process.exitCode).toBe(1);
 	});
 });

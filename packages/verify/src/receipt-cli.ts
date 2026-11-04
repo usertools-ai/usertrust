@@ -213,7 +213,7 @@ const POSITIONAL_BINDING = "<file>";
  * So the mechanism has to exist even while the list is empty, because an empty
  * allow-list plus a default-deny is precisely what a new flag must inherit
  * without anyone remembering to. A future repeatable option (the vault parser
- * already has several — `--anchor`, `--rekor-pubkey`) is added HERE, next to
+ * already has several — `--anchor`, `--successor-pin`) is added HERE, next to
  * the reason it is safe, and every other option keeps the constraint for free.
  */
 const REPEATABLE_OPTIONS: ReadonlySet<string> = new Set<string>();

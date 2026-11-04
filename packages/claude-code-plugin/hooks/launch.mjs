@@ -176,6 +176,26 @@ function runInChild(hook, text, input, session, home) {
 			resolve();
 		};
 		let child;
+		// The hook's signals are forwarded to its child, as `probeInChild`'s are, and the handlers are
+		// installed BEFORE the child is spawned: a signal in between would end this process by the
+		// signal's default action and leave the child running on its own.
+		const signals = ["SIGTERM", "SIGINT", "SIGHUP"];
+		const handlers = Object.fromEntries(
+			signals.map((signal) => [
+				signal,
+				() => {
+					if (child !== undefined) {
+						child.kill(signal);
+						return;
+					}
+					// No child yet: put the default back and die as the signal would have killed this
+					// process without a handler.
+					for (const s of signals) process.off(s, handlers[s]);
+					process.kill(process.pid, signal);
+				},
+			]),
+		);
+		for (const signal of signals) process.on(signal, handlers[signal]);
 		try {
 			child = spawn(
 				process.execPath,
@@ -190,13 +210,11 @@ function runInChild(hook, text, input, session, home) {
 				childOptions(),
 			);
 		} catch (err) {
+			for (const signal of signals) process.off(signal, handlers[signal]);
 			void finish(`no process: ${err?.code ?? "error"}`);
 			return;
 		}
 		child.on("error", (err) => void finish(`no process: ${err?.code ?? "error"}`));
-		for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
-			process.on(signal, () => child.kill(signal));
-		}
 		// A spawn that fails for want of descriptors (EMFILE, ENFILE) returns a child with
 		// no stdin, and says so only by a later `error`: the input goes in once it exists.
 		child.once("spawn", () => {
@@ -251,8 +269,10 @@ export function probeInChild(session, home) {
 		let output = "";
 		let over = false;
 		// The probe child dies with this launcher, as `runInChild`'s does: a signal to the
-		// launcher is forwarded, and the launcher's own exit takes the child with it.
-		const forward = (signal) => child?.kill(signal);
+		// launcher is forwarded, and the launcher's own exit takes the child with it. The handlers
+		// are installed BEFORE the child is spawned: a signal that arrives once the child exists
+		// but before they were would take this process down by the signal's default action, which
+		// runs no exit handler, and leave the child orphaned until its own bound.
 		const onExit = () => child?.kill("SIGKILL");
 		const signals = ["SIGTERM", "SIGINT", "SIGHUP"];
 		const cleanup = () => {
@@ -260,8 +280,20 @@ export function probeInChild(session, home) {
 			for (const signal of signals) process.off(signal, handlers[signal]);
 			process.off("exit", onExit);
 		};
+		const forward = (signal) => {
+			if (child !== undefined) {
+				child.kill(signal);
+				return;
+			}
+			// No child yet: nothing to forward to. Put the default back and die as the signal would
+			// have killed this process without a handler.
+			cleanup();
+			process.kill(process.pid, signal);
+		};
 		const handlers = Object.fromEntries(signals.map((s) => [s, () => forward(s)]));
 		let timer;
+		for (const signal of signals) process.on(signal, handlers[signal]);
+		process.on("exit", onExit);
 		try {
 			child = spawn(
 				process.execPath,
@@ -276,11 +308,10 @@ export function probeInChild(session, home) {
 				{ ...childOptions(), stdio: ["ignore", "pipe", "inherit"] },
 			);
 		} catch {
+			cleanup();
 			resolve(false);
 			return;
 		}
-		for (const signal of signals) process.on(signal, handlers[signal]);
-		process.on("exit", onExit);
 		timer = setTimeout(() => child.kill("SIGKILL"), PROBE_KILL_MS);
 		// A bounded read, never relayed: SessionStart's stdout is one JSON object, this process's.
 		child.stdout.setEncoding("utf-8");
