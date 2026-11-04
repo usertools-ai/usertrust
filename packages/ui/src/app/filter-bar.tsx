@@ -359,6 +359,7 @@ export function FilterBar(props: {
 						<input
 							type="number"
 							aria-label="minimum cost in UT"
+							min={0}
 							placeholder="min UT"
 							value={filters.costMin ?? ""}
 							onChange={(e) => cost("costMin", e.currentTarget.value)}
@@ -371,6 +372,7 @@ export function FilterBar(props: {
 						className="ut-field-bare"
 						type="number"
 						aria-label="maximum cost in UT"
+						min={0}
 						placeholder="max UT"
 						value={filters.costMax ?? ""}
 						onChange={(e) => cost("costMax", e.currentTarget.value)}
