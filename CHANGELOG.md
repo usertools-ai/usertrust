@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`usertrust-ui --allow-host <name>` lets the dashboard answer a private network proxy such as `tailscale serve`.** The dashboard has refused every `Host` but `127.0.0.1:<port>` and `localhost:<port>`, so it could not be reached through a proxy that forwards to the loopback address. `--allow-host` (repeatable) also accepts a `Host` of exactly `<name>` or `<name>:<port>`, and a POST whose `Origin` is `https://<name>`, `http://<name>` or `http://<name>:<port>`. Every other `Host` and `Origin` is still refused with 403. `<name>` must be a plain DNS host name: a wildcard, an IP address, a port, a scheme or a path is refused and the server does not start (exit code 2). The server still binds `127.0.0.1` only, there is no option to bind another address, and it prints one line at start naming the allowed hosts. Use it only behind a private network such as Tailscale serve; never behind a public tunnel.
+
 ### Changed
 
 - **The TigerBeetle client a project resolves can be read, and a test holds it to the server release.** `resolvedClientVersion(projectRoot)` reads the `tigerbeetle-node` version that the project's installed `usertrust` loads, never the calling process's copy, because TigerBeetle refuses a client newer than its server. Node resolves the client from `usertrust`'s real path, so the reader finds the first `usertrust` the project can see, follows a symlink (a pnpm install), and looks in that directory's `node_modules` and each parent's, as Node does; without an installed `usertrust` it reads what the project directory itself would find. New tests fail if core's `tigerbeetle-node` is a range instead of an exact version, or if the server release CI downloads differs from it. Nothing a user runs changes.
