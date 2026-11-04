@@ -12,8 +12,7 @@ export type BudgetDisplay =
 	| { kind: "unknown"; provenance: string }
 	| {
 			kind: "known";
-			pct: number;
-			usedPct: number;
+			leftPct: number;
 			fill: "gold" | "warn" | "danger";
 			provenance: string;
 	  };
@@ -40,10 +39,9 @@ export function budgetDisplay(
 	// The provenance is shown with every known figure: a config budget says it is unconfirmed, a record its age.
 	return {
 		kind: "known",
-		// `pct` is what is LEFT (the figure the strip prints); `usedPct` is what the bar FILLS to: it grows with spend, so
-		// an overspent budget is a full bar (clamped to 100), never an overflow.
-		pct: Math.max(0, Math.min(100, frac * 100)),
-		usedPct: Math.max(0, Math.min(100, (1 - frac) * 100)),
+		// `leftPct` is what is LEFT, clamped to 0-100: the one figure the strip prints AND the width the bar fills to, so
+		// the bar drains as money is spent, like a fuel gauge. An overspent budget is an empty bar, never a negative one.
+		leftPct: Math.max(0, Math.min(100, frac * 100)),
 		fill,
 		provenance: s.budgetProvenance,
 	};

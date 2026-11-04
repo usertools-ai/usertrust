@@ -126,7 +126,7 @@ function AnchorFact(props: { anchorFile: SummaryPayload["anchorFile"] }): React.
 	const { open, toggle, rootRef } = usePopover();
 	const [before, after] = shown.explainer.split(ANCHOR_VERIFY_COMMAND);
 	return (
-		<div className="ut-fact">
+		<div className="ut-fact detail" id="ut-fact-anchor">
 			<b>Anchor file</b>
 			<div className="ut-info" ref={rootRef}>
 				<span className="ut-tag" title={shown.explainer}>
@@ -188,7 +188,7 @@ function SpendFact(props: { spentUt: number }): React.JSX.Element {
 	);
 }
 
-function BudgetFact(props: { s: SummaryPayload }): React.JSX.Element {
+export function BudgetFact(props: { s: SummaryPayload }): React.JSX.Element {
 	const { s } = props;
 	const budget = budgetDisplay(s);
 	const word = budgetSourceWord(s.budgetSource);
@@ -203,11 +203,11 @@ function BudgetFact(props: { s: SummaryPayload }): React.JSX.Element {
 			{budget.kind === "known" && s.budget !== null && s.remainingUt !== null ? (
 				<>
 					<span className="v">
-						{budget.pct.toFixed(1)}% <small>left</small>
+						{budget.leftPct.toFixed(1)}% <small>left</small>
 					</span>
-					{/* Decorative: the figure above it is the value. The fill is what is USED; the figure says what is left. */}
+					{/* Decorative: the figure above it carries the number. The fill is what is LEFT, the same figure, so it drains as money is spent. */}
 					<div className="ut-meter" aria-hidden="true">
-						<i style={{ width: `${budget.usedPct}%`, background: `var(--${budget.fill})` }} />
+						<i style={{ width: `${budget.leftPct}%`, background: `var(--${budget.fill})` }} />
 					</div>
 					{s.remainingUt < 0 ? (
 						<>
@@ -253,13 +253,30 @@ export function SummaryStrip(props: {
 	live: LiveState;
 }): React.JSX.Element {
 	const s = props.summary;
+	// Phone only: the Chain and Anchor facts sit behind a button. Elsewhere every fact shows and the button does not.
+	const [detailsOpen, setDetailsOpen] = useState(false);
+	const detailsRef = useRef<HTMLButtonElement>(null);
+	// Escape closes the disclosure from the button or from inside it, unless the anchor explainer is open (it takes the
+	// first Escape), and puts focus back on the button.
+	const onKeyDown = (e: React.KeyboardEvent<HTMLElement>): void => {
+		if (e.key !== "Escape" || !detailsOpen) return;
+		if (e.target !== detailsRef.current && e.currentTarget.querySelector(".ut-pop") !== null)
+			return;
+		setDetailsOpen(false);
+		detailsRef.current?.focus();
+	};
 	if (!s)
 		return (
 			<>
 				<TopBar vaultPath={null} live={props.live} kit={false} />
 				<section className="ut-facts" aria-busy="true" aria-label="vault summary loading">
 					{["Spend", "Budget", "Chain", "Integrity", "Anchor file"].map((label) => (
-						<div key={label} className="ut-fact">
+						<div
+							key={label}
+							className={
+								label === "Chain" || label === "Anchor file" ? "ut-fact detail" : "ut-fact"
+							}
+						>
 							<b>{label}</b>
 							<span className="v na">…</span>
 						</div>
@@ -297,10 +314,28 @@ export function SummaryStrip(props: {
 					{notice}
 				</div>
 			)}
-			<section className="ut-facts" aria-label="vault summary">
+			<section
+				className="ut-facts"
+				aria-label="vault summary"
+				data-details={detailsOpen}
+				onKeyDown={onKeyDown}
+			>
 				<SpendFact spentUt={s.spentUt} />
 				<BudgetFact s={s} />
-				<div className="ut-fact">
+				<button
+					ref={detailsRef}
+					type="button"
+					className="ut-more"
+					aria-expanded={detailsOpen}
+					aria-controls="ut-fact-chain ut-fact-anchor"
+					onClick={() => setDetailsOpen((o) => !o)}
+				>
+					<span>{detailsOpen ? "Hide details" : "Details"}</span>
+					<span className="chev" aria-hidden="true">
+						▾
+					</span>
+				</button>
+				<div className="ut-fact detail" id="ut-fact-chain">
 					<b>Chain</b>
 					<span className="v">
 						{s.chain.events.toLocaleString()}{" "}
