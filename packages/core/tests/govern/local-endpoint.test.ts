@@ -384,9 +384,11 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 			await destroy(governed);
 		});
 
-		it("does not inject for cloud endpoints", async () => {
+		// api.openai.com is the one cloud host that now gets the field (cloud-usage-injection.test.ts); every
+		// other cloud host is sent as the caller wrote it.
+		it("does not inject for cloud endpoints other than api.openai.com", async () => {
 			const { client, createFn } = makeStreamClient(STREAM_CHUNKS_NO_USAGE, {
-				baseURL: "https://api.openai.com/v1",
+				baseURL: "https://api.together.xyz/v1",
 			});
 			const governed = await trust(client, { dryRun: true, budget: 1000, vaultBase: tmpVault });
 
