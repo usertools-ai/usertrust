@@ -148,6 +148,58 @@ describe("the tier option", () => {
 		});
 	});
 
+	describe("governAction()", () => {
+		/** One governed action under `opts`; `run` is the caller's own work, reached only when policy allows it. */
+		async function actionWith(opts: Record<string, unknown>) {
+			const run = vi.fn(async () => "done");
+			const governed = await trust({ messages: { create: vi.fn() } }, {
+				dryRun: true,
+				vaultBase: vault,
+				...opts,
+			} as never);
+			try {
+				await governed.governAction(
+					{ kind: "tool_use", name: "search", cost: 25, params: {} },
+					run,
+				);
+				return { error: undefined, run };
+			} catch (error) {
+				return { error, run };
+			} finally {
+				await governed.destroy();
+			}
+		}
+
+		it("a rule on the tier the host set denies the action, though the file names no tier", async () => {
+			writeVault("free");
+			const { error, run } = await actionWith({ tier: "free" });
+			expect(error).toBeInstanceOf(PolicyDeniedError);
+			expect(run).not.toHaveBeenCalled();
+		});
+
+		it("the option wins over the file's tier, in both directions", async () => {
+			// The file names the denied tier; the host's tier is another one: allowed.
+			writeVault("free", "free");
+			const allowed = await actionWith({ tier: "pro" });
+			expect(allowed.error).toBeUndefined();
+			expect(allowed.run).toHaveBeenCalledTimes(1);
+			// The file names another tier; the host's tier is the denied one: denied.
+			writeVault("free", "pro");
+			const denied = await actionWith({ tier: "free" });
+			expect(denied.error).toBeInstanceOf(PolicyDeniedError);
+			expect(denied.run).not.toHaveBeenCalled();
+		});
+
+		it("without the option the file's tier applies, and with neither it is mini", async () => {
+			writeVault("pro", "pro");
+			expect((await actionWith({})).error).toBeInstanceOf(PolicyDeniedError);
+			writeVault("mini");
+			expect((await actionWith({})).error).toBeInstanceOf(PolicyDeniedError);
+			writeVault("free");
+			expect((await actionWith({})).error).toBeUndefined();
+		});
+	});
+
 	describe("createGovernor()", () => {
 		async function authorizeWith(opts: Record<string, unknown>) {
 			const gov = await createGovernor({
