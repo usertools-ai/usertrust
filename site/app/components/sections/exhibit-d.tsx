@@ -14,11 +14,10 @@ const MERKLE_CAPTION = "sha-256 · rfc 6962 leaf and node prefixes";
 // COPY REVIEW (Cam): descriptive, not declarative — flagged in the spec for
 // Cam's wording review before launch. Do not edit without his sign-off.
 const EU_FOOTNOTE = "built for the record-keeping era — EU AI Act Art. 12 traceability";
-const ANCHOR_BADGES: { label: string; experimental?: boolean }[] = [
+const ANCHOR_BADGES: { label: string }[] = [
 	{ label: "S3 Object Lock" },
 	{ label: "git" },
 	{ label: "SIEM" },
-	{ label: "Rekor", experimental: true },
 ];
 // Provenance must match the committed fixture: chain-slice.json is read from
 // the LEDGER vault when the capture runs with TigerBeetle (scripts/
@@ -148,12 +147,6 @@ export default function ExhibitD() {
 						<h3 className="font-display text-xl lowercase text-white">
 							and can be anchored beyond your infra
 						</h3>
-						{/* EXPERIMENTAL is a baseline-aligned mini-tag, not a <sup>. A
-					    <sup> keeps its superscript raise while `text-[12px]` cancels
-					    the browser's compensating size reduction, so the raised
-					    full-size line box grew the Rekor chip well past its siblings
-					    and pushed the glyph caps through the chip's top hairline at
-					    390px. The 12px floor (Addendum H) is kept; only the raise is dropped. */}
 						<ul className="flex flex-wrap gap-2">
 							{ANCHOR_BADGES.map((b) => (
 								<li
@@ -161,11 +154,6 @@ export default function ExhibitD() {
 									className="inline-flex items-center gap-1 rounded-sm border border-brand-border px-2 py-1 font-mono text-xs text-white/70"
 								>
 									{b.label}
-									{b.experimental && (
-										<span className="font-mono text-[12px] tracking-widest text-white/70">
-											EXPERIMENTAL
-										</span>
-									)}
 								</li>
 							))}
 						</ul>

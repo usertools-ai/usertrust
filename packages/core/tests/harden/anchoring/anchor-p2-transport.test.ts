@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * Coverage for the default network transport in rekor.ts (the module's only
+ * Coverage for the default network transport in s3-sink.ts (the module's only
  * impure escape hatch — exercised against a local node:http server via the
  * documented localhost-http dev allowance) and the inconclusive/unprobeable
  * verdict branches of the s3 doctor.
@@ -11,7 +11,7 @@
 import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { doctorS3Sink } from "../../../src/audit/anchor-doctor.js";
-import { rekorSink, s3Sink } from "../../../src/audit/rekor.js";
+import { s3Sink } from "../../../src/audit/s3-sink.js";
 import { anchorOnce, cleanupAll, makeAnchoredVault } from "./fixtures.js";
 
 let server: Server | null = null;
@@ -91,7 +91,9 @@ describe("default transport (localhost http dev allowance)", () => {
 		expect(rep.checks.every((c) => c.status === "pass")).toBe(true);
 	});
 
-	it("rekor sink surfaces a non-201 through the real transport without leaking headers", async () => {
+	it("s3 sink surfaces a non-2xx through the real transport without leaking headers", async () => {
+		vi.stubEnv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE");
+		vi.stubEnv("AWS_SECRET_ACCESS_KEY", "secret");
 		const s = await makeAnchoredVault(2);
 		const record = await anchorOnce(s);
 		const port = await startServer((req, res) => {
@@ -101,8 +103,12 @@ describe("default transport (localhost http dev allowance)", () => {
 				res.end("upstream exploded");
 			});
 		});
-		const sink = rekorSink(s.root, `http://127.0.0.1:${port}`);
-		await expect(sink.publish(record)).rejects.toThrow(/rekor sink: HTTP 500/);
+		const sink = s3Sink({
+			bucket: "b",
+			region: "us-east-1",
+			endpoint: `http://127.0.0.1:${port}`,
+		});
+		await expect(sink.publish(record)).rejects.toThrow(/s3 sink: HTTP 500/);
 		try {
 			await sink.publish(record);
 		} catch (err) {

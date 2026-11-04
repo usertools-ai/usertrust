@@ -463,7 +463,7 @@
 				},
 				{
 					"file": "docs/anchoring.md",
-					"text": "| `--sink-url`, `--sink-rekor`, `command` | `info` — no probe is possible from here; verify the append-only property at the receiving system. |"
+					"text": "| `--sink-url`, `command` | `info` — no probe is possible from here; verify the append-only property at the receiving system. |"
 				},
 				{
 					"file": "docs/anchoring.md",
@@ -480,72 +480,6 @@
 					"test": "fails both probes in an ordinary writable store directory"
 				}
 			]
-		},
-		{
-			"id": "rekor-inclusion",
-			"kind": "guarantee",
-			"claim": "A Rekor receipt is verified offline: checkpoint signature, inclusion path, and binding to the anchor record; a SET is what attests integratedTime.",
-			"statements": [
-				{
-					"file": "docs/anchoring.md",
-					"text": "What ships now is the complete, tested verification path — receipt schema, > signed-note checkpoints, RFC 9162 inclusion, SET-verified attested time — plus a sink that works > against any log accepting these entries."
-				},
-				{
-					"file": "docs/anchoring.md",
-					"text": "Verification is offline and zero-dependency: the signed-note checkpoint is parsed and its ECDSA P-256 signature checked, inclusion is proven by an RFC 9162 index-based path walk, and the stored entry is bound to *your* record by payload hash and by decoded signature bytes."
-				},
-				{
-					"file": "docs/anchoring.md",
-					"text": "Receipts *without* a SET still prove inclusion, but fall back to operator-claimed time for freshness: an unsigned `integratedTime` is a number the party under audit could have chosen."
-				},
-				{
-					"file": "docs/anchoring.md",
-					"text": "**Checkpoint-replay caveat.** Offline verification proves the entry was included in the log — *at `integratedTime`* only when a SET vouches for that time — under a checkpoint signed by the pinned key."
-				},
-				{
-					"file": "packages/verify/README.md",
-					"text": "A verified receipt also makes `--max-anchor-age` measure against the log's attested `integratedTime` instead of the operator's own timestamp."
-				}
-			],
-			"proofs": [
-				{
-					"file": "packages/core/tests/harden/anchoring/rekor-verify.test.ts",
-					"test": "15. a tampered inclusion-path element"
-				},
-				{
-					"file": "packages/core/tests/harden/anchoring/rekor-verify.test.ts",
-					"test": "19. checkpoint signed by a key the auditor did not pin"
-				},
-				{
-					"file": "packages/core/tests/harden/anchoring/rekor-verify.test.ts",
-					"test": "12. entryBody signature is not the anchor record's signature"
-				},
-				{
-					"file": "packages/core/tests/harden/anchoring/rekor-verify.test.ts",
-					"test": "40. editing integratedTime alone now fails — the SET is the only signature over it"
-				},
-				{
-					"file": "packages/core/tests/harden/anchoring/rekor-verify.test.ts",
-					"test": "43. a receipt with NO SET proves inclusion and attests no time"
-				}
-			]
-		},
-		{
-			"id": "rekor-checkpoint-replay",
-			"kind": "caveat",
-			"claim": "Offline Rekor verification does not show the checkpoint is consistent with the log's current head.",
-			"statements": [
-				{
-					"file": "docs/anchoring.md",
-					"text": "Treat Rekor as an additional witness alongside an > append-only store, never as a replacement for one."
-				},
-				{
-					"file": "docs/anchoring.md",
-					"text": "It does **not** prove that checkpoint is consistent with the log's current head — a forked or rewound log would need a consistency proof against a checkpoint you fetched yourself."
-				}
-			],
-			"proofs": [],
-			"pending": "external: needs a live transparency log to fork or rewind"
 		},
 		{
 			"id": "bundle-is-operator-evidence",

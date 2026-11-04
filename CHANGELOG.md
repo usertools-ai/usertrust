@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Rekor support is removed from the open-source package.** The `--sink-rekor` option of `usertrust anchor now` is gone, along with the Rekor sink and the `{ type: "rekor" }` sink form in the SDK. `usertrust-verify` and `usertrust verify` no longer accept `--rekor-receipts` or `--rekor-pubkey`, no longer print the `Rekor: N receipt(s)` line, and no longer take a Rekor receipt in programmatic use (`verifyRekorReceipt` and the `rekorReceiptsRaw` and `rekorLogPubkeysPem` parameters are gone; passing either parameter to `verifyVaultWithAnchors`, or the `attestedTimeMs` option to `evaluateAnchoredVault`, now throws an error that names it, so it is never silently ignored). The sink was experimental and the public log rejected its entries. `usertrust anchor export-bundle` writes `{ "v": 1, "records": [...] }` and nothing else: the `rekorReceipts` member is gone. A bundle that still carries it is refused, with a message that names the removed member and says to export again. The S3 Object Lock, file and URL sinks, and every other anchor and verify option, are unchanged. `usertrust anchor` now refuses an option it does not know (exit 2, "has no option") where it used to ignore it, so `anchor now --sink-rekor` stops with an error instead of anchoring with no sink. Receipt files an earlier release wrote under `.usertrust/audit/anchors/rekor/` are not read and not deleted.
+
 ## [5.5.0] - 2026-11-04
 
 ### Read before upgrading
