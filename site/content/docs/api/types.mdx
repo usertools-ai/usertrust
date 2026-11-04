@@ -232,6 +232,9 @@ type TrustConfig = {
     models: Record<string, ModelRates>;
     injectUsageOptions: boolean;
   };
+  cloud: {
+    injectUsageOptions: boolean;
+  };
   unknownModelPolicy: "fallback" | "warn" | "deny";
   supplyChain: {
     enabled: boolean;

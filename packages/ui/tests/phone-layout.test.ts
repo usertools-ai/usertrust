@@ -42,9 +42,16 @@ function blockAt(css: string, open: number): { body: string; end: number } {
 
 const PHONE_HEADER = `@media (max-width: ${PHONE_MAX_WIDTH}px)`;
 const phoneAt = CSS.indexOf(PHONE_HEADER);
+/** The phone layout's own block (the first at the phone width; the hit-area block at the end has its own). */
 const phone = blockAt(CSS, phoneAt);
-/** The stylesheet with the phone block cut out: what every wider window gets. */
-const WIDE = CSS.slice(0, phoneAt) + CSS.slice(phone.end);
+/** The stylesheet with every phone-width block cut out: what every wider window gets. */
+const WIDE = (() => {
+	let out = CSS;
+	for (let at = out.indexOf(PHONE_HEADER); at >= 0; at = out.indexOf(PHONE_HEADER)) {
+		out = out.slice(0, at) + out.slice(blockAt(out, at).end);
+	}
+	return out;
+})();
 
 /** The declarations of the FIRST rule whose selector is exactly `selector`, or null. */
 function rule(css: string, selector: string): string | null {
@@ -75,8 +82,12 @@ describe("the phone breakpoint", () => {
 	it("is one number: the components' query and the stylesheet's narrow block agree", () => {
 		expect(phoneAt).toBeGreaterThan(0);
 		expect(PHONE_QUERY).toBe(`(max-width: ${PHONE_MAX_WIDTH}px)`);
-		// Exactly one such block, so a second one cannot drift from the first.
-		expect(CSS.split(PHONE_HEADER).length - 1).toBe(1);
+		// Every narrow block is written at the phone width (or the summary's wider 900px step), so a phone block written
+		// with another number, which would drift from the components' query, fails here. (The hit-area block at the end
+		// has its own phone-width section, at the same width.)
+		const widths = [...CSS.matchAll(/@media \(max-width: (\d+)px\)/g)].map((m) => Number(m[1]));
+		expect(widths.filter((w) => w !== PHONE_MAX_WIDTH && w !== 900)).toEqual([]);
+		expect(widths.filter((w) => w === PHONE_MAX_WIDTH).length).toBeGreaterThanOrEqual(1);
 	});
 });
 

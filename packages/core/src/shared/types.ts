@@ -396,6 +396,17 @@ export const TrustConfigSchema = z.object({
 			injectUsageOptions: z.boolean().default(true),
 		})
 		.prefault({}),
+	cloud: z
+		.object({
+			/**
+			 * Ask api.openai.com for the usage of a streamed chat completion
+			 * (`stream_options.include_usage`), so the call settles at the provider's own count
+			 * and not at the estimate. Off: the request is sent exactly as the caller wrote it and a
+			 * stream with no usage settles at the estimate. No other host is ever changed.
+			 */
+			injectUsageOptions: z.boolean().default(true),
+		})
+		.prefault({}),
 	/**
 	 * Cloud-scope policy when a model misses customRates and PRICING_TABLE (an exact key, or
 	 * a dated `-YYYYMMDD` / `-YYYY-MM-DD` snapshot of one; there is no prefix match).
