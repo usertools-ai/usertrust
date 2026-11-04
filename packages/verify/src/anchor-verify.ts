@@ -14,7 +14,7 @@
  * 2026-07-26-external-anchoring-design.md) against a caller-pinned trust root:
  *  - strict record parsing (unknown fields / range violations are INVALID)
  *  - Ed25519 signature verification via node:crypto (ECDSA P-256 helper kept
- *    alg-agile for Phase 2 transparency-log checkpoints)
+ *    alg-agile)
  *  - anchor-chain verification: prevAnchorHash linkage, anchorSeq contiguity,
  *    key epochs via cross-signed rotation records, fork/duplicate semantics
  *  - vault binding: Merkle root / head hash at each anchored treeSize, with
@@ -91,13 +91,6 @@ export interface AnchorEvaluationOptions {
 	readonly expectedVaultId?: string;
 	/** Injectable clock for tests. Defaults to Date.now(). */
 	readonly nowMs?: number;
-	/**
-	 * Witness-attested integration time (ms) for the NEWEST anchor, from a
-	 * transparency-log receipt the caller already verified. When present it
-	 * replaces the operator-claimed timestamp as the input to --max-anchor-age:
-	 * it is the one time in the record the vault operator cannot choose.
-	 */
-	readonly attestedTimeMs?: number;
 }
 
 export interface AnchorEvaluationInput {
@@ -145,7 +138,6 @@ const INVALID_REASONS = new Set([
 	"malformed-anchor",
 	"range-invalid",
 	"sig-invalid",
-	"rekor-receipt-invalid",
 	// Caller-supplied trust material that cannot be parsed. Registered here
 	// deliberately: an UNregistered reason falls into the default bucket at the
 	// classification step, which is MISMATCH — the most severe verdict, and the
@@ -352,8 +344,7 @@ export function keyIdFromKeyObject(key: KeyObject): string {
 
 /**
  * Raw signature verification over UTF-8 data. Ed25519 for usertrust anchor
- * records; ECDSA P-256 kept alg-agile for Phase 2 transparency-log checkpoints
- * (Rekor signs with ECDSA — spec reconciliation R2). Never throws.
+ * records; ECDSA P-256 kept alg-agile. Never throws.
  */
 export function verifySignatureRaw(
 	alg: "ed25519" | "ecdsa-p256",
@@ -800,8 +791,8 @@ const STATE_SEVERITY: Record<AnchorState, number> = {
 
 /**
  * The more severe of two states. Exported so callers layering evidence ON TOP
- * of the state machine (the glue's Rekor receipts) escalate by the SAME
- * severity ordering the machine itself uses, rather than hardcoding one.
+ * of the state machine escalate by the SAME severity ordering the machine
+ * itself uses, rather than hardcoding one.
  */
 export function worseAnchorState(a: AnchorState, b: AnchorState): AnchorState {
 	return (STATE_SEVERITY[a] ?? 0) >= (STATE_SEVERITY[b] ?? 0) ? a : b;
@@ -817,6 +808,13 @@ export function worseAnchorState(a: AnchorState, b: AnchorState): AnchorState {
  */
 export function evaluateAnchoredVault(input: AnchorEvaluationInput): AnchorEvaluation {
 	const opts = input.opts ?? {};
+	// A removed option is refused, never ignored: a caller written for an earlier release
+	// would otherwise get a fresher verdict than the input supports.
+	if ("attestedTimeMs" in (opts as object)) {
+		throw new Error(
+			'evaluateAnchoredVault: the "attestedTimeMs" option was removed; freshness is measured from the anchor record\'s own timestamp',
+		);
+	}
 	const nowMs = opts.nowMs ?? Date.now();
 	const reasons: string[] = [];
 	const warnings: string[] = [];
@@ -1044,21 +1042,10 @@ export function evaluateAnchoredVault(input: AnchorEvaluationInput): AnchorEvalu
 	const latest = [...records].sort((a, b) => b.treeSize - a.treeSize)[0];
 	if (latest !== undefined) {
 		const ts = Date.parse(latest.timestamp);
-		// A witness-attested integration time supersedes the operator's claim:
-		// the caller verified a transparency-log receipt binding this anchor to a
-		// time the vault operator did not choose, which is exactly the input the
-		// operator-claimed path lacks.
-		const attestedMs =
-			opts.attestedTimeMs !== undefined && Number.isSafeInteger(opts.attestedTimeMs)
-				? opts.attestedTimeMs
-				: null;
 		if (Number.isFinite(ts) && ts > nowMs) {
 			// Operator-claimed time is in the auditor's future — clock gaming
-			// (buyer-rejection §5.13). Raised even when an attested time supersedes
-			// it below: a forward-dated claim is evidence about the operator whether
-			// or not a witness also spoke, and suppressing it on the attested path
-			// would let a receipt LAUNDER the very signal it was supplied to
-			// corroborate. --max-unanchored-events stays the clock-independent control.
+			// (buyer-rejection §5.13). --max-unanchored-events stays the
+			// clock-independent control.
 			warnings.push("future-timestamp");
 		}
 		const tail = Math.max(0, observed - latest.treeSize);
@@ -1068,17 +1055,14 @@ export function evaluateAnchoredVault(input: AnchorEvaluationInput): AnchorEvalu
 			);
 			return finish("ANCHOR_STALE", records);
 		}
-		const ageBasisMs = attestedMs ?? ts;
 		if (
 			opts.maxAnchorAgeMs !== undefined &&
-			Number.isFinite(ageBasisMs) &&
-			nowMs - ageBasisMs > opts.maxAnchorAgeMs &&
+			Number.isFinite(ts) &&
+			nowMs - ts > opts.maxAnchorAgeMs &&
 			observed > latest.treeSize
 		) {
 			errors.push(
-				attestedMs === null
-					? "stale: newest anchor is older than the supplied --max-anchor-age (operator-claimed time)"
-					: "stale: newest anchor is older than the supplied --max-anchor-age (witness-attested time)",
+				"stale: newest anchor is older than the supplied --max-anchor-age (operator-claimed time)",
 			);
 			return finish("ANCHOR_STALE", records);
 		}

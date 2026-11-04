@@ -263,7 +263,7 @@ describe("emitter edge paths", () => {
 });
 
 describe("verifySignatureRaw alg agility (R2)", () => {
-	it("verifies ECDSA P-256 (Phase 2 transparency-log checkpoints) and rejects garbage", () => {
+	it("verifies ECDSA P-256 and rejects garbage", () => {
 		const { publicKey, privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
 		const data = "checkpoint body";
 		const sigDer = cryptoSign("sha256", Buffer.from(data), { key: privateKey, dsaEncoding: "der" });

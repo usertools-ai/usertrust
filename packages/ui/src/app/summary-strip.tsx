@@ -8,13 +8,16 @@ import { budgetAsOf, budgetDisplay, budgetSourceWord } from "../shared/budget-di
 import {
 	ANCHOR_VERIFY_COMMAND,
 	anchorView,
+	CHAINED_TITLE,
 	chainStatus,
+	NOT_ANCHORED_NOTE,
 	verifiedAsOf,
 	windowNotice,
 } from "../shared/display.js";
-import { formatUsd, formatUt, middleTruncate } from "../shared/format.js";
+import { formatUsd, formatUsdTotal, formatUt, middleTruncate, UT_KEY } from "../shared/format.js";
 import { KIT_MARK_URL, KIT_TIMEOUT_MS } from "../shared/kit.js";
 import type { LiveState } from "./store.js";
+import { useNow } from "./use-now.js";
 
 const LIVE_LABEL: Record<LiveState, string> = {
 	connecting: "connecting",
@@ -94,9 +97,12 @@ function TopBar(props: {
 	);
 }
 
-/** The explainer a bare "absent" never had: a small popover, toggled by click or keyboard, closed by Escape. */
-function AnchorFact(props: { anchorFile: SummaryPayload["anchorFile"] }): React.JSX.Element {
-	const shown = anchorView(props.anchorFile);
+/** Open state for a small popover: closed by a press outside it or by Escape. */
+function usePopover(): {
+	open: boolean;
+	toggle(): void;
+	rootRef: React.RefObject<HTMLDivElement | null>;
+} {
 	const [open, setOpen] = useState(false);
 	const rootRef = useRef<HTMLDivElement>(null);
 	useEffect(() => {
@@ -114,9 +120,16 @@ function AnchorFact(props: { anchorFile: SummaryPayload["anchorFile"] }): React.
 			document.removeEventListener("keydown", esc);
 		};
 	}, [open]);
+	return { open, toggle: () => setOpen((o) => !o), rootRef };
+}
+
+/** The explainer a bare "absent" never had: a small popover, toggled by click or keyboard, closed by Escape. */
+function AnchorFact(props: { anchorFile: SummaryPayload["anchorFile"] }): React.JSX.Element {
+	const shown = anchorView(props.anchorFile);
+	const { open, toggle, rootRef } = usePopover();
 	const [before, after] = shown.explainer.split(ANCHOR_VERIFY_COMMAND);
 	return (
-		<div className="ut-fact">
+		<div className="ut-fact detail" id="ut-fact-anchor">
 			<b>Anchor file</b>
 			<div className="ut-info" ref={rootRef}>
 				<span className="ut-tag" title={shown.explainer}>
@@ -127,7 +140,7 @@ function AnchorFact(props: { anchorFile: SummaryPayload["anchorFile"] }): React.
 					className="ut-info-btn"
 					aria-label="what the anchor file is"
 					aria-expanded={open}
-					onClick={() => setOpen((o) => !o)}
+					onClick={toggle}
 				>
 					i
 				</button>
@@ -143,12 +156,56 @@ function AnchorFact(props: { anchorFile: SummaryPayload["anchorFile"] }): React.
 	);
 }
 
-function BudgetFact(props: { s: SummaryPayload }): React.JSX.Element {
-	const { s } = props;
-	const budget = budgetDisplay(s);
-	const word = budgetSourceWord(s.budgetSource);
+/**
+ * The vault's spend: dollars lead (2 dp, the exact 4 dp figure on hover) and the ledger's own unit, usertokens,
+ * follows on the line below, with an info button that gives the key to the unit.
+ */
+function SpendFact(props: { spentUt: number }): React.JSX.Element {
+	const { open, toggle, rootRef } = usePopover();
 	return (
-		<div className="ut-fact budget" title={s.budgetProvenance}>
+		<div className="ut-fact" title="The cost of every llm_call record in the vault">
+			<b>Spend</b>
+			<span className="v" title={formatUsd(props.spentUt)}>
+				{formatUsdTotal(props.spentUt)}
+			</span>
+			<div className="ut-info" ref={rootRef}>
+				<span className="ut-sub mono">{formatUt(props.spentUt)}</span>
+				<button
+					type="button"
+					className="ut-info-btn"
+					title={UT_KEY}
+					aria-label={`what a UT is: ${UT_KEY}`}
+					aria-expanded={open}
+					onClick={toggle}
+				>
+					i
+				</button>
+				{open && (
+					<div className="ut-pop text start" role="note">
+						{UT_KEY}
+					</div>
+				)}
+			</div>
+			<span className="ut-sub">llm calls · whole vault</span>
+		</div>
+	);
+}
+
+/**
+ * The Budget fact. A controller's record is a file written at one moment, so its age is shown against the clock (which
+ * ticks while the page is open), and past the freshness bound the source word is `recorded`, never `enforced`. The
+ * provenance sentence calls such a budget "enforced", so for a controller's record the tooltip is the exact time
+ * instead of that sentence.
+ */
+export function BudgetFact(props: { s: SummaryPayload }): React.JSX.Element {
+	const { s } = props;
+	const now = useNow();
+	const budget = budgetDisplay(s);
+	const word = budgetSourceWord(s.budgetSource, s.budgetWrittenAt, now);
+	const asOf = budgetAsOf(s, now);
+	const title = asOf.isRecord ? (asOf.title ?? undefined) : s.budgetProvenance;
+	return (
+		<div className="ut-fact budget" title={title}>
 			<b>
 				Budget
 				<span className="ut-mark" data-tone={word.tone}>
@@ -158,28 +215,47 @@ function BudgetFact(props: { s: SummaryPayload }): React.JSX.Element {
 			{budget.kind === "known" && s.budget !== null && s.remainingUt !== null ? (
 				<>
 					<span className="v">
-						{budget.pct.toFixed(1)}% <small>left</small>
+						{budget.leftPct.toFixed(1)}% <small>left</small>
 					</span>
-					{/* Decorative: the figure above it is the value. The fill is what is USED; the figure says what is left. */}
+					{/* Decorative: the figure above it carries the number. The fill is what is LEFT, the same figure, so it drains as money is spent. */}
 					<div className="ut-meter" aria-hidden="true">
-						<i style={{ width: `${budget.usedPct}%`, background: `var(--${budget.fill})` }} />
+						<i style={{ width: `${budget.leftPct}%`, background: `var(--${budget.fill})` }} />
 					</div>
 					{s.remainingUt < 0 ? (
-						<span className="ut-why red">
-							overspent by {formatUt(-s.remainingUt)} of {formatUt(s.budget)}
-						</span>
+						<>
+							<span
+								className="ut-why red"
+								title={`overspent by ${formatUsd(-s.remainingUt)} of ${formatUsd(s.budget)}`}
+							>
+								overspent by {formatUsdTotal(-s.remainingUt)} of {formatUsdTotal(s.budget)}
+							</span>
+							<span className="ut-sub mono">
+								{formatUt(-s.remainingUt)} of {formatUt(s.budget)}
+							</span>
+						</>
 					) : (
-						<span className="ut-sub mono">
-							{formatUt(s.remainingUt)} of {formatUt(s.budget)}
-						</span>
+						<>
+							<span
+								className="ut-amts"
+								title={`${formatUsd(s.remainingUt)} of ${formatUsd(s.budget)}`}
+							>
+								{formatUsdTotal(s.remainingUt)} of {formatUsdTotal(s.budget)}
+							</span>
+							<span className="ut-sub mono">
+								{formatUt(s.remainingUt)} of {formatUt(s.budget)}
+							</span>
+						</>
 					)}
-					<span className="ut-why">{budgetAsOf(s)}</span>
+					<span className="ut-why" title={asOf.title ?? undefined}>
+						{asOf.text}
+					</span>
 				</>
 			) : (
 				<>
 					<span className="v na">no remaining figure</span>
 					<span className={`ut-why${s.budgetSource === "unreadable" ? " info" : ""}`}>
-						{s.budgetProvenance.replace(/^unknown: /, "")}
+						{/* A controller's record with no usable figure still must not call itself "enforced" once stale. */}
+						{asOf.isRecord ? asOf.text : s.budgetProvenance.replace(/^unknown: /, "")}
 					</span>
 				</>
 			)}
@@ -192,13 +268,30 @@ export function SummaryStrip(props: {
 	live: LiveState;
 }): React.JSX.Element {
 	const s = props.summary;
+	// Phone only: the Chain and Anchor facts sit behind a button. Elsewhere every fact shows and the button does not.
+	const [detailsOpen, setDetailsOpen] = useState(false);
+	const detailsRef = useRef<HTMLButtonElement>(null);
+	// Escape closes the disclosure from the button or from inside it, unless the anchor explainer is open (it takes the
+	// first Escape), and puts focus back on the button.
+	const onKeyDown = (e: React.KeyboardEvent<HTMLElement>): void => {
+		if (e.key !== "Escape" || !detailsOpen) return;
+		if (e.target !== detailsRef.current && e.currentTarget.querySelector(".ut-pop") !== null)
+			return;
+		setDetailsOpen(false);
+		detailsRef.current?.focus();
+	};
 	if (!s)
 		return (
 			<>
 				<TopBar vaultPath={null} live={props.live} kit={false} />
 				<section className="ut-facts" aria-busy="true" aria-label="vault summary loading">
 					{["Spend", "Budget", "Chain", "Integrity", "Anchor file"].map((label) => (
-						<div key={label} className="ut-fact">
+						<div
+							key={label}
+							className={
+								label === "Chain" || label === "Anchor file" ? "ut-fact detail" : "ut-fact"
+							}
+						>
 							<b>{label}</b>
 							<span className="v na">…</span>
 						</div>
@@ -236,15 +329,28 @@ export function SummaryStrip(props: {
 					{notice}
 				</div>
 			)}
-			<section className="ut-facts" aria-label="vault summary">
-				<div className="ut-fact" title="The cost of every llm_call record in the vault">
-					<b>Spend</b>
-					<span className="v">{formatUt(s.spentUt)}</span>
-					<span className="ut-sub mono">{formatUsd(s.spentUt)}</span>
-					<span className="ut-sub">llm calls · whole vault</span>
-				</div>
+			<section
+				className="ut-facts"
+				aria-label="vault summary"
+				data-details={detailsOpen}
+				onKeyDown={onKeyDown}
+			>
+				<SpendFact spentUt={s.spentUt} />
 				<BudgetFact s={s} />
-				<div className="ut-fact">
+				<button
+					ref={detailsRef}
+					type="button"
+					className="ut-more"
+					aria-expanded={detailsOpen}
+					aria-controls="ut-fact-chain ut-fact-anchor"
+					onClick={() => setDetailsOpen((o) => !o)}
+				>
+					<span>{detailsOpen ? "Hide details" : "Details"}</span>
+					<span className="chev" aria-hidden="true">
+						▾
+					</span>
+				</button>
+				<div className="ut-fact detail" id="ut-fact-chain">
 					<b>Chain</b>
 					<span className="v">
 						{s.chain.events.toLocaleString()}{" "}
@@ -253,11 +359,16 @@ export function SummaryStrip(props: {
 				</div>
 				<div className="ut-fact">
 					<b>Integrity</b>
+					{/* "chained", never "verified": this is the hash links re-checked by the dashboard, not an explicit,
+					    anchored check. Without an anchor file it says so under the pill. */}
 					{status === "verified" && (
-						<span className="ut-pill" data-tone="approve">
-							<i />
-							verified
-						</span>
+						<>
+							<span className="ut-pill" data-tone="approve" title={CHAINED_TITLE}>
+								<i />
+								chained
+							</span>
+							{s.anchorFile !== "present" && <span className="ut-sub">{NOT_ANCHORED_NOTE}</span>}
+						</>
 					)}
 					{status === "broken" && (
 						<span className="ut-pill" data-tone="stakes">

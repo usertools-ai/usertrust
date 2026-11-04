@@ -75,7 +75,7 @@ the kit first, never committed here.
 | Governance | `govern.ts`, `headless.ts`, `streaming.ts`, `detect.ts`, `default-deny.ts`, `config.ts`, `proxy.ts` |
 | Ledger | `ledger/{client,engine,pricing}.ts` |
 | Audit | `audit/{chain,canonical,merkle,verify,read,dead-letters,rotation,entropy,quarantine}.ts` |
-| Anchoring | `audit/{anchor,anchor-verify,anchor-doctor,rekor,rekor-verify,sigv4}.ts` |
+| Anchoring | `audit/{anchor,anchor-verify,anchor-doctor,s3-sink,sigv4}.ts` |
 | Policy | `policy/{gate,default-rules,pii,pii-content,injection,canary,decay}.ts` |
 | Board | `board/{board,director,concerns}.ts` |
 | Budget | `budget/{allocation,attribution,context,runway}.ts` |
@@ -1385,9 +1385,8 @@ outage, ENOSPC, a self-check throw) would crash the host process the emitter is 
 Failures are captured as a degraded signal. The timer is `unref()`'d.
 
 **Anchor trust never comes from the vault under audit.** The caller pins the genesis root PEM
-out-of-band. A Rekor log other than `rekor.sigstore.dev` without a caller-supplied pin is refused,
-not trusted. A supplied-but-failing Rekor receipt fails the vault **closed** (`ANCHOR_INVALID`); it
-is never dropped as advisory.
+out-of-band. An anchor record that fails verification against that pin fails the vault **closed**
+(`ANCHOR_INVALID`); it is never dropped as advisory.
 
 ### Policy and safety
 
@@ -1578,11 +1577,11 @@ reachable only *after* signature verification.
 
 **Untrusted text echoed to a terminal is control-character sanitized BEFORE truncation.** Sanitize
 first, clip second.
-*Prevents:* JSON keys from a `--bundle`, or Rekor/anchor record fields, carrying ANSI escapes that
+*Prevents:* JSON keys from a `--bundle`, or anchor record fields, carrying ANSI escapes that
 repaint the terminal of the auditor running the command — forging a passing verdict, which is the
 entire product for a verification tool.
 
-There are **twenty** sanitizers, in two variants: **fourteen** neutralise C1 and **six** do not. Do
+There are **eighteen** sanitizers, in two variants: **fourteen** neutralise C1 and **four** do not. Do
 not consolidate them onto the weaker one — and note that the two counts are pinned SEPARATELY,
 because swapping a stronger sanitizer for a weaker one moves both by one and leaves the total
 untouched. A total is not an inventory.
@@ -1621,9 +1620,9 @@ The entries below are deliberately NOT numbered. They used to be ("a seventh", "
 adding one meant renumbering every later entry — so a new copy was added and the ordinals silently
 stopped matching the count. Adding a sanitizer means: add a bullet, and update the total above.
 
-- Six identical copies of `CONTROL_CHARS = /[\x00-\x1f\x7f]/g` plus a clip at 80, in
-  `core/src/cli/verify.ts`, `verify/src/cli.ts`, and the `rekor-verify.ts` / `anchor-verify.ts`
-  pairs. These must move together. The
+- Four identical copies of `CONTROL_CHARS = /[\x00-\x1f\x7f]/g` plus a clip at 80, in
+  `core/src/cli/verify.ts`, `verify/src/cli.ts`, and the `anchor-verify.ts`
+  pair. These must move together. The
   `biome-ignore lint/suspicious/noControlCharactersInRegex` on each is intentional — do not "fix" it.
 - A **mirrored pair** of the stronger variant, `scrubForError`, in
   `core/src/audit/verify.ts` and `verify/src/index.ts`. `verifyVault`'s
@@ -1859,7 +1858,6 @@ verifier verifies nothing.
 | Core | Verify | Enforced by |
 |---|---|---|
 | `core/src/audit/anchor-verify.ts` | `verify/src/anchor-verify.ts` | file-diff test (differs in exactly 2 lines per side: the `GENESIS_HASH` import, and `./merkle.js` vs `./verify.js`) |
-| `core/src/audit/rekor-verify.ts` | `verify/src/rekor-verify.ts` | file-diff test (currently byte-identical) |
 | `core/src/cli/verify.ts` → the `--bundle` helpers (`CONTROL_CHARS`, `clipKey`, `parseBundle`, `readArtifact`, `readPinnedPem`, …) | `verify/src/cli.ts` | **behavioral only, and only on the `--bundle` path** — one test drives both CLIs against a hostile bundle key. No file-diff rule covers this pair, and the two files are not whole-file mirrors. |
 | `core/src/audit/canonical.ts` | `verify/src/canonical.ts` | behavioral tests only — **weakest link; hand-check it**. Code-identical (differ only in comments). Corrected together on `ship/canonicalize-guard` against receipt-spec §13: top-level `undefined` → `null`; in-array `undefined` and holes → `null`; functions/symbols throw. Remaining known divergence vs the harness oracle is **invalid-Date error identity** (`RangeError` from `toISOString` vs the harness's named throw) — not this cut. |
 | `core/src/audit/verify.ts` → `verifyChain` | `verify/src/verify.ts` | differential tests |
