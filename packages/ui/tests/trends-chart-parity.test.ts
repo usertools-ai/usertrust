@@ -5,14 +5,15 @@
  * The chart's text alternative states money, so it must print each figure the way the chart does. The Tooltip's own
  * `formatter` and `labelFormatter` props are captured from the rendered component (recharts is stubbed so its
  * children render at any size) and called with each bucket's value, then compared with the hidden table's cells.
- * Reuse is by import: the table's UT cell is `formatUt`, the function the tooltip's formatter calls.
+ * Reuse is by import: the table's dollar and UT cells are `formatUsd` and `formatUt`, the functions the tooltip's
+ * formatter calls; the tooltip prints them dollars first, as `$x · y UT`.
  */
 
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { PersistedAuditEvent } from "usertrust";
 import { describe, expect, it, vi } from "vitest";
-import { formatUt } from "../src/shared/format.js";
+import { formatUsd, formatUt } from "../src/shared/format.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 import { toLedgerRows } from "../src/shared/rows.js";
 
@@ -76,7 +77,7 @@ const DAYS: Array<[string, number]> = [
 ];
 
 describe("the table prints each bucket as the chart's tooltip does", () => {
-	it("for every bucket, the table's UT cell equals the tooltip formatter's output and its label the labelFormatter's", async () => {
+	it("for every bucket, the table's dollar and UT cells are the tooltip's figure (dollars first) and its label the labelFormatter's", async () => {
 		const rows = toLedgerRows(
 			DAYS.map(([ts, cost], i) => evt(i + 1, ts, cost)),
 			{ valid: true, breakIndex: null },
@@ -94,8 +95,9 @@ describe("the table prints each bucket as the chart's tooltip does", () => {
 		DAYS.forEach(([ts, cost], i) => {
 			const day = `${ts.slice(0, 10)}T00:00:00Z`;
 			expect(cells[i]?.[0]).toBe(tip.labelFormatter(Date.parse(day)));
-			// mutant: a table that formats UT its own way (no separators, a different unit) differs here
-			expect(cells[i]?.[2]).toBe(tip.formatter(cost)[0]);
+			// mutant: a table that formats a figure its own way (no separators, a different unit, UT first) differs here
+			expect(`${cells[i]?.[1]} · ${cells[i]?.[2]}`).toBe(tip.formatter(cost)[0]);
+			expect(cells[i]?.[1]).toBe(formatUsd(cost));
 			expect(cells[i]?.[2]).toBe(formatUt(cost));
 		});
 	});
