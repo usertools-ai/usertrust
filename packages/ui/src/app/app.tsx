@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo } from "react";
 import { csvFilename, toCsv } from "../shared/csv.js";
 import { chainStatus } from "../shared/display.js";
 import { applyFilters, EMPTY_FILTERS, isFiltering } from "../shared/filters.js";
@@ -13,6 +13,7 @@ import { InspectorHint, RowPanel } from "./row-panel.js";
 import { useLedger } from "./store.js";
 import { SummaryStrip } from "./summary-strip.js";
 import { Trends } from "./trends.js";
+import { useMediaQuery } from "./use-media-query.js";
 import { useUrlState } from "./use-url-state.js";
 
 export type View = ViewId;
@@ -24,18 +25,6 @@ const VIEWS: Array<{ id: View; label: string }> = [
 
 /** At this width the inspector docks beside the list; below it, it opens over the list. */
 const DOCK_QUERY = "(min-width: 1100px)";
-
-function useMediaQuery(query: string): boolean {
-	const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
-	useEffect(() => {
-		const m = window.matchMedia(query);
-		const on = (): void => setMatches(m.matches);
-		on();
-		m.addEventListener("change", on);
-		return () => m.removeEventListener("change", on);
-	}, [query]);
-	return matches;
-}
 
 export function App(): React.JSX.Element {
 	const { rows, summary, phase, live, liveIds } = useLedger();
@@ -55,7 +44,7 @@ export function App(): React.JSX.Element {
 	// Export what the operator is looking at — the filtered set, not the vault, and within the server's window: the
 	// filename says both. BOM first: Excel reads UTF-8 CSV as latin-1 without it.
 	function exportCsv(): void {
-		const blob = new Blob([`﻿${toCsv(filtered)}`], { type: "text/csv;charset=utf-8" });
+		const blob = new Blob([`\uFEFF${toCsv(filtered)}`], { type: "text/csv;charset=utf-8" });
 		const url = URL.createObjectURL(blob);
 		const a = document.createElement("a");
 		a.href = url;

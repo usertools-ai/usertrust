@@ -3,7 +3,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { costView, transferView, usageView } from "../shared/display.js";
-import { formatUtc } from "../shared/format.js";
+import { formatUtc, UT_KEY } from "../shared/format.js";
 import { JOB_TYPE_CAVEAT, type LedgerRow, statusOf } from "../shared/rows.js";
 import { type Held, heldFor, type VerifyOutcome, verifyOutcome } from "../shared/verify-view.js";
 import { STATUS_TONE } from "./audit-table.js";
@@ -275,15 +275,16 @@ export function RowPanel(props: {
 				) : (
 					<>
 						<div className="ut-rcpt">
-							<span>Usertokens</span>
-							<span className="dots" />
-							<span className="v">{cost.ut}</span>
-						</div>
-						<div className="ut-rcpt">
 							<span>Dollars</span>
 							<span className="dots" />
 							<span className="v">{cost.usd}</span>
 						</div>
+						<div className="ut-rcpt">
+							<span>Usertokens</span>
+							<span className="dots" />
+							<span className="v">{cost.ut}</span>
+						</div>
+						<div className="ut-key">{UT_KEY}</div>
 						<div className="ut-rcpt">
 							<span>Usage</span>
 							<span className="dots" />

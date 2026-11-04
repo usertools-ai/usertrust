@@ -2,7 +2,14 @@
 // Copyright 2026 Usertools, Inc.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { EMPTY_FILTERS, type FilterState, isFiltering } from "../shared/filters.js";
+import {
+	activeFilterCount,
+	EMPTY_FILTERS,
+	type FilterState,
+	isFiltering,
+} from "../shared/filters.js";
+import { costBoundLabel } from "../shared/format.js";
+import { PHONE_QUERY } from "../shared/layout.js";
 import {
 	JOB_TYPE_CAVEAT,
 	jobTypeOf,
@@ -127,6 +134,60 @@ export function FilterBar(props: {
 	onChange(f: FilterState): void;
 }): React.JSX.Element {
 	const { rows, filters, onChange } = props;
+	// On a phone the bar is one button, and the filters open in a sheet over the page; elsewhere the button and the
+	// sheet's header are not shown and the bar is the row it always was.
+	const [sheet, setSheet] = useState(false);
+	const buttonRef = useRef<HTMLButtonElement | null>(null);
+	const sheetRef = useRef<HTMLDivElement | null>(null);
+	const doneRef = useRef<HTMLButtonElement | null>(null);
+
+	// The sheet is modal: it takes focus, Escape (or Done, or the scrim) closes it and focus goes back to the button,
+	// and Tab cycles inside it. An open facet list takes the first Escape, as it does anywhere.
+	useEffect(() => {
+		if (!sheet) return;
+		doneRef.current?.focus();
+		const onKey = (e: KeyboardEvent): void => {
+			const root = sheetRef.current;
+			if (e.key === "Escape") {
+				if (root?.querySelector(".ut-pop")) return;
+				setSheet(false);
+				return;
+			}
+			if (e.key !== "Tab" || root === null) return;
+			const focusables = root.querySelectorAll<HTMLElement>(
+				"button, [href], input, [tabindex]:not([tabindex='-1'])",
+			);
+			if (focusables.length === 0) return;
+			const first = focusables[0] as HTMLElement;
+			const last = focusables[focusables.length - 1] as HTMLElement;
+			const active = document.activeElement;
+			if (e.shiftKey && (active === first || !root.contains(active))) {
+				e.preventDefault();
+				last.focus();
+			} else if (!e.shiftKey && (active === last || !root.contains(active))) {
+				e.preventDefault();
+				first.focus();
+			}
+		};
+		document.addEventListener("keydown", onKey);
+		return () => {
+			document.removeEventListener("keydown", onKey);
+			// Back to the button that opened it.
+			if (buttonRef.current?.isConnected) buttonRef.current.focus();
+		};
+	}, [sheet]);
+
+	// A window widened past the phone layout leaves the bar open as a row: the sheet's state must not outlive it.
+	useEffect(() => {
+		if (!sheet) return;
+		const m = window.matchMedia(PHONE_QUERY);
+		const on = (): void => {
+			if (!m.matches) setSheet(false);
+		};
+		m.addEventListener("change", on);
+		return () => m.removeEventListener("change", on);
+	}, [sheet]);
+
 	const kinds = useMemo(() => counted(rows.map((r) => r.kind)), [rows]);
 	const models = useMemo(() => counted(rows.map((r) => r.model)), [rows]);
 	const actors = useMemo(() => counted(rows.map((r) => r.actor)), [rows]);
@@ -184,21 +245,59 @@ export function FilterBar(props: {
 	// A cost bound hides every row WITHOUT a cost (an unknown cost is not 0), and the chip says so.
 	if (filters.costMin !== undefined)
 		chips.push({
-			label: `cost ≥ ${filters.costMin} UT · uncosted hidden`,
+			label: costBoundLabel("≥", filters.costMin),
 			clear: () => onChange({ ...filters, costMin: undefined }),
 		});
 	if (filters.costMax !== undefined)
 		chips.push({
-			label: `cost ≤ ${filters.costMax} UT · uncosted hidden`,
+			label: costBoundLabel("≤", filters.costMax),
 			clear: () => onChange({ ...filters, costMax: undefined }),
 		});
 
 	const cost = (key: "costMin" | "costMax", value: string): void =>
 		onChange({ ...filters, [key]: value === "" ? undefined : Number(value) });
 
+	const applied = activeFilterCount(filters);
+
 	return (
 		<>
-			<div className="ut-bar">
+			<button
+				ref={buttonRef}
+				type="button"
+				className="ut-btn ut-filters-btn"
+				aria-haspopup="dialog"
+				aria-expanded={sheet}
+				aria-controls="ut-filter-sheet"
+				onClick={() => setSheet(true)}
+			>
+				<span>Filters{applied > 0 ? ` (${applied})` : ""}</span>
+				<span className="chev" aria-hidden="true">
+					▾
+				</span>
+			</button>
+			{sheet && (
+				<button
+					type="button"
+					className="ut-scrim"
+					aria-hidden="true"
+					tabIndex={-1}
+					onClick={() => setSheet(false)}
+				/>
+			)}
+			<div
+				ref={sheetRef}
+				id="ut-filter-sheet"
+				className="ut-bar"
+				data-sheet={sheet}
+				// A dialog only while open (and only a phone opens it); otherwise the bar is the plain row it always was.
+				{...(sheet ? { role: "dialog", "aria-modal": true, "aria-label": "Filters" } : {})}
+			>
+				<div className="ut-sheet-head">
+					<b>Filters{applied > 0 ? ` (${applied})` : ""}</b>
+					<button ref={doneRef} type="button" className="ut-btn" onClick={() => setSheet(false)}>
+						Done
+					</button>
+				</div>
 				<Facet
 					label="kind"
 					options={kinds}
