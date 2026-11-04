@@ -211,9 +211,7 @@ describe("a failed read of an argv-named anchor input is printed scrubbed", () =
 	// Each flag with what makes the CLI READ its file (anchor mode on; a successor pin is read only beside a pubkey):
 	// without them the file is never opened, and a row would pass on the hostile vault's own exit 1.
 	it.each([
-		["--rekor-pubkey", ["--require-anchor"]],
 		["--anchor", []],
-		["--rekor-receipts", []],
 		["--pubkey", []],
 		["--successor-pin", ["--pubkey", "READABLE_PEM"]],
 	] as const)(

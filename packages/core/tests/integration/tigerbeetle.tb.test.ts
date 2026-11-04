@@ -13,7 +13,7 @@
  * funded, balance-enforcing wallet on the live cluster.
  *
  * The suite self-skips (via `describe.skipIf`) whenever `USERTRUST_TB_ADDRESS` is
- * absent. The root vitest `include` glob (`packages/*​/tests/**​/*.test.ts`)
+ * absent. The root vitest `include` glob (any `.test.ts` file under a package's `tests` directory)
  * auto-collects this file into the normal `test` job, so the skip is what keeps
  * that job green without a cluster. Green-against-real-TB is proven by the
  * dedicated `tb-integration` CI job, which exports `USERTRUST_TB_ADDRESS`.

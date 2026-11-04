@@ -76,7 +76,9 @@ describe("renderReceipt", () => {
 
 		expect(output).toContain("TRANSACTION RECEIPT");
 		expect(output).toContain("SETTLED");
-		expect(output).toContain("VERIFIED");
+		// no anchor reached the renderer: the chain is intact, not verified
+		expect(output).toContain("CHAIN INTACT, NOT ANCHORED");
+		expect(output).not.toContain("* VERIFIED *");
 		expect(output).toContain("tx_test_12345678");
 		expect(output).toContain("claude-haiku-4-5-20251001");
 		expect(output).toContain("anthropic");
@@ -208,9 +210,7 @@ describe("renderReceipt", () => {
 		// red-first (local time, no zone): UTC, and the Z says so — the same instant on every auditor's machine.
 		const lines = output.split("\n");
 		expect(lines.find((l) => l.includes("Date"))).toMatch(/Date \.+ 2026-03-28 19:59:18Z │$/);
-		expect(lines.find((l) => l.includes("Verified"))).toMatch(
-			/Verified \.+ 2026-03-28 20:15:00Z │$/,
-		);
+		expect(lines.find((l) => l.includes("Checked"))).toMatch(/Checked \.+ 2026-03-28 20:15:00Z │$/);
 	});
 
 	it("an unreadable timestamp prints as such, and the receipt still renders", () => {

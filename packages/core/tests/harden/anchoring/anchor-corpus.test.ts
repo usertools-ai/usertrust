@@ -62,6 +62,7 @@ describe("HARDEN: anchoring corpus — mutation / deletion / rollback (rows 1-5)
 		});
 		expect(tx.receipt).not.toContain("INCLUSION VERIFIED");
 		expect(tx.valid).toBe(false);
+		expect(tx.inclusionVerified).toBe(false);
 	});
 
 	it("2. F2 KILL: delete the ENTIRE audit tree; external anchor supplied → ANCHOR_MISMATCH/deletion, exit 1", async () => {
@@ -639,6 +640,7 @@ describe("HARDEN: anchoring corpus — strict gates + happy paths (rows 29-30)",
 		});
 		expect(tx.valid).toBe(true);
 		expect(tx.receipt).toContain("INCLUSION VERIFIED (anchor #");
+		expect(tx.inclusionVerified).toBe(true);
 
 		// Tail event: honest label, never "verified".
 		const tail = pkgVerifyTransaction(s.vaultPath, "tr_8", {
@@ -648,5 +650,6 @@ describe("HARDEN: anchoring corpus — strict gates + happy paths (rows 29-30)",
 		});
 		expect(tail.receipt).toContain("IN UNANCHORED TAIL");
 		expect(tail.receipt).not.toContain("INCLUSION VERIFIED");
+		expect(tail.inclusionVerified).toBe(false);
 	});
 });
