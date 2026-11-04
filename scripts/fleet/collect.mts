@@ -413,7 +413,7 @@ function runVerify(vaultBase: string, verifyCli: string, month: string): VerifyT
 		command: `node ${relative(REPO_ROOT, verifyCli)} ${relative(REPO_ROOT, vaultPath)}`,
 		lines: out
 			// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR sequences from real CLI output
-			.replace(/\[[0-9;]*m/g, "")
+			.replace(/\x1b\[[0-9;]*m/g, "")
 			.trimEnd()
 			.split("\n"),
 		exitCode: 0,

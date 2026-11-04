@@ -18,7 +18,7 @@
  * actually fixes it. Keep this file free of workspace imports — a static
  * `import … from "usertrust…"` here silently restores the bad failure mode.
  */
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -36,8 +36,17 @@ export const CORE_DIST_MISSING =
 	"packages/core/dist missing — run `npm ci && npx tsc -b` at the repo root first.";
 
 // Import-safe: tests import the exported helpers without running the CLI.
-const invokedDirectly =
-	process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+// realpath on both sides: see changelog-guard.mjs (a symlinked or space-containing path otherwise skips the CLI silently)
+const invokedDirectly = (() => {
+	try {
+		return (
+			process.argv[1] !== undefined &&
+			realpathSync(resolve(process.argv[1])) === realpathSync(fileURLToPath(import.meta.url))
+		);
+	} catch {
+		return false;
+	}
+})();
 if (invokedDirectly) {
 	if (!coreDistBuilt(REPO_ROOT)) {
 		console.error(CORE_DIST_MISSING);

@@ -1043,7 +1043,7 @@ describe("the field table is CLOSED — every declared format is enforced", () =
 		return null;
 	}
 
-	/** `a.b[]​.c` / `a.b[variant].c` → the concrete member path in the document. */
+	/** `a.b[].c` / `a.b[variant].c` → the concrete member path in the document. */
 	function segmentsOf(path: string): string[] {
 		const out: string[] = [];
 		for (const raw of path.split(".")) {
