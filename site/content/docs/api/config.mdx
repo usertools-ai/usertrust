@@ -113,6 +113,9 @@ const TrustConfigSchema = z.object({
     models: z.record(z.string(), RateSchema).default({}),
     injectUsageOptions: z.boolean().default(true),
   }).prefault({}),
+  cloud: z.object({
+    injectUsageOptions: z.boolean().default(true),
+  }).prefault({}),
   unknownModelPolicy: z.enum(["fallback", "warn", "deny"]).default("warn"),
   supplyChain: z.object({
     enabled: z.boolean().default(true),
@@ -290,6 +293,7 @@ The remaining schema fields. All are optional in the file; defaults shown are wh
 | `customRates` | absent | Map of model name to per-1k usertoken rates `{ inputPer1k, outputPer1k, cacheReadPer1k?, cacheWritePer1k?, cacheWrite1hPer1k? }`; used only when `pricing` is `"custom"`. An omitted 5-minute or read tier prices at `inputPer1k`, an omitted 1-hour write rate prices at the dearer of the 5-minute write rate and twice `inputPer1k`, and an explicit `0` is honoured |
 | `endpoints` | `[]` | Endpoint matchers for `classifyEndpoint()`, first match wins: `{ match, class: "local" \| "cloud" (default local), runtime: "ollama" \| "vllm" \| "lmstudio" \| "openai-compat" \| "unknown" (default unknown) }`. `match` is an origin URL, a `*.suffix` hostname, or a bare hostname |
 | `local` | `{ autoDetectLoopback: true, defaultRate: { inputPer1k: 0, outputPer1k: 0 }, rateClass: "nominal", models: {}, injectUsageOptions: true }` | Local (self-hosted) settlement scope: loopback hosts classify as local without config; `models` maps exact names or trailing-`*` globs to rates; `rateClass` is `nominal` or `amortized-usd`; `injectUsageOptions` adds `stream_options.include_usage` to local OpenAI-style streams |
+| `cloud` | `{ injectUsageOptions: true }` | Cloud settlement scope: `injectUsageOptions` asks `api.openai.com` for the usage of a streamed chat completion (`stream_options.include_usage`), so the call settles at the provider's own count and not at the estimate. The caller's own `stream_options` are merged, never replaced, and an explicit `include_usage` is respected. The usage chunk the controller asked for is not passed on to a caller who did not ask for it. No other host is changed. Off: the request goes out as written and a stream with no usage settles at the estimate |
 | `unknownModelPolicy` | `"warn"` | Cloud model with no rate anywhere: `fallback` bills the fallback rate (the dearest rate in the pricing table) without a warning, `warn` bills the same rate with a one-time warning per model, `deny` throws `PolicyDeniedError` before the hold. Every fallback-priced receipt carries `meter.rateSource: "fallback"` |
 | `supplyChain` | `{ enabled: true, trustedPublishers: [], publisherKeys: {}, allowedPermissions: ["llm_call", "tool_use", "file_read"], requireSignature: true }` | Skill-manifest verification, fail-closed by default; `publisherKeys` maps a publisher to hex Ed25519 public keys (64 hex chars each) |
 | `vault` | `{ enabled: false, masterKeyEnv: "USERTRUST_VAULT_KEY", auditAccess: true, defaultScope: { agents: [], actions: [], expiresAt: null } }` | Encrypted credential vault; `masterKeyEnv` names the environment variable holding the master key |
