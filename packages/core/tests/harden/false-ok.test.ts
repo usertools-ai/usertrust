@@ -267,6 +267,11 @@ describe("false OK — a documented count that stops matching reality", () => {
 		expect(declaredSplit, "AGENTS.md no longer states the per-variant split").not.toBeNull();
 
 		const WORDS: Record<string, number> = {
+			one: 1,
+			two: 2,
+			three: 3,
+			four: 4,
+			five: 5,
 			six: 6,
 			seven: 7,
 			eight: 8,

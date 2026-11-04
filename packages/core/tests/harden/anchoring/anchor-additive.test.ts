@@ -100,8 +100,8 @@ describe("HARDEN: anchoring additive proofs", () => {
 		// vendored crypto file IS a sibling file). This budget is a tripwire:
 		// growing past it requires consciously editing this number — at which
 		// point the reviewer asks what was added. Raised from 3200 for the
-		// Phase-2 anchoring work (rekor-verify.ts, ~490 lines of node:crypto-only
-		// receipt verification — no vendored source). Current size ~3.3k lines.
+		// Phase-2 anchoring work (node:crypto-only verification, no vendored
+		// source). Current size ~3.3k lines.
 		// Raised 4200 → 6500 for the `usertrust-verify receipt` ship
 		// (receipt-verify.ts, receipt-spec §7's offline verifier — node builtins
 		// only, no vendored source).

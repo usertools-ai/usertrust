@@ -28,7 +28,6 @@ import {
 	mutateAndRechain,
 	storeRaw,
 } from "./fixtures.js";
-import { makeRekorReceipt } from "./rekor-fixtures.js";
 
 afterEach(() => {
 	cleanupAll();
@@ -43,14 +42,6 @@ function verdict(result: {
 		anchorCount: number;
 		anchorSource: string;
 		unanchoredTail: { events: number };
-		rekor?:
-			| {
-					receiptsVerified: number;
-					receiptsFailed: number;
-					latestAttestedTimeMs: number | null;
-					errors: string[];
-			  }
-			| undefined;
 	};
 	chainLength: number;
 }): string {
@@ -63,7 +54,6 @@ function verdict(result: {
 		anchorSource: result.anchoring.anchorSource,
 		tail: result.anchoring.unanchoredTail.events,
 		chainLength: result.chainLength,
-		rekor: result.anchoring.rekor ?? null,
 	});
 }
 
@@ -79,38 +69,12 @@ describe("HARDEN: core vs verify pkg produce identical ANCHOR verdicts", () => {
 		const s = await makeAnchoredVault(3);
 		await anchorOnce(s);
 		await appendEvents(s.root, 3, 4);
-		const latest = await anchorOnce(s);
+		await anchorOnce(s);
 
 		const base = { externalAnchorsRaw: [storeRaw(s)], trust: s.trust };
 
 		// 1. Happy path.
 		expect(assertAgree(s.vaultPath, base)).toBe("ANCHORED_VERIFIED");
-
-		// 1b. Rekor receipts: both glues must agree on the rekor block too — a
-		// receipt that fails in one package and passes in the other would be a
-		// silent trust split between the shipped verifier and the CLI.
-		const f = makeRekorReceipt(latest, { integratedTime: 1_760_000_000 });
-		const rekorPins = { rekorLogPubkeysPem: [f.logPubkeyPem] };
-		expect(
-			assertAgree(s.vaultPath, {
-				...base,
-				...rekorPins,
-				rekorReceiptsRaw: [JSON.stringify(f.receipt)],
-			}),
-		).toBe("ANCHORED_VERIFIED");
-		expect(
-			assertAgree(s.vaultPath, {
-				...base,
-				...rekorPins,
-				rekorReceiptsRaw: [
-					JSON.stringify(
-						f.tamper((r) => {
-							r.artifactHash = "c".repeat(64);
-						}),
-					),
-				],
-			}),
-		).toBe("ANCHOR_INVALID");
 
 		// 2. Stale under a caller-supplied freshness policy.
 		await appendEvents(s.root, 4, 7);

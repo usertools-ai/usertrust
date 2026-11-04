@@ -76,8 +76,6 @@ const KNOWN_VERIFY_FLAGS = new Set([
 	"--anchors",
 	"--anchor-url",
 	"--bundle",
-	"--rekor-receipts",
-	"--rekor-pubkey",
 	"--pubkey",
 	"--successor-pin",
 	"--require-anchor",
@@ -89,31 +87,13 @@ const KNOWN_VERIFY_FLAGS = new Set([
 	"--receipts",
 ]);
 
-const MAX_PEM_BYTES = 16 * 1024;
 const MAX_BUNDLE_ITEMS = 10_000;
-const BUNDLE_KEYS = new Set(["v", "records", "rekorReceipts"]);
+const BUNDLE_KEYS = new Set(["v", "records"]);
+/** A field older exports carried; refused by name so the fix is obvious. */
+const REMOVED_BUNDLE_KEYS = new Set(["rekorReceipts"]);
 
 function readArtifact(pathOrDash: string): string {
 	return pathOrDash === "-" ? readFileSync(0, "utf-8") : readFileSync(pathOrDash, "utf-8");
-}
-
-/**
- * Read one pinned log key. A file that carries no usable PEM is a usage error,
- * not an empty pin: the verifier discards unusable entries, so accepting one
- * here would leave the caller believing they pinned a key while the receipt was
- * checked against something else entirely.
- */
-function readPinnedPem(path: string): string {
-	const pem = readFileSync(path, "utf-8");
-	if (Buffer.byteLength(pem, "utf8") > MAX_PEM_BYTES) {
-		throw new Error(`--rekor-pubkey ${path}: PEM exceeds 16 KiB`);
-	}
-	if (pem.trim().length === 0 || !pem.includes("-----BEGIN PUBLIC KEY-----")) {
-		throw new Error(
-			`--rekor-pubkey ${path}: not a PEM public key (-----BEGIN PUBLIC KEY----- missing)`,
-		);
-	}
-	return pem;
 }
 
 // Matching control characters is the entire point here — they are what gets
@@ -133,14 +113,13 @@ function clipKey(key: string): string {
 }
 
 /**
- * Strict parse of an auditor bundle: `{v:1, records, rekorReceipts?}`. A bundle
- * is untrusted transport, so unknown top-level fields are rejected rather than
- * ignored — a field the CLI silently drops is one an exporter can use to carry
- * evidence the verifier never looks at. Element shapes are NOT validated here:
- * records and receipts are re-serialized and go through the same strict parsers
- * every other input does.
+ * Strict parse of an auditor bundle: `{v:1, records}`. A bundle is untrusted
+ * transport, so unknown top-level fields are rejected rather than ignored — a
+ * field the CLI silently drops is one an exporter can use to carry evidence the
+ * verifier never looks at. Element shapes are NOT validated here: records are
+ * re-serialized and go through the same strict parser every other input does.
  */
-function parseBundle(raw: string): { anchorsRaw: string; receiptsRaw: string[] } {
+function parseBundle(raw: string): { anchorsRaw: string } {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(raw);
@@ -152,6 +131,11 @@ function parseBundle(raw: string): { anchorsRaw: string; receiptsRaw: string[] }
 	}
 	const obj = parsed as Record<string, unknown>;
 	for (const key of Object.keys(obj)) {
+		if (REMOVED_BUNDLE_KEYS.has(key)) {
+			throw new Error(
+				`--bundle: the "${key}" field was removed; re-export the bundle with \`usertrust anchor export-bundle\``,
+			);
+		}
 		if (!BUNDLE_KEYS.has(key)) throw new Error(`--bundle: unknown field "${clipKey(key)}"`);
 	}
 	if (obj.v !== 1) throw new Error("--bundle: unsupported version (expected 1)");
@@ -159,15 +143,7 @@ function parseBundle(raw: string): { anchorsRaw: string; receiptsRaw: string[] }
 	if (obj.records.length > MAX_BUNDLE_ITEMS) {
 		throw new Error(`--bundle: records exceeds the ${MAX_BUNDLE_ITEMS} cap`);
 	}
-	const receipts = obj.rekorReceipts ?? [];
-	if (!Array.isArray(receipts)) throw new Error("--bundle: rekorReceipts must be an array");
-	if (receipts.length > MAX_BUNDLE_ITEMS) {
-		throw new Error(`--bundle: rekorReceipts exceeds the ${MAX_BUNDLE_ITEMS} cap`);
-	}
-	return {
-		anchorsRaw: obj.records.map((record) => toSafeJson(record)).join("\n"),
-		receiptsRaw: receipts.map((receipt) => toSafeJson(receipt)),
-	};
+	return { anchorsRaw: obj.records.map((record) => toSafeJson(record)).join("\n") };
 }
 
 function fetchAnchorUrl(url: string): Promise<{ ok: boolean; body?: string; error?: string }> {
@@ -196,8 +172,6 @@ async function parseAnchorFlags(argv: string[], collectTargets: boolean): Promis
 	const targets: string[] = [];
 	const dashTokens: string[] = [];
 	const anchorFiles: string[] = [];
-	const rekorReceiptFiles: string[] = [];
-	const rekorPubkeyFiles: string[] = [];
 	let bundleFile: string | undefined;
 	let anchorUrl: string | undefined;
 	let pubkeyFile: string | undefined;
@@ -214,12 +188,6 @@ async function parseAnchorFlags(argv: string[], collectTargets: boolean): Promis
 		if (arg === "--anchor" || arg === "--anchors") {
 			const v = next();
 			if (v !== undefined) anchorFiles.push(v);
-		} else if (arg === "--rekor-receipts") {
-			const v = next();
-			if (v !== undefined) rekorReceiptFiles.push(v);
-		} else if (arg === "--rekor-pubkey") {
-			const v = next();
-			if (v !== undefined) rekorPubkeyFiles.push(v);
 		} else if (arg === "--bundle") bundleFile = next();
 		else if (arg === "--anchor-url") anchorUrl = next();
 		else if (arg === "--pubkey") pubkeyFile = next();
@@ -262,12 +230,9 @@ async function parseAnchorFlags(argv: string[], collectTargets: boolean): Promis
 		}
 	}
 	const externalAnchorsRaw = anchorFiles.map(readArtifact);
-	const rekorReceiptsRaw = rekorReceiptFiles.map(readArtifact);
-	const rekorLogPubkeysPem = rekorPubkeyFiles.map(readPinnedPem);
 	if (bundleFile !== undefined) {
 		const bundle = parseBundle(readArtifact(bundleFile));
 		externalAnchorsRaw.push(bundle.anchorsRaw);
-		rekorReceiptsRaw.push(...bundle.receiptsRaw);
 	}
 	let witness: WitnessInput = { requested: false };
 	if (anchorUrl !== undefined) {
@@ -296,7 +261,6 @@ async function parseAnchorFlags(argv: string[], collectTargets: boolean): Promis
 		anchorUrl !== undefined ||
 		pubkeyFile !== undefined ||
 		bundleFile !== undefined ||
-		rekorReceiptFiles.length > 0 ||
 		requireAnchor ||
 		requireExternalAnchor;
 	const trust =
@@ -317,8 +281,6 @@ async function parseAnchorFlags(argv: string[], collectTargets: boolean): Promis
 		receiptsRaw: receiptFiles.map(readArtifact),
 		params: {
 			externalAnchorsRaw,
-			rekorReceiptsRaw,
-			rekorLogPubkeysPem,
 			...(trust !== undefined ? { trust } : {}),
 			witness,
 			...(maxAnchorAgeMs !== undefined ? { maxAnchorAgeMs } : {}),
@@ -531,16 +493,6 @@ function printIncompleteness(d: ChainDeadLetters | ChainDeadLettersUnreadable): 
 	}
 }
 
-/**
- * A witness-attested time on its way to a terminal. The receipt parser bounds
- * integratedTime, but this value also arrives from library callers, and
- * `toISOString()` throws RangeError outside ±8.64e15 ms — printing raw
- * milliseconds beats crashing the verifier over a number it already distrusts.
- */
-function formatAttestedMs(ms: number): string {
-	return Number.isFinite(ms) && Math.abs(ms) <= 8.64e15 ? new Date(ms).toISOString() : `${ms} ms`;
-}
-
 export async function run(rootDir?: string, opts?: CliOptions, args?: string[]): Promise<void> {
 	const json = opts?.json === true;
 
@@ -720,15 +672,6 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 			console.log(`Latest anchor: #${la.anchorSeq} treeSize ${la.treeSize} (${la.timestamp})`);
 		}
 		console.log(`Unanchored tail: ${result.anchoring.unanchoredTail.events} event(s)`);
-		const rekor = result.anchoring.rekor;
-		if (rekor !== undefined) {
-			const attested =
-				rekor.latestAttestedTimeMs === null
-					? ""
-					: `, attested ${formatAttestedMs(rekor.latestAttestedTimeMs)}`;
-			const failed = rekor.receiptsFailed > 0 ? `, ${rekor.receiptsFailed} FAILED` : "";
-			console.log(`Rekor: ${rekor.receiptsVerified} receipt(s) verified${failed}${attested}`);
-		}
 		if (result.anchoring.anchorSource === "vault-mirror") {
 			console.log(
 				pc.yellow(
