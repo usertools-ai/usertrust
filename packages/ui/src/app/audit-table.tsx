@@ -328,10 +328,13 @@ export function AuditTable(props: {
 		}
 		// A screenful by the rows the virtualiser has MEASURED, not an estimate: under 560px rows stack and wrap and are far
 		// taller than a desktop row, so a fixed estimate made PageUp and PageDown skip rows.
+		// On a phone the page is the scroller (the list flows in it), so the screenful is the window's.
 		const el = parentRef.current;
-		const page = el
-			? pageSizeFromItems(virtualizer.getVirtualItems(), el.scrollTop, el.clientHeight)
-			: 1;
+		const page = phone
+			? pageSizeFromItems(virtualizer.getVirtualItems(), window.scrollY, window.innerHeight)
+			: el
+				? pageSizeFromItems(virtualizer.getVirtualItems(), el.scrollTop, el.clientHeight)
+				: 1;
 		const next = nextRowIndex(activeIndex, e.key, sorted.length, page);
 		if (next === null) return;
 		e.preventDefault();

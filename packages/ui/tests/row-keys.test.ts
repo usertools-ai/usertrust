@@ -11,7 +11,7 @@ import { readFile } from "node:fs/promises";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { PersistedAuditEvent } from "usertrust";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toLedgerRows } from "../src/shared/rows.js";
 
 // The components are .tsx files, which the tests' tsconfig (no `jsx`) cannot resolve statically: load them by a
@@ -72,6 +72,16 @@ const noop = () => {};
 const tabStops = (html: string) => [...html.matchAll(/tabindex="(-?\d+)"/gi)].map((m) => m[1]);
 
 describe("the audit list is one tab stop", () => {
+	// Since the phone layout, the list asks window.matchMedia whether it is on a phone as it first renders; these tests run
+	// without a browser, so the answer is stubbed: a desktop window.
+	beforeEach(() => {
+		vi.stubGlobal("window", {
+			matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+		});
+	});
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
 	it("a list with rows is a named listbox with exactly one tab stop", async () => {
 		const { AuditTable } = await table();
 		const html = renderToStaticMarkup(
@@ -193,6 +203,10 @@ describe("the inspector takes focus from the list", () => {
 		const src = await source("audit-table.tsx");
 		expect(src).toContain(
 			"pageSizeFromItems(virtualizer.getVirtualItems(), el.scrollTop, el.clientHeight)",
+		);
+		// On a phone the page is the scroller (the list flows in it), so a screenful is the window's, not the list's.
+		expect(src).toMatch(
+			/phone\s*\?\s*pageSizeFromItems\(virtualizer\.getVirtualItems\(\), window\.scrollY, window\.innerHeight\)/,
 		);
 		expect(src).not.toContain("ROW_HEIGHT");
 	});
