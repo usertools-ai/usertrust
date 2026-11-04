@@ -162,7 +162,7 @@ describe("canonical base64 (§3, §4)", () => {
 describe("fatal UTF-8 with ignoreBOM (§3 step 2)", () => {
 	it("RETAINS a BOM rather than silently dropping three signed bytes (PR #92)", () => {
 		const bytes = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from("{}", "utf8")]);
-		expect(decodeUtf8Strict(bytes)).toBe("﻿{}");
+		expect(decodeUtf8Strict(bytes)).toBe("\uFEFF{}");
 	});
 
 	it("refuses invalid UTF-8 instead of substituting U+FFFD", () => {
