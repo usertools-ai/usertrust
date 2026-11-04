@@ -5,11 +5,16 @@ import { describe, expect, it } from "vitest";
 import { applyFilters, EMPTY_FILTERS } from "../src/shared/filters.js";
 import {
 	compactActor,
+	costBoundLabel,
 	formatUsd,
+	formatUsdApprox,
+	formatUsdAxis,
+	formatUsdTotal,
 	formatUt,
 	formatUtc,
 	formatUtcMinute,
 	middleTruncate,
+	UT_KEY,
 	utcDay,
 	utcHour,
 } from "../src/shared/format.js";
@@ -118,5 +123,79 @@ describe("middleTruncate", () => {
 		expect(cut.startsWith("/Users")).toBe(true);
 		expect(cut.endsWith(".usertrust")).toBe(true);
 		expect(cut).toContain("…");
+	});
+});
+
+describe("dollars first", () => {
+	it("red-first (a total printed in usertokens): a total is 2 dp, and its exact 4 dp figure is the tooltip", () => {
+		// 76,045 UT is $7.6045: no float drift in either figure.
+		expect(formatUsdTotal(76_045)).toBe("$7.60");
+		expect(formatUsd(76_045)).toBe("$7.6045");
+	});
+
+	it("groups the whole dollars with commas", () => {
+		expect(formatUsdTotal(12_045_500)).toBe("$1,204.55");
+		expect(formatUsd(12_045_500)).toBe("$1,204.5500");
+		expect(formatUsdTotal(1_000_000_000)).toBe("$100,000.00");
+	});
+
+	it("edge values are exact: 0, 1 UT, 9,999 UT, and one dollar", () => {
+		expect(formatUsdTotal(0)).toBe("$0.00");
+		expect(formatUsd(0)).toBe("$0.0000");
+		expect(formatUsd(1)).toBe("$0.0001");
+		expect(formatUsdTotal(1)).toBe("$0.0001");
+		expect(formatUsd(9_999)).toBe("$0.9999");
+		expect(formatUsdTotal(9_999)).toBe("$1.00");
+		expect(formatUsd(10_000)).toBe("$1.0000");
+		expect(formatUsdTotal(10_000)).toBe("$1.00");
+	});
+
+	it("a nonzero total under a cent keeps 4 dp, so it never reads $0.00", () => {
+		expect(formatUsdTotal(1)).toBe("$0.0001");
+		expect(formatUsdTotal(49)).toBe("$0.0049");
+		expect(formatUsdTotal(99)).toBe("$0.0099");
+		expect(formatUsdTotal(-49)).toBe("-$0.0049");
+		expect(formatUsdTotal(0)).toBe("$0.00");
+		expect(formatUsdTotal(100)).toBe("$0.01");
+	});
+
+	it("rounds a half cent up, never by a float's whim", () => {
+		expect(formatUsdTotal(150)).toBe("$0.02");
+		expect(formatUsdTotal(149)).toBe("$0.01");
+		// 1.005 * 100 is 100.49999999999999 in floats: integer math has no such case
+		expect(formatUsdTotal(10_050)).toBe("$1.01");
+		expect(formatUsdTotal(76_050)).toBe("$7.61");
+	});
+
+	it("a very large count has no float drift", () => {
+		// 9,007,199,254,740,991 UT = $900,719,925,474.0991
+		expect(formatUsd(Number.MAX_SAFE_INTEGER)).toBe("$900,719,925,474.0991");
+		expect(formatUsdTotal(Number.MAX_SAFE_INTEGER)).toBe("$900,719,925,474.10");
+		expect(formatUsd(123_456_789_012_345)).toBe("$12,345,678,901.2345");
+	});
+
+	it("a count that is not finite has no dollar figure, never $NaN", () => {
+		expect(formatUsd(Number.NaN)).toBe("n/a");
+		expect(formatUsdTotal(Number.POSITIVE_INFINITY)).toBe("n/a");
+	});
+
+	it("the key says what a UT is, in exactly these words", () => {
+		expect(UT_KEY).toBe("1 UT = $0.0001, one hundredth of a cent");
+	});
+
+	it("a typed bound gets a dollar echo; under a cent it keeps 4 dp so it does not read $0.00", () => {
+		expect(formatUsdApprox(5_000)).toBe("≈ $0.50");
+		expect(formatUsdApprox(100)).toBe("≈ $0.01");
+		expect(formatUsdApprox(10)).toBe("≈ $0.0010");
+		expect(costBoundLabel("≥", 5_000)).toBe("cost ≥ 5000 UT ≈ $0.50 · uncosted hidden");
+		expect(costBoundLabel("≤", 10)).toBe("cost ≤ 10 UT ≈ $0.0010 · uncosted hidden");
+	});
+
+	it("an axis tick drops trailing zeros but keeps 2 dp", () => {
+		expect(formatUsdAxis(20_000)).toBe("$2.00");
+		expect(formatUsdAxis(5_000)).toBe("$0.50");
+		expect(formatUsdAxis(5)).toBe("$0.0005");
+		expect(formatUsdAxis(50)).toBe("$0.005");
+		expect(formatUsdAxis(12_045_500)).toBe("$1,204.55");
 	});
 });

@@ -3,7 +3,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { costView, transferView, usageView } from "../shared/display.js";
-import { formatUtc } from "../shared/format.js";
+import { formatUtc, UT_KEY } from "../shared/format.js";
+import { popoverOwnsEscape } from "../shared/row-nav.js";
 import { JOB_TYPE_CAVEAT, type LedgerRow, statusOf } from "../shared/rows.js";
 import { type Held, heldFor, type VerifyOutcome, verifyOutcome } from "../shared/verify-view.js";
 import { STATUS_TONE } from "./audit-table.js";
@@ -137,9 +138,18 @@ export function VerifyResult(props: {
 export function RowPanel(props: {
 	row: LedgerRow;
 	docked: boolean;
-	onClose(): void;
+	/** `returnFocus`: focus was in the inspector (or nowhere), so it goes back to the row the inspector showed. */
+	onClose(returnFocus: boolean): void;
+	/**
+	 * Set (to a number that changes on each request) when the row was opened with the keyboard: a docked inspector then
+	 * takes focus on its heading. Unset for a click, which leaves focus where it is.
+	 */
+	focusNonce?: number;
+	/** Called once the heading has taken focus for a request, so the request is cleared and a later remount (another
+	 * view and back) does not replay it and take focus from wherever the reader is. */
+	onFocusHandled?: () => void;
 }): React.JSX.Element {
-	const { row, docked, onClose } = props;
+	const { row, docked, onClose, focusNonce, onFocusHandled } = props;
 	// A verify response is held for the row VERSION it was requested for (the row object: a status correction replaces
 	// it) and shown only while the row is still that version. Clearing the panel when the status changed ran BEFORE an
 	// in-flight response landed, so the earlier status's receipt was then shown beside the corrected status.
@@ -148,6 +158,16 @@ export function RowPanel(props: {
 	const closeRef = useRef<HTMLButtonElement>(null);
 	const panelRef = useRef<HTMLElement>(null);
 	const verdictRef = useRef<HTMLDivElement>(null);
+	const headingRef = useRef<HTMLHeadingElement>(null);
+
+	// Enter or Space on a row opens it here: focus goes to the heading (a tabindex of -1: reachable by script, not a tab
+	// stop), so the next Tab lands on the inspector's own controls, not 20 rows away.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: runs once per request (the nonce), not when docking changes
+	useEffect(() => {
+		if (!docked || focusNonce === undefined) return;
+		headingRef.current?.focus();
+		onFocusHandled?.();
+	}, [focusNonce]);
 
 	// A modal panel takes focus, and returns it to the invoking row on close. A docked one leaves it on the row.
 	useEffect(() => {
@@ -162,7 +182,16 @@ export function RowPanel(props: {
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent): void => {
 			if (e.key === "Escape") {
-				onClose();
+				// An open popover (a filter's choices, an explainer) owns this Escape: it closes, the inspector stays.
+				if (popoverOwnsEscape(document)) return;
+				const active = document.activeElement;
+				const inside =
+					active === null ||
+					active === document.body ||
+					panelRef.current?.contains(active) === true;
+				// A modal panel returns focus on its own (below); a docked one hands it back to its row. Focus in the search box
+				// or elsewhere stays there: closing must not take it.
+				onClose(docked && inside);
 				return;
 			}
 			// aria-modal promises modality: keep Tab cycling inside the panel.
@@ -183,8 +212,9 @@ export function RowPanel(props: {
 				}
 			}
 		};
-		document.addEventListener("keydown", onKey);
-		return () => document.removeEventListener("keydown", onKey);
+		// Capture: this sees Escape before a popover's own listener closes it, whichever of them was registered first.
+		document.addEventListener("keydown", onKey, true);
+		return () => document.removeEventListener("keydown", onKey, true);
 	}, [onClose, docked]);
 
 	const runVerify = async (): Promise<void> => {
@@ -226,7 +256,9 @@ export function RowPanel(props: {
 		<div className="ut-insp-in">
 			<div className="ut-dhead">
 				<div>
-					<h2>{row.model ?? row.kind}</h2>
+					<h2 ref={headingRef} tabIndex={-1}>
+						{row.model ?? row.kind}
+					</h2>
 					<div className="ut-dkind">
 						{row.kind} · seq {row.seq ?? "?"} · {formatUtc(row.ts)}
 					</div>
@@ -235,7 +267,7 @@ export function RowPanel(props: {
 					ref={closeRef}
 					type="button"
 					className="ut-x"
-					onClick={onClose}
+					onClick={() => onClose(true)}
 					aria-label="close the inspector"
 				>
 					✕
@@ -322,15 +354,16 @@ export function RowPanel(props: {
 				) : (
 					<>
 						<div className="ut-rcpt">
-							<span>Usertokens</span>
-							<span className="dots" />
-							<span className="v">{cost.ut}</span>
-						</div>
-						<div className="ut-rcpt">
 							<span>Dollars</span>
 							<span className="dots" />
 							<span className="v">{cost.usd}</span>
 						</div>
+						<div className="ut-rcpt">
+							<span>Usertokens</span>
+							<span className="dots" />
+							<span className="v">{cost.ut}</span>
+						</div>
+						<div className="ut-key">{UT_KEY}</div>
 						<div className="ut-rcpt">
 							<span>Usage</span>
 							<span className="dots" />
@@ -400,7 +433,7 @@ export function RowPanel(props: {
 				className="ut-scrim"
 				aria-hidden="true"
 				tabIndex={-1}
-				onClick={onClose}
+				onClick={() => onClose(false)}
 			/>
 			<aside
 				ref={panelRef}

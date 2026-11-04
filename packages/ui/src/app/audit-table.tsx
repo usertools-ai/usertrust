@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { useVirtualizer } from "@tanstack/react-virtual";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useVirtualizer, useWindowVirtualizer } from "@tanstack/react-virtual";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
 	type ChainStatus,
 	costView,
@@ -12,8 +12,16 @@ import {
 	transferView,
 } from "../shared/display.js";
 import { type SortKey, sortRows } from "../shared/filters.js";
-import { compactActor, formatUtc } from "../shared/format.js";
+import { compactActor, formatUtc, UT_KEY } from "../shared/format.js";
+import { PHONE_QUERY } from "../shared/layout.js";
+import {
+	nextRowIndex,
+	pageSizeFromItems,
+	resolveActiveIndex,
+	rowAccessibleName,
+} from "../shared/row-nav.js";
 import { type LedgerRow, type RowStatus, statusOf } from "../shared/rows.js";
+import { useMediaQuery } from "./use-media-query.js";
 
 const SORTS: Array<{ key: SortKey; label: string }> = [
 	{ key: "seq", label: "Position" },
@@ -51,8 +59,12 @@ function Sep(): React.JSX.Element {
 	);
 }
 
-/** One ledger row as the list draws it. Exported so its marks can be rendered in a test. */
-export function Row(props: { row: LedgerRow }): React.JSX.Element {
+/** The DOM id of a row's element: what the list's `aria-activedescendant` names. */
+export function rowDomId(hash: string): string {
+	return `ut-row-${hash}`;
+}
+
+function RowBody(props: { row: LedgerRow }): React.JSX.Element {
 	const { row } = props;
 	const status = statusOf(row);
 	const cost = costView(row);
@@ -104,19 +116,61 @@ export function Row(props: { row: LedgerRow }): React.JSX.Element {
 					<span className="ut-amt na">no cost recorded</span>
 				) : (
 					<>
-						<span className="ut-amt">{cost.ut}</span>
+						<span className="ut-amt">{cost.usd}</span>
 						<span className="ut-recd">
 							{cost.estimated && (
 								<span className="ut-est" title={ESTIMATED_TITLE}>
 									est.
 								</span>
 							)}
-							{cost.usd}
+							{cost.ut}
 						</span>
 					</>
 				)}
 			</span>
 		</>
+	);
+}
+
+/**
+ * One row of the list. Not a tab stop and not focused itself: the list holds focus and names the active row, so the
+ * virtualiser can unmount a row that scrolls away without dropping the keyboard's place. A listbox option, so its
+ * name (what a screen reader says as the arrows move) is set whole, not read off the cells inside it.
+ */
+export function AuditRow(props: {
+	row: LedgerRow;
+	/** Position in the sorted list, 0-based. */
+	index: number;
+	/** How many rows the list holds (the virtualiser renders a window of them). */
+	setSize: number;
+	/** The row the arrow keys are on. */
+	active: boolean;
+	/** The row open in the inspector. */
+	selected: boolean;
+	fresh: boolean;
+	style?: React.CSSProperties;
+	measure?: (el: HTMLElement | null) => void;
+	onClick(): void;
+}): React.JSX.Element {
+	const { row } = props;
+	return (
+		// biome-ignore lint/a11y/useFocusableInteractive: an option of a listbox that holds focus and names it (aria-activedescendant)
+		// biome-ignore lint/a11y/useKeyWithClickEvents: the list's own onKeyDown opens the active row; the click is the mouse's route
+		<div
+			role="option"
+			id={rowDomId(row.hash)}
+			data-index={props.index}
+			ref={props.measure}
+			onClick={props.onClick}
+			aria-selected={props.selected}
+			aria-posinset={props.index + 1}
+			aria-setsize={props.setSize}
+			aria-label={rowAccessibleName(row)}
+			className={`ut-row${props.selected ? " sel" : ""}${props.active ? " act" : ""}${props.fresh ? " fresh" : ""}`}
+			style={props.style}
+		>
+			<RowBody row={row} />
+		</div>
 	);
 }
 
@@ -181,8 +235,11 @@ export function AuditTable(props: {
 	chain: ChainStatus | null;
 	liveIds?: Set<string>;
 	selected: string | null;
-	onOpen(row: LedgerRow): void;
+	/** `viaKeyboard`: opened with Enter or Space, so the inspector should take focus. A click leaves focus alone. */
+	onOpen(row: LedgerRow, viaKeyboard: boolean): void;
 	onClearFilters(): void;
+	/** Set when the inspector closes and focus should go back to the row it showed; `n` makes a repeat count. */
+	restoreFocus?: { hash: string; n: number } | null;
 }): React.JSX.Element {
 	const [sortKey, setSortKey] = useState<SortKey>("seq");
 	const [desc, setDesc] = useState(true);
@@ -192,17 +249,126 @@ export function AuditTable(props: {
 	// Stable while the rows are: the virtualizer's measurement cache is keyed on this callback's identity, and a new one
 	// each render (a scroll re-renders) re-scanned every row of a large vault.
 	const getItemKey = useCallback((i: number) => (sorted[i] as LedgerRow).hash, [sorted]);
-	const virtualizer = useVirtualizer({
+	// On a phone the list has no scroller of its own: it flows in the page, so a swipe on it scrolls the page, and the
+	// window is what the virtualizer follows. It then needs the list's distance from the top of the page, which moves
+	// when anything above it changes height (the details, the filter chips), so it is re-measured as the page resizes.
+	const phone = useMediaQuery(PHONE_QUERY);
+	const [scrollMargin, setScrollMargin] = useState(0);
+	// The sort bar sticks to the top of the window on a phone, over the rows that scroll under it: a row brought into view
+	// by the keyboard is placed below it (scrollPaddingStart), and a screenful counts only the rows below it.
+	const capRef = useRef<HTMLDivElement>(null);
+	const [capH, setCapH] = useState(0);
+	useLayoutEffect(() => {
+		if (!phone) return;
+		const measure = (): void => {
+			const top = parentRef.current?.getBoundingClientRect().top;
+			if (top !== undefined) setScrollMargin(Math.round(top + window.scrollY));
+			setCapH(capRef.current?.offsetHeight ?? 0);
+		};
+		measure();
+		if (typeof ResizeObserver === "undefined") return;
+		const watch = new ResizeObserver(measure);
+		watch.observe(document.body);
+		return () => watch.disconnect();
+	}, [phone]);
+
+	// Two-line rows; a narrow list stacks the cost under them, so each row is measured.
+	const shared = {
 		count: sorted.length,
-		getScrollElement: () => parentRef.current,
-		// Two-line rows; a narrow list stacks the cost under them, so each row is measured.
 		estimateSize: () => 62,
 		getItemKey,
 		gap: 2,
 		paddingStart: 8,
 		paddingEnd: 24,
 		overscan: 12,
+	};
+	// Both hooks always run (hooks cannot be conditional); only the one in use observes anything.
+	const inList = useVirtualizer<HTMLDivElement, Element>({
+		...shared,
+		enabled: !phone,
+		getScrollElement: () => parentRef.current,
 	});
+	const inPage = useWindowVirtualizer<Element>({
+		...shared,
+		enabled: phone,
+		scrollMargin,
+		scrollPaddingStart: capH,
+	});
+	const virtualizer = phone ? inPage : inList;
+
+	// The row the arrow keys are on, by hash (an index would slide to another row when a live record arrives at the top).
+	// Until a key or a click sets one: the open row, else the first.
+	const [activeHash, setActiveHash] = useState<string | null>(null);
+	const activeIndex = useMemo(
+		() => resolveActiveIndex(sorted, activeHash, props.selected),
+		[sorted, activeHash, props.selected],
+	);
+	const activeRow = sorted[activeIndex];
+
+	// The active row must be RENDERED to be named (aria-activedescendant) and shown. While the list holds focus, a sort,
+	// filter or live insert that moves it scrolls it back into the virtualiser's window.
+	const listFocused = (): boolean =>
+		parentRef.current !== null && document.activeElement === parentRef.current;
+	// biome-ignore lint/correctness/useExhaustiveDependencies: re-run when the active row's index or the rows change
+	useEffect(() => {
+		if (activeRow !== undefined && listFocused()) virtualizer.scrollToIndex(activeIndex);
+	}, [activeIndex, sorted]);
+	// And when focus comes back by keyboard (Tab), the active row is scrolled in first. Only keyboard focus: a mouse
+	// click also focuses the list, and scrolling under the pointer before its click lands would open another row.
+	const onFocus = (e: React.FocusEvent<HTMLDivElement>): void => {
+		if (e.target !== e.currentTarget || activeRow === undefined) return;
+		if (e.currentTarget.matches(":focus-visible")) virtualizer.scrollToIndex(activeIndex);
+	};
+
+	const moveTo = (index: number): void => {
+		const row = sorted[index];
+		if (row === undefined) return;
+		setActiveHash(row.hash);
+		virtualizer.scrollToIndex(index);
+	};
+
+	const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>): void => {
+		// Leave the browser's and the system's chords alone (Cmd+Home, Alt+Arrow).
+		if (e.ctrlKey || e.metaKey || e.altKey) return;
+		if (e.key === "Enter" || e.key === " ") {
+			// Opens the row the arrows are on: moving never opens it, so arrowing does not fire the inspector per key.
+			if (activeRow === undefined) return;
+			e.preventDefault();
+			props.onOpen(activeRow, true);
+			return;
+		}
+		// A screenful by the rows the virtualiser has MEASURED, not an estimate: under 560px rows stack and wrap and are far
+		// taller than a desktop row, so a fixed estimate made PageUp and PageDown skip rows.
+		// On a phone the page is the scroller (the list flows in it), so the screenful is the window's, below the sticky
+		// sort bar.
+		const el = parentRef.current;
+		const page = phone
+			? pageSizeFromItems(
+					virtualizer.getVirtualItems(),
+					window.scrollY + capH,
+					window.innerHeight - capH,
+				)
+			: el
+				? pageSizeFromItems(virtualizer.getVirtualItems(), el.scrollTop, el.clientHeight)
+				: 1;
+		const next = nextRowIndex(activeIndex, e.key, sorted.length, page);
+		if (next === null) return;
+		e.preventDefault();
+		moveTo(next);
+	};
+
+	// Focus returns to the list, on the row the inspector showed, when the inspector closes.
+	const restore = props.restoreFocus ?? null;
+	// A request already held when this list mounted (the view was switched away and back) is old: not acted on.
+	const handled = useRef(restore?.n);
+	// biome-ignore lint/correctness/useExhaustiveDependencies: runs once per restore request (n), not per render
+	useEffect(() => {
+		if (restore === null || restore.n === handled.current) return;
+		handled.current = restore.n;
+		const i = sorted.findIndex((r) => r.hash === restore.hash);
+		if (i >= 0) moveTo(i);
+		parentRef.current?.focus({ preventScroll: true });
+	}, [restore?.n]);
 
 	const sortBy = (key: SortKey): void => {
 		if (key === sortKey) setDesc(!desc);
@@ -212,6 +378,7 @@ export function AuditTable(props: {
 		}
 	};
 
+	const items = virtualizer.getVirtualItems();
 	const state = listState({
 		phase: props.phase,
 		chain: props.chain,
@@ -221,7 +388,7 @@ export function AuditTable(props: {
 
 	return (
 		<>
-			<div className="ut-cap">
+			<div className="ut-cap" ref={capRef}>
 				<span className="lead">Sort</span>
 				{SORTS.map((s) => (
 					<button
@@ -240,7 +407,25 @@ export function AuditTable(props: {
 					</button>
 				))}
 			</div>
-			<div ref={parentRef} className="ut-list">
+			<div
+				ref={parentRef}
+				className="ut-list"
+				// The one tab stop of the list, and only when there are rows to move over. The rows are options the list
+				// names with aria-activedescendant; a row the virtualiser has not rendered cannot be named, so none is.
+				{...(state === "rows"
+					? {
+							role: "listbox",
+							tabIndex: 0,
+							"aria-label": "Audit records",
+							"aria-activedescendant":
+								activeRow !== undefined && items.some((v) => v.index === activeIndex)
+									? rowDomId(activeRow.hash)
+									: undefined,
+							onKeyDown,
+							onFocus,
+						}
+					: {})}
+			>
 				{state !== "rows" ? (
 					<Empty
 						state={state}
@@ -249,29 +434,31 @@ export function AuditTable(props: {
 					/>
 				) : (
 					<div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
-						{virtualizer.getVirtualItems().map((item) => {
+						{items.map((item) => {
 							const row = sorted[item.index] as LedgerRow;
-							const sel = props.selected === row.hash;
 							return (
-								<button
-									type="button"
+								<AuditRow
 									// The event hash, unique on the chain: an id can repeat, and duplicate keys drop or duplicate rows.
 									key={row.hash}
-									data-index={item.index}
-									ref={virtualizer.measureElement}
-									onClick={() => props.onOpen(row)}
-									aria-current={sel ? "true" : undefined}
-									className={`ut-row${sel ? " sel" : ""}${props.liveIds?.has(row.hash) ? " fresh" : ""}`}
+									row={row}
+									index={item.index}
+									setSize={sorted.length}
+									active={item.index === activeIndex}
+									selected={props.selected === row.hash}
+									fresh={props.liveIds?.has(row.hash) === true}
+									measure={virtualizer.measureElement}
+									onClick={() => {
+										setActiveHash(row.hash);
+										props.onOpen(row, false);
+									}}
 									style={{
 										position: "absolute",
 										top: 0,
 										left: 8,
 										right: 8,
-										transform: `translateY(${item.start}px)`,
+										transform: `translateY(${item.start - virtualizer.options.scrollMargin}px)`,
 									}}
-								>
-									<Row row={row} />
-								</button>
+								/>
 							);
 						})}
 					</div>
@@ -283,8 +470,12 @@ export function AuditTable(props: {
 						? `${props.total.toLocaleString()} ${props.total === 1 ? "record" : "records"}`
 						: `${sorted.length.toLocaleString()} of ${props.total.toLocaleString()} records`}
 				</span>
+				<span>{UT_KEY}</span>
 				<span>times in UTC</span>
 			</div>
 		</>
 	);
 }
+
+/** One ledger row's body as the list draws it, exported so its marks can be rendered in a test. */
+export const Row = RowBody;
