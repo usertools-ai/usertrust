@@ -304,6 +304,7 @@ describe("cloud OpenAI chat streams ask for usage", () => {
 			["a host that only ends with the name", "https://evilapi.openai.com.test/v1"],
 			["a userinfo trick", "https://api.openai.com@evil.test/v1"],
 			["a subdomain", "https://eu.api.openai.com/v1"],
+			["a plain http address", "http://api.openai.com/v1"],
 			["Azure OpenAI", "https://example.openai.azure.com/openai/v1"],
 			["a client with no readable baseURL", null],
 		];
