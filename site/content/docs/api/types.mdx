@@ -19,7 +19,7 @@ interface TrustOpts {
   /** @deprecated Proxy API key. Unused because proxy throws. */
   key?: string;
   budget?: number;
-  /** Accepted, but currently not applied: the config file's tier is used. */
+  /** Overrides the config file's tier; policy rules that match on `tier` are evaluated at it. */
   tier?: string;
   /** PII enforcement override: overrides pii in the config file. */
   pii?: TrustConfig["pii"] | undefined;

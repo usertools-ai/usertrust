@@ -195,7 +195,11 @@ export interface TrustOpts {
 	key?: string;
 	/** Token budget override. */
 	budget?: number;
-	/** Tier. Accepted, but currently not applied: the config file's `tier` is used. */
+	/**
+	 * Tier override: overrides `tier` in the config file (`"free" | "mini" | "pro" | "mega" | "ultra"`, see
+	 * `TrustConfigSchema.tier`). It is the tier policy rules that match on `tier` are evaluated at. Any
+	 * other value is refused when the client is built.
+	 */
 	tier?: string;
 	/**
 	 * PII enforcement override: overrides `pii` in the config file
@@ -297,6 +301,7 @@ export const TRUST_OPTS_KEYS: Readonly<Record<keyof TrustOpts, true>> = {
  */
 const CONFIG_OVERRIDE_KEYS = [
 	"budget",
+	"tier",
 	"pii",
 	"parentUserId",
 	"scope",
@@ -309,9 +314,9 @@ const ENUM_OVERRIDE_KEYS = [
 
 /**
  * Accepted (no refusal) but never advertised in a refusal's list: `proxy` and
- * `key` are deprecated, and `tier` is declared but not currently applied.
+ * `key` are deprecated.
  */
-const UNADVERTISED_OPTS = new Set(["proxy", "key", "tier"]);
+const UNADVERTISED_OPTS = new Set(["proxy", "key"]);
 
 /**
  * The options that override config-file values, ready to spread over the file's
