@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **The TigerBeetle client a project resolves can be read, and a test holds it to the server release.** `resolvedClientVersion(projectRoot)` reads the `tigerbeetle-node` version that the project's installed `usertrust` loads, never the calling process's copy, because TigerBeetle refuses a client newer than its server. Node resolves the client from `usertrust`'s real path, so the reader finds the first `usertrust` the project can see, follows a symlink (a pnpm install), and looks in that directory's `node_modules` and each parent's, as Node does; without an installed `usertrust` it reads what the project directory itself would find. New tests fail if core's `tigerbeetle-node` is a range instead of an exact version, or if the server release CI downloads differs from it. Nothing a user runs changes.
+- **A `--tx` receipt no longer prints `* VERIFIED *` for a chain that is only consistent with itself.** The verdict line reads `* VERIFIED *` only when the Merkle row is `INCLUSION VERIFIED` (an anchor covers the transaction and a key is pinned). Otherwise a chain that checks out reads `CHAIN INTACT, NOT ANCHORED`, which is also what sits beside an unanchored Merkle row. The footer's date row is now `Checked`, not `Verified`. `usertrust-verify --tx` exit codes are unchanged.
 
 ### Removed
 

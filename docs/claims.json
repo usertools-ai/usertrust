@@ -508,6 +508,31 @@
 			"pending": "no test diffs two exports across an anchored-over rewrite"
 		},
 		{
+			"id": "receipt-verdict-needs-an-anchor",
+			"kind": "guarantee",
+			"claim": "A --tx receipt's verdict reads VERIFIED only when its Merkle row is INCLUSION VERIFIED against an anchor and a pinned key; a chain that is merely consistent reads CHAIN INTACT, NOT ANCHORED.",
+			"statements": [
+				{
+					"file": "packages/verify/README.md",
+					"text": "The receipt's verdict line reads `* VERIFIED *` only when its Merkle row is `INCLUSION VERIFIED`, which needs an anchor that covers the transaction and a pinned key. A chain that checks out without one reads `CHAIN INTACT, NOT ANCHORED`."
+				},
+				{
+					"file": "CHANGELOG.md",
+					"text": "- **A `--tx` receipt no longer prints `* VERIFIED *` for a chain that is only consistent with itself.** The verdict line reads `* VERIFIED *` only when the Merkle row is `INCLUSION VERIFIED` (an anchor covers the transaction and a key is pinned). Otherwise a chain that checks out reads `CHAIN INTACT, NOT ANCHORED`, which is also what sits beside an unanchored Merkle row. The footer's date row is now `Checked`, not `Verified`. `usertrust-verify --tx` exit codes are unchanged."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/verify/tests/receipt-verdict.test.ts",
+					"test": "a chain that is consistent but unanchored reads CHAIN INTACT, NOT ANCHORED, never VERIFIED"
+				},
+				{
+					"file": "packages/verify/tests/receipt-verdict.test.ts",
+					"test": "a Merkle row of INCLUSION VERIFIED, reached against a pinned key, reads * VERIFIED *"
+				}
+			]
+		},
+		{
 			"id": "sample-output",
 			"kind": "guarantee",
 			"claim": "The documented sample line is what usertrust-verify prints for a clean unanchored vault.",
