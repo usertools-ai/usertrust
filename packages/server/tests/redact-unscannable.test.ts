@@ -824,8 +824,14 @@ describe("internalErrorLine reads the original and the sanitized text, and redac
 				const once = regexWork(() => read(unit.repeat(2_000)));
 				const twice = regexWork(() => read(unit.repeat(4_000)));
 				expect(once.calls, `${name} ${unit}: the counter saw nothing`).toBeGreaterThan(1_000);
-				expect(twice.calls / once.calls, `${name} ${JSON.stringify(unit)} calls`).toBeLessThanOrEqual(2.5);
-				expect(twice.chars / once.chars, `${name} ${JSON.stringify(unit)} chars`).toBeLessThanOrEqual(2.5);
+				expect(
+					twice.calls / once.calls,
+					`${name} ${JSON.stringify(unit)} calls`,
+				).toBeLessThanOrEqual(2.5);
+				expect(
+					twice.chars / once.chars,
+					`${name} ${JSON.stringify(unit)} chars`,
+				).toBeLessThanOrEqual(2.5);
 			}
 		}
 	}, 120_000);
