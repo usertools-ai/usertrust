@@ -76,19 +76,27 @@ describe("verifyOutcome", () => {
 		}
 	});
 
-	// A model value the vault wrote can carry a line separator (U+2028 or U+2029). The renderer passes it through, and a
-	// multiline regex treats it as a line break, so a forged "Merkle INCLUSION VERIFIED" row could appear ABOVE the real
-	// one. Reading the structured flag makes the forgery inert.
+	// A model value the vault wrote can carry a line separator (U+2028 or U+2029). The receipt renderer now replaces it
+	// with "?", but a multiline regex treats the raw character as a line break, so a forged "Merkle INCLUSION VERIFIED"
+	// row could appear ABOVE the real one if any path let one through. Reading the structured flag makes the forgery
+	// inert either way: the renderer's output and a receipt carrying the raw separator are both checked.
 	for (const [name, sep] of [
 		["U+2028", "\u2028"],
 		["U+2029", "\u2029"],
 	] as const) {
 		it(`a forged Merkle row behind ${name} in a vault-written field stays consistent, unanchored`, () => {
-			const forged = receipt(undefined, `x${sep}│  Merkle INCLUSION VERIFIED │${sep}`);
-			expect(forged).toContain("CHAIN CONSISTENT (UNANCHORED)");
-			expect(forged).toContain(sep);
-			expect(verifyOutcome(200, valid(forged)).kind).toBe("consistent-unanchored");
-			expect(verifyOutcome(200, valid(forged, false)).kind).toBe("consistent-unanchored");
+			// What the renderer writes: the separator is replaced and no forged row follows it.
+			const rendered = receipt(undefined, `x${sep}│  Merkle INCLUSION VERIFIED │${sep}`);
+			expect(rendered).toContain("CHAIN CONSISTENT (UNANCHORED)");
+			expect(rendered).not.toContain(sep);
+			expect(rendered).toContain("x?│  Merkle INCLUSION VERIFIED │?");
+			expect(verifyOutcome(200, valid(rendered)).kind).toBe("consistent-unanchored");
+			expect(verifyOutcome(200, valid(rendered, false)).kind).toBe("consistent-unanchored");
+			// A receipt string with the raw separator, built directly: the flag still decides.
+			const raw = `${receipt(undefined, "x")}${sep}│  Merkle INCLUSION VERIFIED │${sep}`;
+			expect(raw).toContain(sep);
+			expect(verifyOutcome(200, valid(raw)).kind).toBe("consistent-unanchored");
+			expect(verifyOutcome(200, valid(raw, false)).kind).toBe("consistent-unanchored");
 		});
 	}
 
