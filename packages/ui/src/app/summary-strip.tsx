@@ -8,13 +8,16 @@ import { budgetAsOf, budgetDisplay, budgetSourceWord } from "../shared/budget-di
 import {
 	ANCHOR_VERIFY_COMMAND,
 	anchorView,
+	CHAINED_TITLE,
 	chainStatus,
+	NOT_ANCHORED_NOTE,
 	verifiedAsOf,
 	windowNotice,
 } from "../shared/display.js";
 import { formatUsd, formatUsdTotal, formatUt, middleTruncate, UT_KEY } from "../shared/format.js";
 import { KIT_MARK_URL, KIT_TIMEOUT_MS } from "../shared/kit.js";
 import type { LiveState } from "./store.js";
+import { useNow } from "./use-now.js";
 
 const LIVE_LABEL: Record<LiveState, string> = {
 	connecting: "connecting",
@@ -188,12 +191,21 @@ function SpendFact(props: { spentUt: number }): React.JSX.Element {
 	);
 }
 
+/**
+ * The Budget fact. A controller's record is a file written at one moment, so its age is shown against the clock (which
+ * ticks while the page is open), and past the freshness bound the source word is `recorded`, never `enforced`. The
+ * provenance sentence calls such a budget "enforced", so for a controller's record the tooltip is the exact time
+ * instead of that sentence.
+ */
 export function BudgetFact(props: { s: SummaryPayload }): React.JSX.Element {
 	const { s } = props;
+	const now = useNow();
 	const budget = budgetDisplay(s);
-	const word = budgetSourceWord(s.budgetSource);
+	const word = budgetSourceWord(s.budgetSource, s.budgetWrittenAt, now);
+	const asOf = budgetAsOf(s, now);
+	const title = asOf.isRecord ? (asOf.title ?? undefined) : s.budgetProvenance;
 	return (
-		<div className="ut-fact budget" title={s.budgetProvenance}>
+		<div className="ut-fact budget" title={title}>
 			<b>
 				Budget
 				<span className="ut-mark" data-tone={word.tone}>
@@ -234,13 +246,16 @@ export function BudgetFact(props: { s: SummaryPayload }): React.JSX.Element {
 							</span>
 						</>
 					)}
-					<span className="ut-why">{budgetAsOf(s)}</span>
+					<span className="ut-why" title={asOf.title ?? undefined}>
+						{asOf.text}
+					</span>
 				</>
 			) : (
 				<>
 					<span className="v na">no remaining figure</span>
 					<span className={`ut-why${s.budgetSource === "unreadable" ? " info" : ""}`}>
-						{s.budgetProvenance.replace(/^unknown: /, "")}
+						{/* A controller's record with no usable figure still must not call itself "enforced" once stale. */}
+						{asOf.isRecord ? asOf.text : s.budgetProvenance.replace(/^unknown: /, "")}
 					</span>
 				</>
 			)}
@@ -344,11 +359,16 @@ export function SummaryStrip(props: {
 				</div>
 				<div className="ut-fact">
 					<b>Integrity</b>
+					{/* "chained", never "verified": this is the hash links re-checked by the dashboard, not an explicit,
+					    anchored check. Without an anchor file it says so under the pill. */}
 					{status === "verified" && (
-						<span className="ut-pill" data-tone="approve">
-							<i />
-							verified
-						</span>
+						<>
+							<span className="ut-pill" data-tone="approve" title={CHAINED_TITLE}>
+								<i />
+								chained
+							</span>
+							{s.anchorFile !== "present" && <span className="ut-sub">{NOT_ANCHORED_NOTE}</span>}
+						</>
 					)}
 					{status === "broken" && (
 						<span className="ut-pill" data-tone="stakes">

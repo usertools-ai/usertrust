@@ -2,7 +2,14 @@
 // Copyright 2026 Usertools, Inc.
 
 import { describe, expect, it } from "vitest";
-import { budgetAsOf, budgetDisplay, budgetSourceWord } from "../src/shared/budget-display.js";
+import {
+	BUDGET_RECORD_FRESH_MS,
+	budgetAsOf,
+	budgetDisplay,
+	budgetRecordAge,
+	budgetSourceWord,
+	formatRecordAge,
+} from "../src/shared/budget-display.js";
 
 /** What the summary strip shows for the budget: an UNKNOWN budget has no remaining figure at all. */
 describe("budgetDisplay", () => {
@@ -98,39 +105,152 @@ describe("budgetDisplay", () => {
 	});
 });
 
-describe("budgetSourceWord", () => {
-	it("only a governor's record reads as enforced; a config budget is unconfirmed; the rest are unknown", () => {
-		expect(budgetSourceWord("governor")).toEqual({ word: "enforced", tone: "ink" });
-		expect(budgetSourceWord("config")).toEqual({ word: "config · unconfirmed", tone: "info" });
-		for (const source of ["several", "unreadable", "unpublished"] as const)
-			expect(budgetSourceWord(source)).toEqual({ word: "unknown", tone: "body" });
+const WRITTEN = "2026-11-02T23:33:00.000Z";
+const T0 = Date.parse(WRITTEN);
+const SEC = 1_000;
+const MIN = 60 * SEC;
+const HOUR = 60 * MIN;
+const DAY = 24 * HOUR;
+
+describe("BUDGET_RECORD_FRESH_MS", () => {
+	it("is the ruling's bound: 15 minutes", () => {
+		expect(BUDGET_RECORD_FRESH_MS).toBe(15 * MIN);
 	});
 });
 
-/** The line under a known budget: a governor's record says when it was written, with its year. */
-describe("budgetAsOf", () => {
-	it("red-first (MM-DD only): a record from an earlier year shows its year, so it never reads as current", () => {
-		const line = budgetAsOf({
-			budgetSource: "governor",
-			budgetWrittenAt: "2025-10-12T21:58:00.000Z",
-			budgetProvenance: "P",
+/** The age in words: never negative, never a clock time. */
+describe("formatRecordAge", () => {
+	it.each([
+		["0 s", 0, "just now"],
+		["59 s", 59 * SEC, "just now"],
+		["60 s", 60 * SEC, "1 min ago"],
+		["12 min", 12 * MIN, "12 min ago"],
+		["15 min", 15 * MIN, "15 min ago"],
+		["59 min 59 s", 59 * MIN + 59 * SEC, "59 min ago"],
+		["1 h exactly", HOUR, "1 h ago"],
+		["1 h 5 min", HOUR + 5 * MIN, "1 h 5 min ago"],
+		["23 h 59 min", 23 * HOUR + 59 * MIN, "23 h 59 min ago"],
+		["1 day", DAY, "1 day ago"],
+		["2 days", 2 * DAY, "2 days ago"],
+		["a negative age (clock skew)", -5 * MIN, "just now"],
+	])("%s reads %s", (_n, ms, expected) => {
+		expect(formatRecordAge(ms)).toBe(expected);
+	});
+});
+
+describe("budgetRecordAge", () => {
+	it.each([
+		["0 s", 0, true, "recorded just now"],
+		["59 s", 59 * SEC, true, "recorded just now"],
+		["12 min", 12 * MIN, true, "recorded 12 min ago"],
+		["exactly 15 min is still fresh", 15 * MIN, true, "recorded 15 min ago"],
+		["15 min + 1 s is stale", 15 * MIN + SEC, false, "recorded 15 min ago"],
+		["1 h 5 min", HOUR + 5 * MIN, false, "recorded 1 h 5 min ago"],
+		["2 days", 2 * DAY, false, "recorded 2 days ago"],
+		["a record 1 min in the future (clock skew)", -MIN, true, "recorded just now"],
+		["a record exactly 15 min in the future", -15 * MIN, true, "recorded just now"],
+		["a record 15 min + 1 s in the future", -(15 * MIN + SEC), false, "recorded just now"],
+		["a record a day in the future", -DAY, false, "recorded just now"],
+	])("%s", (_n, age, fresh, line) => {
+		const got = budgetRecordAge(WRITTEN, T0 + age);
+		expect(got.fresh).toBe(fresh);
+		expect(got.line).toBe(line);
+		expect(got.exact).toBe("as of 2026-11-02 23:33Z");
+	});
+
+	it("a time that cannot be read is never fresh", () => {
+		expect(budgetRecordAge("not a time", T0)).toEqual({
+			fresh: false,
+			line: "recorded at a time that cannot be read",
+			exact: "not a time",
 		});
-		expect(line).toBe("published by the controller, as of 2025-10-12 21:58Z");
+	});
+});
+
+describe("budgetSourceWord", () => {
+	it("a controller's FRESH record reads as enforced", () => {
+		expect(budgetSourceWord("governor", WRITTEN, T0 + 12 * MIN)).toEqual({
+			word: "enforced",
+			tone: "ink",
+		});
+		expect(budgetSourceWord("governor", WRITTEN, T0 + 15 * MIN)).toEqual({
+			word: "enforced",
+			tone: "ink",
+		});
+	});
+
+	it("red-first (enforced forever): a record older than 15 minutes reads recorded, in the amber tone, never enforced", () => {
+		for (const age of [15 * MIN + SEC, HOUR + 5 * MIN, 2 * DAY])
+			expect(budgetSourceWord("governor", WRITTEN, T0 + age)).toEqual({
+				word: "recorded",
+				tone: "info",
+			});
+	});
+
+	it("a controller's record with no time, or one dated far in the future, cannot prove it is fresh", () => {
+		expect(budgetSourceWord("governor", null, T0).word).toBe("recorded");
+		expect(budgetSourceWord("governor", WRITTEN, T0 - DAY).word).toBe("recorded");
+	});
+
+	it("the other sources are unchanged whatever the clock says", () => {
+		for (const age of [0, 2 * DAY]) {
+			expect(budgetSourceWord("config", null, T0 + age)).toEqual({
+				word: "config · unconfirmed",
+				tone: "info",
+			});
+			for (const source of ["several", "unreadable", "unpublished"] as const)
+				expect(budgetSourceWord(source, null, T0 + age)).toEqual({ word: "unknown", tone: "body" });
+		}
+	});
+});
+
+/** The line under a known budget: a controller's record gives its age, with the exact UTC time as the tooltip. */
+describe("budgetAsOf", () => {
+	const record = {
+		budgetSource: "governor",
+		budgetWrittenAt: WRITTEN,
+		budgetProvenance: "the enforced budget, as of 2026-11-02T23:33:00.000Z",
+	} as const;
+
+	it("a fresh record: the age against now, the exact time in the tooltip", () => {
+		expect(budgetAsOf(record, T0 + 12 * MIN)).toEqual({
+			text: "recorded 12 min ago",
+			title: "as of 2026-11-02 23:33Z",
+			isRecord: true,
+		});
+	});
+
+	it("a stale record: the age, and the word enforced nowhere (not the provenance sentence either)", () => {
+		const got = budgetAsOf(record, T0 + HOUR + 5 * MIN);
+		expect(got).toEqual({
+			text: "recorded 1 h 5 min ago",
+			title: "as of 2026-11-02 23:33Z",
+			isRecord: true,
+		});
+		expect(JSON.stringify(got)).not.toContain("enforced");
+	});
+
+	it("a record from an earlier year shows its year in the tooltip, so it never reads as current", () => {
+		const got = budgetAsOf({ ...record, budgetWrittenAt: "2025-10-12T21:58:00.000Z" }, T0);
+		expect(got.title).toBe("as of 2025-10-12 21:58Z");
+		expect(got.text).toMatch(/^recorded \d+ days ago$/);
 	});
 
 	it("the date is the UTC instant's, even where an offset moves it into another year", () => {
-		const line = budgetAsOf({
-			budgetSource: "governor",
-			budgetWrittenAt: "2026-01-01T01:30:00+02:00",
-			budgetProvenance: "P",
-		});
-		expect(line).toBe("published by the controller, as of 2025-12-31 23:30Z");
+		const at = "2026-01-01T01:30:00+02:00";
+		expect(budgetAsOf({ ...record, budgetWrittenAt: at }, Date.parse(at)).title).toBe(
+			"as of 2025-12-31 23:30Z",
+		);
 	});
 
-	it.each([
-		["a config budget", "config", "2026-10-12T21:58:00.000Z"],
-		["a governor record with no time", "governor", null],
-	] as const)("%s shows its provenance sentence", (_n, budgetSource, budgetWrittenAt) => {
-		expect(budgetAsOf({ budgetSource, budgetWrittenAt, budgetProvenance: "P" })).toBe("P");
+	it("a controller's record with no time says so, and never calls the budget enforced", () => {
+		const got = budgetAsOf({ ...record, budgetWrittenAt: null }, T0);
+		expect(got).toEqual({ text: "recorded at an unknown time", title: null, isRecord: true });
+	});
+
+	it("a config budget shows its provenance sentence, unchanged", () => {
+		expect(
+			budgetAsOf({ budgetSource: "config", budgetWrittenAt: WRITTEN, budgetProvenance: "P" }, T0),
+		).toEqual({ text: "P", title: null, isRecord: false });
 	});
 });

@@ -33,22 +33,40 @@ function CopyHash(props: { hash: string }): React.JSX.Element {
 	);
 }
 
-function Verdict(props: { outcome: VerifyOutcome; delayMs: number }): React.JSX.Element {
+/**
+ * The verdict of an explicit check. Green `verified` only for a pass whose receipt is anchored; a pass without an
+ * anchor is `consistent, unanchored`, in the neutral colour of a routine state, because the chain agreeing with itself
+ * is what a log cut short and rewritten to match also does.
+ */
+function Verdict(props: { outcome: VerifyOutcome }): React.JSX.Element {
 	const { outcome } = props;
-	const style = { animationDelay: `${props.delayMs}ms` };
 	switch (outcome.kind) {
 		case "verified":
 			return (
-				<div className="ut-verdict" style={style}>
+				<div className="ut-verdict">
 					<span className="ut-pill" data-tone="approve">
 						<i />
 						verified
+					</span>
+					<span className="ut-why">Checked against an anchor recorded outside this vault.</span>
+				</div>
+			);
+		case "consistent-unanchored":
+			return (
+				<div className="ut-verdict">
+					<span className="ut-pill">
+						<i />
+						consistent, unanchored
+					</span>
+					<span className="ut-why">
+						The chain agrees with itself up to this record. With no anchor to check it against, a
+						log cut short and rewritten to match would read the same.
 					</span>
 				</div>
 			);
 		case "failed":
 			return (
-				<div className="ut-verdict" style={style}>
+				<div className="ut-verdict">
 					<span className="ut-pill" data-tone="stakes">
 						<i />
 						failed
@@ -58,7 +76,7 @@ function Verdict(props: { outcome: VerifyOutcome; delayMs: number }): React.JSX.
 			);
 		case "not-found":
 			return (
-				<div className="ut-verdict" style={style}>
+				<div className="ut-verdict">
 					<span className="ut-pill" data-tone="info">
 						<i />
 						not found
@@ -72,7 +90,7 @@ function Verdict(props: { outcome: VerifyOutcome; delayMs: number }): React.JSX.
 			);
 		case "request-failed":
 			return (
-				<div className="ut-verdict" style={style}>
+				<div className="ut-verdict">
 					<span className="ut-pill" data-tone="info">
 						<i />
 						not checked
@@ -81,6 +99,36 @@ function Verdict(props: { outcome: VerifyOutcome; delayMs: number }): React.JSX.
 				</div>
 			);
 	}
+}
+
+/**
+ * A check's result: the verdict first, then the receipt it rests on, so the verdict is read before the receipt. The
+ * live region is there before any result (`outcome` null), so the verdict is announced when it lands.
+ */
+export function VerifyResult(props: {
+	outcome: VerifyOutcome | null;
+	verdictRef?: React.Ref<HTMLDivElement>;
+}): React.JSX.Element {
+	const { outcome } = props;
+	const lines =
+		outcome === null || outcome.kind === "request-failed" ? [] : outcome.receipt.split("\n");
+	return (
+		<>
+			<div aria-live="polite" ref={props.verdictRef}>
+				{outcome !== null && <Verdict outcome={outcome} />}
+			</div>
+			{lines.length > 0 && (
+				<pre className="ut-receipt">
+					{lines.map((line, i) => (
+						// biome-ignore lint/suspicious/noArrayIndexKey: receipt lines are static per response and never reorder
+						<span key={i} className="ut-receipt-line" style={{ animationDelay: `${i * 26}ms` }}>
+							{`${line}\n`}
+						</span>
+					))}
+				</pre>
+			)}
+		</>
+	);
 }
 
 /**
@@ -109,7 +157,7 @@ export function RowPanel(props: {
 	const shown = heldFor(verify, row);
 	const closeRef = useRef<HTMLButtonElement>(null);
 	const panelRef = useRef<HTMLElement>(null);
-	const verdictRef = useRef<HTMLElement>(null);
+	const verdictRef = useRef<HTMLDivElement>(null);
 	const headingRef = useRef<HTMLHeadingElement>(null);
 
 	// Enter or Space on a row opens it here: focus goes to the heading (a tabindex of -1: reachable by script, not a tab
@@ -196,14 +244,13 @@ export function RowPanel(props: {
 	const tx = transferView(row);
 	const result = shown !== null && shown !== "loading" ? shown : null;
 
-	// The receipt and verdict land below the button, often below the panel's fold: bring them into view.
+	// The verdict lands below the button, often below the panel's fold, with the receipt under it: bring the verdict
+	// to the top of the view, the receipt following.
 	useEffect(() => {
 		if (result === null) return;
 		const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-		verdictRef.current?.scrollIntoView({ block: "end", behavior: reduce ? "auto" : "smooth" });
+		verdictRef.current?.scrollIntoView({ block: "start", behavior: reduce ? "auto" : "smooth" });
 	}, [result]);
-	const lines =
-		result !== null && result.kind !== "request-failed" ? result.receipt.split("\n") : [];
 
 	const body = (
 		<div className="ut-insp-in">
@@ -235,10 +282,10 @@ export function RowPanel(props: {
 					<span
 						className="ut-pill"
 						data-tone="approve"
-						title="hash chain verified up to this record"
+						title="every hash link up to this record is intact"
 					>
 						<i />
-						chain verified
+						chained up to here
 					</span>
 				) : (
 					<span className="ut-pill" data-tone="stakes">
@@ -344,8 +391,8 @@ export function RowPanel(props: {
 					</dd>
 				</dl>
 			</section>
-			<section className="ut-sec" ref={verdictRef}>
-				<div className="ut-lbl">Independent verification</div>
+			<section className="ut-sec">
+				<div className="ut-lbl">Explicit check</div>
 				{tx.kind === "transfer" ? (
 					<>
 						<span className="ut-why">
@@ -364,19 +411,7 @@ export function RowPanel(props: {
 				) : (
 					<span className="ut-why">No transfer id: there is no transaction to verify.</span>
 				)}
-				{lines.length > 0 && (
-					<pre className="ut-receipt">
-						{lines.map((line, i) => (
-							// biome-ignore lint/suspicious/noArrayIndexKey: receipt lines are static per response and never reorder
-							<span key={i} className="ut-receipt-line" style={{ animationDelay: `${i * 26}ms` }}>
-								{`${line}\n`}
-							</span>
-						))}
-					</pre>
-				)}
-				<div aria-live="polite">
-					{result !== null && <Verdict outcome={result} delayMs={lines.length * 26 + 150} />}
-				</div>
+				<VerifyResult outcome={result} verdictRef={verdictRef} />
 			</section>
 		</div>
 	);
@@ -419,8 +454,8 @@ export function InspectorHint(): React.JSX.Element {
 		<aside className="ut-insp" aria-label="transaction inspector">
 			<div className="ut-hint">
 				<b>Select a record</b>
-				Its call, its cost and its place on the chain show here, with an independent verification of
-				its receipt.
+				Its call, its cost and its place on the chain show here, with an explicit check of its
+				transaction and the receipt it prints.
 			</div>
 		</aside>
 	);

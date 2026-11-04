@@ -33,9 +33,9 @@ const SORTS: Array<{ key: SortKey; label: string }> = [
 ];
 
 /**
- * Each status's badge tone. Settling is normal, not a celebration: neutral. Green is earned by verification only
- * (the integrity mark). A Record, so a new status cannot fall into another's colour unnoticed. An ungoverned call is
- * amber: it ran unmetered, which an operator should see.
+ * Each status's badge tone. Settling is normal, not a celebration: neutral. Green is kept for the chain's integrity
+ * (the integrity pills) and an anchored check. A Record, so a new status cannot fall into another's colour unnoticed.
+ * An ungoverned call is amber: it ran unmetered, which an operator should see.
  */
 export const STATUS_TONE: Record<RowStatus, string | undefined> = {
 	settled: undefined,
@@ -80,7 +80,7 @@ function RowBody(props: { row: LedgerRow }): React.JSX.Element {
 					<span className="ut-rtitle">{row.model ?? row.kind}</span>
 				</span>
 				<span className="ut-meta">
-					{/* The description may be cut; the integrity mark after it never is (the banner says rows are marked). */}
+					{/* The description may be cut; an after-break mark after it never is (the banner says rows are marked). */}
 					<span className="txt">
 						<span className="m" title={row.ts}>
 							{formatUtc(row.ts)}
@@ -102,11 +102,12 @@ function RowBody(props: { row: LedgerRow }): React.JSX.Element {
 							<span className="none">no transfer</span>
 						)}
 					</span>
-					<Sep />
-					{row.integrity === "verified" ? (
-						<span className="ok">✓ verified</span>
-					) : (
-						<span className="bad">⚠ after break</span>
+					{/* No mark while the chain is intact: a tick on every row said nothing a reader could act on. */}
+					{row.integrity === "after-break" && (
+						<>
+							<Sep />
+							<span className="bad">⚠ after break</span>
+						</>
 					)}
 				</span>
 			</span>
