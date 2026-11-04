@@ -96,3 +96,13 @@ export function rowAccessibleName(row: LedgerRow): string {
 	if (row.integrity !== "verified") parts.push("after break");
 	return parts.join(", ");
 }
+
+/**
+ * Whether an open popover is on the page: a filter's choices or an explainer, each a `.ut-pop` rendered only while open,
+ * listening for Escape on the document. That Escape is the popover's: it closes, and the inspector stays. An expanded
+ * disclosure that is not a popover (the phone's Details or Filters toggle, `aria-expanded` but handling Escape only
+ * while focus is inside it) does not count, or Escape with Details open would close neither it nor the inspector.
+ */
+export function popoverOwnsEscape(doc: Pick<ParentNode, "querySelector">): boolean {
+	return doc.querySelector(".ut-pop") !== null;
+}

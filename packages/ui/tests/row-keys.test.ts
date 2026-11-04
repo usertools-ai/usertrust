@@ -12,6 +12,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { PersistedAuditEvent } from "usertrust";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { popoverOwnsEscape } from "../src/shared/row-nav.js";
 import { toLedgerRows } from "../src/shared/rows.js";
 
 // The components are .tsx files, which the tests' tsconfig (no `jsx`) cannot resolve statically: load them by a
@@ -173,8 +174,25 @@ describe("the inspector takes focus from the list", () => {
 
 	it("Escape belongs to an open popover first, in the capture phase, so one key does not do both", async () => {
 		const src = await source("row-panel.tsx");
-		expect(src).toContain(`document.querySelector('button[aria-expanded="true"]') !== null`);
+		expect(src).toContain("if (popoverOwnsEscape(document)) return;");
+		expect(src).not.toContain(`button[aria-expanded="true"]`);
 		expect(src).toContain('addEventListener("keydown", onKey, true)');
+	});
+
+	// A page stub: which selectors would match. The real popovers render a `.ut-pop` only while open; the phone's
+	// Details and Filters toggles are expanded buttons that render none.
+	const page = (...present: string[]) => ({
+		querySelector: (sel: string) => (present.includes(sel) ? ({} as Element) : null),
+	});
+
+	it("an open filter popover or explainer takes the first Escape: the inspector stays", () => {
+		expect(popoverOwnsEscape(page(".ut-pop", 'button[aria-expanded="true"]'))).toBe(true);
+	});
+
+	it("red-first (Details open, a record open, Escape did nothing): an expanded toggle that is not a popover does not take Escape, so the inspector closes", () => {
+		// The phone's Details disclosure is open (aria-expanded) but shows no popover; Escape must close the inspector.
+		expect(popoverOwnsEscape(page('button[aria-expanded="true"]'))).toBe(false);
+		expect(popoverOwnsEscape(page())).toBe(false);
 	});
 
 	it("the active row is scrolled back into the rendered window when keyboard focus returns, and when it moves while focused", async () => {

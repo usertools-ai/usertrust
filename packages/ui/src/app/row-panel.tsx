@@ -4,6 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import { costView, transferView, usageView } from "../shared/display.js";
 import { formatUtc, UT_KEY } from "../shared/format.js";
+import { popoverOwnsEscape } from "../shared/row-nav.js";
 import { JOB_TYPE_CAVEAT, type LedgerRow, statusOf } from "../shared/rows.js";
 import { type Held, heldFor, type VerifyOutcome, verifyOutcome } from "../shared/verify-view.js";
 import { STATUS_TONE } from "./audit-table.js";
@@ -133,8 +134,8 @@ export function RowPanel(props: {
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent): void => {
 			if (e.key === "Escape") {
-				// An open popover (a filter's choices, the anchor explainer) owns this Escape: it closes, the inspector stays.
-				if (document.querySelector('button[aria-expanded="true"]') !== null) return;
+				// An open popover (a filter's choices, an explainer) owns this Escape: it closes, the inspector stays.
+				if (popoverOwnsEscape(document)) return;
 				const active = document.activeElement;
 				const inside =
 					active === null ||
