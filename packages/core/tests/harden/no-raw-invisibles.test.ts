@@ -227,11 +227,11 @@ describe("no raw invisible or control characters in tracked text files", () => {
 			if (hits.length > 0) found.set(file, hits);
 		}
 		expect(censusProblems(found, ALLOWED_RAW, new Set(files))).toEqual([]);
-		// timing: 60 s budget for the whole tracked tree (about 1,100 files). The scan takes about 90 ms on an idle 14-core host;
-		// under a CPU burn of 5 busy loops per core it took 0.63-0.71 s (3 of 3 passed at the 5 s default). The per-character
-		// version it replaced took about 650 ms idle and over 5 s under the same burn (timed out 3 of 3), and once timed out
-		// on a loaded CI runner at the 5 s default.
-	}, 60_000);
+		// Measured when the scanner was rewritten to one native pass per file: about 90 ms on an idle 14-core host for the whole
+		// tracked tree (about 1,100 files); 0.63-0.71 s under a CPU burn of 5 busy loops per core (3 of 3 passed at the default
+		// timeout). The per-character version it replaced took about 650 ms idle and over 5 s under the same burn, and once timed
+		// out on a loaded CI runner. The default timeout stays: a scanner that got far slower should fail here.
+	});
 });
 
 describe("the scanner can see what it is meant to catch (positive controls)", () => {
