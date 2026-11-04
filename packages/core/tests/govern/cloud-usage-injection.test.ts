@@ -150,8 +150,15 @@ describe("cloud OpenAI chat streams ask for usage", () => {
 		return out;
 	}
 
+	/** The params the provider was called with; fails the test when it was never called. */
+	function sentParams(createFn: ReturnType<typeof makeStreamClient>["createFn"]) {
+		const first = createFn.mock.calls[0];
+		if (first === undefined) throw new Error("the provider was never called");
+		return first[0] as Record<string, unknown>;
+	}
+
 	function forwardedOptions(createFn: ReturnType<typeof makeStreamClient>["createFn"]) {
-		return (createFn.mock.calls[0]?.[0] as Record<string, unknown>).stream_options;
+		return sentParams(createFn).stream_options;
 	}
 
 	describe("api.openai.com", () => {
@@ -214,14 +221,14 @@ describe("cloud OpenAI chat streams ask for usage", () => {
 				usage: { prompt_tokens: 100, completion_tokens: 50 },
 			} as never);
 			await call(governed, baseParams({ stream: false }));
-			expect("stream_options" in (createFn.mock.calls[0]?.[0] as object)).toBe(false);
+			expect("stream_options" in sentParams(createFn)).toBe(false);
 			await destroy(governed);
 		});
 
 		it("does not inject when cloud.injectUsageOptions is false", async () => {
 			const { client, createFn } = makeStreamClient("never");
 			await run(client, baseParams(), { cloud: { injectUsageOptions: false } });
-			expect("stream_options" in (createFn.mock.calls[0]?.[0] as object)).toBe(false);
+			expect("stream_options" in sentParams(createFn)).toBe(false);
 		});
 
 		it("a provider error makes exactly one call and rethrows the original error", async () => {
@@ -257,10 +264,7 @@ describe("cloud OpenAI chat streams ask for usage", () => {
 
 		it("still contains the usage chunk when the caller asked for usage", async () => {
 			const { client } = makeStreamClient("when-asked");
-			const { chunks } = await run(
-				client,
-				baseParams({ stream_options: { include_usage: true } }),
-			);
+			const { chunks } = await run(client, baseParams({ stream_options: { include_usage: true } }));
 			expect(chunks).toHaveLength(3);
 		});
 	});
@@ -274,7 +278,10 @@ describe("cloud OpenAI chat streams ask for usage", () => {
 					yield { type: "response.output_text.delta", delta: "Hi" };
 					yield {
 						type: "response.completed",
-						response: { id: "r1", usage: { input_tokens: 100, output_tokens: 50, total_tokens: 150 } },
+						response: {
+							id: "r1",
+							usage: { input_tokens: 100, output_tokens: 50, total_tokens: 150 },
+						},
 					};
 				}
 				return gen();
@@ -312,7 +319,7 @@ describe("cloud OpenAI chat streams ask for usage", () => {
 			it(`${name}: sends the request as the caller wrote it`, async () => {
 				const { client, createFn } = makeStreamClient("never", { baseURL });
 				await run(client, baseParams());
-				expect("stream_options" in (createFn.mock.calls[0]?.[0] as object)).toBe(false);
+				expect("stream_options" in sentParams(createFn)).toBe(false);
 			});
 		}
 	});
