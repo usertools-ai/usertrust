@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import {
 	costByJobType,
@@ -11,6 +11,7 @@ import {
 	statTiles,
 	timeWindow,
 } from "../shared/aggregate.js";
+import { type ChartSummary, chartSummary } from "../shared/chart-summary.js";
 import {
 	formatUsd,
 	formatUsdAxis,
@@ -24,6 +25,53 @@ import { JOB_TYPE_CAVEAT, type LedgerRow } from "../shared/rows.js";
 import { BarList } from "./bar-list.js";
 
 type Granularity = "day" | "hour";
+
+/**
+ * The chart's figures as a table, and the button that shows it. Hidden, the table is still read by a screen reader
+ * (the chart's SVG is not); shown, it is there for anyone who cannot hover a 12px bar, a keyboard user included: the
+ * chart itself has no keyboard route. The button is a disclosure (`aria-expanded`, `aria-controls` the table).
+ */
+export function ChartTable(props: {
+	summary: ChartSummary;
+	shown: boolean;
+	onToggle(): void;
+}): React.JSX.Element {
+	const id = useId();
+	return (
+		<>
+			<div className="ut-chart-foot">
+				<button
+					type="button"
+					className="ut-btn"
+					aria-expanded={props.shown}
+					aria-controls={id}
+					onClick={props.onToggle}
+				>
+					{props.shown ? "Hide table" : "Show table"}
+				</button>
+			</div>
+			<table id={id} className={props.shown ? "ut-chart-table" : "ut-sr-only"}>
+				<caption>{props.summary.caption}</caption>
+				<thead>
+					<tr>
+						<th scope="col">Bucket</th>
+						<th scope="col">Cost (USD)</th>
+						<th scope="col">Cost (UT)</th>
+					</tr>
+				</thead>
+				<tbody>
+					{props.summary.rows.map((r) => (
+						<tr key={r.label}>
+							<th scope="row">{r.label}</th>
+							<td>{r.usd}</td>
+							<td>{r.ut}</td>
+						</tr>
+					))}
+				</tbody>
+			</table>
+		</>
+	);
+}
 
 function pad2(n: number): string {
 	return String(n).padStart(2, "0");
@@ -72,6 +120,7 @@ export function Trends(props: {
 	newestOf: number | undefined;
 }): React.JSX.Element {
 	const [granularity, setGranularity] = useState<Granularity>("day");
+	const [tableShown, setTableShown] = useState(false);
 	const series = useMemo(
 		() =>
 			spendOverTime(props.rows, granularity)
@@ -83,6 +132,10 @@ export function Trends(props: {
 				}))
 				.filter((b) => !Number.isNaN(b.t)),
 		[props.rows, granularity],
+	);
+	const summary = useMemo(
+		() => chartSummary(series, granularity, (t) => formatBucketUtc(t, granularity)),
+		[series, granularity],
 	);
 	const tiles = useMemo(() => statTiles(props.rows), [props.rows]);
 	const window = useMemo(() => timeWindow(props.rows), [props.rows]);
@@ -140,13 +193,15 @@ export function Trends(props: {
 			<div className="ut-card">
 				<div className="ut-card-h">
 					<span className="ut-tile-h">Cost over time · UTC</span>
-					<div className="ut-seg small" role="tablist" aria-label="bucket size">
+					{/* One chart, bucketed two ways: a toggle, not tabs (there is no panel to switch to). A fieldset would
+					    bring its own border and padding into a control that is styled as a segmented switch. */}
+					{/* biome-ignore lint/a11y/useSemanticElements: role="group" keeps the segmented look; a fieldset restyles it */}
+					<div className="ut-seg small" role="group" aria-label="Bucket size">
 						{(["day", "hour"] as const).map((g) => (
 							<button
 								key={g}
 								type="button"
-								role="tab"
-								aria-selected={granularity === g}
+								aria-pressed={granularity === g}
 								onClick={() => setGranularity(g)}
 							>
 								{g === "day" ? "By day" : "By hour"}
@@ -159,8 +214,16 @@ export function Trends(props: {
 						<b>No records in view</b>
 					</div>
 				) : (
-					<ResponsiveContainer width="100%" height={240}>
-						<BarChart data={series} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
+					// The container is the chart's image: the label states the series, and the table below lists every
+					// bucket (an image's children are not exposed, so the SVG is hidden and out of the tab order; the
+					// table's button is the keyboard's way to the figures).
+					<ResponsiveContainer width="100%" height={240} role="img" aria-label={summary.label}>
+						<BarChart
+							data={series}
+							margin={{ top: 4, right: 4, bottom: 0, left: 0 }}
+							aria-hidden="true"
+							tabIndex={-1}
+						>
 							<CartesianGrid stroke="var(--line)" vertical={false} />
 							<XAxis
 								dataKey="t"
@@ -208,6 +271,13 @@ export function Trends(props: {
 							/>
 						</BarChart>
 					</ResponsiveContainer>
+				)}
+				{series.length > 0 && (
+					<ChartTable
+						summary={summary}
+						shown={tableShown}
+						onToggle={() => setTableShown((s) => !s)}
+					/>
 				)}
 			</div>
 			<div className="ut-split">
