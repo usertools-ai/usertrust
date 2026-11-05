@@ -29,7 +29,6 @@ import WorkClaims from "./components/work-claims";
 import { fixtureState, loadFixture, verifiedFixtureState } from "./fixture-harness";
 import {
 	ADVISORY_NEVER_ALTERS_VERDICT,
-	ANCHOR_BINDING_RESOLVER_ASSERTED,
 	DELEGATION_POSTURE_SCOPE,
 	EQUIVOCATION_CAVEAT,
 	EQUIVOCATION_NON_GOAL,
@@ -632,7 +631,7 @@ test("AnchorEvidencePanels: nothing served renders nothing", () => {
 test("AnchorEvidencePanels: an unrecognizable anchorEvidence container renders as absent, not as a claim", () => {
 	const markup = html(
 		<AnchorEvidencePanels
-			anchorEvidence={{ rekor: "not-an-object", s3ObjectLock: "not-an-array" }}
+			anchorEvidence={{ s3ObjectLock: "not-an-array" }}
 			checks={verification({ anchorEvidence: PASSED }).checks}
 			rung="verified_checkpoint_history"
 		/>,
@@ -716,39 +715,6 @@ test("R7: the history claim NEVER renders without its equivocation gap, at any r
 	);
 	assert.ok(!textOf(failed).includes(HISTORY_WALK_PROVED));
 	assert.ok(!failed.includes('data-testid="history-equivocation-caveat"'));
-});
-
-test("AnchorEvidencePanels: a PASSED Rekor attachment carries R8's caveat; a FAILED one does not", () => {
-	const rekor = {
-		rekor: { artifactHash: "ab".repeat(32), log: { url: "https://log", logIndex: 1 } },
-	};
-	const passed = html(
-		<AnchorEvidencePanels
-			anchorEvidence={rekor}
-			checks={verification({ anchorEvidence: PASSED }).checks}
-			rung="verified_checkpoint_history"
-		/>,
-	);
-	assert.ok(passed.includes('data-anchor-standing="upheld"'));
-	assert.ok(passed.includes('data-testid="anchor-caveat"'));
-	assert.ok(
-		textOf(passed).includes(ANCHOR_BINDING_RESOLVER_ASSERTED),
-		"an upheld Rekor card carries R41 locally, not only on the masthead",
-	);
-
-	const failed = html(
-		<AnchorEvidencePanels
-			anchorEvidence={rekor}
-			checks={verification().checks}
-			rung="verified_checkpoint"
-		/>,
-	);
-	assert.ok(failed.includes('data-anchor-standing="not-upheld"'));
-	assert.ok(
-		!failed.includes('data-testid="anchor-caveat"'),
-		"no anchor claim, so nothing to caveat",
-	);
-	assert.ok(textOf(failed).includes("ANCHOR_INVALID"), "R10: the failed extension is NAMED");
 });
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,41 @@
+{
+	"version": "0.17.9",
+	"baseUrl": "https://github.com/tigerbeetle/tigerbeetle/releases/download",
+	"assets": {
+		"darwin-arm64": {
+			"file": "tigerbeetle-universal-macos.zip",
+			"entry": "tigerbeetle",
+			"sha256": "4e085eaffc66c2ed82e7f94a8137c468256d2fb0b35152ccf903cc6676c22940",
+			"bytes": 15191849,
+			"entryBytes": 43409408
+		},
+		"darwin-x64": {
+			"file": "tigerbeetle-universal-macos.zip",
+			"entry": "tigerbeetle",
+			"sha256": "4e085eaffc66c2ed82e7f94a8137c468256d2fb0b35152ccf903cc6676c22940",
+			"bytes": 15191849,
+			"entryBytes": 43409408
+		},
+		"linux-arm64": {
+			"file": "tigerbeetle-aarch64-linux.zip",
+			"entry": "tigerbeetle",
+			"sha256": "413994920fe48b04f5aa86895b7a1d9d98d14803b29d4e91d2a6d0098fff4ef2",
+			"bytes": 7089968,
+			"entryBytes": 17655912
+		},
+		"linux-x64": {
+			"file": "tigerbeetle-x86_64-linux.zip",
+			"entry": "tigerbeetle",
+			"sha256": "af71f2c0057e3b409bf79940fa94894b738187b0d4f1e711097bca15df5d8cd4",
+			"bytes": 7338512,
+			"entryBytes": 21234744
+		},
+		"win32-x64": {
+			"file": "tigerbeetle-x86_64-windows.zip",
+			"entry": "tigerbeetle.exe",
+			"sha256": "aaac96a69380b33a0e63f981635c24924d610f28c3f41637f9e57b8caa0e5e77",
+			"bytes": 8101136,
+			"entryBytes": 23698944
+		}
+	}
+}

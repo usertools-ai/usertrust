@@ -63,7 +63,7 @@ const EVENTS: Ev[] = [
 function stable(receipt: string): string {
 	return receipt
 		.split("\n")
-		.filter((l) => !l.includes("  Verified"))
+		.filter((l) => !l.includes("  Checked"))
 		.join("\n");
 }
 
@@ -112,6 +112,10 @@ describe("verifyTransaction over rotated segments", () => {
 		expect(r.valid).toBe(s.valid);
 		expect(r.errors).toEqual(s.errors);
 		expect(stable(r.receipt)).toBe(stable(s.receipt));
+		// The control for `stable`: it must actually remove the footer's date row, or the equality above compares live
+		// timestamps and flakes across a second boundary. A footer label renamed without this filter fails here, always.
+		expect(r.receipt).toContain("  Checked");
+		expect(stable(r.receipt)).not.toContain("  Checked");
 		// Spelled out, so the equality cannot pass on two equally partial readings.
 		expect(r.receipt).toContain("Event 5 of 6");
 		expect(r.receipt).toContain("velocity spike");

@@ -88,7 +88,9 @@ describe("verifyTransaction", () => {
 		expect(result.found).toBe(true);
 		expect(result.valid).toBe(true);
 		expect(result.errors).toHaveLength(0);
-		expect(result.receipt).toContain("VERIFIED");
+		// an unanchored vault: the chain is intact, and the receipt does not call that verified
+		expect(result.receipt).toContain("CHAIN INTACT, NOT ANCHORED");
+		expect(result.receipt).not.toContain("* VERIFIED *");
 		expect(result.receipt).toContain("SETTLED");
 		expect(result.receipt).toContain("tx-bbb");
 	});

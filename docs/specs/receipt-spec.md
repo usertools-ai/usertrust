@@ -1,5 +1,10 @@
 # Receipt Spec + ID Format — DRAFT v0.10 (usertrust drafts, the operator reviews)
 
+> **usertrust 5.5.0 and Rekor.** The `anchorEvidence.rekor` member and the `verified_anchored` rung below are reserved
+> for an external transparency anchor provided as a service. usertrust's open-source package never sets the member (a
+> test enforces it), and a receipt without it is not degraded. Its Rekor sink, Rekor verifier and `RekorReceipt` code,
+> and the `--sink-rekor`, `--rekor-receipts` and `--rekor-pubkey` options, were removed in 5.5.0.
+
 Status: **DRAFT v0.10** — the version-history block below is the authority;
 v0.9.2–v0.9.4 amendments were recorded inline before this bump, so the jump
 from the long-standing v0.6 title is history catching up, not versions

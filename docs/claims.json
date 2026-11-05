@@ -463,7 +463,7 @@
 				},
 				{
 					"file": "docs/anchoring.md",
-					"text": "| `--sink-url`, `--sink-rekor`, `command` | `info` — no probe is possible from here; verify the append-only property at the receiving system. |"
+					"text": "| `--sink-url`, `command` | `info` — no probe is possible from here; verify the append-only property at the receiving system. |"
 				},
 				{
 					"file": "docs/anchoring.md",
@@ -480,72 +480,6 @@
 					"test": "fails both probes in an ordinary writable store directory"
 				}
 			]
-		},
-		{
-			"id": "rekor-inclusion",
-			"kind": "guarantee",
-			"claim": "A Rekor receipt is verified offline: checkpoint signature, inclusion path, and binding to the anchor record; a SET is what attests integratedTime.",
-			"statements": [
-				{
-					"file": "docs/anchoring.md",
-					"text": "What ships now is the complete, tested verification path — receipt schema, > signed-note checkpoints, RFC 9162 inclusion, SET-verified attested time — plus a sink that works > against any log accepting these entries."
-				},
-				{
-					"file": "docs/anchoring.md",
-					"text": "Verification is offline and zero-dependency: the signed-note checkpoint is parsed and its ECDSA P-256 signature checked, inclusion is proven by an RFC 9162 index-based path walk, and the stored entry is bound to *your* record by payload hash and by decoded signature bytes."
-				},
-				{
-					"file": "docs/anchoring.md",
-					"text": "Receipts *without* a SET still prove inclusion, but fall back to operator-claimed time for freshness: an unsigned `integratedTime` is a number the party under audit could have chosen."
-				},
-				{
-					"file": "docs/anchoring.md",
-					"text": "**Checkpoint-replay caveat.** Offline verification proves the entry was included in the log — *at `integratedTime`* only when a SET vouches for that time — under a checkpoint signed by the pinned key."
-				},
-				{
-					"file": "packages/verify/README.md",
-					"text": "A verified receipt also makes `--max-anchor-age` measure against the log's attested `integratedTime` instead of the operator's own timestamp."
-				}
-			],
-			"proofs": [
-				{
-					"file": "packages/core/tests/harden/anchoring/rekor-verify.test.ts",
-					"test": "15. a tampered inclusion-path element"
-				},
-				{
-					"file": "packages/core/tests/harden/anchoring/rekor-verify.test.ts",
-					"test": "19. checkpoint signed by a key the auditor did not pin"
-				},
-				{
-					"file": "packages/core/tests/harden/anchoring/rekor-verify.test.ts",
-					"test": "12. entryBody signature is not the anchor record's signature"
-				},
-				{
-					"file": "packages/core/tests/harden/anchoring/rekor-verify.test.ts",
-					"test": "40. editing integratedTime alone now fails — the SET is the only signature over it"
-				},
-				{
-					"file": "packages/core/tests/harden/anchoring/rekor-verify.test.ts",
-					"test": "43. a receipt with NO SET proves inclusion and attests no time"
-				}
-			]
-		},
-		{
-			"id": "rekor-checkpoint-replay",
-			"kind": "caveat",
-			"claim": "Offline Rekor verification does not show the checkpoint is consistent with the log's current head.",
-			"statements": [
-				{
-					"file": "docs/anchoring.md",
-					"text": "Treat Rekor as an additional witness alongside an > append-only store, never as a replacement for one."
-				},
-				{
-					"file": "docs/anchoring.md",
-					"text": "It does **not** prove that checkpoint is consistent with the log's current head — a forked or rewound log would need a consistency proof against a checkpoint you fetched yourself."
-				}
-			],
-			"proofs": [],
-			"pending": "external: needs a live transparency log to fork or rewind"
 		},
 		{
 			"id": "bundle-is-operator-evidence",
@@ -572,6 +506,31 @@
 			],
 			"proofs": [],
 			"pending": "no test diffs two exports across an anchored-over rewrite"
+		},
+		{
+			"id": "receipt-verdict-needs-an-anchor",
+			"kind": "guarantee",
+			"claim": "A --tx receipt's verdict reads VERIFIED only when its Merkle row is INCLUSION VERIFIED against an anchor and a pinned key; a chain that is merely consistent reads CHAIN INTACT, NOT ANCHORED.",
+			"statements": [
+				{
+					"file": "packages/verify/README.md",
+					"text": "The receipt's verdict line reads `* VERIFIED *` only when its Merkle row is `INCLUSION VERIFIED`, which needs an anchor that covers the transaction and a pinned key. A chain that checks out without one reads `CHAIN INTACT, NOT ANCHORED`."
+				},
+				{
+					"file": "CHANGELOG.md",
+					"text": "- **A `--tx` receipt no longer prints `* VERIFIED *` for a chain that is only consistent with itself.** The verdict line reads `* VERIFIED *` only when the Merkle row is `INCLUSION VERIFIED` (an anchor covers the transaction and a key is pinned). Otherwise a chain that checks out reads `CHAIN INTACT, NOT ANCHORED`, which is also what sits beside an unanchored Merkle row. The footer's date row is now `Checked`, not `Verified`. `usertrust-verify --tx` exit codes are unchanged."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/verify/tests/receipt-verdict.test.ts",
+					"test": "a chain that is consistent but unanchored reads CHAIN INTACT, NOT ANCHORED, never VERIFIED"
+				},
+				{
+					"file": "packages/verify/tests/receipt-verdict.test.ts",
+					"test": "a Merkle row of INCLUSION VERIFIED, reached against a pinned key, reads * VERIFIED *"
+				}
+			]
 		},
 		{
 			"id": "sample-output",
@@ -920,7 +879,7 @@
 			"statements": [
 				{
 					"file": "packages/ui/README.md",
-					"text": "- **Inspector** — select a row to see its call, cost and chain fields, docked beside the list on a wide screen, and a one-click **Verify** that replays the independent `usertrust-verify` check and renders a thermal-receipt style result: verified, failed, or not found in any of the vault's audit segments."
+					"text": "- **Inspector** — select a row to see its call, cost and chain fields, docked beside the list on a wide screen, and a one-click **Verify** that runs the `usertrust-verify` check and renders a thermal-receipt style result under its verdict: verified (only when the receipt proves inclusion against an anchor), consistent, unanchored (the chain agrees with itself, with no anchor to check it against), failed, or not found in any of the vault's audit segments."
 				}
 			],
 			"proofs": [
@@ -931,6 +890,10 @@
 				{
 					"file": "packages/ui/tests/verify-endpoint.test.ts",
 					"test": "404s an unknown transaction"
+				},
+				{
+					"file": "packages/ui/tests/verify-view.test.ts",
+					"test": "a real receipt from this dashboard's own check (no anchor) reads consistent, unanchored, never verified"
 				}
 			]
 		},
@@ -1174,9 +1137,75 @@
 					"test": "emptying events.jsonl while .meta remains: the next append continues from the sidecar, and verification reports the gap"
 				}
 			]
+		},
+		{
+			"id": "verified-only-anchored-inclusion",
+			"kind": "guarantee",
+			"claim": "verifyTransaction's inclusionVerified is true only when the transaction's inclusion was proven against a verified anchor root, and the dashboard says \"verified\" only on that flag, never from the receipt text, so a vault-written field cannot make an unanchored pass read verified.",
+			"statements": [
+				{
+					"file": "CHANGELOG.md",
+					"text": "When the transaction is found, it is `true` only when its inclusion was proven against a verified anchor root (the receipt's `INCLUSION VERIFIED (anchor #n)`), and `false` otherwise."
+				},
+				{
+					"file": "CHANGELOG.md",
+					"text": "usertrust-ui says \"verified\" only for an explicit check that passed against an anchor; the CSV export's integrity value changes from `verified` to `chained`."
+				},
+				{
+					"file": "CHANGELOG.md",
+					"text": "The inspector's explicit check puts its verdict above the receipt, and says `verified` only when the verifier reports inclusion proven against an anchor (`inclusionVerified`); any other pass reads `consistent, unanchored`."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/harden/anchoring/anchor-corpus.test.ts",
+					"test": "30. happy paths: single anchor / full history / grown chain / post-rotation keyring → ANCHORED_VERIFIED"
+				},
+				{
+					"file": "packages/core/tests/harden/anchoring/anchor-corpus.test.ts",
+					"test": "1. F1 KILL: mutate anchored event + full re-chain + .meta rewrite → ANCHOR_MISMATCH/root-mismatch; --tx never prints INCLUSION VERIFIED"
+				},
+				{
+					"file": "packages/core/tests/harden/anchoring/inclusion-flag.test.ts",
+					"test": "a valid chain checked with NO anchor inputs: valid, and inclusionVerified false"
+				},
+				{
+					"file": "packages/core/tests/harden/anchoring/inclusion-flag.test.ts",
+					"test": "an anchored transaction whose inclusion proof holds, in a vault whose unanchored tail was edited: inclusionVerified false"
+				},
+				{
+					"file": "packages/core/tests/harden/anchoring/inclusion-flag.test.ts",
+					"test": "control: the same anchored transaction on the untouched vault: inclusionVerified true"
+				},
+				{
+					"file": "packages/ui/tests/verify-view.test.ts",
+					"test": "a real receipt from this dashboard's own check (no anchor) reads consistent, unanchored, never verified"
+				},
+				{
+					"file": "packages/ui/tests/verify-view.test.ts",
+					"test": "found, valid and the verifier proved inclusion against an anchor: verified"
+				},
+				{
+					"file": "packages/ui/tests/verify-view.test.ts",
+					"test": "only the boolean true counts: absent (an older server), false, or a look-alike value is unanchored"
+				},
+				{
+					"file": "packages/ui/tests/verify-view.test.ts",
+					"test": "the receipt TEXT never decides it: a genuine-looking INCLUSION VERIFIED row without the flag is unanchored"
+				},
+				{
+					"file": "packages/ui/tests/verify-view.test.ts",
+					"test": "a vault-written model carrying a forged Merkle row behind a line separator: the real check still reads unanchored"
+				}
+			]
 		}
 	],
 	"nonclaims": [
+		{
+			"file": "CHANGELOG.md",
+			"text": "the integrity column of an intact row now holds `chained` where it held `verified`; update any filter or script that matches the old value.",
+			"why": "a data-format note for readers of the CSV export, not a statement about the chain"
+		},
 		{
 			"file": "CHANGELOG.md",
 			"text": "Each of these statements is now listed in `docs/claims.json` with the test that proves it, and a test fails when the documentation states an integrity claim the list does not hold (see `docs/CLAIMS.md`). ",
