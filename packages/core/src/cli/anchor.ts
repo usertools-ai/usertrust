@@ -16,7 +16,8 @@
  * Spec: docs/superpowers/specs/2026-07-26-external-anchoring-design.md
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { createPublicKey } from "node:crypto";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import pc from "picocolors";
 import {
@@ -31,7 +32,7 @@ import {
 	type SinkConfig,
 } from "../audit/anchor.js";
 import { type DoctorReport, doctorFileSink, doctorS3Sink } from "../audit/anchor-doctor.js";
-import { parseAnchorsContent } from "../audit/anchor-verify.js";
+import { keyIdFromKeyObject, parseAnchorsContent } from "../audit/anchor-verify.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { CliOptions } from "./init.js";
 import { refuseStrayPositional, scrubForTerminal, toSafeJson, warnIfVaultLoose } from "./target.js";
@@ -307,7 +308,12 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 						toSafeJson({
 							command: "anchor init",
 							success: true,
-							data: { vaultId: identity.vaultId, keyId: identity.keyId, keyFile: writtenKeyFile },
+							data: {
+								vaultId: identity.vaultId,
+								keyId: identity.keyId,
+								keyFile: writtenKeyFile,
+								publicKeyPem,
+							},
 						}),
 					);
 					return;
@@ -331,6 +337,51 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 				console.log("     usertrust anchor now --sink-file /mnt/worm/anchors.jsonl");
 				console.log("     Deployment invariant: the identity that writes the vault has");
 				console.log("     append-only (no delete/overwrite) access to the store.");
+				return;
+			}
+			case "pubkey": {
+				// It prints THIS directory's vault key: a path argument must be refused, not
+				// ignored, or an operator could pin the wrong vault's key.
+				if (refuseStrayPositional("anchor pubkey", args.slice(1), json)) return;
+				const identity = readAnchorIdentity(root);
+				if (identity === null) {
+					throw new Error("No anchor identity here: run `usertrust anchor init`.");
+				}
+				const genesis = identity.keyHistory?.[0];
+				if (genesis === undefined) {
+					throw new Error(
+						"This anchor identity predates key history, so the genesis key is not recorded here.",
+					);
+				}
+				// identity.json is plain text inside the vault: never print it raw. Parse it as an
+				// Ed25519 key, rebuild the PEM from the parsed key, and require its keyId to match.
+				let publicKeyPem: string;
+				try {
+					const key = createPublicKey({
+						key: Buffer.from(genesis.publicKeySpki, "base64"),
+						format: "der",
+						type: "spki",
+					});
+					if (key.asymmetricKeyType !== "ed25519" || keyIdFromKeyObject(key) !== genesis.keyId) {
+						throw new Error("mismatch");
+					}
+					publicKeyPem = key.export({ type: "spki", format: "pem" }) as string;
+				} catch {
+					throw new Error(
+						"The genesis key recorded in identity.json is not a valid Ed25519 key for its keyId.",
+					);
+				}
+				if (json) {
+					console.log(
+						toSafeJson({
+							command: "anchor pubkey",
+							success: true,
+							data: { keyId: genesis.keyId, publicKeyPem },
+						}),
+					);
+					return;
+				}
+				process.stdout.write(publicKeyPem);
 				return;
 			}
 			case "now": {
@@ -619,9 +670,10 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 				return;
 			}
 			default: {
-				console.log(`Usage: usertrust anchor <init|now|status|export|export-bundle|doctor|rotate|resume>
+				console.log(`Usage: usertrust anchor <init|pubkey|now|status|export|export-bundle|doctor|rotate|resume>
 
   init          [--key-file <path>]     Mint identity + Ed25519 key (outside the vault)
+  pubkey        [--json]                Print the vault's genesis public key (PEM)
   now           [sink flags]            Snapshot, sign, mirror, publish
   status                                Last anchor, unanchored tail, outbox
   export        [--since <anchorSeq>]   Print mirror records (pull-mode shipping)

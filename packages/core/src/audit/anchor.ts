@@ -34,6 +34,8 @@ import {
 	existsSync,
 	constants as fsConstants,
 	fsyncSync,
+	linkSync,
+	lstatSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
@@ -181,6 +183,78 @@ function writeIdentityFile(rootDir: string, identity: AnchorIdentity): void {
 	renameSync(tmp, path);
 }
 
+/**
+ * Write the public-key copy beside a freshly made private key, without ever touching
+ * something that is not a stale public copy. Absent: create it exclusively. A regular
+ * file that parses as a PUBLIC key only: replace it with a temp file and an atomic swap (the
+ * directory entry changes, never follows a link or truncates through one). Anything else, a
+ * symlink, a private key, unreadable bytes, is left exactly as found. Returns the path
+ * written, or null when no copy was made.
+ */
+function writePublicKeyCopy(keyFile: string, publicKeyPem: string): string | null {
+	const path = publicKeyCopyPath(keyFile);
+	try {
+		let existing: ReturnType<typeof lstatSync> | null = null;
+		try {
+			existing = lstatSync(path);
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== "ENOENT") return null;
+		}
+		if (existing === null) {
+			writeFileSync(path, publicKeyPem, { mode: 0o644, flag: "wx" });
+			return path;
+		}
+		if (!existing.isFile()) return null;
+		const bytes = readFileSync(path);
+		createPublicKey(bytes);
+		let isPrivate = true;
+		try {
+			createPrivateKey(bytes);
+		} catch {
+			isPrivate = false;
+		}
+		if (isPrivate) return null;
+		const tmp = `${path}.new-${process.pid}-${randomUUID()}`;
+		writeFileSync(tmp, publicKeyPem, { mode: 0o644, flag: "wx" });
+		try {
+			renameSync(tmp, path);
+		} catch {
+			unlinkSync(tmp);
+			return null;
+		}
+		return path;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Create identity.json only if it does not exist: temp file + fsync + hard link (link(2)
+ * fails with EEXIST instead of replacing). Two concurrent inits cannot both succeed.
+ */
+function createIdentityFileExclusive(rootDir: string, identity: AnchorIdentity): void {
+	const path = join(anchorsDir(rootDir), "identity.json");
+	const tmp = `${path}.new-${process.pid}-${randomUUID()}`;
+	const fd = openSync(tmp, "wx", 0o600);
+	try {
+		writeSync(fd, JSON.stringify(identity, null, "\t"));
+		fsyncSync(fd);
+	} finally {
+		closeSync(fd);
+	}
+	try {
+		linkSync(tmp, path);
+	} finally {
+		// Best effort: once the link succeeded the identity is published, so a failure
+		// removing the temp name must neither undo the caller's work nor hide a lost race.
+		try {
+			unlinkSync(tmp);
+		} catch {
+			/* a stray temp name is harmless */
+		}
+	}
+}
+
 /** Persist the durable anchorSeq high-water (never decreases). */
 function bumpAnchorHighWater(rootDir: string, anchorSeq: number): void {
 	const identity = readAnchorIdentity(rootDir);
@@ -212,6 +286,15 @@ export function defaultKeyPath(vaultId: string): string {
 }
 
 /**
+ * `<name>.anchor.pem` -> `<name>.anchor.pub.pem`, beside the private key. Any other name
+ * gets `.pub` appended. Each branch is injective and the two cannot meet (one result ends
+ * in `.pem`, the other never does), so two key files in one directory never share a copy.
+ */
+export function publicKeyCopyPath(keyFile: string): string {
+	return keyFile.endsWith(".pem") ? `${keyFile.slice(0, -4)}.pub.pem` : `${keyFile}.pub`;
+}
+
+/**
  * Resolve a path to its canonical absolute form, realpath-ing the deepest
  * EXISTING ancestor so symlinked parents (macOS /var → /private/var) compare
  * equal even when the leaf doesn't exist yet.
@@ -234,6 +317,15 @@ function realResolve(p: string): string {
 	return suffix.length === 0 ? base : join(base, ...suffix);
 }
 
+/** Code on the error thrown when an identity already stands (an existing one, or a lost race). */
+export const ANCHOR_IDENTITY_EXISTS = "ANCHOR_IDENTITY_EXISTS";
+
+function identityExistsError(identityPath: string): Error {
+	return Object.assign(new Error(`Anchor identity already exists: ${identityPath}`), {
+		code: ANCHOR_IDENTITY_EXISTS,
+	});
+}
+
 /**
  * Mint the vault's anchor identity: Ed25519 keypair (private key OUTSIDE the
  * vault, mode 0600), `identity.json`, and an empty mirror file. Returns the
@@ -246,9 +338,7 @@ export function initAnchorIdentity(
 ): { identity: AnchorIdentity; publicKeyPem: string; keyFile: string } {
 	const dir = anchorsDir(rootDir);
 	const identityPath = join(dir, "identity.json");
-	if (existsSync(identityPath)) {
-		throw new Error(`Anchor identity already exists: ${identityPath}`);
-	}
+	if (existsSync(identityPath)) throw identityExistsError(identityPath);
 	const vaultId = randomUUID();
 	const { publicKey, privateKey } = generateKeyPairSync("ed25519");
 	const keyId = keyIdFromKeyObject(publicKey);
@@ -269,27 +359,83 @@ export function initAnchorIdentity(
 		throw new Error("Refusing to write the anchor private key inside the vault (AC-6.2)");
 	}
 	mkdirSync(keyDir, { recursive: true, mode: 0o700 });
-	writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }) as string, {
-		mode: 0o600,
-	});
-
-	mkdirPrivate(join(dir, "outbox"));
-	const identity: AnchorIdentity = {
-		v: 1,
-		vaultId,
-		keyId,
-		publicKeySpki,
-		createdAt: new Date().toISOString(),
-		keyHistory: [{ keyId, publicKeySpki }],
-	};
-	writeIdentityFile(rootDir, identity);
-	// Touch the mirror so "mirror file missing" (accidental loss / partial
-	// restore) is distinguishable from "fresh vault, no anchors yet".
-	const mirrorPath = join(dir, "anchors.jsonl");
-	if (!existsSync(mirrorPath)) {
-		writeFileSync(mirrorPath, "", { mode: 0o600 });
+	// Exclusive create: an existing file at this path is somebody's key (or another
+	// vault's). Overwriting it would silently destroy the only copy of that signer.
+	let keyFd: number;
+	try {
+		keyFd = openSync(keyFile, "wx", 0o600);
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+			throw new Error(`Refusing to overwrite an existing key file: ${keyFile}`);
+		}
+		throw err;
 	}
-	return { identity, publicKeyPem, keyFile };
+	// The file exists and is ours from here: a write that fails part-way (ENOSPC, EIO) must
+	// not leave a partial key behind, or every retry with this --key-file would refuse.
+	try {
+		// writeFileSync on the descriptor writes the WHOLE buffer (writeSync may write less).
+		writeFileSync(keyFd, privateKey.export({ type: "pkcs8", format: "pem" }) as string);
+		fsyncSync(keyFd);
+		closeSync(keyFd);
+	} catch (err) {
+		try {
+			closeSync(keyFd);
+		} catch {
+			/* already failing */
+		}
+		try {
+			unlinkSync(keyFile);
+		} catch {
+			/* never created */
+		}
+		throw err;
+	}
+	let createdIdentity: AnchorIdentity;
+	// From here until the identity is published, ANY failure removes the key this call just
+	// made (the exclusive create above proves it is ours): an orphaned key would make a
+	// retry with the same --key-file refuse as "existing", and nothing refers to it yet.
+	let pubCopy: string | null = null;
+	try {
+		// The public half sits beside the private key so it can be pinned or handed to a
+		// verifier without touching the secret. Best effort: the identity does not need it
+		// (`usertrust anchor pubkey` prints it again). `pubCopy` is null when nothing was
+		// written, so cleanup removes only what this call made.
+		pubCopy = writePublicKeyCopy(keyFile, publicKeyPem);
+		mkdirPrivate(join(dir, "outbox"));
+		// Touch the mirror so "mirror file missing" (accidental loss / partial restore) is
+		// distinguishable from "fresh vault, no anchors yet". Done BEFORE the identity is
+		// published, so nothing that can fail runs after publication; a leftover empty
+		// mirror from a failed attempt is harmless.
+		// Exclusive create: a concurrent winner may already have published and anchored,
+		// and a plain write would truncate the mirror it filled.
+		try {
+			writeFileSync(join(dir, "anchors.jsonl"), "", { mode: 0o600, flag: "wx" });
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+		}
+		const identity: AnchorIdentity = {
+			v: 1,
+			vaultId,
+			keyId,
+			publicKeySpki,
+			createdAt: new Date().toISOString(),
+			keyHistory: [{ keyId, publicKeySpki }],
+		};
+		createIdentityFileExclusive(rootDir, identity);
+		createdIdentity = identity;
+	} catch (err) {
+		for (const f of pubCopy === null ? [keyFile] : [keyFile, pubCopy]) {
+			try {
+				unlinkSync(f);
+			} catch {
+				/* never created */
+			}
+		}
+		// EEXIST: lost a race to a concurrent init, whose identity stands.
+		if ((err as NodeJS.ErrnoException).code === "EEXIST") throw identityExistsError(identityPath);
+		throw err;
+	}
+	return { identity: createdIdentity, publicKeyPem, keyFile };
 }
 
 // ── Signer resolution ──

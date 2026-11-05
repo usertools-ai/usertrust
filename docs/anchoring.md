@@ -28,8 +28,9 @@ aws s3 cp s3://audit-anchors/vault-a/anchors.jsonl - \
   | npx usertrust-verify .usertrust --anchors - --pubkey pinned-root.pem
 ```
 
-Run `usertrust anchor now` from cron/CI (it exits non-zero if the record was not delivered), or
-start the in-process scheduler via the SDK. Defaults: an anchor every **1000 events** or **60
+Run `usertrust anchor now` from cron/CI (it exits non-zero if the record was not delivered). Nothing
+in the CLI or `init` schedules it yet; the SDK's `createAnchorEmitter(...).start()` runs a scheduler
+inside your own process. Defaults for that scheduler: an anchor every **1000 events** or **60
 seconds**, whichever comes first — the gap to the live head (the *unanchored tail*) is protected
 only by internal chain consistency and is always reported, never hidden.
 
@@ -167,7 +168,8 @@ can't suppress it. One rule:
 
 That is a two-line CloudWatch metric filter on `PutObject` events, or a scheduled SIEM search on
 the ingest index. Writer-side, `usertrust anchor status` reports the unanchored tail, outbox
-depth, and a `degraded` flag; scheduled emitters also surface `lastEmitError`.
+depth, and a `degraded` flag; an emitter you start in your own process also surfaces `lastEmitError`.
+`usertrust anchor pubkey` prints the vault's genesis public key as PEM, for pinning with `--pubkey`.
 
 ## Auditor bundles
 
@@ -234,7 +236,7 @@ honest export of an earlier head exists. Push mode with the monitor rule above i
 
 The `external` signer keeps the private key off the vault host entirely: usertrust hands the
 backend the record's signing pre-image and gets a signature back. The key never touches disk, and
-`anchor init`'s PEM file is never created.
+`anchor init`'s private key file is never created.
 
 ```ts
 import { createAnchorEmitter, type AnchoringConfig } from "usertrust";

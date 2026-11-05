@@ -363,6 +363,7 @@ With [external anchoring](https://github.com/usertools-ai/usertrust/blob/master/
 
 ```bash
 usertrust anchor init                                     # once: mint identity, pin the key
+usertrust anchor pubkey > pinned-root.pem                 # the key to pin, any time later
 usertrust anchor now --sink-file /mnt/worm/anchors.jsonl  # from cron or CI
 
 # or publish straight to S3, after checking the store really refuses deletes
