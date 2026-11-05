@@ -62,7 +62,7 @@ describe("CLI --json flag", () => {
 			expect(result.data.path).toContain(".usertrust");
 		});
 
-		it("outputs valid JSON when vault already exists", async () => {
+		it("outputs one valid JSON object when vault already exists: success, created false", async () => {
 			const { run } = await import("../../src/cli/init.js");
 			await run(tempDir, { json: true });
 			logOutput = [];
@@ -71,9 +71,11 @@ describe("CLI --json flag", () => {
 			const result = parseJsonOutput(logOutput) as {
 				command: string;
 				success: boolean;
+				data: { created: boolean };
 			};
 			expect(result.command).toBe("init");
-			expect(result.success).toBe(false);
+			expect(result.success).toBe(true);
+			expect(result.data.created).toBe(false);
 		});
 
 		it("contains no ANSI escape codes in JSON output", async () => {

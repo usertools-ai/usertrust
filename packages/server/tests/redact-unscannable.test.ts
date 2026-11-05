@@ -83,6 +83,32 @@ const line = (message: string, secrets: readonly string[] = []): string =>
 	internalErrorLine(new Error(message), "t", "POST /v1/authorize", secrets);
 
 /**
+ * The regular-expression work `run` does, counted instead of timed: every `RegExp.prototype.exec` call counts one, plus
+ * the characters that call read, from where it started (`lastIndex` of a global or sticky pattern, else 0) to where its
+ * match ended (the whole text when it found none). The result is the same on a slow runner, under coverage and under
+ * load, which a wall-clock ratio is not. It sees the span readers (`Bearer`, api-key values, the caller's key), which are
+ * regular-expression loops; a quadratic step outside them (a string copy per match) is for `expectLinear`.
+ */
+function regexWork(run: () => unknown): { calls: number; chars: number } {
+	const original = RegExp.prototype.exec;
+	let calls = 0;
+	let chars = 0;
+	RegExp.prototype.exec = function (this: RegExp, input: string) {
+		const from = this.global || this.sticky ? this.lastIndex : 0;
+		const found = original.call(this, input);
+		calls++;
+		chars += Math.max(0, (found === null ? input.length : found.index + found[0].length) - from);
+		return found;
+	} as typeof RegExp.prototype.exec;
+	try {
+		run();
+	} finally {
+		RegExp.prototype.exec = original;
+	}
+	return { calls, chars };
+}
+
+/**
  * `make(n)` builds an input of size `n` and gives what reads it, and reading twice that input takes
  * at most three times as long: a linear reader takes about twice, a quadratic one about four. `n`
  * doubles (up to 64 times) until one read takes 25 ms. Both inputs are then built, read once, and
@@ -777,7 +803,7 @@ describe("internalErrorLine reads the original and the sanitized text, and redac
 		expect(redactApiKeys(`api_key=x.x-api-key: ${SECRET}`)).toBe(`api_key=[redacted] ${SECRET}`);
 	});
 
-	it("searching from inside each match reads each value once: twice the units take at most three times as long", () => {
+	it("searching from inside each match reads each value once: twice the units take at most 2.5 times the regular-expression work", () => {
 		for (const unit of [
 			"api_key=",
 			"x-api-key: api_key=",
@@ -789,8 +815,24 @@ describe("internalErrorLine reads the original and the sanitized text, and redac
 		]) {
 			const printed = line(unit.repeat(100_000)).slice(LINE.length);
 			expect(printed.includes("api_key=a"), unit).toBe(false);
-			expectLinear(`line ${unit}`, (n) => () => line(unit.repeat(n)), 10_000);
-			expectLinear(`redactSecrets ${unit}`, (n) => () => redactSecrets(unit.repeat(n)), 10_000);
+			// Counted, not timed: a linear reader does twice the work on twice the units (a little under or over
+			// from the edges), a quadratic one four times. The count is the same on every runner.
+			for (const [name, read] of [
+				["line", (text: string) => line(text)],
+				["redactSecrets", (text: string) => redactSecrets(text)],
+			] as const) {
+				const once = regexWork(() => read(unit.repeat(2_000)));
+				const twice = regexWork(() => read(unit.repeat(4_000)));
+				expect(once.calls, `${name} ${unit}: the counter saw nothing`).toBeGreaterThan(1_000);
+				expect(
+					twice.calls / once.calls,
+					`${name} ${JSON.stringify(unit)} calls`,
+				).toBeLessThanOrEqual(2.5);
+				expect(
+					twice.chars / once.chars,
+					`${name} ${JSON.stringify(unit)} chars`,
+				).toBeLessThanOrEqual(2.5);
+			}
 		}
 	}, 120_000);
 

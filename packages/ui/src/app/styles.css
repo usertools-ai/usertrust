@@ -3,9 +3,9 @@
 /*
  * Violet accent on black, dark only: there is no light theme. usertrust gold marks the brand and the budget: the logo,
  * the rule beside the title and a healthy budget bar. The bar turns orange past 80% used and red past 95%.
- * Green (--approve, aliased --verify) is EARNED by verification only: the integrity pill and row marks, the Verify
- * button and the VERIFIED verdict. The accent marks selection, the active tab, progress fills, chart marks and the live
- * pill; blue (--words) is the focus ring. Fonts are named, never shipped or fetched: a family is used only where it is
+ * Green (--approve, aliased --verify) is kept for the chain's integrity and an anchored check: the integrity pills, the
+ * Verify button and the anchored verdict. An unanchored pass is neutral. The accent marks selection, the active tab,
+ * progress fills, chart marks and the live pill; blue (--words) is the focus ring. Fonts are named, never shipped or fetched: a family is used only where it is
  * already installed, else the system stack after it.
  */
 
@@ -21,6 +21,9 @@
 	--faint-text: #7e7e88;
 	--faint-deco: #5c5c64;
 	--line: rgba(255, 255, 255, 0.11);
+	/* Borders of interactive controls: 3:1 or better against the page, the surface and raised (WCAG 1.4.11). --line stays
+	   the decorative tier (panel edges, row rules, separators), which carries no meaning of its own. */
+	--control-line: rgba(255, 255, 255, 0.36);
 	--approve: #30d158;
 	--info: #ffb020;
 	--words: #4da3ff;
@@ -363,6 +366,19 @@ body {
 		letter-spacing: 0;
 		text-transform: none;
 	}
+	/* The dollar amounts under a fact's headline figure; the usertoken line follows in .ut-sub.mono. */
+	.ut-amts {
+		font: 400 12.5px/1.3 var(--mono);
+		font-variant-numeric: tabular-nums;
+		color: var(--body);
+		overflow-wrap: anywhere;
+	}
+	/* The one-line key to the usertoken unit, where a panel shows UT without a foot of its own. */
+	.ut-key {
+		font: 400 11px/1.4 var(--mono);
+		color: var(--faint-text);
+		overflow-wrap: anywhere;
+	}
 	.ut-why {
 		font: 400 12px/1.45 var(--sans);
 		color: var(--body);
@@ -454,7 +470,7 @@ body {
 		width: 20px;
 		height: 20px;
 		border-radius: 50%;
-		border: 1px solid var(--line);
+		border: 1px solid var(--control-line);
 		background: transparent;
 		color: var(--body);
 		font: 600 11px/1 var(--sans);
@@ -490,6 +506,12 @@ body {
 		color: #d6d6db;
 		right: 0;
 		width: 300px;
+	}
+	/* Opens from the left edge of its anchor, for a fact in the first column. */
+	.ut-pop.text.start {
+		left: 0;
+		right: auto;
+		width: min(300px, calc(100vw - 48px));
 	}
 	.ut-pop.text code {
 		font: 400 11.5px/1.5 var(--mono);
@@ -536,7 +558,7 @@ body {
 		padding: 3px;
 		border-radius: 10px;
 		background: rgba(255, 255, 255, 0.05);
-		border: 1px solid var(--line);
+		border: 1px solid var(--control-line);
 		gap: 2px;
 	}
 	.ut-seg button {
@@ -551,7 +573,8 @@ body {
 	.ut-seg button:hover {
 		color: var(--ink);
 	}
-	.ut-seg button[aria-selected="true"] {
+	.ut-seg button[aria-selected="true"],
+	.ut-seg button[aria-pressed="true"] {
 		background: rgba(155, 123, 255, 0.22);
 		color: #fff;
 		box-shadow: 0 1px 0 rgba(255, 255, 255, 0.06) inset;
@@ -564,7 +587,7 @@ body {
 		flex: 0 1 260px;
 		min-width: 140px;
 		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid var(--line);
+		border: 1px solid var(--control-line);
 		border-radius: 8px;
 		color: var(--ink);
 		font: 400 12.5px/1 var(--sans);
@@ -578,7 +601,7 @@ body {
 		border-color: var(--intel);
 	}
 	.ut-btn {
-		border: 1px solid var(--line);
+		border: 1px solid var(--control-line);
 		background: rgba(255, 255, 255, 0.04);
 		color: var(--ink);
 		font: 500 12px/1 var(--sans);
@@ -596,7 +619,7 @@ body {
 		cursor: default;
 	}
 	.ut-ghost {
-		border: 1px solid var(--line);
+		border: 1px solid var(--control-line);
 		background: transparent;
 		color: var(--body);
 		font: 500 11px/1 var(--sans);
@@ -631,7 +654,7 @@ body {
 		display: inline-flex;
 		align-items: center;
 		gap: 5px;
-		border: 1px solid var(--line);
+		border: 1px solid var(--control-line);
 		background: transparent;
 		color: var(--body);
 		font: 500 11.5px/1 var(--sans);
@@ -642,7 +665,7 @@ body {
 		max-width: 260px;
 	}
 	.ut-chip:hover {
-		border-color: rgba(155, 123, 255, 0.6);
+		border-color: var(--intel);
 	}
 	.ut-chip.on {
 		background: rgba(155, 123, 255, 0.22);
@@ -707,7 +730,7 @@ body {
 	.ut-field input,
 	.ut-field-bare {
 		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid var(--line);
+		border: 1px solid var(--control-line);
 		border-radius: 8px;
 		color: var(--ink);
 		font: 400 12px/1 var(--mono);
@@ -739,6 +762,9 @@ body {
 	}
 	.ut-active .ut-label {
 		margin-right: 4px;
+	}
+	.ut-address-note {
+		margin: 8px 16px;
 	}
 
 	/* ── Body: list beside a docked inspector ── */
@@ -816,6 +842,15 @@ body {
 		cursor: pointer;
 		font: inherit;
 		transition: background 0.12s ease, border-color 0.12s ease;
+	}
+	/* The list is the one tab stop; its active row is named by aria-activedescendant and marked here while the list has focus. */
+	.ut-list:focus-visible {
+		outline-offset: -2px;
+	}
+	.ut-list:focus-visible .ut-row.act {
+		outline: 2px solid var(--words);
+		outline-offset: -2px;
+		border-radius: 12px;
 	}
 	.ut-row:hover {
 		background: rgba(255, 255, 255, 0.03);
@@ -901,7 +936,6 @@ body {
 		text-overflow: ellipsis;
 	}
 	.ut-meta > .d,
-	.ut-meta > .ok,
 	.ut-meta > .bad {
 		flex: none;
 	}
@@ -911,9 +945,6 @@ body {
 	.ut-meta .d {
 		color: var(--faint-deco);
 		margin: 0 6px;
-	}
-	.ut-meta .ok {
-		color: var(--approve);
 	}
 	.ut-meta .bad {
 		color: var(--stakes);
@@ -1013,12 +1044,18 @@ body {
 	}
 	.ut-foot {
 		display: flex;
-		gap: 10px;
+		flex-wrap: wrap;
+		gap: 4px 10px;
 		padding: 8px 16px;
 		border-top: 1px solid var(--line);
-		font: 400 11px/1 var(--mono);
+		font: 400 11px/1.3 var(--mono);
 		color: var(--faint-text);
 		font-variant-numeric: tabular-nums;
+	}
+	/* A dot between the foot's facts: with the key there are three, and a bare gap reads as one run-on line. */
+	.ut-foot > span + span::before {
+		content: "·";
+		margin-right: 10px;
 	}
 
 	/* ── Inspector ── */
@@ -1081,7 +1118,7 @@ body {
 		width: 30px;
 		height: 30px;
 		border-radius: 9px;
-		border: 1px solid var(--line);
+		border: 1px solid var(--control-line);
 		background: transparent;
 		color: var(--body);
 		cursor: pointer;
@@ -1300,6 +1337,54 @@ body {
 		justify-content: space-between;
 		gap: 12px;
 	}
+	/* The chart's figures, shown on request under the chart. */
+	.ut-chart-foot {
+		display: flex;
+		justify-content: flex-end;
+		margin-top: 10px;
+	}
+	.ut-chart-table {
+		width: 100%;
+		margin-top: 10px;
+		border-collapse: collapse;
+		font: 400 12px/1.4 var(--mono);
+		color: var(--ink);
+	}
+	.ut-chart-table caption {
+		text-align: left;
+		padding-bottom: 6px;
+		color: var(--body);
+		font: 500 11px/1.4 var(--sans);
+	}
+	.ut-chart-table th,
+	.ut-chart-table td {
+		padding: 5px 8px;
+		border-bottom: 1px solid var(--line);
+		text-align: right;
+		font-weight: 400;
+	}
+	.ut-chart-table th:first-child {
+		text-align: left;
+	}
+	/* A figure never breaks between its digits and its unit. */
+	.ut-chart-table td {
+		white-space: nowrap;
+	}
+	.ut-chart-table thead th {
+		color: var(--body);
+	}
+	/* Text for a screen reader only: out of the layout, still in the accessibility tree. */
+	.ut-sr-only {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		margin: -1px;
+		padding: 0;
+		overflow: hidden;
+		clip-path: inset(50%);
+		white-space: nowrap;
+		border: 0;
+	}
 	.ut-split {
 		display: grid;
 		grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1324,9 +1409,23 @@ body {
 		text-align: right;
 		white-space: nowrap;
 	}
+	/* The UT figure is the value's second line: dollars and count on the first, so the value is no wider than it was
+	   before dollars led and the name (.k) keeps its width on a narrow card. */
+	.ut-blist .v .ut-bl-ut {
+		display: block;
+		color: var(--faint-text);
+	}
 	.ut-blist .ut-meter {
 		grid-column: 1 / -1;
 		margin-bottom: 8px;
+	}
+
+	/* Phone-only controls: the details toggle, the Filters button and the sheet's header. Shown by the narrow-screen
+	   block below and by nothing else, so a wider window lays out exactly as before. */
+	.ut-more,
+	.ut-filters-btn,
+	.ut-sheet-head {
+		display: none;
 	}
 
 	/* ── Narrow screens ── */
@@ -1363,24 +1462,173 @@ body {
 			flex-basis: 100%;
 			padding: 0;
 		}
+
+		/* Facts: one row of three (spend, budget, integrity); chain and anchor open under a Details button. */
 		.ut-facts {
-			grid-template-columns: repeat(2, minmax(0, 1fr));
-			padding: 14px 16px;
+			grid-template-columns: repeat(3, minmax(0, 1fr));
+			gap: 10px;
+			padding: 12px;
 		}
+		.ut-facts .budget {
+			grid-column: auto;
+		}
+		.ut-facts .ut-fact > b {
+			flex-wrap: wrap;
+			gap: 4px 6px;
+			letter-spacing: 1px;
+			white-space: normal;
+		}
+		.ut-facts .ut-fact .v {
+			font-size: 15px;
+		}
+		.ut-facts .ut-more {
+			display: flex;
+			order: 1;
+			grid-column: 1 / -1;
+			align-items: center;
+			justify-self: start;
+			gap: 6px;
+			min-height: 32px;
+			padding: 0 2px;
+			border: 0;
+			background: transparent;
+			color: var(--body);
+			font: 500 11px/1 var(--sans);
+			letter-spacing: 1.5px;
+			text-transform: uppercase;
+			cursor: pointer;
+		}
+		.ut-facts .ut-more:hover {
+			color: var(--ink);
+		}
+		.ut-facts .ut-more .chev {
+			color: var(--faint-text);
+			font-size: 10px;
+		}
+		.ut-facts .ut-more[aria-expanded="true"] .chev {
+			transform: rotate(180deg);
+		}
+		.ut-facts .ut-fact.detail {
+			display: none;
+			order: 2;
+		}
+		.ut-facts[data-details="true"] .ut-fact.detail {
+			display: flex;
+		}
+		.ut-facts[data-details="true"] #ut-fact-anchor {
+			grid-column: span 2;
+		}
+
+		/* The list flows in the page: no height of its own, no scroller of its own. The sort bar stays at the top of the
+		   screen while the page scrolls past the records. */
 		.ut-work {
-			height: 78dvh;
+			height: auto;
+			min-height: 0;
 			flex: 0 0 auto;
 		}
+		.ut-body {
+			overflow: visible;
+			border-radius: 0;
+		}
+		.ut-list {
+			flex: 0 0 auto;
+			overflow: visible;
+		}
+		.ut-cap {
+			position: sticky;
+			top: 0;
+			z-index: 5;
+		}
+
+		/* Head: the view tabs and the count, then the search and Export on one row. */
 		.ut-head {
-			flex-wrap: wrap;
+			display: grid;
+			grid-template-columns: auto minmax(0, 1fr) auto;
+			gap: 8px 10px;
 			padding: 10px 12px;
 		}
+		.ut-head .ut-grow {
+			display: none;
+		}
+		.ut-head .ut-label {
+			grid-column: 2 / 4;
+		}
 		.ut-head .ut-search {
-			flex: 1 1 100%;
-			order: 5;
+			grid-column: 1 / 3;
+			min-width: 0;
+			width: 100%;
+		}
+		.ut-head .ut-btn {
+			grid-column: 3;
+		}
+
+		/* Filters: the bar is one button; the filters open in a sheet over the page. */
+		.ut-filters-btn {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			margin: 8px 12px;
+			padding: 11px 12px;
+			font-size: 13px;
+		}
+		.ut-filters-btn .chev {
+			color: var(--faint-text);
+			font-size: 10px;
 		}
 		.ut-bar {
-			padding: 8px 12px;
+			display: none;
+		}
+		.ut-bar[data-sheet="true"] {
+			display: flex;
+			position: fixed;
+			z-index: 50;
+			left: 0;
+			right: 0;
+			bottom: 0;
+			max-height: 80dvh;
+			overflow: auto;
+			gap: 10px;
+			padding: 14px 16px calc(18px + env(safe-area-inset-bottom));
+			background: var(--page);
+			border-top: 1px solid var(--line);
+			border-bottom: 0;
+			border-radius: 16px 16px 0 0;
+			box-shadow: 0 -20px 60px rgba(0, 0, 0, 0.6);
+			animation: ut-sheet-in 0.22s var(--ease-enter) both;
+		}
+		.ut-bar[data-sheet="true"] .ut-sheet-head {
+			display: flex;
+			flex: 1 1 100%;
+			align-items: center;
+			justify-content: space-between;
+			font: 600 13px/1 var(--sans);
+		}
+		.ut-bar[data-sheet="true"] .ut-facet,
+		.ut-bar[data-sheet="true"] .ut-field,
+		.ut-bar[data-sheet="true"] .ut-range {
+			flex: 1 1 100%;
+		}
+		.ut-bar[data-sheet="true"] .ut-field {
+			justify-content: space-between;
+		}
+		.ut-bar[data-sheet="true"] .ut-facet > .ut-chip {
+			width: 100%;
+			max-width: none;
+			padding: 10px 12px;
+		}
+		.ut-bar[data-sheet="true"] .ut-chip .chev {
+			margin-left: auto;
+		}
+		/* A facet's values list opens in place, under its chip, instead of floating: a floating list would be clipped by
+		   the sheet's own scrolling. The sizes it was given when it opened are inline styles, hence !important. */
+		.ut-bar[data-sheet="true"] .ut-pop {
+			position: static;
+			left: auto !important;
+			width: auto !important;
+			max-width: none;
+			max-height: none !important;
+			margin-top: 6px;
+			box-shadow: none;
 		}
 		.ut-sep {
 			display: none;
@@ -1399,6 +1647,123 @@ body {
 			border-radius: 16px 16px 0 0;
 			box-shadow: 0 -20px 60px rgba(0, 0, 0, 0.6);
 			animation-name: ut-sheet-in;
+		}
+	}
+
+	/* ── Hit areas ──
+	   Every small control keeps its look and gets a larger tappable area: at least 32px on a desktop, at least 44px at the
+	   phone width. An invisible ::after (no other rule here uses ::after on these controls) is stretched past the control
+	   by a negative inset. An inset is measured from the PADDING box, inside the border, so each value below is the
+	   target size minus the control's padding box, halved: a 20px button with a 1px border has an 18px padding box, and
+	   an inset of -7px makes 32px. Each expansion stays inside the room its neighbours leave (a gap, the container's
+	   padding), so it never reaches another control's visible body. tests/hit-areas.test.ts reads these numbers. */
+	.ut-info-btn,
+	.ut-x,
+	.ut-chip,
+	.ut-cap button,
+	.ut-seg button,
+	.ut-btn,
+	.ut-ghost {
+		position: relative;
+	}
+	.ut-info-btn::after,
+	.ut-x::after,
+	.ut-chip::after,
+	.ut-cap button::after,
+	.ut-seg button::after,
+	.ut-btn::after,
+	.ut-ghost::after {
+		content: "";
+		position: absolute;
+	}
+	/* The sort row is a flex item of the column .ut-pane, and as a scroll box (overflow-x: auto) its automatic minimum
+	   height is 0, so with the long list beside it the row shrank to its content and clipped the area. It keeps its own
+	   height. */
+	.ut-cap {
+		flex: 0 0 auto;
+	}
+	/* Padding box 18px (20px, 1px border): 32px. Beside it only a title-only tag and a label. */
+	.ut-info-btn::after {
+		inset: -7px;
+	}
+	/* Padding box 28px (30px, 1px border): 32px. */
+	.ut-x::after {
+		inset: -2px;
+	}
+	/* Padding box 23.5px high (11.5px text, 6px padding, 1px border): 32.5px. Sideways it stays inside the 6px gap. */
+	.ut-chip::after {
+		inset: -4.5px -3px;
+	}
+	/* 20.5px high (10.5px text, 5px padding, no border): 32.5px, inside the 7px padding of the row. The 4px gap is split. */
+	.ut-cap button::after {
+		inset: -6px -2px;
+	}
+	/* 24px high (12px text, 6px padding): 32px. The 2px gap is split. */
+	.ut-seg button::after {
+		inset: -4px -1px;
+	}
+	/* The smaller bucket switch: 21px high (11px text, 5px padding): 32px. */
+	.ut-seg.small button::after {
+		inset: -5.5px -1px;
+	}
+	/* Padding box 28px high (12px text, 8px padding, 1px border): 32px. */
+	.ut-btn::after {
+		inset: -2px;
+	}
+	/* Padding box 25px high (11px text, 7px padding, 1px border): 32px. Sideways it stays inside the 6px gap. */
+	.ut-ghost::after {
+		inset: -3.5px -2px;
+	}
+
+	@media (max-width: 760px) {
+		/* Each chip owns its 44.5px band alone: its area reaches 9.5px past the border, so rows are 19px apart (two
+		   areas, no overlap, no neighbour painting over the end of this one), and the 10px of padding (plus the 1px
+		   border) at the top and bottom of each strip keeps the first and last row off the rows and controls next to
+		   the strip. Only spacing changes. */
+		.ut-bar,
+		.ut-active {
+			row-gap: 19px;
+			padding-block: 10px;
+		}
+		/* The sort row gets the room its buttons' area needs (12px each side), so nothing is clipped by its scroll box. */
+		.ut-cap {
+			padding-block: 12px;
+		}
+		.ut-info-btn::after {
+			inset: -13px;
+		}
+		.ut-x::after {
+			inset: -8px;
+		}
+		.ut-chip::after {
+			inset: -10.5px -3px;
+		}
+		.ut-cap button::after {
+			inset: -12px -2px;
+		}
+		.ut-seg button::after {
+			inset: -10px -1px;
+		}
+		.ut-seg.small button::after {
+			inset: -11.5px -1px;
+		}
+		.ut-btn::after {
+			inset: -8px;
+		}
+		.ut-ghost::after {
+			inset: -9.5px -2px;
+		}
+		/* The filter sheet stacks one full-width chip per facet (33.5px with the sheet's 10px padding, a 31.5px padding box):
+		   each chip's area reaches 44px with 6.25px above and below, inside a row gap widened to 13px, and the head (its Done
+		   button's area reaches 8px down) keeps 2px more room so the first chip's area does not meet it. */
+		.ut-bar[data-sheet="true"] {
+			row-gap: 13px;
+		}
+		.ut-bar[data-sheet="true"] .ut-sheet-head {
+			margin-bottom: 2px;
+		}
+		.ut-bar[data-sheet="true"] .ut-chip::after {
+			inset: -6.25px -3px;
 		}
 	}
 }

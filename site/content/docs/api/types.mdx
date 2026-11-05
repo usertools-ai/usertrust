@@ -3,7 +3,7 @@ title: Types
 description: Core TypeScript types exported by usertrust.
 ---
 
-All types are exported from the `usertrust` package entry point. The SDK uses TypeScript 5.9 strict mode with `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`.
+All types on this page except `StreamUsage` (internal to `streaming.ts`) are exported from the `usertrust` package entry point. The SDK uses TypeScript 5.9 strict mode with `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`.
 
 ## Client Types
 
@@ -19,23 +19,40 @@ interface TrustOpts {
   /** @deprecated Proxy API key. Unused because proxy throws. */
   key?: string;
   budget?: number;
+  /** Overrides the config file's tier; policy rules that match on `tier` are evaluated at it. */
   tier?: string;
+  /** PII enforcement override: overrides pii in the config file. */
+  pii?: TrustConfig["pii"] | undefined;
+  /** Ledger identity for cost-center envelopes. Overrides config.parentUserId; validated by the same rule. */
+  parentUserId?: string | undefined;
+  /** Operator-declared policy scopes that scopePatterns rules match. Overrides config.scope. */
+  scope?: string[] | undefined;
   dryRun?: boolean;
   vaultBase?: string;
+  /** Endpoint classification override; wins over config.endpoints matchers and loopback autodetect. */
+  endpoint?: Partial<EndpointInfo> | undefined;
+  /** SDK methods to let through ungoverned, by the path the refusal names. */
+  allowUngoverned?: string[] | undefined;
 }
 ```
 
 ### TrustedClient\<T\>
 
-The governed client returned by `trust()`. Same shape as the original LLM client plus `destroy()`.
+The governed client returned by `trust()`. The original client's shape with its governed methods (`create`, `stream`, `parse`, `generateContent`) rewritten to return receipts, plus `destroy()` and `governAction()`. `GovernedShape` is not exported; it is the mapped type that rewrites only the provider surface `trust()` actually intercepts.
 
 ```typescript
-type TrustedClient<T> = T & { destroy(): Promise<void> };
+type TrustedClient<T> = GovernedShape<T> & {
+  destroy(): Promise<void>;
+  governAction<R>(
+    action: ActionDescriptor,
+    execute: () => Promise<R>,
+  ): Promise<GovernedActionResult<R>>;
+};
 ```
 
 ### TrustedResponse\<T\>
 
-The return type of every intercepted LLM call.
+The return type of every governed `create()` / `generateContent()` call. The Anthropic `messages.stream()` and `messages.parse()` helpers are governed too but return the SDK object itself with a receipt hung off it: a `Promise<TrustReceipt>` for `stream()`, a settled `TrustReceipt` for `parse()`.
 
 ```typescript
 interface TrustedResponse<T> {
@@ -173,8 +190,17 @@ type TrustConfig = {
   proxy?: string;
   /** @deprecated Proxy API key. Unused. */
   key?: string;
+  /** Ledger identity for cost-center envelopes; validated by parentUserIdRefusal() at parse time. */
+  parentUserId?: string;
+  /** Operator-declared policy scopes: at most 32, each matching /^[a-zA-Z0-9._@:+/-]{1,128}$/. */
+  scope?: string[];
   policies: string;
   pii: "redact" | "warn" | "block" | "off";
+  injection: "block" | "warn" | "off";
+  board: {
+    enabled: boolean;
+    vetoThreshold: "low" | "medium" | "high" | "critical";
+  };
   circuitBreaker: {
     failureThreshold: number;
     resetTimeout: number;
@@ -186,10 +212,59 @@ type TrustConfig = {
   audit: {
     rotation: "daily" | "weekly" | "none";
     indexLimit: number;
+    /** When true a failed critical audit write denies the call instead of settling an unaudited spend. Default false. */
+    failClosed: boolean;
   };
   tigerbeetle: {
     addresses: string[];
     clusterId: number;
+  };
+  providers: { name: string; models: string[] }[];
+  pricing: "recommended" | "custom";
+  /** Per-model per-1k rates. The two cache tiers are optional; an absent tier prices at inputPer1k. */
+  customRates?: Record<string, ModelRates>;
+  /** Endpoint matchers for classifyEndpoint(); first match wins. */
+  endpoints: { match: string; class: EndpointClass; runtime: LocalRuntime }[];
+  local: {
+    autoDetectLoopback: boolean;
+    defaultRate: ModelRates;
+    rateClass: "nominal" | "amortized-usd";
+    models: Record<string, ModelRates>;
+    injectUsageOptions: boolean;
+  };
+  cloud: {
+    injectUsageOptions: boolean;
+  };
+  unknownModelPolicy: "fallback" | "warn" | "deny";
+  supplyChain: {
+    enabled: boolean;
+    trustedPublishers: string[];
+    publisherKeys: Record<string, string[]>;
+    allowedPermissions: SkillPermission[];
+    requireSignature: boolean;
+  };
+  vault: {
+    enabled: boolean;
+    masterKeyEnv: string;
+    auditAccess: boolean;
+    defaultScope: { agents: string[]; actions: ActionKind[]; expiresAt: string | null };
+  };
+  anomaly: {
+    enabled: boolean;
+    tokenRate: {
+      thresholdTokPerSec: number;
+      localThresholdTokPerSec: number;
+      perModel: Record<string, number>;
+      windowMs: number;
+      consecutiveWindows: number;
+    };
+    spendVelocity: {
+      thresholdDollarsPerMin: number;
+      localThresholdUsertokensPerMin: number;
+      windowMs: number;
+    };
+    injectionCascade: { eventCount: number; windowMs: number };
+    cooldownMs: number;
   };
 };
 ```
@@ -211,6 +286,8 @@ interface PolicyRule {
   conditions: FieldCondition[];
 }
 ```
+
+The rule the gate actually evaluates (and the policy YAML loader accepts) extends this with optional `id`, `description`, `priority` (lower wins, default 100), `enabled` (default true), `scopePatterns` (minimatch globs matched against the host's `scope`), and `timeWindows`. That `GateRule` type is internal to `policy/gate.ts` and is not exported from the entry point.
 
 ### FieldCondition
 
@@ -246,8 +323,8 @@ type FieldOperator =
 
 | Operator | Description | Example Value |
 |----------|-------------|--------------|
-| `exists` | Field is present and not `undefined` | (none) |
-| `not_exists` | Field is absent or `undefined` | (none) |
+| `exists` | Field resolves to a value other than `undefined` or `null` | (none) |
+| `not_exists` | Field is absent, `undefined`, or `null` | (none) |
 | `eq` | Strict equality | `"gpt-4o"` |
 | `neq` | Not equal | `"test"` |
 | `gt` | Greater than (numeric) | `1000` |
@@ -259,14 +336,16 @@ type FieldOperator =
 | `contains` | String contains substring | `"password"` |
 | `regex` | Matches regular expression | `"^claude-.*"` |
 
+Every comparison operator (everything except `exists` / `not_exists`) is unanswerable when the field does not resolve. An explicit `null` is a value the document carries, so it is answerable. Beyond that, what makes a condition unanswerable depends on the operator: `gt`, `gte`, `lt` and `lte` need a number on both sides, `contains` and `regex` need a string on both sides, and `in` and `not_in` need an array as the rule value. `eq`, `neq`, `in` and `not_in` compare the resolved value with strict equality, so a value of another type (the string `"5"` against `5`) is a determinate comparison, not an unanswerable condition: false for `eq` and `in`, true for `neq` and `not_in`. On a hard rule an unanswerable condition counts as satisfied, so a hard `gt` rule on an absent field fires; on a soft rule it counts as unmet. An unknown operator is unanswerable too.
+
 ### PolicyEffect
 
 ```typescript
 type PolicyEffect = "deny" | "warn";
 ```
 
-- `deny` -- Block the request and throw a `PolicyDeniedError`.
-- `warn` -- Allow the request but attach a warning to the receipt.
+- `deny` -- Labels the rule as a denial. Whether a matching rule blocks is decided by `enforcement`, not by `effect`: the gate treats `deny` and `warn` identically, so a `deny` rule with `enforcement: "soft"` never throws.
+- `warn` -- Labels the rule as a warning. A `warn` rule with `enforcement: "hard"` still blocks the call with a `PolicyDeniedError`. Nothing is attached to the receipt: `TrustReceipt` has no warnings field, and `trust()` acts on the gate's `decision`, its `reasons` and its `hardViolations`.
 
 ### PolicyEnforcement
 
@@ -274,8 +353,8 @@ type PolicyEffect = "deny" | "warn";
 type PolicyEnforcement = "hard" | "soft";
 ```
 
-- `hard` -- The rule is enforced strictly. A `deny` effect blocks the call.
-- `soft` -- The rule generates warnings but does not block.
+- `hard` -- A matching rule is a hard violation regardless of its `effect`: the gate's decision becomes `deny` and `trust()` throws `PolicyDeniedError` before any hold is placed. A condition that cannot be evaluated (absent or mistyped field) counts as satisfied, so hard rules fail closed.
+- `soft` -- A matching rule is recorded in the gate's result (`hasWarnings`, `softViolations`, a `[WARN]`-prefixed reason) and never blocks. `trust()` does not read `hasWarnings` or `softViolations`, so a soft rule does not change whether the call proceeds and adds nothing to its receipt; its `[WARN]` reason shows up only inside the `reason` of a denial that a hard rule caused.
 
 ### PolicySeverity
 
@@ -299,7 +378,7 @@ interface AuditEvent {
   timestamp: string;                  // ISO 8601 timestamp
   previousHash: string;               // Hash of the previous event (or GENESIS_HASH)
   hash: string;                       // SHA-256 hash of this event
-  kind: string;                       // Event type (e.g., "spend", "settlement_ambiguous")
+  kind: string;                       // Event type (e.g., "llm_call", "settlement_ambiguous", "policy_denied")
   actor: string;                      // Actor identifier
   data: Record<string, unknown>;      // Event-specific payload
 }

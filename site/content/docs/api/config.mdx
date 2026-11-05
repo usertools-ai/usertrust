@@ -11,22 +11,24 @@ usertrust configuration lives in a JSON file at `.usertrust/usertrust.config.jso
 function defineConfig(config: TrustConfig): TrustConfig
 ```
 
-A type-checking identity function. It validates the config through the Zod schema and returns it unchanged. Use it in scripts or documentation to get autocompletion, but the actual config file is always JSON (not TypeScript).
+Validates the object through the Zod schema and returns the parsed result, a new object with every default filled in (the input is not mutated). `TrustConfig` is the resolved type (`z.infer` of the schema), so every defaulted field is required at the type level: a partial literal such as `{ budget: 100_000, tier: "pro" }` is a compile error (`injection`, `board`, `providers`, `pricing`, `audit.failClosed` and more are missing). Pass a fully resolved object, or validate a partial object at runtime with `loadConfig(overrides)`. The actual config file is always JSON (not TypeScript).
 
 ```typescript
-import { defineConfig } from "usertrust";
+import { defineConfig, loadConfig } from "usertrust";
 
-// Type-checked — IDE shows errors for invalid fields
-const config = defineConfig({
+// A partial literal does not compile: TrustConfig is the resolved type,
+// so every defaulted field is required. Validate a partial object at
+// runtime with loadConfig() instead — overrides merge on top of the file.
+const config = await loadConfig({
   budget: 100_000,
   tier: "pro",
   pii: "block",
   circuitBreaker: { failureThreshold: 3, resetTimeout: 30_000 },
-  patterns: { enabled: true, feedProxy: false },
-  audit: { rotation: "daily", indexLimit: 10_000 },
-  tigerbeetle: { addresses: ["127.0.0.1:3001"], clusterId: 0 },
-  policies: "./policies/default.yml",
 });
+
+// defineConfig() type-checks a fully resolved object; IDE shows errors for
+// invalid values (tier: "gold") and for missing fields.
+const checked = defineConfig({ ...config, tier: "ultra" });
 ```
 
 ## loadConfig()
@@ -38,7 +40,7 @@ async function loadConfig(
 ): Promise<TrustConfig>
 ```
 
-Reads `.usertrust/usertrust.config.json` from disk, merges any runtime overrides on top, and validates the result through the Zod schema. Returns a fully resolved `TrustConfig`.
+Reads `.usertrust/usertrust.config.json` from disk, merges any runtime overrides on top, and validates the result through the Zod schema. Returns a fully resolved `TrustConfig`. Before reading the config it also loads `.usertrust/.env` (the file `usertrust init` writes API keys to), if present, into `process.env`: simple `KEY=VALUE` lines, `#` comments skipped, surrounding quotes stripped, and a variable already set in the environment is never overwritten.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -50,29 +52,113 @@ If the config file does not exist, `loadConfig()` uses Zod defaults for all fiel
 ## Full Schema
 
 ```typescript
+const RateSchema = z.object({
+  inputPer1k: z.number().finite().nonnegative(),
+  outputPer1k: z.number().finite().nonnegative(),
+  cacheReadPer1k: z.number().finite().nonnegative().optional(),
+  cacheWritePer1k: z.number().finite().nonnegative().optional(),
+  cacheWrite1hPer1k: z.number().finite().nonnegative().optional(),
+});
+
 const TrustConfigSchema = z.object({
   budget: z.number().int().positive(),
   tier: z.enum(["free", "mini", "pro", "mega", "ultra"]).default("mini"),
   proxy: z.string().url().optional(),
   key: z.string().optional(),
+  parentUserId: z.string().superRefine((value, ctx) => {
+    const refusal = parentUserIdRefusal(value);
+    if (refusal !== null) ctx.addIssue(`parentUserId ${refusal}`);
+  }).optional(),
+  scope: z.array(z.string().regex(/^[a-zA-Z0-9._@:+/-]{1,128}$/)).max(32).optional(),
   policies: z.string().default("./policies/default.yml"),
   pii: z.enum(["redact", "warn", "block", "off"]).default("warn"),
+  injection: z.enum(["block", "warn", "off"]).default("warn"),
+  board: z.object({
+    enabled: z.boolean().default(false),
+    vetoThreshold: z.enum(["low", "medium", "high", "critical"]).default("high"),
+  }).prefault({}),
   circuitBreaker: z.object({
     failureThreshold: z.number().int().default(5),
     resetTimeout: z.number().int().default(60_000),
-  }).default({}),
+  }).prefault({}),
   patterns: z.object({
     enabled: z.boolean().default(true),
     feedProxy: z.boolean().default(false),
-  }).default({}),
+  }).prefault({}),
   audit: z.object({
     rotation: z.enum(["daily", "weekly", "none"]).default("daily"),
     indexLimit: z.number().int().default(10_000),
-  }).default({}),
+    failClosed: z.boolean().default(false),
+  }).prefault({}),
   tigerbeetle: z.object({
     addresses: z.array(z.string()).default(["127.0.0.1:3001"]),
     clusterId: z.number().int().nonnegative().default(0),
-  }).default({}),
+    connectTimeoutMs: z.number().int().positive().default(5_000),
+  }).prefault({}),
+  providers: z.array(z.object({
+    name: z.string(),
+    models: z.array(z.string()).default([]),
+  })).default([]),
+  pricing: z.enum(["recommended", "custom"]).default("recommended"),
+  customRates: z.record(z.string(), RateSchema).optional(),
+  endpoints: z.array(z.object({
+    match: z.string().min(1),
+    class: z.enum(["local", "cloud"]).default("local"),
+    runtime: z.enum(["ollama", "vllm", "lmstudio", "openai-compat", "unknown"]).default("unknown"),
+  })).default([]),
+  local: z.object({
+    autoDetectLoopback: z.boolean().default(true),
+    defaultRate: RateSchema.default({ inputPer1k: 0, outputPer1k: 0 }),
+    rateClass: z.enum(["nominal", "amortized-usd"]).default("nominal"),
+    models: z.record(z.string(), RateSchema).default({}),
+    injectUsageOptions: z.boolean().default(true),
+  }).prefault({}),
+  cloud: z.object({
+    injectUsageOptions: z.boolean().default(true),
+  }).prefault({}),
+  unknownModelPolicy: z.enum(["fallback", "warn", "deny"]).default("warn"),
+  supplyChain: z.object({
+    enabled: z.boolean().default(true),
+    trustedPublishers: z.array(z.string()).default([]),
+    publisherKeys: z.record(z.string(), z.array(z.string().regex(/^[a-f0-9]{64}$/))).default({}),
+    allowedPermissions: z.array(z.enum([
+      "llm_call", "tool_use", "file_read", "file_write",
+      "shell_command", "network_access", "credential_access",
+    ])).default(["llm_call", "tool_use", "file_read"]),
+    requireSignature: z.boolean().default(true),
+  }).prefault({}),
+  vault: z.object({
+    enabled: z.boolean().default(false),
+    masterKeyEnv: z.string().default("USERTRUST_VAULT_KEY"),
+    auditAccess: z.boolean().default(true),
+    defaultScope: z.object({
+      agents: z.array(z.string()).default([]),
+      actions: z.array(z.enum([
+        "llm_call", "tool_use", "file_access", "shell_command", "api_request",
+      ])).default([]),
+      expiresAt: z.string().datetime().nullable().default(null),
+    }).prefault({}),
+  }).prefault({}),
+  anomaly: z.object({
+    enabled: z.boolean().default(false),
+    tokenRate: z.object({
+      thresholdTokPerSec: z.number().positive().default(500),
+      localThresholdTokPerSec: z.number().positive().default(5000),
+      perModel: z.record(z.string(), z.number().positive()).default({}),
+      windowMs: z.number().int().positive().default(2_000),
+      consecutiveWindows: z.number().int().positive().default(3),
+    }).prefault({}),
+    spendVelocity: z.object({
+      thresholdDollarsPerMin: z.number().positive().default(1.0),
+      localThresholdUsertokensPerMin: z.number().positive().default(10_000),
+      windowMs: z.number().int().positive().default(10_000),
+    }).prefault({}),
+    injectionCascade: z.object({
+      eventCount: z.number().int().positive().default(3),
+      windowMs: z.number().int().positive().default(60_000),
+    }).prefault({}),
+    cooldownMs: z.number().int().nonnegative().default(30_000),
+  }).prefault({}),
 });
 ```
 
@@ -98,7 +184,8 @@ const TrustConfigSchema = z.object({
   },
   "tigerbeetle": {
     "addresses": ["127.0.0.1:3001"],
-    "clusterId": 0
+    "clusterId": 0,
+    "connectTimeoutMs": 5000
   }
 }
 ```
@@ -159,34 +246,58 @@ Default: `{ enabled: true, feedProxy: false }`.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `enabled` | `true` | Enable pattern memory for cost-based model routing |
+| `enabled` | `true` | Record a pattern entry (prompt hash, model, cost, success) after each governed call. The SDK does not route on this data itself; the exported `suggestModel()` reads it for callers that want to choose a model from past calls |
 | `feedProxy` | `false` | Unused. Reserved for a removed remote-proxy aggregation path; has no effect. |
 
 Pattern memory stores SHA-256 hashes of prompts (never raw text) mapped to model, cost, and success rate. Capped at 10,000 entries with FIFO eviction.
 
 ### audit
 
-Default: `{ rotation: "daily", indexLimit: 10_000 }`.
+Default: `{ rotation: "daily", indexLimit: 10_000, failClosed: false }`.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `rotation` | `"daily"` | Receipt rotation schedule (`daily`, `weekly`, `none`) |
+| `rotation` | `"daily"` | Accepts `daily`, `weekly` or `none`. `none` disables per-call receipt files; any other value writes them into daily `YYYY-MM-DD` directories (`weekly` is accepted but behaves exactly like `daily`) |
 | `indexLimit` | `10_000` | Maximum entries in the bounded receipt index |
+| `failClosed` | `false` | When `true`, a `trust()` client refuses a call with `AuditDegradedError` when an audit write fails: a failed `llm_call` write voids the hold before anything posts, while a write that fails later in the call, or on a stream, is refused after settlement ran, so the work may be billed. `createGovernor()` and `usertrust-server` do not enforce it. `false` keeps the fail-open behaviour (degraded receipt, money still moves) |
 
 Receipts are organized into date-based directories under `.usertrust/audit/`.
 
 ### tigerbeetle
 
-Default: `{ addresses: ["127.0.0.1:3001"], clusterId: 0 }`.
+Default: `{ addresses: ["127.0.0.1:3001"], clusterId: 0, connectTimeoutMs: 5000 }`.
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `addresses` | `["127.0.0.1:3001"]` | TigerBeetle cluster addresses |
 | `clusterId` | `0` | TigerBeetle cluster ID |
+| `connectTimeoutMs` | `5000` | How long the first request waits for an answer from a ledger before the controller stops and says so. It applies when something is listening at the address but no usertrust ledger answers (another service on the port, or a cluster formatted with a different id). An address with nothing listening is refused at once and never waits this long (it is refused within 1 s on a loopback address, 3 s on a remote one). |
 
 <Callout type="info">
+**DRY-RUN MODE**
 In dry-run mode (`dryRun: true` or `USERTRUST_DRY_RUN=true`), TigerBeetle is skipped entirely. The audit chain and policy engine still run.
 </Callout>
+
+### Other fields
+
+The remaining schema fields. All are optional in the file; defaults shown are what the schema fills in.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `parentUserId` | absent | This controller's ledger identity, the parent half of the `(parentUserId, costCenter)` tuple cost-center envelope accounts derive from. Validated at parse time by `parentUserIdRefusal()`; a `::` in the value or a character outside the id charset throws |
+| `scope` | absent | Up to 32 operator-declared path-like labels (`/^[a-zA-Z0-9._@:+/-]{1,128}$/`) that `scopePatterns` policy rules match against; globs and control characters are refused |
+| `injection` | `"warn"` | Prompt-injection detection mode: `block` throws `PolicyDeniedError`, `warn` records it, `off` disables the scan |
+| `board` | `{ enabled: false, vetoThreshold: "high" }` | Accepted and written by `usertrust init`, but not read by `trust()` or `createGovernor()`: the exported `createBoard()` takes its own options. `vetoThreshold` is one of `low`, `medium`, `high`, `critical` |
+| `providers` | `[]` | Provider list written by `usertrust init`: `{ name, models: [] }` entries |
+| `pricing` | `"recommended"` | `"recommended"` uses the built-in pricing table; `"custom"` applies `customRates` |
+| `customRates` | absent | Map of model name to per-1k usertoken rates `{ inputPer1k, outputPer1k, cacheReadPer1k?, cacheWritePer1k?, cacheWrite1hPer1k? }`; used only when `pricing` is `"custom"`. An omitted 5-minute or read tier prices at `inputPer1k`, an omitted 1-hour write rate prices at the dearer of the 5-minute write rate and twice `inputPer1k`, and an explicit `0` is honoured |
+| `endpoints` | `[]` | Endpoint matchers for `classifyEndpoint()`, first match wins: `{ match, class: "local" \| "cloud" (default local), runtime: "ollama" \| "vllm" \| "lmstudio" \| "openai-compat" \| "unknown" (default unknown) }`. `match` is an origin URL, a `*.suffix` hostname, or a bare hostname |
+| `local` | `{ autoDetectLoopback: true, defaultRate: { inputPer1k: 0, outputPer1k: 0 }, rateClass: "nominal", models: {}, injectUsageOptions: true }` | Local (self-hosted) settlement scope: loopback hosts classify as local without config; `models` maps exact names or trailing-`*` globs to rates; `rateClass` is `nominal` or `amortized-usd`; `injectUsageOptions` adds `stream_options.include_usage` to local OpenAI-style streams |
+| `cloud` | `{ injectUsageOptions: true }` | Cloud settlement scope: `injectUsageOptions` asks `api.openai.com` for the usage of a streamed chat completion (`stream_options.include_usage`), so the call settles at the provider's own count and not at the estimate. The caller's own `stream_options` are merged, never replaced, and an explicit `include_usage` is respected. The usage chunk the controller asked for is not passed on to a caller who did not ask for it. No other host is changed. Off: the request goes out as written and a stream with no usage settles at the estimate |
+| `unknownModelPolicy` | `"warn"` | Cloud model with no rate anywhere: `fallback` bills the fallback rate (the dearest rate in the pricing table) without a warning, `warn` bills the same rate with a one-time warning per model, `deny` throws `PolicyDeniedError` before the hold. Every fallback-priced receipt carries `meter.rateSource: "fallback"` |
+| `supplyChain` | `{ enabled: true, trustedPublishers: [], publisherKeys: {}, allowedPermissions: ["llm_call", "tool_use", "file_read"], requireSignature: true }` | Skill-manifest verification, fail-closed by default; `publisherKeys` maps a publisher to hex Ed25519 public keys (64 hex chars each) |
+| `vault` | `{ enabled: false, masterKeyEnv: "USERTRUST_VAULT_KEY", auditAccess: true, defaultScope: { agents: [], actions: [], expiresAt: null } }` | Encrypted credential vault; `masterKeyEnv` names the environment variable holding the master key |
+| `anomaly` | `{ enabled: false, cooldownMs: 30_000, tokenRate: { thresholdTokPerSec: 500, localThresholdTokPerSec: 5000, perModel: {}, windowMs: 2_000, consecutiveWindows: 3 }, spendVelocity: { thresholdDollarsPerMin: 1.0, localThresholdUsertokensPerMin: 10_000, windowMs: 10_000 }, injectionCascade: { eventCount: 3, windowMs: 60_000 } }` | Streaming anomaly detection: token-rate, spend-velocity and injection-cascade signals |
 
 ### remote
 
@@ -206,4 +317,8 @@ Read by the local dashboard, `usertrust-ui`, and ignored by the SDK: `TrustConfi
 
 | Variable | Effect |
 |----------|--------|
-| `USERTRUST_DRY_RUN=true` | Enable dry-run mode globally, equivalent to `{ dryRun: true }` |
+| `USERTRUST_DRY_RUN=true` | Enable dry-run mode globally, equivalent to `{ dryRun: true }` (an explicit `dryRun` option wins over the variable) |
+| `USERTRUST_VAULT_KEY` | Master key for the credential vault; `createVaultStore()` throws `VaultKeyMissingError` when it is unset. The variable name is configurable via `vault.masterKeyEnv` |
+| `USERTRUST_ANCHOR_KEY` | Ed25519 private key for anchor checkpoints: a PEM string, or a path to a PEM file. Falls back to `--key-file`, then the vault's default key path |
+| `USERTRUST_USER_ID` | Parent wallet id for `usertrust budget` when `--parent` is not given (default `local`) |
+| `.usertrust/.env` | Not a variable but a file: `loadConfig()` loads its `KEY=VALUE` lines into `process.env` without overwriting variables already set |

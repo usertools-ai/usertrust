@@ -192,11 +192,15 @@
 		{
 			"id": "meta-catches-a-cut",
 			"kind": "guarantee",
-			"claim": "While .meta still records the longer head, a log cut short, deleted or emptied fails verification.",
+			"claim": "While .meta still records the longer head, a log cut short, deleted or emptied fails verification; a .meta that is present but unparseable fails verification instead of disabling the anchor.",
 			"statements": [
 				{
 					"file": "packages/verify/README.md",
 					"text": "While the sidecar still records the longer head and count, the verifier fails a log that has been **truncated or deleted**."
+				},
+				{
+					"file": "site/content/docs/concepts/audit-trail.mdx",
+					"text": "a log whose tail hash or event count no longer matches the sidecar is reported as truncated or deleted, and a sidecar that is present but unparseable fails verification rather than silently disabling the check."
 				}
 			],
 			"proofs": [
@@ -219,6 +223,10 @@
 				{
 					"file": "packages/core/tests/harden/integrity-claims-pins.test.ts",
 					"test": "emptying events.jsonl while .meta remains: the next append continues from the sidecar, and verification reports the gap"
+				},
+				{
+					"file": "packages/verify/tests/harden/tail-truncation.test.ts",
+					"test": "a .meta that is present but unparseable fails verification instead of silently disabling the anchor"
 				}
 			]
 		},
@@ -245,11 +253,11 @@
 				},
 				{
 					"file": "site/content/docs/concepts/index.mdx",
-					"text": "<Card title=\"Audit Trail\" description=\"SHA-256 hash-chained, append-only log for every governed call\" href=\"/docs/concepts/audit-trail\" />"
+					"text": "<Card title=\"Audit trail\" description=\"SHA-256 hash-chained, append-only log for every governed call\" href=\"/docs/concepts/audit-trail\" />"
 				},
 				{
 					"file": "site/content/docs/index.mdx",
-					"text": "- **SHA-256 hash-chained audit trail** — Append-only JSONL."
+					"text": "- **SHA-256 hash-chained audit trail** — append-only JSONL."
 				}
 			],
 			"proofs": [
@@ -455,7 +463,7 @@
 				},
 				{
 					"file": "docs/anchoring.md",
-					"text": "| `--sink-url`, `--sink-rekor`, `command` | `info` — no probe is possible from here; verify the append-only property at the receiving system. |"
+					"text": "| `--sink-url`, `command` | `info` — no probe is possible from here; verify the append-only property at the receiving system. |"
 				},
 				{
 					"file": "docs/anchoring.md",
@@ -472,72 +480,6 @@
 					"test": "fails both probes in an ordinary writable store directory"
 				}
 			]
-		},
-		{
-			"id": "rekor-inclusion",
-			"kind": "guarantee",
-			"claim": "A Rekor receipt is verified offline: checkpoint signature, inclusion path, and binding to the anchor record; a SET is what attests integratedTime.",
-			"statements": [
-				{
-					"file": "docs/anchoring.md",
-					"text": "What ships now is the complete, tested verification path — receipt schema, > signed-note checkpoints, RFC 9162 inclusion, SET-verified attested time — plus a sink that works > against any log accepting these entries."
-				},
-				{
-					"file": "docs/anchoring.md",
-					"text": "Verification is offline and zero-dependency: the signed-note checkpoint is parsed and its ECDSA P-256 signature checked, inclusion is proven by an RFC 9162 index-based path walk, and the stored entry is bound to *your* record by payload hash and by decoded signature bytes."
-				},
-				{
-					"file": "docs/anchoring.md",
-					"text": "Receipts *without* a SET still prove inclusion, but fall back to operator-claimed time for freshness: an unsigned `integratedTime` is a number the party under audit could have chosen."
-				},
-				{
-					"file": "docs/anchoring.md",
-					"text": "**Checkpoint-replay caveat.** Offline verification proves the entry was included in the log — *at `integratedTime`* only when a SET vouches for that time — under a checkpoint signed by the pinned key."
-				},
-				{
-					"file": "packages/verify/README.md",
-					"text": "A verified receipt also makes `--max-anchor-age` measure against the log's attested `integratedTime` instead of the operator's own timestamp."
-				}
-			],
-			"proofs": [
-				{
-					"file": "packages/core/tests/harden/anchoring/rekor-verify.test.ts",
-					"test": "15. a tampered inclusion-path element"
-				},
-				{
-					"file": "packages/core/tests/harden/anchoring/rekor-verify.test.ts",
-					"test": "19. checkpoint signed by a key the auditor did not pin"
-				},
-				{
-					"file": "packages/core/tests/harden/anchoring/rekor-verify.test.ts",
-					"test": "12. entryBody signature is not the anchor record's signature"
-				},
-				{
-					"file": "packages/core/tests/harden/anchoring/rekor-verify.test.ts",
-					"test": "40. editing integratedTime alone now fails — the SET is the only signature over it"
-				},
-				{
-					"file": "packages/core/tests/harden/anchoring/rekor-verify.test.ts",
-					"test": "43. a receipt with NO SET proves inclusion and attests no time"
-				}
-			]
-		},
-		{
-			"id": "rekor-checkpoint-replay",
-			"kind": "caveat",
-			"claim": "Offline Rekor verification does not show the checkpoint is consistent with the log's current head.",
-			"statements": [
-				{
-					"file": "docs/anchoring.md",
-					"text": "Treat Rekor as an additional witness alongside an > append-only store, never as a replacement for one."
-				},
-				{
-					"file": "docs/anchoring.md",
-					"text": "It does **not** prove that checkpoint is consistent with the log's current head — a forked or rewound log would need a consistency proof against a checkpoint you fetched yourself."
-				}
-			],
-			"proofs": [],
-			"pending": "external: needs a live transparency log to fork or rewind"
 		},
 		{
 			"id": "bundle-is-operator-evidence",
@@ -566,6 +508,31 @@
 			"pending": "no test diffs two exports across an anchored-over rewrite"
 		},
 		{
+			"id": "receipt-verdict-needs-an-anchor",
+			"kind": "guarantee",
+			"claim": "A --tx receipt's verdict reads VERIFIED only when its Merkle row is INCLUSION VERIFIED against an anchor and a pinned key; a chain that is merely consistent reads CHAIN INTACT, NOT ANCHORED.",
+			"statements": [
+				{
+					"file": "packages/verify/README.md",
+					"text": "The receipt's verdict line reads `* VERIFIED *` only when its Merkle row is `INCLUSION VERIFIED`, which needs an anchor that covers the transaction and a pinned key. A chain that checks out without one reads `CHAIN INTACT, NOT ANCHORED`."
+				},
+				{
+					"file": "CHANGELOG.md",
+					"text": "- **A `--tx` receipt no longer prints `* VERIFIED *` for a chain that is only consistent with itself.** The verdict line reads `* VERIFIED *` only when the Merkle row is `INCLUSION VERIFIED` (an anchor covers the transaction and a key is pinned). Otherwise a chain that checks out reads `CHAIN INTACT, NOT ANCHORED`, which is also what sits beside an unanchored Merkle row. The footer's date row is now `Checked`, not `Verified`. `usertrust-verify --tx` exit codes are unchanged."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/verify/tests/receipt-verdict.test.ts",
+					"test": "a chain that is consistent but unanchored reads CHAIN INTACT, NOT ANCHORED, never VERIFIED"
+				},
+				{
+					"file": "packages/verify/tests/receipt-verdict.test.ts",
+					"test": "a Merkle row of INCLUSION VERIFIED, reached against a pinned key, reads * VERIFIED *"
+				}
+			]
+		},
+		{
 			"id": "sample-output",
 			"kind": "guarantee",
 			"claim": "The documented sample line is what usertrust-verify prints for a clean unanchored vault.",
@@ -585,6 +552,10 @@
 				{
 					"file": "site/content/docs/quickstart.mdx",
 					"text": "Vault integrity: VERIFIED (UNANCHORED — internal consistency only)"
+				},
+				{
+					"file": "site/content/docs/verify/index.mdx",
+					"text": "the verdict line reads `Vault integrity: VERIFIED (UNANCHORED — internal consistency only)`."
 				}
 			],
 			"proofs": [
@@ -618,6 +589,10 @@
 				{
 					"file": "packages/verify/README.md",
 					"text": "| `1` | Verification failed (tamper, truncation, or corrupt anchor) |"
+				},
+				{
+					"file": "site/content/docs/verify/index.mdx",
+					"text": "| `0` | Verified |"
 				}
 			],
 			"proofs": [
@@ -792,7 +767,7 @@
 				},
 				{
 					"file": "site/content/docs/concepts/local-models.mdx",
-					"text": "Every governed local call still places a PENDING hold, settles at least 1 usertoken, and is recorded on the audit chain (or, if that write fails, its receipt carries `auditDegraded`) -- so runaway loops burn budget, anomaly governance still fires, and every governed call has a receipt."
+					"text": "Every governed local call still places a PENDING hold, settles at least 1 usertoken, and is recorded on the audit chain (or, if that write fails, its receipt carries `auditDegraded`) — so runaway loops burn budget, anomaly governance still fires, and every governed call has a receipt."
 				},
 				{
 					"file": "site/content/docs/index.mdx",
@@ -801,6 +776,10 @@
 				{
 					"file": "site/content/docs/quickstart.mdx",
 					"text": "Every governed call appends a SHA-256-hashed event to `.usertrust/audit/events.jsonl` (a call whose event could not be written says so on its receipt, as `auditDegraded`)."
+				},
+				{
+					"file": "site/content/docs/api/trust.mdx",
+					"text": "returns a governed client where every governed call — the provider methods listed under [Provider detection](#provider-detection) — becomes an audited, budget-enforced financial transaction."
 				}
 			],
 			"proofs": [
@@ -900,7 +879,7 @@
 			"statements": [
 				{
 					"file": "packages/ui/README.md",
-					"text": "- **Inspector** — select a row to see its call, cost and chain fields, docked beside the list on a wide screen, and a one-click **Verify** that replays the independent `usertrust-verify` check and renders a thermal-receipt style result: verified, failed, or not found in any of the vault's audit segments."
+					"text": "- **Inspector** — select a row to see its call, cost and chain fields, docked beside the list on a wide screen, and a one-click **Verify** that runs the `usertrust-verify` check and renders a thermal-receipt style result under its verdict: verified (only when the receipt proves inclusion against an anchor), consistent, unanchored (the chain agrees with itself, with no anchor to check it against), failed, or not found in any of the vault's audit segments."
 				}
 			],
 			"proofs": [
@@ -911,6 +890,10 @@
 				{
 					"file": "packages/ui/tests/verify-endpoint.test.ts",
 					"test": "404s an unknown transaction"
+				},
+				{
+					"file": "packages/ui/tests/verify-view.test.ts",
+					"test": "a real receipt from this dashboard's own check (no anchor) reads consistent, unanchored, never verified"
 				}
 			]
 		},
@@ -1154,9 +1137,75 @@
 					"test": "emptying events.jsonl while .meta remains: the next append continues from the sidecar, and verification reports the gap"
 				}
 			]
+		},
+		{
+			"id": "verified-only-anchored-inclusion",
+			"kind": "guarantee",
+			"claim": "verifyTransaction's inclusionVerified is true only when the transaction's inclusion was proven against a verified anchor root, and the dashboard says \"verified\" only on that flag, never from the receipt text, so a vault-written field cannot make an unanchored pass read verified.",
+			"statements": [
+				{
+					"file": "CHANGELOG.md",
+					"text": "When the transaction is found, it is `true` only when its inclusion was proven against a verified anchor root (the receipt's `INCLUSION VERIFIED (anchor #n)`), and `false` otherwise."
+				},
+				{
+					"file": "CHANGELOG.md",
+					"text": "usertrust-ui says \"verified\" only for an explicit check that passed against an anchor; the CSV export's integrity value changes from `verified` to `chained`."
+				},
+				{
+					"file": "CHANGELOG.md",
+					"text": "The inspector's explicit check puts its verdict above the receipt, and says `verified` only when the verifier reports inclusion proven against an anchor (`inclusionVerified`); any other pass reads `consistent, unanchored`."
+				}
+			],
+			"proofs": [
+				{
+					"file": "packages/core/tests/harden/anchoring/anchor-corpus.test.ts",
+					"test": "30. happy paths: single anchor / full history / grown chain / post-rotation keyring → ANCHORED_VERIFIED"
+				},
+				{
+					"file": "packages/core/tests/harden/anchoring/anchor-corpus.test.ts",
+					"test": "1. F1 KILL: mutate anchored event + full re-chain + .meta rewrite → ANCHOR_MISMATCH/root-mismatch; --tx never prints INCLUSION VERIFIED"
+				},
+				{
+					"file": "packages/core/tests/harden/anchoring/inclusion-flag.test.ts",
+					"test": "a valid chain checked with NO anchor inputs: valid, and inclusionVerified false"
+				},
+				{
+					"file": "packages/core/tests/harden/anchoring/inclusion-flag.test.ts",
+					"test": "an anchored transaction whose inclusion proof holds, in a vault whose unanchored tail was edited: inclusionVerified false"
+				},
+				{
+					"file": "packages/core/tests/harden/anchoring/inclusion-flag.test.ts",
+					"test": "control: the same anchored transaction on the untouched vault: inclusionVerified true"
+				},
+				{
+					"file": "packages/ui/tests/verify-view.test.ts",
+					"test": "a real receipt from this dashboard's own check (no anchor) reads consistent, unanchored, never verified"
+				},
+				{
+					"file": "packages/ui/tests/verify-view.test.ts",
+					"test": "found, valid and the verifier proved inclusion against an anchor: verified"
+				},
+				{
+					"file": "packages/ui/tests/verify-view.test.ts",
+					"test": "only the boolean true counts: absent (an older server), false, or a look-alike value is unanchored"
+				},
+				{
+					"file": "packages/ui/tests/verify-view.test.ts",
+					"test": "the receipt TEXT never decides it: a genuine-looking INCLUSION VERIFIED row without the flag is unanchored"
+				},
+				{
+					"file": "packages/ui/tests/verify-view.test.ts",
+					"test": "a vault-written model carrying a forged Merkle row behind a line separator: the real check still reads unanchored"
+				}
+			]
 		}
 	],
 	"nonclaims": [
+		{
+			"file": "CHANGELOG.md",
+			"text": "the integrity column of an intact row now holds `chained` where it held `verified`; update any filter or script that matches the old value.",
+			"why": "a data-format note for readers of the CSV export, not a statement about the chain"
+		},
 		{
 			"file": "CHANGELOG.md",
 			"text": "Each of these statements is now listed in `docs/claims.json` with the test that proves it, and a test fails when the documentation states an integrity claim the list does not hold (see `docs/CLAIMS.md`). ",
@@ -1186,6 +1235,11 @@
 			"file": "README.md",
 			"text": "- There is no way to prove what happened after the fact",
 			"why": "problem statement, about running without usertrust"
+		},
+		{
+			"file": "README.md",
+			"text": "| Chain: 847 events | Integrity: SHA-256 verified |",
+			"why": "sample header of `usertrust inspect`; it shows a chain check, not an anchoring or tamper-proof claim"
 		},
 		{
 			"file": "LIMITATIONS.md",
@@ -1338,6 +1392,11 @@
 			"why": "PII detection types"
 		},
 		{
+			"file": "site/content/docs/api/config.mdx",
+			"text": "and a variable already set in the environment is never overwritten.",
+			"why": "how the .env loader treats an existing environment variable; not about the audit chain"
+		},
+		{
 			"file": "site/content/docs/api/pricing.mdx",
 			"text": "Rates re-verified against Anthropic's published pricing page (`platform.claude.com/docs/en/about-claude/pricing`) on 2026-10-07; the 1-hour write column was re-read raw on 2026-10-08, and every row again on 2026-10-11.",
 			"why": "pricing table provenance and budget policy"
@@ -1389,13 +1448,23 @@
 		},
 		{
 			"file": "site/content/docs/concepts/local-models.mdx",
-			"text": "Every call cost is floored at 1 usertoken -- zero-amount ledger transfers are invalid -- so a `{0,0}`-rate local call settles at **exactly 1 nominal usertoken**.",
+			"text": "Every call cost is floored at 1 usertoken — zero-amount ledger transfers are invalid — so a `{0,0}`-rate local call settles at **exactly 1 nominal usertoken**.",
 			"why": "pricing floor for local models"
 		},
 		{
 			"file": "site/content/docs/concepts/policy-engine.mdx",
 			"text": "The policy engine evaluates every governed LLM call against a set of rules before the call is forwarded to the provider.",
 			"why": "policy evaluation order"
+		},
+		{
+			"file": "site/content/docs/concepts/policy-engine.mdx",
+			"text": "and every call site reads the evaluation result only inside its `decision === \"deny\"` branch.",
+			"why": "where the code reads the policy result; not a claim about the audit chain"
+		},
+		{
+			"file": "site/content/docs/concepts/policy-engine.mdx",
+			"text": "so user rules can add deny or warn rules but cannot remove, disable, or override a built-in",
+			"why": "how custom policy rules merge with the built-ins; not a claim about the audit chain"
 		},
 		{
 			"file": "site/content/docs/concepts/two-phase-spend.mdx",
@@ -1424,12 +1493,12 @@
 		},
 		{
 			"file": "site/content/docs/index.mdx",
-			"text": "## Core Guarantees",
+			"text": "## Core guarantees",
 			"why": "a section heading"
 		},
 		{
 			"file": "site/content/docs/index.mdx",
-			"text": "- **Two-phase spend lifecycle** — Every governed LLM call follows `PENDING hold → LLM call → POST (success) or VOID (failure)`.",
+			"text": "- **Two-phase spend lifecycle** — every governed LLM call follows `PENDING hold → LLM call → POST (success) or VOID (failure)`.",
 			"why": "the spend lifecycle, not the audit chain"
 		},
 		{
@@ -1448,6 +1517,21 @@
 			"why": "SDK client detection"
 		},
 		{
+			"file": "site/content/docs/cli/index.mdx",
+			"text": "# acknowledge that a live TigerBeetle ledger is not rolled back",
+			"why": "what snapshot restore does to the ledger; not about the audit chain"
+		},
+		{
+			"file": "site/content/docs/cli/index.mdx",
+			"text": "`--force` bypasses only the refusal that a live `tigerbeetle/` ledger cannot be rolled back.",
+			"why": "what snapshot restore does to the ledger; not about the audit chain"
+		},
+		{
+			"file": "site/content/docs/cli/index.mdx",
+			"text": "(the output also reports whether the chain verified)",
+			"why": "says the command's output carries a verification line; the verification itself is documented on the verify page"
+		},
+		{
 			"file": "site/content/docs/schemas.mdx",
 			"text": "usertrust publishes JSON Schema (draft 2020-12) definitions for its two public interop shapes: the receipt returned by every governed call, and one persisted line of the hash-chained audit log.",
 			"why": "names the receipt every governed call returns; a schema, not an audit claim"
@@ -1456,6 +1540,11 @@
 			"file": "site/content/docs/schemas.mdx",
 			"text": "| Trust Receipt v1 | [receipt.v1.schema.json](https://usertrust.ai/schemas/receipt.v1.schema.json) | The `TrustReceipt` returned by every governed call |",
 			"why": "names the receipt every governed call returns; a schema, not an audit claim"
+		},
+		{
+			"file": "site/content/docs/verify/index.mdx",
+			"text": "Exit codes: `0` verified, `1` failed, `2` unverifiable, `3` usage error.",
+			"why": "exit codes of the signed-receipt verifier, a separate command from vault verification"
 		},
 		{
 			"file": "LIMITATIONS.md",
@@ -1503,14 +1592,14 @@
 			"why": "the error a caller sees when a denial event fails to append"
 		},
 		{
+			"file": "site/content/docs/api/errors.mdx",
+			"text": "**Docs URL:** `https://usertrust.ai/docs/errors/anomaly-detected` — note the slug is `anomaly-detected`, not the class name.",
+			"why": "the page slug the SDK prints for AnomalyError; the word is part of a URL, not a claim about the chain"
+		},
+		{
 			"file": "site/content/docs/concepts/local-models.mdx",
 			"text": "Renaming a local model (`ollama cp llama3.2 gpt-4o`) cannot change the regime in either direction.",
 			"why": "pricing regime of local models"
-		},
-		{
-			"file": "site/content/docs/concepts/two-phase-spend.mdx",
-			"text": "Hold becomes permanent spend",
-			"why": "the POST step of a ledger hold; not an audit claim"
 		},
 		{
 			"file": "site/content/docs/schemas.mdx",
@@ -1531,6 +1620,21 @@
 			"file": "LIMITATIONS.md",
 			"text": "Detecting a rollback after the fact needs evidence held outside the vault, an anchor or receipts you kept (section 8): a restore that takes the log below an anchor shows as `ANCHOR_MISMATCH` when you verify with the anchors and your pinned key (see [docs/anchoring.md](docs/anchoring.md)). Without either, the restored vault is checked only against itself. Verification reads every audit segment in the directory, so a segment the snapshot lacked can make the restored vault fail with duplicate sequences or a count mismatch.",
 			"why": "describes what snapshot restore does and refuses to do, not a property of the audit chain"
+		},
+		{
+			"file": "site/content/docs/concepts/circuit-breaker.mdx",
+			"text": "so `halfOpenSuccessThreshold` stays at its default of 2 for governed clients and cannot be changed from config or options.",
+			"why": "which circuit-breaker settings the config reaches; not about the audit chain"
+		},
+		{
+			"file": "site/content/docs/policy/operators.mdx",
+			"text": "A hard rule on a field the SDK never populates therefore denies every call.",
+			"why": "what a hard policy rule on an unpopulated field does; not about the audit chain"
+		},
+		{
+			"file": "site/content/docs/policy/operators.mdx",
+			"text": "and `cost_center` on every LLM call",
+			"why": "which fields the policy context carries; not about the audit chain"
 		}
 	],
 	"denied": [

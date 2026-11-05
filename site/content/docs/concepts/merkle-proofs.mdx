@@ -23,22 +23,24 @@ The prefix byte ensures a leaf hash can never collide with an internal node hash
 
 ```typescript
 hashLeaf(data: string): string
-// SHA-256(0x00 || data)
+// data is hex; SHA-256(0x00 || hex-decode(data)), returned as hex
 
 hashInternal(left: string, right: string): string
-// SHA-256(0x01 || left || right)
+// left and right are hex; SHA-256(0x01 || hex-decode(left) || hex-decode(right)), returned as hex
 ```
+
+Every hash the tree touches is a hex-encoded string. `hashLeaf` and `hashInternal` decode their inputs with `Buffer.from(input, "hex")` and return hex. Node's hex decoder stops silently at the first non-hex character, so a non-hex input is not an error — `hashLeaf("hello")` hashes an empty buffer and returns the same value as `hashLeaf("")`. Feed the tree the audit events' `hash` fields (64 hex characters), never raw text.
 
 ## Odd Leaf Promotion
 
-When the number of leaves is odd, the unpaired leaf is **promoted** to the next layer -- it is **not** duplicated. This avoids CVE-2012-2459, where duplicating odd leaves allows an attacker to construct two different leaf sets that produce the same Merkle root.
+When the number of leaves is odd, the unpaired leaf is **promoted** to the next layer — it is **not** duplicated. This avoids CVE-2012-2459, where duplicating odd leaves allows an attacker to construct two different leaf sets that produce the same Merkle root.
 
 ```
 Leaves: [A, B, C]
 
-Layer 0: [A, B, C]
-Layer 1: [hash(A, B), C]      // C promoted, not duplicated
-Layer 2: [hash(hash(A,B), C)] // root
+Layer 0: [hashLeaf(A), hashLeaf(B), hashLeaf(C)]
+Layer 1: [hashInternal(hashLeaf(A), hashLeaf(B)), hashLeaf(C)]  // C promoted, not duplicated
+Layer 2: [hashInternal(layer1[0], hashLeaf(C))]                 // root
 ```
 
 ## Building the Tree
@@ -50,7 +52,7 @@ buildMerkleTree(leaves: string[]): {
 }
 ```
 
-Returns the Merkle root and all intermediate layers. If the input is empty, `root` is `undefined`. A single leaf returns its `hashLeaf` value as the root.
+Each leaf is a hex string (the audit events' `hash` fields). The function hashes each one with `hashLeaf` first. It returns the Merkle root and all intermediate layers. If the input is empty, `root` is `undefined`. A single leaf returns its `hashLeaf` value as the root.
 
 ## Inclusion Proofs
 
@@ -70,6 +72,8 @@ verifyInclusionProof(
 ): boolean
 ```
 
+`generateInclusionProof` throws `RangeError` when `leafIndex` is negative or not less than `leaves.length`. `verifyInclusionProof` never throws: it returns `false` when the proof's `treeSize` or `root` differ from the published values, and for any structurally malformed proof.
+
 The proof contains the sibling hashes needed to recompute the path from the leaf to the root. A verifier walks the path, hashing at each level, and checks that the result matches the published root.
 
 Verification also checks the path's **topology**: the expected number of siblings and each one's left/right orientation are derived from `leafIndex` and `treeSize`, and a proof whose siblings do not match that sequence is rejected before any hashing. Recomputing to the right root is not enough on its own — without this check a proof could claim any position it liked, and where two sibling hashes are equal, flipping a sibling's side folds to the same root.
@@ -78,18 +82,21 @@ Verification also checks the path's **topology**: the expected number of sibling
 
 ```typescript
 interface MerkleInclusionProof {
-  segmentId: string;
-  leafIndex: number;
-  leafHash: string;
-  treeSize: number;
-  root: string;
-  siblings: MerkleSibling[];
+  readonly version: 1;
+  readonly leafHash: string;
+  readonly leafIndex: number;
+  readonly treeSize: number;
+  readonly root: string;
+  readonly siblings: readonly MerkleSibling[];
+  readonly segmentId: string;
 }
 ```
 
+`version` is the literal `1`. `generateInclusionProof` sets it; `verifyInclusionProof` does not read it.
+
 ## Consistency Proofs
 
-A consistency proof demonstrates that a Merkle tree of size `N` is a prefix of a Merkle tree of size `M` (where `M > N`). Checked against an older root you obtained independently (a signed anchor, a published checkpoint), it shows the log was only appended to since then: no event under that root was modified or removed. On its own it shows nothing about tampering: `verifyConsistencyProof` takes both roots from the proof, so a log rewritten from the start yields proofs that verify against its own roots.
+A consistency proof demonstrates that a Merkle tree of size `N` is a prefix of a Merkle tree of size `M` (where `M >= N`; when the two sizes are equal the `proof` array is empty and the two roots must match). Checked against an older root you obtained independently (a signed anchor, a published checkpoint), it shows the log was only appended to since then: no event under that root was modified or removed. On its own it shows nothing about tampering: `verifyConsistencyProof` takes both roots from the proof, so a log rewritten from the start yields proofs that verify against its own roots.
 
 ```typescript
 generateConsistencyProof(
@@ -103,15 +110,17 @@ verifyConsistencyProof(
 ): boolean
 ```
 
+`generateConsistencyProof` throws `RangeError` when `firstSize` is less than 1 or greater than `secondSize`, or when `secondSize` exceeds `leaves.length`. `verifyConsistencyProof` returns `false` for a `firstSize` below 1 or above `secondSize`, and for a proof whose `proof` array is empty while the two sizes differ.
+
 ### MerkleConsistencyProof
 
 ```typescript
 interface MerkleConsistencyProof {
-  firstSize: number;
-  secondSize: number;
-  firstRoot: string;
-  secondRoot: string;
-  proof: string[];
+  readonly firstSize: number;
+  readonly secondSize: number;
+  readonly firstRoot: string;
+  readonly secondRoot: string;
+  readonly proof: readonly string[];
 }
 ```
 
@@ -121,8 +130,8 @@ Each sibling in a proof path indicates its hash and whether it should be placed 
 
 ```typescript
 interface MerkleSibling {
-  hash: string;
-  position: "left" | "right";
+  readonly hash: string;
+  readonly position: "left" | "right";
 }
 ```
 
@@ -132,7 +141,7 @@ When recomputing the path upward, the verifier places the sibling on the indicat
 
 A typical verification flow:
 
-1. Obtain the published Merkle root (e.g., from a transparency log or signed receipt)
+1. Obtain the published Merkle root (e.g., from a published checkpoint or a signed receipt)
 2. Request an inclusion proof for a specific audit event
 3. Verify the proof against the published root
 

@@ -3,6 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+	ANCHOR_LEAD,
 	anchorView,
 	chainStatus,
 	costView,
@@ -50,7 +51,17 @@ describe("chainStatus", () => {
 describe("anchorView", () => {
 	it("red-first ('absent', unexplained): says what the file is, that it is NOT verified here, and how to verify", () => {
 		const shown = anchorView("absent");
-		expect(shown.label).toBe("not present");
+		expect(shown.label).toBe("not set up");
+		expect(shown.explainer.startsWith(ANCHOR_LEAD)).toBe(true);
+		expect(ANCHOR_LEAD).toBe(
+			"Anchoring is optional: it adds signed checkpoints of this log, and usertrust anchor init sets it up in this project.",
+		);
+		expect(ANCHOR_LEAD).not.toContain("`");
+		expect(shown.label).not.toBe("not present");
+		// the three sentences other documents quote stay word for word
+		expect(shown.explainer).toContain(
+			"An anchor file mirrors chain checkpoints outside this vault's log. This dashboard only checks whether the file exists; it does not verify anchors.",
+		);
 		expect(shown.explainer).toMatch(/only checks whether the file exists/);
 		expect(shown.explainer).toMatch(/does not verify anchors/);
 		expect(shown.explainer).toContain("usertrust verify --anchors <file> --pubkey <genesis.pem>");
@@ -170,7 +181,7 @@ describe("verifiedAsOf: when the integrity verdict was last derived from a full 
 	it("shows the instant of the last full read in the reader's local time", () => {
 		const local = (d: Date): string => `local(${d.toISOString()})`;
 		expect(verifiedAsOf("2026-10-13T09:15:00.000Z", local)).toBe(
-			"verified as of local(2026-10-13T09:15:00.000Z)",
+			"links checked as of local(2026-10-13T09:15:00.000Z)",
 		);
 	});
 
@@ -179,6 +190,6 @@ describe("verifiedAsOf: when the integrity verdict was last derived from a full 
 	});
 
 	it("shows an unparseable value as it is, never as a made-up time", () => {
-		expect(verifiedAsOf("not a time", () => "never")).toBe("verified as of not a time");
+		expect(verifiedAsOf("not a time", () => "never")).toBe("links checked as of not a time");
 	});
 });

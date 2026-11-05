@@ -9,6 +9,7 @@ vi.mock("@clack/prompts", () => ({
 	intro: vi.fn(),
 	outro: vi.fn(),
 	text: vi.fn(),
+	password: vi.fn(),
 	confirm: vi.fn(),
 	log: {
 		info: vi.fn(),
@@ -49,10 +50,10 @@ describe("usertrust init (interactive)", () => {
 	});
 
 	it("creates vault with one API key and recommended rates", async () => {
-		vi.mocked(clack.text)
+		vi.mocked(clack.password)
 			.mockResolvedValueOnce("sk-ant-api03-testkey123") // first key
-			.mockResolvedValueOnce("") // empty = done
-			.mockResolvedValueOnce("50"); // budget
+			.mockResolvedValueOnce(""); // empty = done
+		vi.mocked(clack.text).mockResolvedValueOnce("50"); // budget
 		vi.mocked(clack.confirm).mockResolvedValueOnce(true); // recommended rates
 
 		await run(tempDir);
@@ -68,11 +69,11 @@ describe("usertrust init (interactive)", () => {
 	});
 
 	it("creates .env with API keys", async () => {
-		vi.mocked(clack.text)
+		vi.mocked(clack.password)
 			.mockResolvedValueOnce("sk-ant-api03-testkey123")
 			.mockResolvedValueOnce("sk-proj-openai-key456")
-			.mockResolvedValueOnce("")
-			.mockResolvedValueOnce("100");
+			.mockResolvedValueOnce("");
+		vi.mocked(clack.text).mockResolvedValueOnce("100");
 		vi.mocked(clack.confirm).mockResolvedValueOnce(true);
 
 		await run(tempDir);
@@ -86,10 +87,10 @@ describe("usertrust init (interactive)", () => {
 	});
 
 	it("writes .gitignore with .env entry", async () => {
-		vi.mocked(clack.text)
+		vi.mocked(clack.password)
 			.mockResolvedValueOnce("sk-ant-api03-testkey123")
-			.mockResolvedValueOnce("")
-			.mockResolvedValueOnce("50");
+			.mockResolvedValueOnce("");
+		vi.mocked(clack.text).mockResolvedValueOnce("50");
 		vi.mocked(clack.confirm).mockResolvedValueOnce(true);
 
 		await run(tempDir);
@@ -99,10 +100,10 @@ describe("usertrust init (interactive)", () => {
 	});
 
 	it("sets vault permissions to 700", async () => {
-		vi.mocked(clack.text)
+		vi.mocked(clack.password)
 			.mockResolvedValueOnce("sk-ant-api03-testkey123")
-			.mockResolvedValueOnce("")
-			.mockResolvedValueOnce("50");
+			.mockResolvedValueOnce("");
+		vi.mocked(clack.text).mockResolvedValueOnce("50");
 		vi.mocked(clack.confirm).mockResolvedValueOnce(true);
 
 		await run(tempDir);
@@ -112,32 +113,32 @@ describe("usertrust init (interactive)", () => {
 	});
 
 	it("does not overwrite existing vault without --reconfigure", async () => {
-		vi.mocked(clack.text)
+		vi.mocked(clack.password)
 			.mockResolvedValueOnce("sk-ant-api03-testkey123")
-			.mockResolvedValueOnce("")
-			.mockResolvedValueOnce("50");
+			.mockResolvedValueOnce("");
+		vi.mocked(clack.text).mockResolvedValueOnce("50");
 		vi.mocked(clack.confirm).mockResolvedValueOnce(true);
 		await run(tempDir);
 
-		// Second init — should warn
+		// Second init: carries on, says the vault exists, keeps its config
 		await run(tempDir);
-		expect(clack.log.warn).toHaveBeenCalled();
+		expect(clack.log.info).toHaveBeenCalledWith(expect.stringContaining("already exists"));
 	});
 
 	it("--reconfigure overwrites existing vault", async () => {
 		// First init
-		vi.mocked(clack.text)
+		vi.mocked(clack.password)
 			.mockResolvedValueOnce("sk-ant-api03-testkey123")
-			.mockResolvedValueOnce("")
-			.mockResolvedValueOnce("50");
+			.mockResolvedValueOnce("");
+		vi.mocked(clack.text).mockResolvedValueOnce("50");
 		vi.mocked(clack.confirm).mockResolvedValueOnce(true);
 		await run(tempDir);
 
 		// Reconfigure with different budget
-		vi.mocked(clack.text)
+		vi.mocked(clack.password)
 			.mockResolvedValueOnce("sk-ant-api03-newkey456")
-			.mockResolvedValueOnce("")
-			.mockResolvedValueOnce("200");
+			.mockResolvedValueOnce("");
+		vi.mocked(clack.text).mockResolvedValueOnce("200");
 		vi.mocked(clack.confirm).mockResolvedValueOnce(true);
 		await run(tempDir, { reconfigure: true });
 
@@ -148,10 +149,10 @@ describe("usertrust init (interactive)", () => {
 	});
 
 	it("converts dollar budget to usertokens", async () => {
-		vi.mocked(clack.text)
+		vi.mocked(clack.password)
 			.mockResolvedValueOnce("sk-ant-api03-testkey123")
-			.mockResolvedValueOnce("")
-			.mockResolvedValueOnce("100.50"); // $100.50
+			.mockResolvedValueOnce("");
+		vi.mocked(clack.text).mockResolvedValueOnce("100.50"); // $100.50
 		vi.mocked(clack.confirm).mockResolvedValueOnce(true);
 
 		await run(tempDir);
@@ -164,9 +165,10 @@ describe("usertrust init (interactive)", () => {
 
 	// D8: the custom-rate wizard writes four-tier examples.
 	it("writes all four tiers when the operator supplies cache rates", async () => {
-		vi.mocked(clack.text)
+		vi.mocked(clack.password)
 			.mockResolvedValueOnce("sk-ant-api03-testkey123") // key
-			.mockResolvedValueOnce("") // done adding keys
+			.mockResolvedValueOnce(""); // done adding keys
+		vi.mocked(clack.text)
 			.mockResolvedValueOnce("50") // budget
 			.mockResolvedValueOnce("claude-sonnet-4-6") // model to edit
 			.mockResolvedValueOnce("35") // input rate $/1M
@@ -195,9 +197,10 @@ describe("usertrust init (interactive)", () => {
 	});
 
 	it("omits (not zeroes) cache tiers left blank in the custom-rate wizard", async () => {
-		vi.mocked(clack.text)
+		vi.mocked(clack.password)
 			.mockResolvedValueOnce("sk-ant-api03-testkey123")
-			.mockResolvedValueOnce("")
+			.mockResolvedValueOnce("");
+		vi.mocked(clack.text)
 			.mockResolvedValueOnce("50")
 			.mockResolvedValueOnce("claude-sonnet-4-6")
 			.mockResolvedValueOnce("35") // input rate $/1M

@@ -57,7 +57,6 @@ import {
 	PROOF_ID_IS_A_HANDLE,
 	PROVIDER_SCOPED_CLAIM,
 	RECOMPUTE_IS_RESOLVER_ONLINE_CHECK,
-	REKOR_EVIDENCE_MEANING,
 	REPO_NAME_IS_NOT_SCOPE,
 	S3_OPERATOR_ASSERTED,
 	SESSION_NON_ARTIFACT,
@@ -302,9 +301,6 @@ function mandatedStrings(state: VerifiedState): { needle: string; why: string }[
 		if ((envelope.display.spendBreakdown ?? []).length > 0) {
 			required.push({ needle: BREAKDOWN_ROWS_NOTE, why: "R29 — breakdown rows are display-grade" });
 		}
-	}
-	if (envelope.anchorEvidence?.rekor !== undefined) {
-		required.push({ needle: REKOR_EVIDENCE_MEANING, why: "R32 — what a Rekor attachment IS" });
 	}
 	return required;
 }
@@ -797,21 +793,14 @@ test("C2 commit-history.json — history rung, the served history, and R7's cave
 	assertContains(text, "seg-0001", "the walked segments render");
 });
 
-test("C3 commit-anchored.json — anchored rung, Rekor as the basis, S3 as context only", () => {
+test("C3 commit-anchored.json — anchored rung, S3 as context only", () => {
 	const { html, text } = renderFixture("commit-anchored.json");
 	assert.ok(
 		html.includes('data-rung="verified_anchored" data-rung-state="reached"'),
 		"the anchored rung",
 	);
-	assert.ok(html.includes('data-testid="rekor-evidence"'));
-	assert.ok(html.includes('data-anchor-standing="upheld"'));
-	assertContains(text, "https://rekor.usertrust.ai", "the log the evidence names");
-	assertContains(text, "1786450800", "integratedTime as evidence about the checkpoint (§10.13)");
 
 	// R8 — the surviving equivocation caveat, verbatim, plus the fork disclaimer.
-	assertContains(text, ANCHOR_BINDING_RESOLVER_ASSERTED, "R41 qualifies the Rekor card locally");
-	assertContains(text, ANCHOR_EXTERNAL_VISIBILITY, "R8's caveat, verbatim");
-	assertContains(text, "does not prove the signer never produced another", "R8's limit");
 	assertContains(text, FORK_DISCLAIMER, "R8: the fork disclaimer REMAINS at this rung");
 	assertContains(text, EQUIVOCATION_CAVEAT, "the ladder is cumulative");
 
@@ -828,7 +817,6 @@ test("C4 commit-s3-only.json — S3 evidence alone renders NO anchor claim", () 
 		"no anchored word anywhere",
 	);
 	assertOmits(text, "VERIFIED — ANCHORED", "R8: S3 upgrades no cryptographic verdict");
-	assert.ok(!html.includes('data-testid="rekor-evidence"'), "there is no Rekor attachment to show");
 	assertOmits(text, ANCHOR_EXTERNAL_VISIBILITY, "no anchor caveat without an anchor claim");
 	assert.ok(html.includes('data-testid="s3-object-lock"'), "the probes still render as context");
 	assertContains(text, S3_OPERATOR_ASSERTED, "labeled operator-asserted");
@@ -849,8 +837,6 @@ test("C5 commit-anchor-failed.json — base verdict preserved, the failed extens
 		anchorRow.includes("When this check passes"),
 		"failed row must not present-tense claim the resolver is asserting the anchored rung",
 	);
-	// The served Rekor attachment must NOT read as a green anchor chip.
-	assert.ok(html.includes('data-anchor-standing="not-upheld"'), "R10: never a green anchor chip");
 	assertOmits(text, ANCHOR_EXTERNAL_VISIBILITY, "a failed anchor has no mitigation to claim");
 	assertContains(text, "The base verdict is PRESERVED", "R10's sentence");
 });
