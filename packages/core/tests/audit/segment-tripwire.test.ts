@@ -26,6 +26,7 @@ const KNOWN_JSONL: Record<string, string[]> = {
 		"audit/quarantine.ts",
 		"audit/read.ts",
 		"audit/verify.ts",
+		"cli/anchor.ts", // the scheduled run's empty-vault check lists segment files; it only reads sizes
 		"cli/audit-segments.ts",
 		"cli/health.ts",
 	],

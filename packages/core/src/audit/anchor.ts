@@ -107,6 +107,8 @@ export interface AnchorEmitterStatus {
 	eventsSinceLastAnchor: number;
 	msSinceLastAnchor: number | null;
 	outboxDepth: number;
+	/** True when the outbox directory exists but cannot be listed: the depth is then unknown. */
+	outboxUnreadable: boolean;
 	anchorSkips: number;
 	publishFailures: number;
 	degraded: boolean;
@@ -126,6 +128,11 @@ export interface AnchorEmitter {
 	/** Emit a rotation record cross-signed by the CURRENT key (spec §6). */
 	rotate(next: { keyId: string; publicKeySpki: string }): Promise<AnchorEmitResult>;
 	status(): AnchorEmitterStatus;
+	/**
+	 * Retry delivery of records still in the outbox, oldest first (no new record is made).
+	 * Resolves "locked" when another run holds the writer lock, so nothing was attempted.
+	 */
+	redeliverPending(): Promise<"done" | "locked">;
 	/** Start the cadence scheduler (unref'd timer; never blocks appends). */
 	start(): void;
 	stop(): Promise<void>;
@@ -639,8 +646,13 @@ function tryAcquireAnchorLock(dir: string): (() => void) | null {
 					/* already removed */
 				}
 			};
-		} catch {
-			return null;
+		} catch (err) {
+			// EEXIST means another run holds the lock. Anything else (an unwritable or
+			// missing anchors directory) is a fault to report, not a run to skip.
+			if ((err as NodeJS.ErrnoException).code === "EEXIST") return null;
+			throw new Error(
+				`anchor lock unavailable: ${err instanceof Error ? err.message : String(err)}`,
+			);
 		}
 	};
 	const first = attempt();
@@ -673,12 +685,19 @@ function tryAcquireAnchorLock(dir: string): (() => void) | null {
 	// rename throws (ENOENT) and backs off. A bare check-then-unlink would let
 	// a slow contender delete the winner's freshly created lock (TOCTOU) and
 	// admit two emitters — the exact race the lock exists to prevent.
+	const reclaimPath = `${lockPath}.reclaim-${process.pid}-${Date.now()}`;
 	try {
-		const reclaimPath = `${lockPath}.reclaim-${process.pid}-${Date.now()}`;
 		renameSync(lockPath, reclaimPath);
+	} catch (err) {
+		// ENOENT: another contender won the reclaim, so the lock is held. Anything else
+		// (EACCES, EROFS) is a fault, not contention.
+		if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+		throw new Error(`anchor lock unavailable: ${err instanceof Error ? err.message : String(err)}`);
+	}
+	try {
 		unlinkSync(reclaimPath);
 	} catch {
-		return null;
+		/* the stale lock is already out of the way; a stray reclaim name is harmless */
 	}
 	return attempt();
 }
@@ -718,16 +737,51 @@ function pendingOutboxRecords(dir: string): AnchorRecord[] {
 		});
 }
 
+/** Thrown (message prefix) when the outbox directory exists but cannot be listed. */
+export const OUTBOX_UNREADABLE = "anchor outbox cannot be read";
+
+/**
+ * The pending outbox sequence numbers. A missing directory is an empty backlog; any other
+ * listing failure THROWS, because "cannot read" must never look like "nothing waiting".
+ */
 function outboxSeqs(dir: string): number[] {
 	const outDir = join(dir, "outbox");
-	if (!existsSync(outDir)) return [];
+	let names: string[];
 	try {
-		return readdirSync(outDir)
-			.filter((f) => f.endsWith(".json"))
-			.map((f) => Number.parseInt(f.slice(0, -5), 10))
-			.filter((n) => Number.isSafeInteger(n) && n >= 1);
+		names = readdirSync(outDir);
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+		throw new Error(`${OUTBOX_UNREADABLE}: ${err instanceof Error ? err.message : String(err)}`);
+	}
+	return names
+		.filter((f) => f.endsWith(".json"))
+		.map((f) => Number.parseInt(f.slice(0, -5), 10))
+		.filter((n) => Number.isSafeInteger(n) && n >= 1);
+}
+
+function outboxReadable(dir: string): boolean {
+	try {
+		outboxSeqs(dir);
+		return true;
 	} catch {
-		return [];
+		return false;
+	}
+}
+
+function outboxDepthOrZero(dir: string): number {
+	try {
+		return outboxSeqs(dir).length;
+	} catch {
+		return 0;
+	}
+}
+
+/** True only when the outbox is readable and holds nothing. */
+function outboxIsEmpty(dir: string): boolean {
+	try {
+		return outboxSeqs(dir).length === 0;
+	} catch {
+		return false;
 	}
 }
 
@@ -747,7 +801,8 @@ function writeOutboxEntry(dir: string, record: AnchorRecord): void {
 	}
 }
 
-function readMeta(
+/** The event log's `.meta` sidecar: its recorded sequence and last hash, or why there is none. */
+export function readMeta(
 	rootDir: string,
 ): { lastHash: string; sequence: number } | "absent" | "unreadable" {
 	const metaPath = join(rootDir, VAULT_DIR, "audit", "events.jsonl.meta");
@@ -803,6 +858,10 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 	// outbox drain and double-publish a record.
 	let publishChain: Promise<void> = Promise.resolve();
 
+	// Errors deliverToSinks already counted (degraded set, failures tallied); trackPublish
+	// counts every other publish error itself, so no failure is invisible to status().
+	const countedErrors = new WeakSet<object>();
+
 	async function deliverToSinks(record: AnchorRecord): Promise<void> {
 		let lastErr: unknown = null;
 		for (const sink of sinks) {
@@ -820,9 +879,12 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 			}
 			if (!delivered) {
 				degraded = true;
-				throw lastErr instanceof Error
-					? lastErr
-					: new Error(`anchor publish failed to sink ${sink.name}`);
+				const failure =
+					lastErr instanceof Error
+						? lastErr
+						: new Error(`anchor publish failed to sink ${sink.name}`);
+				countedErrors.add(failure);
+				throw failure;
 			}
 		}
 	}
@@ -845,6 +907,11 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 		// first failure to preserve store ordering; the emitter stays degraded
 		// until the whole backlog clears.
 		const backlog = pendingOutboxRecords(dir);
+		// An entry that is present but unreadable or unparsable is not in `backlog`: delivering
+		// past it would leave a gap in the store, so stop here and keep everything queued.
+		if (backlog.length < outboxSeqs(dir).length) {
+			throw new Error("anchor outbox holds an unreadable entry; nothing is delivered past it");
+		}
 		const queue = backlog.some((r) => r.anchorSeq === record.anchorSeq)
 			? backlog
 			: [...backlog, record].sort((a, b) => a.anchorSeq - b.anchorSeq);
@@ -857,14 +924,20 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 			}
 		}
 		// Clear degraded only when nothing is left undelivered.
-		if (outboxSeqs(dir).length === 0) degraded = false;
+		if (outboxIsEmpty(dir)) degraded = false;
 	}
 
 	function trackPublish(record: AnchorRecord): Promise<void> {
 		const p = publishChain
 			.then(() => publishRecord(record))
-			.catch(() => {
-				/* failure already counted; outbox entry retained for retry */
+			.catch((err: unknown) => {
+				// The outbox entry is retained for retry. A sink failure was counted in
+				// deliverToSinks; anything else (an unreadable outbox or entry) is counted here,
+				// so an in-process emitter reports degraded instead of silently stalling.
+				if (typeof err === "object" && err !== null && countedErrors.has(err)) return;
+				degraded = true;
+				publishFailures++;
+				lastEmitError = err instanceof Error ? err.message : String(err);
 			})
 			.finally(() => {
 				inFlight.delete(p);
@@ -1067,7 +1140,8 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 					: { anchorSeq: tail.anchorSeq, treeSize: tail.treeSize, timestamp: tail.timestamp },
 			eventsSinceLastAnchor: headSeq === null ? 0 : Math.max(0, headSeq - (tail?.treeSize ?? 0)),
 			msSinceLastAnchor: Number.isFinite(ts) ? Math.max(0, Date.now() - ts) : null,
-			outboxDepth: outboxSeqs(dir).length,
+			outboxDepth: outboxDepthOrZero(dir),
+			outboxUnreadable: !outboxReadable(dir),
 			anchorSkips,
 			publishFailures,
 			degraded,
@@ -1079,6 +1153,49 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 		anchorNow: () => emit(),
 		rotate: (next) => emit({ nextKeyId: next.keyId, nextPublicKeySpki: next.publicKeySpki }),
 		status,
+		async redeliverPending(): Promise<"done" | "locked"> {
+			// Under the writer lock, and only records the mirror already holds byte for
+			// byte: an outbox entry the mirror lacks, or holds differently, is one the
+			// emitter has not accepted (or refused), and must never reach the store.
+			// With no sink configured delivery would succeed vacuously and erase the
+			// entry, so nothing is redelivered and the backlog stays.
+			if (sinks.length === 0) return "done";
+			const release = tryAcquireAnchorLock(dir);
+			if (release === null) return "locked";
+			try {
+				await publishChain;
+				const mirror = readMirrorRecords(dir);
+				if (!mirror.present || mirror.errors.length > 0) return "done";
+				const held = new Map(mirror.records.map((r) => [r.anchorSeq, canonicalize(r)]));
+				// Oldest first, and stop at the first entry that is unreadable, unparsable or
+				// not held by the mirror byte for byte: a later entry must never be delivered
+				// past one that was not.
+				for (const seq of outboxSeqs(dir).sort((a, b) => a - b)) {
+					let rec: AnchorRecord | null = null;
+					try {
+						rec = parseAnchorRecord(readFileSync(outboxPath(dir, seq), "utf-8").trim()).record;
+					} catch {
+						rec = null;
+					}
+					if (rec === null || rec.anchorSeq !== seq) break;
+					if (held.get(rec.anchorSeq) !== canonicalize(rec)) break;
+					try {
+						await deliverToSinks(rec);
+					} catch {
+						break; // failure already counted; the entry stays for the next run
+					}
+					try {
+						unlinkSync(outboxPath(dir, rec.anchorSeq));
+					} catch {
+						/* best effort */
+					}
+				}
+				if (outboxIsEmpty(dir)) degraded = false;
+				return "done";
+			} finally {
+				release();
+			}
+		},
 		start(): void {
 			if (timer !== null) return;
 			const everyMs = config.cadence?.everyMs ?? DEFAULT_ANCHOR_EVERY_MS;

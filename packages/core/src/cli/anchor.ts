@@ -17,7 +17,7 @@
  */
 
 import { createPublicKey } from "node:crypto";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import pc from "picocolors";
 import {
@@ -26,12 +26,22 @@ import {
 	createAnchorEmitter,
 	initAnchorIdentity,
 	mintSuccessorKey,
+	OUTBOX_UNREADABLE,
 	readAnchorIdentity,
+	readMeta,
 	recordRotatedIdentity,
+	resolveSigner,
 	resumeAnchorMirror,
 	type SinkConfig,
 } from "../audit/anchor.js";
 import { type DoctorReport, doctorFileSink, doctorS3Sink } from "../audit/anchor-doctor.js";
+import {
+	classifyEmitReason,
+	isOkReason,
+	type LastRunReason,
+	readLastRun,
+	writeLastRun,
+} from "../audit/anchor-last-run.js";
 import { keyIdFromKeyObject, parseAnchorsContent } from "../audit/anchor-verify.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { CliOptions } from "./init.js";
@@ -50,6 +60,10 @@ const ACTION_VALUE_FLAGS: Readonly<Record<string, readonly string[]>> = {
 	doctor: [...VALUE_SINK_FLAGS],
 	rotate: ["--key-file", "--publish-retries", ...VALUE_SINK_FLAGS],
 	resume: ["--latest"],
+};
+/** Switches an action reads that take no value (the refusal above would otherwise call them unknown). */
+const ACTION_BOOL_FLAGS: Readonly<Record<string, readonly string[]>> = {
+	now: ["--scheduled"],
 };
 /** Same cap the verify CLI enforces on `--bundle` — never export what it refuses. */
 const MAX_BUNDLE_ITEMS = 10_000;
@@ -142,6 +156,211 @@ function emitterConfig(args: string[]): AnchoringConfig {
 		sinks: sinksFromArgs(args),
 		...(retries !== undefined ? { publishRetries: retries } : {}),
 	};
+}
+
+// ── scheduled run ──
+
+/**
+ * Positive evidence that no event was ever stored: every event segment file is absent or
+ * zero-length. A file with bytes that yield no events is damaged, not empty. Returns the
+ * failing check, or null.
+ */
+function eventFilesFault(root: string): string | null {
+	const auditDir = join(root, VAULT_DIR, "audit");
+	if (!existsSync(auditDir)) return null;
+	let names: string[];
+	try {
+		names = readdirSync(auditDir).filter((n) => n.endsWith(".jsonl"));
+	} catch {
+		return "the audit directory cannot be read";
+	}
+	for (const name of names) {
+		try {
+			const st = lstatSync(join(auditDir, name));
+			if (!st.isFile()) return `event file ${name} is not a regular file`;
+			if (st.size > 0) return `event file ${name} has content but yields no events`;
+		} catch {
+			return `event file ${name} cannot be inspected`;
+		}
+	}
+	return null;
+}
+
+/**
+ * Why an "empty" outcome is a fault rather than a fresh vault, or null when it is a fresh
+ * vault. A fresh vault needs POSITIVE evidence: the mirror present and empty, no anchor
+ * high-water, every event file absent or zero-length, and the log's sidecar absent or at
+ * sequence 0. Anything else fails, with a detail naming the check.
+ */
+function emptyVaultFault(root: string): { reason: LastRunReason; detail: string } | null {
+	const mirrorPath = join(anchorsDir(root), "anchors.jsonl");
+	if (!existsSync(mirrorPath)) {
+		return { reason: "mirror-missing", detail: "the anchor mirror file is missing" };
+	}
+	let mirrorBytes = 0;
+	try {
+		mirrorBytes = readFileSync(mirrorPath, "utf-8").trim().length;
+	} catch {
+		return { reason: "other", detail: "the anchor mirror cannot be read" };
+	}
+	if (mirrorBytes > 0 || (readAnchorIdentity(root)?.lastAnchorSeq ?? 0) > 0) {
+		return {
+			reason: "other",
+			detail: "the event log is empty but anchors exist: the log may have been lost",
+		};
+	}
+	const files = eventFilesFault(root);
+	if (files !== null) {
+		return { reason: "other", detail: `${files}: the log may be damaged` };
+	}
+	// Before the first anchor the mirror and high-water say nothing, so ask the log's own
+	// sidecar: a recorded sequence above 0 with no readable events is a lost or damaged log.
+	const meta = readMeta(root);
+	if (meta === "unreadable") {
+		return { reason: "other", detail: "the event log's sequence file cannot be read" };
+	}
+	if (meta !== "absent" && meta.sequence !== 0) {
+		return {
+			reason: "other",
+			detail:
+				"the event log is empty but its sequence file records events: the log may have been lost",
+		};
+	}
+	return null;
+}
+
+/**
+ * For an "empty" outcome, which returns before the emitter's epoch guard: the signer a timer
+ * would sign with must be the identity's current epoch key, or "nothing to do" would hide a run
+ * pointed at the wrong vault's key (or a superseded one). Returns the fault, or null.
+ */
+function emptySignerFault(
+	root: string,
+	args: string[],
+): { reason: LastRunReason; detail: string } | null {
+	const identity = readAnchorIdentity(root);
+	if (identity === null) return null;
+	const signer = resolveSigner(emitterConfig(args).signer, identity.vaultId);
+	if (signer.keyId === identity.keyId) return null;
+	return {
+		reason: "stale-signer-key",
+		detail: `signer ${signer.keyId} is not the current epoch key ${identity.keyId}: point USERTRUST_ANCHOR_KEY/--key-file at this vault's current private key`,
+	};
+}
+
+/** Record a scheduled run the option check refused (reason "other"; the message goes to stderr). */
+function recordRefusedScheduledRun(root: string, message: string): void {
+	if (readAnchorIdentity(root) === null) return;
+	try {
+		writeLastRun(root, "other", new Date(), (warning) => {
+			process.stderr.write(`${scrubForTerminal(warning)}\n`);
+		});
+	} catch (err) {
+		process.stderr.write(
+			`${scrubForTerminal(`usertrust: could not record the refused scheduled run (${message}) in last-run.json: ${err instanceof Error ? err.message : String(err)}`)}\n`,
+		);
+	}
+}
+
+/**
+ * `anchor now --scheduled`: the form a timer runs. Nothing to anchor and "another run
+ * holds the lock" are not failures, so they exit 0; a real failure exits 1 and is also
+ * written to `last-run.json` so `anchor status` shows it after the run is gone. A
+ * human `anchor now` keeps its stricter exit codes.
+ */
+async function runScheduled(root: string, args: string[], json: boolean): Promise<void> {
+	let reason: LastRunReason;
+	let detail: string | undefined;
+	let result: { emitted: boolean; record?: { anchorSeq: number; treeSize: number } } = {
+		emitted: false,
+	};
+	try {
+		const emitter = createAnchorEmitter(root, emitterConfig(args));
+		const emitted = await emitter.anchorNow();
+		// "empty" means the event log has nothing. That is benign only for a vault that has
+		// never anchored; with a missing mirror or recorded anchors it is lost data, and the
+		// human command exits 1 for it too.
+		const emptyFault =
+			emitted.reason === "empty" ? (emptyVaultFault(root) ?? emptySignerFault(root, args)) : null;
+		// A quiet run makes no record, so nothing else retries an earlier failed
+		// delivery; retry it here so a recovered sink clears the backlog.
+		// Only after a benign outcome: a refusal (invalid outbox entry, mirror trouble) or
+		// contention (another run holds the lock) must not trigger delivery.
+		let lockedMidRun = false;
+		const benign =
+			emitted.reason === "no-new-events" || (emitted.reason === "empty" && emptyFault === null);
+		if (!emitted.emitted && benign) {
+			// Another run may take the lock between the two calls: that is contention, not a
+			// failed delivery.
+			lockedMidRun = (await emitter.redeliverPending()) === "locked";
+		}
+		await emitter.stop();
+		const finalStatus = emitter.status();
+		const delivered = finalStatus.outboxDepth === 0 && !finalStatus.outboxUnreadable;
+		result = emitted;
+		if (emitted.emitted) {
+			reason = delivered ? "anchored" : "sink-failed";
+		} else if (emptyFault !== null) {
+			reason = emptyFault.reason;
+			detail = emptyFault.detail;
+		} else if (lockedMidRun) {
+			reason = "locked";
+			detail = "another run took the lock before redelivery";
+		} else if (!delivered && benign) {
+			reason = "sink-failed";
+			detail = finalStatus.outboxUnreadable
+				? "the outbox cannot be read, so undelivered anchors cannot be ruled out"
+				: "an earlier anchor is still waiting in the outbox";
+		} else {
+			reason = classifyEmitReason(emitted.reason);
+			detail = emitted.reason;
+		}
+	} catch (err) {
+		detail = err instanceof Error ? err.message : String(err);
+		reason = detail.startsWith("No anchor private key")
+			? "no-key"
+			: detail.startsWith("anchor lock unavailable")
+				? "lock-unavailable"
+				: detail.startsWith(OUTBOX_UNREADABLE)
+					? "sink-failed"
+					: "other";
+	}
+	// A record that cannot be written leaves `anchor status` showing an older run, possibly a
+	// success: say so on stderr (scrubbed) and fail the run.
+	let recordFailed = false;
+	try {
+		writeLastRun(root, reason, new Date(), (message) => {
+			process.stderr.write(`${scrubForTerminal(message)}\n`);
+		});
+	} catch (err) {
+		recordFailed = true;
+		process.stderr.write(
+			`${scrubForTerminal(`usertrust: could not record this run in last-run.json: ${err instanceof Error ? err.message : String(err)}`)}\n`,
+		);
+	}
+	const ok = isOkReason(reason);
+	if (json) {
+		console.log(
+			toSafeJson({
+				command: "anchor now",
+				success: ok && !recordFailed,
+				data: { scheduled: true, reason, ...(detail !== undefined ? { detail } : {}) },
+			}),
+		);
+	} else if (ok) {
+		console.log(
+			reason === "anchored" && result.record
+				? `Anchored: #${result.record.anchorSeq} treeSize ${result.record.treeSize}`
+				: `Nothing to do (${reason}).`,
+		);
+	} else {
+		console.log(
+			pc.red(
+				`Anchor run failed (${reason})${detail !== undefined ? `: ${scrubForTerminal(detail)}` : ""}`,
+			),
+		);
+	}
+	if (!ok || recordFailed) process.exitCode = 1;
 }
 
 // ── doctor ──
@@ -289,7 +508,19 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 	const valueFlags = action === undefined ? undefined : ACTION_VALUE_FLAGS[action];
 	if (
 		valueFlags !== undefined &&
-		refuseStrayPositional(`anchor ${action}`, args.slice(1), json, valueFlags)
+		refuseStrayPositional(
+			`anchor ${action}`,
+			args.slice(1),
+			json,
+			valueFlags,
+			ACTION_BOOL_FLAGS[action as string] ?? [],
+			(message) => {
+				// A timer's run refused by the option check never reaches runScheduled: record it, or
+				// `anchor status` keeps showing the run before it, possibly an ok.
+				if (action === "now" && args.includes("--scheduled"))
+					recordRefusedScheduledRun(root, message);
+			},
+		)
 	) {
 		return;
 	}
@@ -385,6 +616,10 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 				return;
 			}
 			case "now": {
+				if (args.includes("--scheduled")) {
+					await runScheduled(root, args, json);
+					return;
+				}
 				const emitter = createAnchorEmitter(root, emitterConfig(args));
 				const result = await emitter.anchorNow();
 				await emitter.stop();
@@ -393,7 +628,7 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 					// Delivery-gated: emitted-but-undelivered (all sinks failed,
 					// outbox retained) is a FAILURE in the mode cron/CI consumes —
 					// mirror the non-JSON contract exactly (spec §5.3).
-					const delivered = status.outboxDepth === 0;
+					const delivered = status.outboxDepth === 0 && !status.outboxUnreadable;
 					console.log(
 						toSafeJson({
 							command: "anchor now",
@@ -459,13 +694,14 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 				const tailEvents = Math.max(0, headSeq - (tail?.treeSize ?? 0));
 				const outboxDir = join(anchorsDir(root), "outbox");
 				let outboxDepth = 0;
+				let outboxUnreadable = false;
 				try {
 					outboxDepth = existsSync(outboxDir)
-						? (await import("node:fs")).readdirSync(outboxDir).filter((f) => f.endsWith(".json"))
-								.length
+						? readdirSync(outboxDir).filter((f) => f.endsWith(".json")).length
 						: 0;
 				} catch {
-					/* ignore */
+					// Not "0 pending": the depth is unknown, and status must say so.
+					outboxUnreadable = true;
 				}
 				if (json) {
 					console.log(
@@ -478,6 +714,8 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 								lastAnchor: tail,
 								eventsSinceLastAnchor: tailEvents,
 								outboxDepth,
+								outboxUnreadable,
+								lastRun: readLastRun(root),
 								mirrorErrors: mirror.errors,
 							},
 						}),
@@ -494,7 +732,19 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 					console.log("Last anchor: none");
 				}
 				console.log(`Unanchored tail: ${tailEvents} event(s)`);
-				console.log(`Outbox: ${outboxDepth} pending`);
+				console.log(
+					outboxUnreadable
+						? pc.red("Outbox: cannot be read (pending anchors cannot be ruled out)")
+						: `Outbox: ${outboxDepth} pending`,
+				);
+				if (outboxUnreadable) process.exitCode = 1;
+				const lastRun = readLastRun(root);
+				if (lastRun === null) {
+					console.log("Last scheduled run: none recorded");
+				} else {
+					const line = `Last scheduled run: ${scrubForTerminal(lastRun.at)} ${lastRun.ok ? "ok" : "FAILED"} (${lastRun.reason})`;
+					console.log(lastRun.ok ? line : pc.red(line));
+				}
 				if (mirror.errors.length > 0) {
 					console.log(pc.red(`Mirror parse errors: ${mirror.errors.length}`));
 					process.exitCode = 1;
@@ -600,7 +850,7 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 					keyId: successor.keyId,
 					publicKeySpki: successor.publicKeySpki,
 				});
-				const rotateDelivered = rotateStatus.outboxDepth === 0;
+				const rotateDelivered = rotateStatus.outboxDepth === 0 && !rotateStatus.outboxUnreadable;
 				if (json) {
 					console.log(
 						toSafeJson({
@@ -674,7 +924,7 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 
   init          [--key-file <path>]     Mint identity + Ed25519 key (outside the vault)
   pubkey        [--json]                Print the vault's genesis public key (PEM)
-  now           [sink flags]            Snapshot, sign, mirror, publish
+  now           [sink flags] [--scheduled]  Snapshot, sign, mirror, publish (--scheduled: for a timer)
   status                                Last anchor, unanchored tail, outbox
   export        [--since <anchorSeq>]   Print mirror records (pull-mode shipping)
   export-bundle [--since <anchorSeq>]   Records as one artifact for \`verify --bundle\`
