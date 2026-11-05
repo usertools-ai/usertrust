@@ -3,8 +3,8 @@
 
 import { describe, expect, it } from "vitest";
 import {
-	formatReceipt,
 	dollarsFromUt,
+	formatReceipt,
 	formatUsd,
 	formatUt,
 	type ReceiptFields,
