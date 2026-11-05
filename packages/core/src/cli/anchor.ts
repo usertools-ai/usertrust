@@ -65,6 +65,13 @@ const ACTION_VALUE_FLAGS: Readonly<Record<string, readonly string[]>> = {
 const ACTION_BOOL_FLAGS: Readonly<Record<string, readonly string[]>> = {
 	now: ["--scheduled"],
 };
+/** An own-property lookup: an action named `toString` or `constructor` must not resolve to an inherited member. */
+function flagsFor(
+	table: Readonly<Record<string, readonly string[]>>,
+	action: string,
+): readonly string[] | undefined {
+	return Object.hasOwn(table, action) ? table[action] : undefined;
+}
 /** Same cap the verify CLI enforces on `--bundle` — never export what it refuses. */
 const MAX_BUNDLE_ITEMS = 10_000;
 
@@ -505,7 +512,7 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 
 	// An option the action does not read is refused, not ignored: a dropped sink flag
 	// would run the action with fewer sinks than the operator asked for.
-	const valueFlags = action === undefined ? undefined : ACTION_VALUE_FLAGS[action];
+	const valueFlags = action === undefined ? undefined : flagsFor(ACTION_VALUE_FLAGS, action);
 	if (
 		valueFlags !== undefined &&
 		refuseStrayPositional(
@@ -513,7 +520,7 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 			args.slice(1),
 			json,
 			valueFlags,
-			ACTION_BOOL_FLAGS[action as string] ?? [],
+			flagsFor(ACTION_BOOL_FLAGS, action as string) ?? [],
 			(message) => {
 				// A timer's run refused by the option check never reaches runScheduled: record it, or
 				// `anchor status` keeps showing the run before it, possibly an ok.

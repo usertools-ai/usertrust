@@ -116,6 +116,20 @@ describe("anchor now --scheduled", () => {
 		expect(lines.at(-1)).toContain('has no option \\"--scheduled\\"');
 	});
 
+	it("an action named like an Object.prototype member prints usage; it does not throw", async () => {
+		// "bogus" is the control: an ordinary unknown action takes the same path.
+		for (const name of ["bogus", "toString", "constructor", "hasOwnProperty", "__proto__"]) {
+			const lines = capture();
+			process.exitCode = 0;
+			await expect(anchorRun([name, "x"], { json: false })).resolves.toBeUndefined();
+			const exit = Number(process.exitCode ?? 0);
+			process.exitCode = 0;
+			vi.restoreAllMocks();
+			expect(lines.join("\n")).toContain("Usage: usertrust anchor");
+			expect(exit).toBe(1);
+		}
+	});
+
 	it("an empty vault with ANOTHER vault's key is stale-signer-key, exit 1, recorded (not a benign 'empty')", async () => {
 		const s = await makeAnchoredVault(0);
 		const other = await makeAnchoredVault(0);
