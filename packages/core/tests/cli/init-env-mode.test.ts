@@ -23,6 +23,7 @@ vi.mock("@clack/prompts", () => ({
 	intro: vi.fn(),
 	outro: vi.fn(),
 	text: vi.fn(),
+	password: vi.fn(),
 	confirm: vi.fn(),
 	log: {
 		info: vi.fn(),
@@ -61,10 +62,10 @@ const OLD_KEY = "sk-ant-OLD-0000";
 
 /** One interactive init (or reconfigure) that stores `key`. */
 async function initWithKey(root: string, key: string, reconfigure: boolean): Promise<void> {
-	vi.mocked(clack.text)
+	vi.mocked(clack.password)
 		.mockResolvedValueOnce(key) // the key
-		.mockResolvedValueOnce("") // no more keys
-		.mockResolvedValueOnce("50"); // budget
+		.mockResolvedValueOnce(""); // no more keys
+	vi.mocked(clack.text).mockResolvedValueOnce("50"); // budget
 	vi.mocked(clack.confirm).mockResolvedValueOnce(true); // recommended rates
 	await run(root, { reconfigure, skipVerify: true });
 }
@@ -205,7 +206,7 @@ describe("usertrust init: .env is always owner-only", () => {
 		await expect(
 			withSampler(vault, join(root, "stop"), async (child) => {
 				pid = child.pid;
-				vi.mocked(clack.text).mockRejectedValueOnce(forced);
+				vi.mocked(clack.password).mockRejectedValueOnce(forced);
 				await run(root, { reconfigure: true, skipVerify: true });
 			}),
 		).rejects.toBe(forced);

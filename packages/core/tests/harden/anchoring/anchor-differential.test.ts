@@ -12,10 +12,12 @@
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { evaluateAnchoredVault as pkgEvaluate } from "../../../../verify/src/anchor-verify.js";
 import {
 	type AnchorVerifyParams as PkgParams,
 	verifyVaultWithAnchors as pkgVerify,
 } from "../../../../verify/src/index.js";
+import { evaluateAnchoredVault as coreEvaluate } from "../../../src/audit/anchor-verify.js";
 import {
 	type AnchorVerifyParams as CoreParams,
 	verifyVaultWithAnchors as coreVerify,
@@ -28,7 +30,6 @@ import {
 	mutateAndRechain,
 	storeRaw,
 } from "./fixtures.js";
-import { makeRekorReceipt } from "./rekor-fixtures.js";
 
 afterEach(() => {
 	cleanupAll();
@@ -43,14 +44,6 @@ function verdict(result: {
 		anchorCount: number;
 		anchorSource: string;
 		unanchoredTail: { events: number };
-		rekor?:
-			| {
-					receiptsVerified: number;
-					receiptsFailed: number;
-					latestAttestedTimeMs: number | null;
-					errors: string[];
-			  }
-			| undefined;
 	};
 	chainLength: number;
 }): string {
@@ -63,7 +56,6 @@ function verdict(result: {
 		anchorSource: result.anchoring.anchorSource,
 		tail: result.anchoring.unanchoredTail.events,
 		chainLength: result.chainLength,
-		rekor: result.anchoring.rekor ?? null,
 	});
 }
 
@@ -79,38 +71,12 @@ describe("HARDEN: core vs verify pkg produce identical ANCHOR verdicts", () => {
 		const s = await makeAnchoredVault(3);
 		await anchorOnce(s);
 		await appendEvents(s.root, 3, 4);
-		const latest = await anchorOnce(s);
+		await anchorOnce(s);
 
 		const base = { externalAnchorsRaw: [storeRaw(s)], trust: s.trust };
 
 		// 1. Happy path.
 		expect(assertAgree(s.vaultPath, base)).toBe("ANCHORED_VERIFIED");
-
-		// 1b. Rekor receipts: both glues must agree on the rekor block too — a
-		// receipt that fails in one package and passes in the other would be a
-		// silent trust split between the shipped verifier and the CLI.
-		const f = makeRekorReceipt(latest, { integratedTime: 1_760_000_000 });
-		const rekorPins = { rekorLogPubkeysPem: [f.logPubkeyPem] };
-		expect(
-			assertAgree(s.vaultPath, {
-				...base,
-				...rekorPins,
-				rekorReceiptsRaw: [JSON.stringify(f.receipt)],
-			}),
-		).toBe("ANCHORED_VERIFIED");
-		expect(
-			assertAgree(s.vaultPath, {
-				...base,
-				...rekorPins,
-				rekorReceiptsRaw: [
-					JSON.stringify(
-						f.tamper((r) => {
-							r.artifactHash = "c".repeat(64);
-						}),
-					),
-				],
-			}),
-		).toBe("ANCHOR_INVALID");
 
 		// 2. Stale under a caller-supplied freshness policy.
 		await appendEvents(s.root, 4, 7);
@@ -141,5 +107,44 @@ describe("HARDEN: core vs verify pkg produce identical ANCHOR verdicts", () => {
 		const legacy = await makeAnchoredVault(2); // identity exists but no anchors emitted...
 		rmSync(join(legacy.vaultPath, "audit", "anchors"), { recursive: true, force: true });
 		expect(assertAgree(legacy.vaultPath, {})).toBe("UNANCHORED");
+	});
+});
+
+describe("HARDEN: a removed option is refused, never silently ignored", () => {
+	it.each(["rekorReceiptsRaw", "rekorLogPubkeysPem"])(
+		"%s is refused by both verifiers, naming the option",
+		async (key) => {
+			const s = await makeAnchoredVault(3);
+			await anchorOnce(s);
+			const removed = { externalAnchorsRaw: [storeRaw(s)], trust: s.trust, [key]: ["not JSON"] };
+			const message = new RegExp(`"${key}" option was removed`);
+			expect(() => coreVerify(s.vaultPath, removed as CoreParams)).toThrow(message);
+			expect(() => pkgVerify(s.vaultPath, removed as PkgParams)).toThrow(message);
+			// the same call without the removed option is unchanged: both verify it
+			const normal = { externalAnchorsRaw: [storeRaw(s)], trust: s.trust };
+			expect(assertAgree(s.vaultPath, normal)).toBe("ANCHORED_VERIFIED");
+		},
+	);
+});
+
+describe("HARDEN: the removed attested-time option is refused by both evaluators", () => {
+	const input = {
+		orderedHashes: [],
+		externalAnchors: [],
+		externalErrors: [],
+		mirrorAnchors: [],
+		mirrorErrors: [],
+		trust: null,
+		witness: { requested: false },
+	};
+
+	it("throws, naming the option, and a call without it is unchanged", () => {
+		const removed = { ...input, opts: { attestedTimeMs: 1_760_000_000_000 } };
+		expect(() => coreEvaluate(removed as never)).toThrow(/"attestedTimeMs" option was removed/);
+		expect(() => pkgEvaluate(removed as never)).toThrow(/"attestedTimeMs" option was removed/);
+		const normal = { ...input, opts: { nowMs: 1_760_000_000_000 } };
+		expect(coreEvaluate(normal as never).anchorState).toBe(
+			pkgEvaluate(normal as never).anchorState,
+		);
 	});
 });

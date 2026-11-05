@@ -21,7 +21,7 @@ interface TrustOpts {
   proxy?: string;         // Deprecated — not implemented; setting this throws
   key?: string;           // Deprecated — proxy API key; unused because proxy throws
   budget?: number;        // Token budget override (in usertokens)
-  tier?: string;          // Accepted, but currently not applied (the config file's tier is used)
+  tier?: string;          // Overrides the config file's tier ("free" | "mini" | "pro" | "mega" | "ultra")
   pii?: "redact" | "warn" | "block" | "off"; // PII enforcement override
   parentUserId?: string;  // Ledger identity for cost-center envelopes; overrides config
   scope?: string[];       // Policy scopes for scopePatterns rules; overrides config
@@ -38,7 +38,7 @@ interface TrustOpts {
 | `proxy` | `undefined` | **Not implemented.** Setting this option throws. Use a local TigerBeetle or `dryRun` for enforcement. |
 | `key` | `undefined` | **Not implemented.** API key for the removed proxy. Unused; `proxy` throws first. |
 | `budget` | Config value, else `50_000` | Total usertoken budget for this client. Overrides the config file value. `50_000` applies only when there is no config file; a config file without `budget` (and no `budget` option) fails validation. |
-| `tier` | `"mini"` | Tier classification. Accepted, but currently not applied: the config file's `tier` is used. |
+| `tier` | `"mini"` | Overrides the config file's `tier`. It is the tier that policy rules matching on `tier` are evaluated at. One of `free`, `mini`, `pro`, `mega`, `ultra`; any other value is refused when the client is built. |
 | `pii` | Config value or `"warn"` | PII enforcement: `"redact"`, `"warn"`, `"block"` or `"off"`. Overrides the config file value. Any other value is refused by name. |
 | `dryRun` | `false` | Skip TigerBeetle entirely. Also enabled by `USERTRUST_DRY_RUN=true` env var. Useful for CI and testing. |
 | `vaultBase` | `process.cwd()` | Base directory containing the `.usertrust/` vault. |

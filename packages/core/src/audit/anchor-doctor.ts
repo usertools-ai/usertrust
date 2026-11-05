@@ -326,7 +326,7 @@ function probeTarget(cfg: S3ProbeConfig, prefix: string): ProbeTarget {
 
 /**
  * Endpoint for an S3-compatible store, under the SAME rule as the sink
- * (rekor.ts / s3-sink): plaintext is refused off-loopback. The doctor's probes
+ * (s3-sink.ts): plaintext is refused off-loopback. The doctor's probes
  * are SigV4-signed like any other request, so an http endpoint on the network
  * would put the credential-bearing headers on the wire — and a diagnostic
  * command is exactly where an operator would paste an attacker-suggested URL.

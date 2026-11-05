@@ -30,6 +30,7 @@ vi.mock("@clack/prompts", () => ({
 	intro: vi.fn(),
 	outro: vi.fn(),
 	text: vi.fn(),
+	password: vi.fn(),
 	confirm: vi.fn(),
 	log: {
 		info: vi.fn(),
@@ -58,10 +59,10 @@ import * as clack from "@clack/prompts";
 import { run } from "../../src/cli/init.js";
 
 async function initWithKey(root: string, key: string, reconfigure: boolean): Promise<void> {
-	vi.mocked(clack.text)
+	vi.mocked(clack.password)
 		.mockResolvedValueOnce(key) // the key
-		.mockResolvedValueOnce("") // no more keys
-		.mockResolvedValueOnce("50"); // budget
+		.mockResolvedValueOnce(""); // no more keys
+	vi.mocked(clack.text).mockResolvedValueOnce("50"); // budget
 	vi.mocked(clack.confirm).mockResolvedValueOnce(true); // recommended rates
 	await run(root, { reconfigure, skipVerify: true });
 }

@@ -1081,8 +1081,8 @@ const CHECKPOINT_KEYS: KeySet = keysOf(CHECKPOINT_FIELDS);
 // numeric policy decides it from the document in front of it; a registry has to
 // answer for every structure at once, including the ones nobody attacked yet.
 //
-// `packages/verify` also reads FOUR structures that are not in this registry —
-// the anchors JSONL, the audit-log segment line, the Rekor receipt, and the
+// `packages/verify` also reads THREE structures that are not in this registry —
+// the anchors JSONL, the audit-log segment line, and the
 // `--bundle` transport. Every one of them lives in a file the parity contract
 // MIRRORS into `packages/core` (AGENTS.md, "Mirrored files"), so the rule cannot
 // be added on this side alone without splitting the two implementations against
@@ -4541,13 +4541,11 @@ function walkCheckpointHistory(
  * **The ladder is CUMULATIVE, and its top rung is unreachable here.**
  * `VERIFIED_CHECKPOINT` is steps 1–8. `VERIFIED_CHECKPOINT_HISTORY` adds a
  * clean history walk. `VERIFIED_ANCHORED` requires that history AND validated
- * anchor evidence (§7; verify-page §4.1 rule 3 — "Rekor alone upgrades nothing
- * past the checkpoint floor"). This build validates NO anchor evidence, so
+ * anchor evidence (§7). This build validates NO anchor evidence, so
  * there is deliberately no branch below that returns it: writing one would be
  * dead code that reads to the next maintainer as a live path. The blocker is
  * normative, not schedule — no authority yet defines the artifact-hash preimage
- * binding Rekor evidence to a `SegmentCheckpoint`'s signed payload, and
- * `rekor-verify.ts` binds a vault `AnchorRecord`, a different object. When that
+ * binding transparency evidence to a `SegmentCheckpoint`'s signed payload. When that
  * rule lands, this becomes an ordinary §7 check and the rung becomes reachable.
  *
  * Offline and total, exactly like the base run: no I/O, and never a throw.

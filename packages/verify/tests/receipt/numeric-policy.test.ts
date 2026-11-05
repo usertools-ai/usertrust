@@ -239,13 +239,10 @@ const REGISTRY: Readonly<Record<string, ParseSiteDisposition>> = {
 	// a split worse than a shared bug, so any change here is a coordinated
 	// core+verify ship. Per-file disposition is tracked internally, not in this repo.
 	"index.ts": {
-		// 3 → 4 when origin/master merged in on 2026-08-14. The registry refused the
-		// build until this line moved, which is the whole point of counting.
-		sites: 4,
+		sites: 3,
 		policy:
 			"MIRRORED into packages/core — out of scope for this ship; disposition tracked " +
-			"internally. splitReceiptDocuments' parse is a well-formedness probe that keeps the " +
-			"raw text and is IMMUNE.",
+			"internally.",
 	},
 	"verify.ts": {
 		sites: 2,
@@ -263,13 +260,6 @@ const REGISTRY: Readonly<Record<string, ParseSiteDisposition>> = {
 		policy:
 			"FILE-DIFF MIRRORED and out of scope by explicit constraint; disposition tracked " +
 			"internally.",
-	},
-	"rekor-verify.ts": {
-		sites: 2,
-		policy:
-			"FILE-DIFF MIRRORED and out of scope by explicit constraint; disposition tracked " +
-			"internally. The hashedrekord entry-body parse reads NO numbers and binds the raw " +
-			"bytes for both the leaf hash and the SET body — IMMUNE, and correctly so.",
 	},
 };
 

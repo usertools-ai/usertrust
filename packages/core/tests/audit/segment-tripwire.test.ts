@@ -29,7 +29,6 @@ const KNOWN_JSONL: Record<string, string[]> = {
 		"cli/audit-segments.ts",
 		"cli/health.ts",
 	],
-	"a.jsonl": ["cli/anchor.ts"],
 	"anchors.jsonl": [
 		"audit/anchor-verify.ts",
 		"audit/anchor.ts",

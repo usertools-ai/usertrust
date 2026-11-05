@@ -20,7 +20,7 @@ export interface SummaryPayload {
 	budgetSource: "governor" | "config" | "several" | "unreadable" | "unpublished";
 	/** When the governor wrote its record (`budgetSource: "governor"` only, else null). */
 	budgetWrittenAt: string | null;
-	/** Where the budget came from, in words, SHOWN beside it: only a governor record reads as enforced, with its age. */
+	/** Where the budget came from, in words, SHOWN beside it. The page reads a governor record as enforced only while it is fresh (BUDGET_RECORD_FRESH_MS). */
 	budgetProvenance: string;
 	spentUt: number;
 	/** `budget - spentUt`, or null when the budget is unknown: there is no remaining figure without a budget. */

@@ -79,6 +79,9 @@ const PRODUCT_NAME = "u s e r t r u s t";
 
 const WIDTH = 45; // internal content width (between │ borders)
 
+/** The verdict of a receipt whose chain checks out but is not anchored: intact, not verified. */
+export const CHAIN_INTACT = "CHAIN INTACT, NOT ANCHORED";
+
 function pad(text: string, width: number = WIDTH): string {
 	if (text.length >= width) return text.slice(0, width);
 	return text + " ".repeat(width - text.length);
@@ -210,8 +213,18 @@ function wordWrap(text: string, maxWidth: number): string[] {
  */
 const FORMAT_CHARACTER = /^\p{Cf}$/u;
 
+/**
+ * LINE SEPARATOR (0x2028) and PARAGRAPH SEPARATOR (0x2029) are category Zl and Zp, so neither the control test nor
+ * `\p{Cf}` holds them, yet a terminal or a paste target that honours them starts a new line there. A vault string
+ * carrying one could break a printed receipt's row and forge a line under it. Compared by code point so this source
+ * carries no invisible character.
+ */
+function isLineSeparator(code: number): boolean {
+	return code === 0x2028 || code === 0x2029;
+}
+
 function isInvisibleFormat(ch: string): boolean {
-	return FORMAT_CHARACTER.test(ch);
+	return isLineSeparator(ch.codePointAt(0) as number) || FORMAT_CHARACTER.test(ch);
 }
 
 export function forDisplay(raw: string): string {
@@ -480,8 +493,13 @@ export function renderReceipt(data: ReceiptData): string {
 	lines.push(blank());
 
 	// ── Verdict ──
+	// "VERIFIED" is for an explicit, anchored pass only: the Merkle row says INCLUSION VERIFIED, which the verifier
+	// reaches only against a pinned key. A chain that is merely consistent with itself (UNANCHORED, or an event
+	// after the latest anchor) is intact, not verified, and the box says so on the line a reader takes as the verdict.
 	if (allVerified) {
-		lines.push(row(center("* VERIFIED *")));
+		lines.push(
+			row(center(merkleStatus.startsWith("INCLUSION VERIFIED") ? "* VERIFIED *" : CHAIN_INTACT)),
+		);
 	} else {
 		const reasons: string[] = [];
 		if (!chainVerified) reasons.push("chain");
@@ -494,7 +512,7 @@ export function renderReceipt(data: ReceiptData): string {
 	// ── Footer ──
 	lines.push(divider());
 	lines.push(row(`${dotted("  Root", truncHash(merkleRoot), WIDTH - 1)} `));
-	lines.push(row(`${dotted("  Verified", formatUtc(verifiedAt), WIDTH - 1)} `));
+	lines.push(row(`${dotted("  Checked", formatUtc(verifiedAt), WIDTH - 1)} `));
 	lines.push(blank());
 	lines.push(bottom());
 
