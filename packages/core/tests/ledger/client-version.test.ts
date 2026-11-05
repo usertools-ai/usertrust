@@ -26,9 +26,10 @@ function installUsertrust(dir: string): void {
 	writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "usertrust", version: "5.5.0" }));
 }
 
-/** The pinned server release the CI job downloads, read from its `TIGERBEETLE_VERSION` line. */
-function ciServerVersion(workflow: string): string | undefined {
-	return workflow.match(/^\s*TIGERBEETLE_VERSION:\s*"([^"]+)"/m)?.[1];
+/** The server release the manifest pins: the one CI downloads and the CLI installs. */
+function manifestServerVersion(manifest: string): string | undefined {
+	const version = (JSON.parse(manifest) as { version?: unknown }).version;
+	return typeof version === "string" ? version : undefined;
 }
 
 describe("the client version a project resolves", () => {
@@ -138,14 +139,18 @@ describe("the pinned TigerBeetle client", () => {
 		}
 	});
 
-	it("is the server release CI downloads: client and server move together", () => {
+	it("is the server release the manifest pins, and CI downloads that manifest: client and server move together", () => {
+		const manifest = readFileSync(
+			join(REPO_ROOT, "packages/core/src/ledger/tigerbeetle-release.json"),
+			"utf-8",
+		);
 		const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf-8");
-		expect(ciServerVersion(workflow)).toBe(pinned);
-		// the control: a workflow naming another release is seen as different
+		expect(manifestServerVersion(manifest)).toBe(pinned);
+		// CI takes its server version from the manifest, not from a number of its own.
+		expect(workflow).toContain("packages/core/src/ledger/tigerbeetle-release.json");
+		// the control: a manifest naming another release is seen as different
 		expect(
-			ciServerVersion(
-				workflow.replace(`TIGERBEETLE_VERSION: "${pinned}"`, 'TIGERBEETLE_VERSION: "0.17.10"'),
-			),
+			manifestServerVersion(manifest.replace(`"version": "${pinned}"`, '"version": "0.17.10"')),
 		).not.toBe(pinned);
 	});
 
