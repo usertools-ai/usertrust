@@ -26,10 +26,10 @@ const KNOWN_JSONL: Record<string, string[]> = {
 		"audit/quarantine.ts",
 		"audit/read.ts",
 		"audit/verify.ts",
+		"cli/anchor.ts", // the scheduled run's empty-vault check lists segment files; it only reads sizes
 		"cli/audit-segments.ts",
 		"cli/health.ts",
 	],
-	"a.jsonl": ["cli/anchor.ts"],
 	"anchors.jsonl": [
 		"audit/anchor-verify.ts",
 		"audit/anchor.ts",
@@ -55,7 +55,7 @@ const KNOWN_JSONL: Record<string, string[]> = {
 
 /** Every rename in core's audit layer, by file: anything new is a possible rotation. */
 const KNOWN_RENAMES: Record<string, number> = {
-	"audit/anchor.ts": 2, // identity.json's atomic write; the anchor lock's atomic reclaim
+	"audit/anchor.ts": 3, // identity.json's atomic write; a stale public-key copy's atomic replace; the anchor lock's atomic reclaim
 	"audit/chain.ts": 1, // the .meta head anchor's atomic replace (writeAnchorAtomically) — NOT the log
 };
 

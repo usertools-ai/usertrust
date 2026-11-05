@@ -1,5 +1,10 @@
 # Receipt Resolver API — v0.3 (normative companion; adopted authority: receipt-spec v0.10)
 
+> **usertrust 5.5.0 and Rekor.** The `anchorEvidence.rekor` member and the `verified_anchored` rung below are reserved
+> for an external transparency anchor provided as a service. usertrust's open-source package never sets the member (a
+> test enforces it), and a receipt without it is not degraded. Its Rekor sink, Rekor verifier and `RekorReceipt` code,
+> and the `--sink-rekor`, `--rekor-receipts` and `--rekor-pubkey` options, were removed in 5.5.0.
+
 Status: **v0.3 (2026-10-05) — CLUSTER receipts.** The receipt spec's v0.10
 makes cluster receipts (§15) the only kind issued. The session kind is
 RESERVED: defined, never issued. This revision applies its companion items

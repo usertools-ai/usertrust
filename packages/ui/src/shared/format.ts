@@ -8,7 +8,7 @@
 
 // The usertoken and dollar formatters live in core, so the command line, the demo and this ledger print one figure one way.
 // The `usertrust/receipt` entry point is pure, so it is safe in the browser bundle.
-import { formatUsd, formatUt } from "usertrust/receipt";
+import { dollarsFromUt, formatUsd, formatUt } from "usertrust/receipt";
 
 export { formatUsd, formatUt };
 
@@ -48,6 +48,47 @@ export function utcHour(iso: string): string {
 export function formatUtcMinute(iso: string): string {
 	const t = Date.parse(iso);
 	return Number.isNaN(t) ? iso : `${new Date(t).toISOString().slice(0, 16).replace("T", " ")}Z`;
+}
+
+/** The one-line key, said wherever usertokens are shown. */
+export const UT_KEY = "1 UT = $0.0001, one hundredth of a cent";
+
+/**
+ * Dollars at 2 dp with grouping, for a total (`$7.60`, `$1,204.55`). Its exact 4 dp figure is `formatUsd`, for the
+ * tooltip beside it.
+ */
+export function formatUsdTotal(ut: number): string {
+	// A nonzero total under a cent (1-99 UT) keeps 4 dp: at 2 dp it would read "$0.00" (or a rounded "$0.01"), and
+	// "overspent by $0.00" contradicts itself.
+	return dollarsFromUt(ut, ut !== 0 && Math.abs(ut) < 100 ? 4 : 2);
+}
+
+/**
+ * A dollar echo for a bound the reader typed in usertokens: `≈ $0.50`. Under a cent (100 UT) a 2 dp figure would
+ * read `$0.00` or `$0.01`, so it keeps 4 dp there.
+ */
+export function formatUsdApprox(ut: number): string {
+	return `≈ ${Math.abs(ut) >= 100 ? formatUsdTotal(ut) : formatUsd(ut)}`;
+}
+
+/**
+ * The active-filter chip for a cost bound: the bound as typed (the ledger's unit) with its dollar echo. A cost bound
+ * hides every row WITHOUT a cost (an unknown cost is not 0), and the chip says so.
+ */
+export function costBoundLabel(op: "≥" | "≤", ut: number): string {
+	return `cost ${op} ${ut} UT ${formatUsdApprox(ut)} · uncosted hidden`;
+}
+
+/**
+ * The cost axis plots whole usertokens, so its ticks are whole too. With decimals allowed, a 1 UT tallest bar gets
+ * ticks at 0, 0.25, 0.5, 0.75 and 1, and the dollar labels (exact to 1 UT) repeat and misstate their heights.
+ * Kept here, beside `formatUsdAxis`, so a test can import it without the chart's JSX module.
+ */
+export const Y_AXIS_ALLOW_DECIMALS = false;
+
+/** A chart axis tick in dollars: 4 dp with trailing zeros dropped, never fewer than 2 dp (`$2.00`, `$0.0005`). */
+export function formatUsdAxis(ut: number): string {
+	return formatUsd(ut).replace(/(\.\d\d)(\d*?)0+$/, "$1$2");
 }
 
 /**

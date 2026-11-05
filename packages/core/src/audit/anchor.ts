@@ -34,6 +34,8 @@ import {
 	existsSync,
 	constants as fsConstants,
 	fsyncSync,
+	linkSync,
+	lstatSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
@@ -61,7 +63,7 @@ import {
 } from "./anchor-verify.js";
 import { canonicalize } from "./canonical.js";
 import { buildMerkleTree } from "./merkle.js";
-import { DEFAULT_REKOR_URL, rekorSink, s3Sink } from "./rekor.js";
+import { s3Sink } from "./s3-sink.js";
 
 // ── Config types (spec §5.4) ──
 
@@ -83,9 +85,7 @@ export type SinkConfig =
 	| { type: "https"; url: string; headers?: Record<string, string> }
 	| { type: "command"; argv: string[] }
 	/** S3-compatible object store, one object per record, SigV4-signed. */
-	| { type: "s3"; bucket: string; region: string; prefix?: string; endpoint?: string }
-	/** Rekor transparency log (EXPERIMENTAL). Defaults to rekor.sigstore.dev. */
-	| { type: "rekor"; url?: string };
+	| { type: "s3"; bucket: string; region: string; prefix?: string; endpoint?: string };
 
 export interface AnchorSink {
 	readonly name: string;
@@ -107,6 +107,8 @@ export interface AnchorEmitterStatus {
 	eventsSinceLastAnchor: number;
 	msSinceLastAnchor: number | null;
 	outboxDepth: number;
+	/** True when the outbox directory exists but cannot be listed: the depth is then unknown. */
+	outboxUnreadable: boolean;
 	anchorSkips: number;
 	publishFailures: number;
 	degraded: boolean;
@@ -126,6 +128,11 @@ export interface AnchorEmitter {
 	/** Emit a rotation record cross-signed by the CURRENT key (spec §6). */
 	rotate(next: { keyId: string; publicKeySpki: string }): Promise<AnchorEmitResult>;
 	status(): AnchorEmitterStatus;
+	/**
+	 * Retry delivery of records still in the outbox, oldest first (no new record is made).
+	 * Resolves "locked" when another run holds the writer lock, so nothing was attempted.
+	 */
+	redeliverPending(): Promise<"done" | "locked">;
 	/** Start the cadence scheduler (unref'd timer; never blocks appends). */
 	start(): void;
 	stop(): Promise<void>;
@@ -183,6 +190,78 @@ function writeIdentityFile(rootDir: string, identity: AnchorIdentity): void {
 	renameSync(tmp, path);
 }
 
+/**
+ * Write the public-key copy beside a freshly made private key, without ever touching
+ * something that is not a stale public copy. Absent: create it exclusively. A regular
+ * file that parses as a PUBLIC key only: replace it with a temp file and an atomic swap (the
+ * directory entry changes, never follows a link or truncates through one). Anything else, a
+ * symlink, a private key, unreadable bytes, is left exactly as found. Returns the path
+ * written, or null when no copy was made.
+ */
+function writePublicKeyCopy(keyFile: string, publicKeyPem: string): string | null {
+	const path = publicKeyCopyPath(keyFile);
+	try {
+		let existing: ReturnType<typeof lstatSync> | null = null;
+		try {
+			existing = lstatSync(path);
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== "ENOENT") return null;
+		}
+		if (existing === null) {
+			writeFileSync(path, publicKeyPem, { mode: 0o644, flag: "wx" });
+			return path;
+		}
+		if (!existing.isFile()) return null;
+		const bytes = readFileSync(path);
+		createPublicKey(bytes);
+		let isPrivate = true;
+		try {
+			createPrivateKey(bytes);
+		} catch {
+			isPrivate = false;
+		}
+		if (isPrivate) return null;
+		const tmp = `${path}.new-${process.pid}-${randomUUID()}`;
+		writeFileSync(tmp, publicKeyPem, { mode: 0o644, flag: "wx" });
+		try {
+			renameSync(tmp, path);
+		} catch {
+			unlinkSync(tmp);
+			return null;
+		}
+		return path;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Create identity.json only if it does not exist: temp file + fsync + hard link (link(2)
+ * fails with EEXIST instead of replacing). Two concurrent inits cannot both succeed.
+ */
+function createIdentityFileExclusive(rootDir: string, identity: AnchorIdentity): void {
+	const path = join(anchorsDir(rootDir), "identity.json");
+	const tmp = `${path}.new-${process.pid}-${randomUUID()}`;
+	const fd = openSync(tmp, "wx", 0o600);
+	try {
+		writeSync(fd, JSON.stringify(identity, null, "\t"));
+		fsyncSync(fd);
+	} finally {
+		closeSync(fd);
+	}
+	try {
+		linkSync(tmp, path);
+	} finally {
+		// Best effort: once the link succeeded the identity is published, so a failure
+		// removing the temp name must neither undo the caller's work nor hide a lost race.
+		try {
+			unlinkSync(tmp);
+		} catch {
+			/* a stray temp name is harmless */
+		}
+	}
+}
+
 /** Persist the durable anchorSeq high-water (never decreases). */
 function bumpAnchorHighWater(rootDir: string, anchorSeq: number): void {
 	const identity = readAnchorIdentity(rootDir);
@@ -214,6 +293,15 @@ export function defaultKeyPath(vaultId: string): string {
 }
 
 /**
+ * `<name>.anchor.pem` -> `<name>.anchor.pub.pem`, beside the private key. Any other name
+ * gets `.pub` appended. Each branch is injective and the two cannot meet (one result ends
+ * in `.pem`, the other never does), so two key files in one directory never share a copy.
+ */
+export function publicKeyCopyPath(keyFile: string): string {
+	return keyFile.endsWith(".pem") ? `${keyFile.slice(0, -4)}.pub.pem` : `${keyFile}.pub`;
+}
+
+/**
  * Resolve a path to its canonical absolute form, realpath-ing the deepest
  * EXISTING ancestor so symlinked parents (macOS /var → /private/var) compare
  * equal even when the leaf doesn't exist yet.
@@ -236,6 +324,15 @@ function realResolve(p: string): string {
 	return suffix.length === 0 ? base : join(base, ...suffix);
 }
 
+/** Code on the error thrown when an identity already stands (an existing one, or a lost race). */
+export const ANCHOR_IDENTITY_EXISTS = "ANCHOR_IDENTITY_EXISTS";
+
+function identityExistsError(identityPath: string): Error {
+	return Object.assign(new Error(`Anchor identity already exists: ${identityPath}`), {
+		code: ANCHOR_IDENTITY_EXISTS,
+	});
+}
+
 /**
  * Mint the vault's anchor identity: Ed25519 keypair (private key OUTSIDE the
  * vault, mode 0600), `identity.json`, and an empty mirror file. Returns the
@@ -248,9 +345,7 @@ export function initAnchorIdentity(
 ): { identity: AnchorIdentity; publicKeyPem: string; keyFile: string } {
 	const dir = anchorsDir(rootDir);
 	const identityPath = join(dir, "identity.json");
-	if (existsSync(identityPath)) {
-		throw new Error(`Anchor identity already exists: ${identityPath}`);
-	}
+	if (existsSync(identityPath)) throw identityExistsError(identityPath);
 	const vaultId = randomUUID();
 	const { publicKey, privateKey } = generateKeyPairSync("ed25519");
 	const keyId = keyIdFromKeyObject(publicKey);
@@ -271,27 +366,83 @@ export function initAnchorIdentity(
 		throw new Error("Refusing to write the anchor private key inside the vault (AC-6.2)");
 	}
 	mkdirSync(keyDir, { recursive: true, mode: 0o700 });
-	writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }) as string, {
-		mode: 0o600,
-	});
-
-	mkdirPrivate(join(dir, "outbox"));
-	const identity: AnchorIdentity = {
-		v: 1,
-		vaultId,
-		keyId,
-		publicKeySpki,
-		createdAt: new Date().toISOString(),
-		keyHistory: [{ keyId, publicKeySpki }],
-	};
-	writeIdentityFile(rootDir, identity);
-	// Touch the mirror so "mirror file missing" (accidental loss / partial
-	// restore) is distinguishable from "fresh vault, no anchors yet".
-	const mirrorPath = join(dir, "anchors.jsonl");
-	if (!existsSync(mirrorPath)) {
-		writeFileSync(mirrorPath, "", { mode: 0o600 });
+	// Exclusive create: an existing file at this path is somebody's key (or another
+	// vault's). Overwriting it would silently destroy the only copy of that signer.
+	let keyFd: number;
+	try {
+		keyFd = openSync(keyFile, "wx", 0o600);
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+			throw new Error(`Refusing to overwrite an existing key file: ${keyFile}`);
+		}
+		throw err;
 	}
-	return { identity, publicKeyPem, keyFile };
+	// The file exists and is ours from here: a write that fails part-way (ENOSPC, EIO) must
+	// not leave a partial key behind, or every retry with this --key-file would refuse.
+	try {
+		// writeFileSync on the descriptor writes the WHOLE buffer (writeSync may write less).
+		writeFileSync(keyFd, privateKey.export({ type: "pkcs8", format: "pem" }) as string);
+		fsyncSync(keyFd);
+		closeSync(keyFd);
+	} catch (err) {
+		try {
+			closeSync(keyFd);
+		} catch {
+			/* already failing */
+		}
+		try {
+			unlinkSync(keyFile);
+		} catch {
+			/* never created */
+		}
+		throw err;
+	}
+	let createdIdentity: AnchorIdentity;
+	// From here until the identity is published, ANY failure removes the key this call just
+	// made (the exclusive create above proves it is ours): an orphaned key would make a
+	// retry with the same --key-file refuse as "existing", and nothing refers to it yet.
+	let pubCopy: string | null = null;
+	try {
+		// The public half sits beside the private key so it can be pinned or handed to a
+		// verifier without touching the secret. Best effort: the identity does not need it
+		// (`usertrust anchor pubkey` prints it again). `pubCopy` is null when nothing was
+		// written, so cleanup removes only what this call made.
+		pubCopy = writePublicKeyCopy(keyFile, publicKeyPem);
+		mkdirPrivate(join(dir, "outbox"));
+		// Touch the mirror so "mirror file missing" (accidental loss / partial restore) is
+		// distinguishable from "fresh vault, no anchors yet". Done BEFORE the identity is
+		// published, so nothing that can fail runs after publication; a leftover empty
+		// mirror from a failed attempt is harmless.
+		// Exclusive create: a concurrent winner may already have published and anchored,
+		// and a plain write would truncate the mirror it filled.
+		try {
+			writeFileSync(join(dir, "anchors.jsonl"), "", { mode: 0o600, flag: "wx" });
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+		}
+		const identity: AnchorIdentity = {
+			v: 1,
+			vaultId,
+			keyId,
+			publicKeySpki,
+			createdAt: new Date().toISOString(),
+			keyHistory: [{ keyId, publicKeySpki }],
+		};
+		createIdentityFileExclusive(rootDir, identity);
+		createdIdentity = identity;
+	} catch (err) {
+		for (const f of pubCopy === null ? [keyFile] : [keyFile, pubCopy]) {
+			try {
+				unlinkSync(f);
+			} catch {
+				/* never created */
+			}
+		}
+		// EEXIST: lost a race to a concurrent init, whose identity stands.
+		if ((err as NodeJS.ErrnoException).code === "EEXIST") throw identityExistsError(identityPath);
+		throw err;
+	}
+	return { identity: createdIdentity, publicKeyPem, keyFile };
 }
 
 // ── Signer resolution ──
@@ -435,12 +586,7 @@ function commandSink(argv: string[]): AnchorSink {
 	};
 }
 
-/**
- * `rootDir` is optional so existing callers keep working: only the Rekor sink
- * needs it, because inclusion receipts are persisted into the vault alongside
- * the mirror.
- */
-export function createSink(config: SinkConfig | AnchorSink, rootDir?: string): AnchorSink {
+export function createSink(config: SinkConfig | AnchorSink): AnchorSink {
 	// Already an AnchorSink instance (custom/test sink) — pass through.
 	if ("publish" in config && typeof config.publish === "function") {
 		return config;
@@ -460,11 +606,6 @@ export function createSink(config: SinkConfig | AnchorSink, rootDir?: string): A
 				...(cfg.prefix !== undefined ? { prefix: cfg.prefix } : {}),
 				...(cfg.endpoint !== undefined ? { endpoint: cfg.endpoint } : {}),
 			});
-		case "rekor":
-			if (rootDir === undefined) {
-				throw new Error("rekor sink requires rootDir");
-			}
-			return rekorSink(rootDir, cfg.url ?? DEFAULT_REKOR_URL);
 	}
 }
 
@@ -505,8 +646,13 @@ function tryAcquireAnchorLock(dir: string): (() => void) | null {
 					/* already removed */
 				}
 			};
-		} catch {
-			return null;
+		} catch (err) {
+			// EEXIST means another run holds the lock. Anything else (an unwritable or
+			// missing anchors directory) is a fault to report, not a run to skip.
+			if ((err as NodeJS.ErrnoException).code === "EEXIST") return null;
+			throw new Error(
+				`anchor lock unavailable: ${err instanceof Error ? err.message : String(err)}`,
+			);
 		}
 	};
 	const first = attempt();
@@ -539,12 +685,19 @@ function tryAcquireAnchorLock(dir: string): (() => void) | null {
 	// rename throws (ENOENT) and backs off. A bare check-then-unlink would let
 	// a slow contender delete the winner's freshly created lock (TOCTOU) and
 	// admit two emitters — the exact race the lock exists to prevent.
+	const reclaimPath = `${lockPath}.reclaim-${process.pid}-${Date.now()}`;
 	try {
-		const reclaimPath = `${lockPath}.reclaim-${process.pid}-${Date.now()}`;
 		renameSync(lockPath, reclaimPath);
+	} catch (err) {
+		// ENOENT: another contender won the reclaim, so the lock is held. Anything else
+		// (EACCES, EROFS) is a fault, not contention.
+		if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+		throw new Error(`anchor lock unavailable: ${err instanceof Error ? err.message : String(err)}`);
+	}
+	try {
 		unlinkSync(reclaimPath);
 	} catch {
-		return null;
+		/* the stale lock is already out of the way; a stray reclaim name is harmless */
 	}
 	return attempt();
 }
@@ -584,16 +737,51 @@ function pendingOutboxRecords(dir: string): AnchorRecord[] {
 		});
 }
 
+/** Thrown (message prefix) when the outbox directory exists but cannot be listed. */
+export const OUTBOX_UNREADABLE = "anchor outbox cannot be read";
+
+/**
+ * The pending outbox sequence numbers. A missing directory is an empty backlog; any other
+ * listing failure THROWS, because "cannot read" must never look like "nothing waiting".
+ */
 function outboxSeqs(dir: string): number[] {
 	const outDir = join(dir, "outbox");
-	if (!existsSync(outDir)) return [];
+	let names: string[];
 	try {
-		return readdirSync(outDir)
-			.filter((f) => f.endsWith(".json"))
-			.map((f) => Number.parseInt(f.slice(0, -5), 10))
-			.filter((n) => Number.isSafeInteger(n) && n >= 1);
+		names = readdirSync(outDir);
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+		throw new Error(`${OUTBOX_UNREADABLE}: ${err instanceof Error ? err.message : String(err)}`);
+	}
+	return names
+		.filter((f) => f.endsWith(".json"))
+		.map((f) => Number.parseInt(f.slice(0, -5), 10))
+		.filter((n) => Number.isSafeInteger(n) && n >= 1);
+}
+
+function outboxReadable(dir: string): boolean {
+	try {
+		outboxSeqs(dir);
+		return true;
 	} catch {
-		return [];
+		return false;
+	}
+}
+
+function outboxDepthOrZero(dir: string): number {
+	try {
+		return outboxSeqs(dir).length;
+	} catch {
+		return 0;
+	}
+}
+
+/** True only when the outbox is readable and holds nothing. */
+function outboxIsEmpty(dir: string): boolean {
+	try {
+		return outboxSeqs(dir).length === 0;
+	} catch {
+		return false;
 	}
 }
 
@@ -613,7 +801,8 @@ function writeOutboxEntry(dir: string, record: AnchorRecord): void {
 	}
 }
 
-function readMeta(
+/** The event log's `.meta` sidecar: its recorded sequence and last hash, or why there is none. */
+export function readMeta(
 	rootDir: string,
 ): { lastHash: string; sequence: number } | "absent" | "unreadable" {
 	const metaPath = join(rootDir, VAULT_DIR, "audit", "events.jsonl.meta");
@@ -645,7 +834,7 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 	const identity: AnchorIdentity = maybeIdentity;
 	const vaultId = identity.vaultId;
 	const signer = resolveSigner(config.signer, vaultId);
-	const sinks = (config.sinks ?? []).map((sink) => createSink(sink, rootDir));
+	const sinks = (config.sinks ?? []).map((sink) => createSink(sink));
 	const retries = config.publishRetries ?? 5;
 
 	let anchorSkips = 0;
@@ -669,6 +858,10 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 	// outbox drain and double-publish a record.
 	let publishChain: Promise<void> = Promise.resolve();
 
+	// Errors deliverToSinks already counted (degraded set, failures tallied); trackPublish
+	// counts every other publish error itself, so no failure is invisible to status().
+	const countedErrors = new WeakSet<object>();
+
 	async function deliverToSinks(record: AnchorRecord): Promise<void> {
 		let lastErr: unknown = null;
 		for (const sink of sinks) {
@@ -686,9 +879,12 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 			}
 			if (!delivered) {
 				degraded = true;
-				throw lastErr instanceof Error
-					? lastErr
-					: new Error(`anchor publish failed to sink ${sink.name}`);
+				const failure =
+					lastErr instanceof Error
+						? lastErr
+						: new Error(`anchor publish failed to sink ${sink.name}`);
+				countedErrors.add(failure);
+				throw failure;
 			}
 		}
 	}
@@ -711,6 +907,11 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 		// first failure to preserve store ordering; the emitter stays degraded
 		// until the whole backlog clears.
 		const backlog = pendingOutboxRecords(dir);
+		// An entry that is present but unreadable or unparsable is not in `backlog`: delivering
+		// past it would leave a gap in the store, so stop here and keep everything queued.
+		if (backlog.length < outboxSeqs(dir).length) {
+			throw new Error("anchor outbox holds an unreadable entry; nothing is delivered past it");
+		}
 		const queue = backlog.some((r) => r.anchorSeq === record.anchorSeq)
 			? backlog
 			: [...backlog, record].sort((a, b) => a.anchorSeq - b.anchorSeq);
@@ -723,14 +924,20 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 			}
 		}
 		// Clear degraded only when nothing is left undelivered.
-		if (outboxSeqs(dir).length === 0) degraded = false;
+		if (outboxIsEmpty(dir)) degraded = false;
 	}
 
 	function trackPublish(record: AnchorRecord): Promise<void> {
 		const p = publishChain
 			.then(() => publishRecord(record))
-			.catch(() => {
-				/* failure already counted; outbox entry retained for retry */
+			.catch((err: unknown) => {
+				// The outbox entry is retained for retry. A sink failure was counted in
+				// deliverToSinks; anything else (an unreadable outbox or entry) is counted here,
+				// so an in-process emitter reports degraded instead of silently stalling.
+				if (typeof err === "object" && err !== null && countedErrors.has(err)) return;
+				degraded = true;
+				publishFailures++;
+				lastEmitError = err instanceof Error ? err.message : String(err);
 			})
 			.finally(() => {
 				inFlight.delete(p);
@@ -933,7 +1140,8 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 					: { anchorSeq: tail.anchorSeq, treeSize: tail.treeSize, timestamp: tail.timestamp },
 			eventsSinceLastAnchor: headSeq === null ? 0 : Math.max(0, headSeq - (tail?.treeSize ?? 0)),
 			msSinceLastAnchor: Number.isFinite(ts) ? Math.max(0, Date.now() - ts) : null,
-			outboxDepth: outboxSeqs(dir).length,
+			outboxDepth: outboxDepthOrZero(dir),
+			outboxUnreadable: !outboxReadable(dir),
 			anchorSkips,
 			publishFailures,
 			degraded,
@@ -945,6 +1153,49 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 		anchorNow: () => emit(),
 		rotate: (next) => emit({ nextKeyId: next.keyId, nextPublicKeySpki: next.publicKeySpki }),
 		status,
+		async redeliverPending(): Promise<"done" | "locked"> {
+			// Under the writer lock, and only records the mirror already holds byte for
+			// byte: an outbox entry the mirror lacks, or holds differently, is one the
+			// emitter has not accepted (or refused), and must never reach the store.
+			// With no sink configured delivery would succeed vacuously and erase the
+			// entry, so nothing is redelivered and the backlog stays.
+			if (sinks.length === 0) return "done";
+			const release = tryAcquireAnchorLock(dir);
+			if (release === null) return "locked";
+			try {
+				await publishChain;
+				const mirror = readMirrorRecords(dir);
+				if (!mirror.present || mirror.errors.length > 0) return "done";
+				const held = new Map(mirror.records.map((r) => [r.anchorSeq, canonicalize(r)]));
+				// Oldest first, and stop at the first entry that is unreadable, unparsable or
+				// not held by the mirror byte for byte: a later entry must never be delivered
+				// past one that was not.
+				for (const seq of outboxSeqs(dir).sort((a, b) => a - b)) {
+					let rec: AnchorRecord | null = null;
+					try {
+						rec = parseAnchorRecord(readFileSync(outboxPath(dir, seq), "utf-8").trim()).record;
+					} catch {
+						rec = null;
+					}
+					if (rec === null || rec.anchorSeq !== seq) break;
+					if (held.get(rec.anchorSeq) !== canonicalize(rec)) break;
+					try {
+						await deliverToSinks(rec);
+					} catch {
+						break; // failure already counted; the entry stays for the next run
+					}
+					try {
+						unlinkSync(outboxPath(dir, rec.anchorSeq));
+					} catch {
+						/* best effort */
+					}
+				}
+				if (outboxIsEmpty(dir)) degraded = false;
+				return "done";
+			} finally {
+				release();
+			}
+		},
 		start(): void {
 			if (timer !== null) return;
 			const everyMs = config.cadence?.everyMs ?? DEFAULT_ANCHOR_EVERY_MS;

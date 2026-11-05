@@ -32,6 +32,7 @@ import {
 import { canonicalize, verifyTransaction } from "usertrust-verify";
 import { isHeaderSpend } from "../shared/aggregate.js";
 import { type RowStatus, statusFor, toLedgerRows } from "../shared/rows.js";
+import { hostAllowed, originAllowed, parseAllowHosts } from "./allow-host.js";
 import {
 	budgetSummary,
 	type DeletionCause,
@@ -80,9 +81,14 @@ function sendJson(
 
 export async function createUiServer(
 	rootDir: string,
-	opts?: { port?: number; appDir?: string },
+	opts?: { port?: number; appDir?: string; allowHosts?: readonly string[] },
 ): Promise<UiServer> {
 	const vaultPath = join(rootDir, VAULT_DIR);
+	// Extra Host names (`--allow-host`), validated again here so no caller can pass a wildcard in. The bind
+	// below stays 127.0.0.1 whatever is allowed.
+	const parsedHosts = parseAllowHosts(opts?.allowHosts ?? []);
+	if (!parsedHosts.ok) throw new Error(parsedHosts.error);
+	const allowHosts: readonly string[] = parsedHosts.names;
 	// Compiled location is dist/server/ — the built SPA sits beside it in dist/app/.
 	const appDir = opts?.appDir ?? join(dirname(fileURLToPath(import.meta.url)), "..", "app");
 	let state: LedgerState = loadState(vaultPath);
@@ -301,7 +307,11 @@ export async function createUiServer(
 
 		// Amendment A3: DNS-rebinding guard — only loopback Host headers.
 		const host = req.headers.host;
-		if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) {
+		if (
+			host !== `127.0.0.1:${port}` &&
+			host !== `localhost:${port}` &&
+			!hostAllowed(host, allowHosts, port)
+		) {
 			sendJson(res, 403, { error: "forbidden host" });
 			return;
 		}
@@ -312,7 +322,8 @@ export async function createUiServer(
 			if (
 				origin !== undefined &&
 				origin !== `http://127.0.0.1:${port}` &&
-				origin !== `http://localhost:${port}`
+				origin !== `http://localhost:${port}` &&
+				!originAllowed(origin, allowHosts, port)
 			) {
 				sendJson(res, 403, { error: "forbidden origin" });
 				return;

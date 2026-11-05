@@ -4,6 +4,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	formatReceipt,
+	dollarsFromUt,
 	formatUsd,
 	formatUt,
 	type ReceiptFields,
@@ -30,7 +31,7 @@ describe("formatUsd and formatUt", () => {
 		[104, "$0.0104", "104 UT"],
 		[1_000, "$0.1000", "1,000 UT"],
 		[50_000, "$5.0000", "50,000 UT"],
-		[1_000_000_000, "$100000.0000", "1,000,000,000 UT"],
+		[1_000_000_000, "$100,000.0000", "1,000,000,000 UT"],
 	];
 	for (const [ut, usd, label] of rows) {
 		it(`${ut} usertokens is ${usd}`, () => {
@@ -42,7 +43,32 @@ describe("formatUsd and formatUt", () => {
 	it("rounds by the usertoken, not by a thousand: the control for the table above", () => {
 		// A formatter that divided by 1000 (or by 10^4 and forgot the unit) would print $0.1000 for 1 UT.
 		expect(formatUsd(1)).not.toBe("$0.1000");
-		expect(formatUsd(1_000_000_000)).not.toBe("$1000000.0000");
+		expect(formatUsd(1_000_000_000)).not.toBe("$1,000,000.0000");
+	});
+});
+
+describe("dollarsFromUt: exact integer dollars, shared with the dashboard", () => {
+	it("groups the whole part and is exact at any size, with no float drift", () => {
+		expect(formatUsd(12_045_500)).toBe("$1,204.5500");
+		expect(formatUsd(Number.MAX_SAFE_INTEGER)).toBe("$900,719,925,474.0991");
+		expect(formatUsd(123_456_789_012_345)).toBe("$12,345,678,901.2345");
+		expect(formatUsd(9_999)).toBe("$0.9999");
+		expect(formatUsd(10_000)).toBe("$1.0000");
+	});
+
+	it("rounds the 2 dp cut half up on the magnitude, never by a float's whim", () => {
+		expect(dollarsFromUt(150, 2)).toBe("$0.02");
+		expect(dollarsFromUt(149, 2)).toBe("$0.01");
+		// 1.005 * 100 is 100.49999999999999 in floats: integer math has no such case
+		expect(dollarsFromUt(10_050, 2)).toBe("$1.01");
+		expect(dollarsFromUt(Number.MAX_SAFE_INTEGER, 2)).toBe("$900,719,925,474.10");
+		expect(dollarsFromUt(-150, 2)).toBe("-$0.02");
+		expect(dollarsFromUt(-1, 2)).toBe("$0.00");
+	});
+
+	it("a count that is not finite has no dollar figure, never $NaN", () => {
+		expect(formatUsd(Number.NaN)).toBe("n/a");
+		expect(dollarsFromUt(Number.POSITIVE_INFINITY, 2)).toBe("n/a");
 	});
 });
 

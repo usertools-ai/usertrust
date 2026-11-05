@@ -39,19 +39,9 @@ aws s3 cp s3://…/000000000042.json - | usertrust-verify .usertrust --anchor - 
 usertrust-verify .usertrust --anchors anchors.jsonl --pubkey root.pem \
   --require-anchor --require-external-anchor --max-unanchored-events 5000
 
-# Transparency-log receipts (repeatable; JSON or JSONL; - = stdin)
-usertrust-verify .usertrust --anchors anchors.jsonl --pubkey root.pem \
-  --rekor-receipts .usertrust/audit/anchors/rekor/000000000042.json
-
-# A self-hosted log needs its key pinned too (repeatable — any pinned key may verify)
-usertrust-verify .usertrust --anchors anchors.jsonl --pubkey root.pem \
-  --rekor-receipts receipts.jsonl --rekor-pubkey rekor-internal.pem
-
 # One operator-supplied handoff file: usertrust anchor export-bundle
 usertrust-verify .usertrust --bundle audit-bundle.json --pubkey root.pem
 ```
-
-`--rekor-receipts` verification is offline and fail-closed: the signed-note checkpoint and its ECDSA P-256 signature, an RFC 9162 inclusion proof, and the binding of the log entry to your record all have to check out, or you get `ANCHOR_INVALID` (reason `rekor-receipt-invalid`) and exit 1. A verified receipt also makes `--max-anchor-age` measure against the log's attested `integratedTime` instead of the operator's own timestamp. Without `--rekor-pubkey`, the embedded rekor.sigstore.dev key is used **only** for receipts whose log host is `rekor.sigstore.dev`; any other log must be pinned explicitly. `--bundle` takes `{v:1, records, rekorReceipts}` and is parsed strictly — unknown fields, a version other than 1, or oversized lists are errors.
 
 Result states: `ANCHORED_VERIFIED`, `UNANCHORED` (ordinary verification without an anchor flag, or anchored verification that finds no anchor records, whether supplied or in the vault's own mirror: valid, but the chain is checked only against itself), `ANCHOR_UNVERIFIABLE`, `ANCHOR_STALE`, and the hard failures `ANCHOR_INVALID` / `ANCHOR_MISMATCH` (rewrite, rollback, deletion, or fork against the signed checkpoints — always exit 1). After a key rotation, keep pinning the original root key and pass the announced successor fingerprints with `--successor-pin`. See the [anchoring guide](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md) for the operator side.
 
@@ -76,6 +66,8 @@ usertrust-verify .usertrust --tx tx_m4k7p2_a1b2c3
 ```
 
 `--tx` reads the same history as a full verify: `events.jsonl` and every rotated `*.jsonl` segment, as one chain ordered by `sequence`, so a transfer whose records span a rotation gets the same receipt and verdict as on an unrotated vault. A missing segment fails the check and is named, with the absent event range and the two files it lies between.
+
+The receipt's verdict line reads `* VERIFIED *` only when its Merkle row is `INCLUSION VERIFIED`, which needs an anchor that covers the transaction and a pinned key. A chain that checks out without one reads `CHAIN INTACT, NOT ANCHORED`.
 
 ## Programmatic API
 

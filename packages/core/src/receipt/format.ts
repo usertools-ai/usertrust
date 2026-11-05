@@ -12,20 +12,37 @@
  * receipt fields only: it has no way to print a model's response.
  */
 
-/** One usertoken is exactly one ten-thousandth of a dollar. */
-export const UT_TO_USD = 0.0001;
-
 /** Usertokens, with their unit. Grouped with `en-US` separators so the figure never depends on the machine's locale. */
 export function formatUt(ut: number): string {
 	return `${ut.toLocaleString("en-US")} UT`;
 }
 
+/** Usertokens in a dollar: 1 UT is exactly $0.0001. */
+const UT_PER_DOLLAR = 10_000n;
+
 /**
- * Dollars at 4 dp: 1 UT is exactly $0.0001, so 4 dp is exact. A header that printed 2 dp beside rows that printed 4
- * once summed a $0.0097 call into a "$0.95" that no row added up to.
+ * Dollars from a usertoken count, by integer arithmetic only: 1 UT is exactly $0.0001, so a count is never
+ * multiplied by 0.0001 (a float), and a large vault's figure cannot drift. `dp` is 2 or 4; the cut to 2 dp rounds
+ * half up on the magnitude. The whole part is grouped with commas. A count that is not finite has no dollar figure.
+ */
+export function dollarsFromUt(ut: number, dp: 2 | 4): string {
+	if (!Number.isFinite(ut)) return "n/a";
+	const total = BigInt(Math.round(Math.abs(ut)));
+	const scale = dp === 4 ? 1n : 100n;
+	const units = (total + scale / 2n) / scale;
+	const per = UT_PER_DOLLAR / scale;
+	const whole = (units / per).toString().replace(/\B(?=(\d{3})+$)/g, ",");
+	const frac = (units % per).toString().padStart(dp, "0");
+	return `${ut < 0 && units > 0n ? "-" : ""}$${whole}.${frac}`;
+}
+
+/**
+ * Dollars at 4 dp, for one call or one record: 1 UT is exactly $0.0001, so 4 dp is exact, and a call can cost under
+ * a cent. A header that printed 2 dp beside rows that printed 4 once summed a $0.0097 call into a "$0.95" that no
+ * row added up to.
  */
 export function formatUsd(ut: number): string {
-	return `$${(ut * UT_TO_USD).toFixed(4)}`;
+	return dollarsFromUt(ut, 4);
 }
 
 /** The fields of a receipt that `formatReceipt` reads: a structural subset of `TrustReceipt`, so any receipt fits. */

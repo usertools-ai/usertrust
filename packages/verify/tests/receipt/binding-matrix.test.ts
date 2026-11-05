@@ -2208,8 +2208,8 @@ const NOT_APPLICABLE_ROWS: readonly NotApplicableRow[] = [
 	},
 	{
 		id: "n/a.anchorEvidence",
-		value: "Rekor anchor evidence",
-		boundTo: "a pinned transparency-log key",
+		value: "anchorEvidence member of the envelope",
+		boundTo: "a pinned witness key",
 		reason: "this build validates no anchor evidence and reports it as unimplemented",
 	},
 ];

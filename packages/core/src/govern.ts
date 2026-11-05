@@ -195,7 +195,11 @@ export interface TrustOpts {
 	key?: string;
 	/** Token budget override. */
 	budget?: number;
-	/** Tier. Accepted, but currently not applied: the config file's `tier` is used. */
+	/**
+	 * Tier override: overrides `tier` in the config file (`"free" | "mini" | "pro" | "mega" | "ultra"`, see
+	 * `TrustConfigSchema.tier`). It is the tier policy rules that match on `tier` are evaluated at. Any
+	 * other value is refused when the client is built.
+	 */
 	tier?: string;
 	/**
 	 * PII enforcement override: overrides `pii` in the config file
@@ -297,6 +301,7 @@ export const TRUST_OPTS_KEYS: Readonly<Record<keyof TrustOpts, true>> = {
  */
 const CONFIG_OVERRIDE_KEYS = [
 	"budget",
+	"tier",
 	"pii",
 	"parentUserId",
 	"scope",
@@ -309,9 +314,9 @@ const ENUM_OVERRIDE_KEYS = [
 
 /**
  * Accepted (no refusal) but never advertised in a refusal's list: `proxy` and
- * `key` are deprecated, and `tier` is declared but not currently applied.
+ * `key` are deprecated.
  */
-const UNADVERTISED_OPTS = new Set(["proxy", "key", "tier"]);
+const UNADVERTISED_OPTS = new Set(["proxy", "key"]);
 
 /**
  * The options that override config-file values, ready to spread over the file's
@@ -938,6 +943,10 @@ function withInjectedUsageOptions(args: unknown[]): unknown[] | null {
 	const params = (args[0] ?? {}) as Record<string, unknown>;
 	if (params.stream !== true) return null;
 	const rawOptions = params.stream_options;
+	// A value that is not an object is the caller's own (wrong) request: it is left as written.
+	if (rawOptions != null && (typeof rawOptions !== "object" || Array.isArray(rawOptions))) {
+		return null;
+	}
 	const streamOptions =
 		rawOptions != null && typeof rawOptions === "object"
 			? (rawOptions as Record<string, unknown>)
@@ -947,6 +956,26 @@ function withInjectedUsageOptions(args: unknown[]): unknown[] | null {
 		{ ...params, stream_options: { ...streamOptions, include_usage: true } },
 		...args.slice(1),
 	];
+}
+
+/**
+ * The hosts a cloud chat-completions request may be changed for: each is known to accept
+ * `stream_options.include_usage`. Exact hostnames, https only. Other OpenAI-compatible services can
+ * reject the field, so one provider at a time is added here, with its own test.
+ */
+export const USAGE_OPTION_HOSTS: readonly string[] = ["api.openai.com"];
+
+/** Whether `baseURL` names one of USAGE_OPTION_HOSTS exactly (never a suffix, prefix or userinfo trick). */
+export function acceptsUsageOption(baseURL: string | undefined): boolean {
+	if (baseURL === undefined) return false;
+	let url: URL;
+	try {
+		url = new URL(baseURL);
+	} catch {
+		return false;
+	}
+	if (url.protocol !== "https:" || url.username !== "" || url.password !== "") return false;
+	return USAGE_OPTION_HOSTS.includes(url.hostname.toLowerCase());
 }
 
 /** Message shapes an OpenAI-compat server emits when it rejects an unknown field. */
@@ -2463,16 +2492,27 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// usage automatically on the terminal `response.completed` event, and
 			// injecting the param would be an unknown field on the Responses request.
 			let preInjectionArgs: unknown[] | null = null;
-			if (
-				kind === "openai" &&
-				surfaceKind !== "openai-responses" &&
-				endpoint.class === "local" &&
-				config.local.injectUsageOptions
-			) {
-				const injected = withInjectedUsageOptions(forwardArgs);
-				if (injected != null) {
-					preInjectionArgs = forwardArgs;
-					forwardArgs = injected;
+			// A cloud request is changed only for a host that accepts the field (USAGE_OPTION_HOSTS). It
+			// is never retried without it: that host accepts it, so a failure is about something else,
+			// and the caller's stream must not show the usage chunk they did not ask for.
+			let withholdUsageTail = false;
+			if (kind === "openai" && surfaceKind !== "openai-responses") {
+				if (endpoint.class === "local" && config.local.injectUsageOptions) {
+					const injected = withInjectedUsageOptions(forwardArgs);
+					if (injected != null) {
+						preInjectionArgs = forwardArgs;
+						forwardArgs = injected;
+					}
+				} else if (
+					endpoint.class === "cloud" &&
+					config.cloud.injectUsageOptions &&
+					acceptsUsageOption(endpoint.baseURL)
+				) {
+					const injected = withInjectedUsageOptions(forwardArgs);
+					if (injected != null) {
+						forwardArgs = injected;
+						withholdUsageTail = true;
+					}
 				}
 			}
 
@@ -3354,6 +3394,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						// settlement error rejects `.receipt` alone.
 						{
 							surfaceAuditRefusal: config.audit.failClosed,
+							...(withholdUsageTail ? { withholdUsageTail: true } : {}),
 							// The caller's own abort signal for THIS call: an abort settles the usage
 							// delivered so far (an early stop), it does not void (callerAbortSignal).
 							// Read through the BUILT-IN getter: an own `aborted` property or getter on
