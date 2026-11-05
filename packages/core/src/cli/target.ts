@@ -64,7 +64,8 @@ export function toSafeJson(value: unknown): string {
  *
  * `args` are the arguments AFTER the command word. A positional is refused ("takes no path"), and
  * so is any dash token that is neither a global flag nor one of `valueFlags` (the command's own
- * flags, each taking the next argument as its value): there are no short flags, and skipping an
+ * flags, each taking the next argument as its value) or one of `boolFlags` (the command's own
+ * switches, which take no value): there are no short flags, and skipping an
  * unknown dash token as "probably a flag" is how `-vault` slipped past.
  */
 export function refuseStrayPositional(
@@ -72,6 +73,7 @@ export function refuseStrayPositional(
 	args: string[],
 	json: boolean,
 	valueFlags: readonly string[] = [],
+	boolFlags: readonly string[] = [],
 ): boolean {
 	let message: string | undefined;
 	// `--json` is global and main.ts removes it before dispatch, so it must not be taken as the
@@ -82,7 +84,7 @@ export function refuseStrayPositional(
 		if (valueFlags.includes(a)) {
 			i++;
 		} else if (a.startsWith("-")) {
-			if (!GLOBAL_FLAGS.includes(a)) {
+			if (!GLOBAL_FLAGS.includes(a) && !boolFlags.includes(a)) {
 				message = `\`usertrust ${command}\` has no option "${scrubForTerminal(a)}".`;
 			}
 		} else {

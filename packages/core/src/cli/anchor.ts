@@ -60,6 +60,10 @@ const ACTION_VALUE_FLAGS: Readonly<Record<string, readonly string[]>> = {
 	rotate: ["--key-file", "--publish-retries", ...VALUE_SINK_FLAGS],
 	resume: ["--latest"],
 };
+/** Switches an action reads that take no value (the refusal above would otherwise call them unknown). */
+const ACTION_BOOL_FLAGS: Readonly<Record<string, readonly string[]>> = {
+	now: ["--scheduled"],
+};
 /** Same cap the verify CLI enforces on `--bundle` — never export what it refuses. */
 const MAX_BUNDLE_ITEMS = 10_000;
 
@@ -469,7 +473,13 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 	const valueFlags = action === undefined ? undefined : ACTION_VALUE_FLAGS[action];
 	if (
 		valueFlags !== undefined &&
-		refuseStrayPositional(`anchor ${action}`, args.slice(1), json, valueFlags)
+		refuseStrayPositional(
+			`anchor ${action}`,
+			args.slice(1),
+			json,
+			valueFlags,
+			ACTION_BOOL_FLAGS[action as string] ?? [],
+		)
 	) {
 		return;
 	}

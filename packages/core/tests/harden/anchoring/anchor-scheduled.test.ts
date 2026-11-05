@@ -105,6 +105,17 @@ describe("anchor now --scheduled", () => {
 		expect(readLastRun(s.root)).toMatchObject({ ok: true, reason: "no-new-events" });
 	});
 
+	it("--scheduled is a switch of `now` only: another action still refuses it as an unknown option", async () => {
+		const lines = capture();
+		process.exitCode = 0;
+		await anchorRun(["status", "--scheduled"], { json: true });
+		const exit = Number(process.exitCode ?? 0);
+		process.exitCode = 0;
+		vi.restoreAllMocks();
+		expect(exit).toBe(2);
+		expect(lines.at(-1)).toContain('has no option \\"--scheduled\\"');
+	});
+
 	it("an empty vault exits 0 scheduled but 1 for a human run (positive control)", async () => {
 		const s = await makeAnchoredVault(0);
 		process.chdir(s.root);
