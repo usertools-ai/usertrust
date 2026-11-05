@@ -30,6 +30,7 @@ import {
 	readAnchorIdentity,
 	readMeta,
 	recordRotatedIdentity,
+	resolveSigner,
 	resumeAnchorMirror,
 	type SinkConfig,
 } from "../audit/anchor.js";
@@ -229,6 +230,39 @@ function emptyVaultFault(root: string): { reason: LastRunReason; detail: string 
 }
 
 /**
+ * For an "empty" outcome, which returns before the emitter's epoch guard: the signer a timer
+ * would sign with must be the identity's current epoch key, or "nothing to do" would hide a run
+ * pointed at the wrong vault's key (or a superseded one). Returns the fault, or null.
+ */
+function emptySignerFault(
+	root: string,
+	args: string[],
+): { reason: LastRunReason; detail: string } | null {
+	const identity = readAnchorIdentity(root);
+	if (identity === null) return null;
+	const signer = resolveSigner(emitterConfig(args).signer, identity.vaultId);
+	if (signer.keyId === identity.keyId) return null;
+	return {
+		reason: "stale-signer-key",
+		detail: `signer ${signer.keyId} is not the current epoch key ${identity.keyId}: point USERTRUST_ANCHOR_KEY/--key-file at this vault's current private key`,
+	};
+}
+
+/** Record a scheduled run the option check refused (reason "other"; the message goes to stderr). */
+function recordRefusedScheduledRun(root: string, message: string): void {
+	if (readAnchorIdentity(root) === null) return;
+	try {
+		writeLastRun(root, "other", new Date(), (warning) => {
+			process.stderr.write(`${scrubForTerminal(warning)}\n`);
+		});
+	} catch (err) {
+		process.stderr.write(
+			`${scrubForTerminal(`usertrust: could not record the refused scheduled run (${message}) in last-run.json: ${err instanceof Error ? err.message : String(err)}`)}\n`,
+		);
+	}
+}
+
+/**
  * `anchor now --scheduled`: the form a timer runs. Nothing to anchor and "another run
  * holds the lock" are not failures, so they exit 0; a real failure exits 1 and is also
  * written to `last-run.json` so `anchor status` shows it after the run is gone. A
@@ -246,7 +280,8 @@ async function runScheduled(root: string, args: string[], json: boolean): Promis
 		// "empty" means the event log has nothing. That is benign only for a vault that has
 		// never anchored; with a missing mirror or recorded anchors it is lost data, and the
 		// human command exits 1 for it too.
-		const emptyFault = emitted.reason === "empty" ? emptyVaultFault(root) : null;
+		const emptyFault =
+			emitted.reason === "empty" ? (emptyVaultFault(root) ?? emptySignerFault(root, args)) : null;
 		// A quiet run makes no record, so nothing else retries an earlier failed
 		// delivery; retry it here so a recovered sink clears the backlog.
 		// Only after a benign outcome: a refusal (invalid outbox entry, mirror trouble) or
@@ -479,6 +514,12 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 			json,
 			valueFlags,
 			ACTION_BOOL_FLAGS[action as string] ?? [],
+			(message) => {
+				// A timer's run refused by the option check never reaches runScheduled: record it, or
+				// `anchor status` keeps showing the run before it, possibly an ok.
+				if (action === "now" && args.includes("--scheduled"))
+					recordRefusedScheduledRun(root, message);
+			},
 		)
 	) {
 		return;

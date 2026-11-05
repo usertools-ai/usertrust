@@ -74,6 +74,7 @@ export function refuseStrayPositional(
 	json: boolean,
 	valueFlags: readonly string[] = [],
 	boolFlags: readonly string[] = [],
+	onRefuse?: (message: string) => void,
 ): boolean {
 	let message: string | undefined;
 	// `--json` is global and main.ts removes it before dispatch, so it must not be taken as the
@@ -92,6 +93,7 @@ export function refuseStrayPositional(
 		}
 	}
 	if (message === undefined) return false;
+	onRefuse?.(message);
 	if (json) {
 		console.log(JSON.stringify({ command, success: false, data: { message } }));
 	} else {

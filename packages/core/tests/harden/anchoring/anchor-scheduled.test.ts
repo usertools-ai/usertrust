@@ -116,6 +116,40 @@ describe("anchor now --scheduled", () => {
 		expect(lines.at(-1)).toContain('has no option \\"--scheduled\\"');
 	});
 
+	it("an empty vault with ANOTHER vault's key is stale-signer-key, exit 1, recorded (not a benign 'empty')", async () => {
+		const s = await makeAnchoredVault(0);
+		const other = await makeAnchoredVault(0);
+		process.chdir(s.root);
+		process.env.USERTRUST_ANCHOR_KEY = other.keyFile;
+		const r = await runNow(["--scheduled", "--sink-file", s.storeFile]);
+		expect(r.exit).toBe(1);
+		expect((r.out.data as { reason: string }).reason).toBe("stale-signer-key");
+		expect(readLastRun(s.root)).toMatchObject({ ok: false, reason: "stale-signer-key" });
+		// positive control: the vault's own key is still the benign empty
+		process.env.USERTRUST_ANCHOR_KEY = s.keyFile;
+		const own = await runNow(["--scheduled", "--sink-file", s.storeFile]);
+		expect(own.exit).toBe(0);
+		expect((own.out.data as { reason: string }).reason).toBe("empty");
+	});
+
+	it("a scheduled run refused by the option check is recorded as failed, so status cannot keep an old ok", async () => {
+		const s = await makeAnchoredVault(3);
+		process.chdir(s.root);
+		process.env.USERTRUST_ANCHOR_KEY = s.keyFile;
+		const good = await runNow(["--scheduled", "--sink-file", s.storeFile]);
+		expect(good.exit).toBe(0);
+		expect(readLastRun(s.root)).toMatchObject({ ok: true, reason: "anchored" });
+		const bad = await runNow(["--scheduled", "--bogus"]);
+		expect(bad.exit).toBe(2);
+		expect(readLastRun(s.root)).toMatchObject({ ok: false, reason: "other" });
+		// a human run refused the same way writes nothing: last-run is the timer's record only
+		await runNow(["--sink-file", s.storeFile]);
+		const before = readFileSync(lastRunPath(s.root), "utf-8");
+		const human = await runNow(["--bogus"]);
+		expect(human.exit).toBe(2);
+		expect(readFileSync(lastRunPath(s.root), "utf-8")).toBe(before);
+	});
+
 	it("an empty vault exits 0 scheduled but 1 for a human run (positive control)", async () => {
 		const s = await makeAnchoredVault(0);
 		process.chdir(s.root);
