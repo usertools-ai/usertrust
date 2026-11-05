@@ -32,6 +32,7 @@ const COMMANDS = [
 	"ui",
 	"audit",
 	"report",
+	"demo",
 ] as const;
 
 const argv = process.argv.slice(2);
@@ -192,6 +193,10 @@ switch (command) {
 		await import("./report.js").then((m) => m.run(undefined, { json: jsonFlag }, rest));
 		break;
 	}
+	case "demo":
+		if (await refusedStray("demo")) break;
+		await import("./demo.js").then((m) => m.run(undefined, { json: jsonFlag }));
+		break;
 	default: {
 		if (command && !command.startsWith("-")) {
 			const suggestion = suggestCommand(command);
@@ -221,6 +226,7 @@ Commands:
   ui            Open the visual ledger (local web UI)
   audit         Repair a torn audit-log tail (quarantine-tail [--dry-run])
   report        Weekly spend report from the vault (report --week --end <ISO instant>)
+  demo          See usertrust work with no key and no money (pretend client, temporary vault)
 
 Options:
   --json     Output machine-readable JSON`);

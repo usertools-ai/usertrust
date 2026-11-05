@@ -49,6 +49,11 @@
 			"types": "./dist/ledger/pricing.d.ts",
 			"import": "./dist/ledger/pricing.js",
 			"require": "./dist/ledger/pricing.js"
+		},
+		"./receipt": {
+			"types": "./dist/receipt/format.d.ts",
+			"import": "./dist/receipt/format.js",
+			"require": "./dist/receipt/format.js"
 		}
 	},
 	"dependencies": {

@@ -6,6 +6,12 @@
  * header, the rows, the inspector and Trends cannot print the same figure two ways.
  */
 
+// The usertoken and dollar formatters live in core, so the command line, the demo and this ledger print one figure one way.
+// The `usertrust/receipt` entry point is pure, so it is safe in the browser bundle.
+import { dollarsFromUt, formatUsd, formatUt } from "usertrust/receipt";
+
+export { formatUsd, formatUt };
+
 function pad2(n: number): string {
 	return String(n).padStart(2, "0");
 }
@@ -44,40 +50,8 @@ export function formatUtcMinute(iso: string): string {
 	return Number.isNaN(t) ? iso : `${new Date(t).toISOString().slice(0, 16).replace("T", " ")}Z`;
 }
 
-/** Usertokens, with their unit. */
-export function formatUt(ut: number): string {
-	return `${ut.toLocaleString()} UT`;
-}
-
 /** The one-line key, said wherever usertokens are shown. */
 export const UT_KEY = "1 UT = $0.0001, one hundredth of a cent";
-
-/** Usertokens in a dollar: 1 UT is exactly $0.0001. */
-const UT_PER_DOLLAR = 10_000n;
-
-/**
- * Dollars from a usertoken count, by integer arithmetic only: 1 UT is exactly $0.0001, so a count is never
- * multiplied by 0.0001 (a float), and a large vault's figure cannot drift. `dp` is 2 or 4; the cut to 2 dp rounds
- * half up on the magnitude. The whole part is grouped with commas. A count that is not finite has no dollar figure.
- */
-function dollarsFromUt(ut: number, dp: 2 | 4): string {
-	if (!Number.isFinite(ut)) return "n/a";
-	const total = BigInt(Math.round(Math.abs(ut)));
-	const scale = dp === 4 ? 1n : 100n;
-	const units = (total + scale / 2n) / scale;
-	const per = UT_PER_DOLLAR / scale;
-	const whole = (units / per).toString().replace(/\B(?=(\d{3})+$)/g, ",");
-	const frac = (units % per).toString().padStart(dp, "0");
-	return `${ut < 0 && units > 0n ? "-" : ""}$${whole}.${frac}`;
-}
-
-/**
- * Dollars at 4 dp, for one call or one record: 1 UT is exactly $0.0001, so 4 dp is exact, and a call can cost under
- * a cent. The header printed 2 dp and the rows 4, so a $0.0097 call summed into a "$0.95" that no row added up to.
- */
-export function formatUsd(ut: number): string {
-	return dollarsFromUt(ut, 4);
-}
 
 /**
  * Dollars at 2 dp with grouping, for a total (`$7.60`, `$1,204.55`). Its exact 4 dp figure is `formatUsd`, for the

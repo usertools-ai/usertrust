@@ -9,6 +9,7 @@
 		"paths": {
 			"usertrust": ["./packages/core/src/index.ts"],
 			"usertrust/headless": ["./packages/core/src/headless.ts"],
+			"usertrust/receipt": ["./packages/core/src/receipt/format.ts"],
 			"usertrust-verify": ["./packages/verify/src/index.ts"]
 		}
 	},

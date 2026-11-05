@@ -1581,7 +1581,7 @@ first, clip second.
 repaint the terminal of the auditor running the command — forging a passing verdict, which is the
 entire product for a verification tool.
 
-There are **eighteen** sanitizers, in two variants: **fourteen** neutralise C1 and **four** do not. Do
+There are **nineteen** sanitizers, in two variants: **fifteen** neutralise C1 and **four** do not. Do
 not consolidate them onto the weaker one — and note that the two counts are pinned SEPARATELY,
 because swapping a stronger sanitizer for a weaker one moves both by one and leaves the total
 untouched. A total is not an inventory.
@@ -1657,6 +1657,12 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   Unicode's format-character category, tested by its property (`/^\p{Cf}$/u` in `isInvisibleFormat`), never
   by a hand list of ranges, which missed nine members of the class. The zero-width joiner is included, so an
   emoji sequence shows its parts joined by `?`.
+- The stronger variant once more: `plain` in `core/src/receipt/format.ts`, applied to every string
+  `formatReceipt` prints (model, provider, transfer id, timestamp, audit hash, chain path and receipt url). A
+  receipt's model name is the caller's request parameter and its paths come from the filesystem, and the CLI's output
+  is read by people and by agents that follow it. It also replaces Unicode format characters (the bidirectional
+  overrides among them). A local copy, not an import: this module is the browser-safe `usertrust/receipt` entry
+  and must carry no Node imports, and `scrubForTerminal` lives in the CLI.
 - Independent and deliberately **stronger**: `forDisplay` in `core/src/cli/budget.ts`. It
   also covers `0x80–0x9f`, the C1 range holding the 8-bit CSI/OSC introducers that the regex above
   does not match; it substitutes `?` rather than stripping; and it clips at 120.

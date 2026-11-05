@@ -4,6 +4,8 @@ export default defineConfig({
 	resolve: {
 		alias: {
 			// Resolve workspace packages to source for tests (dist/ may not exist in CI)
+			// before `usertrust`: an alias matches by prefix, so the entry for the bare name would take this one
+			"usertrust/receipt": resolve(__dirname, "packages/core/src/receipt/format.ts"),
 			usertrust: resolve(__dirname, "packages/core/src/index.ts"),
 			"usertrust/headless": resolve(__dirname, "packages/core/src/headless.ts"),
 			"usertrust-verify": resolve(__dirname, "packages/verify/src/index.ts"),
