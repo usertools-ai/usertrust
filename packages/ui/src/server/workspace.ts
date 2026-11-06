@@ -47,13 +47,18 @@ const posix = process.platform !== "win32";
 // O_NOFOLLOW does not exist on Windows; there the flag is simply absent.
 const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
-/** The path with every existing prefix resolved through symlinks. */
+/**
+ * The path with its longest existing prefix resolved by the OS: symlinks
+ * followed and, on a case-insensitive filesystem, letter case as stored on
+ * disk. The JS realpathSync keeps the caller's case there, so two spellings
+ * of one directory would get two workspaces.
+ */
 function canonical(p: string): string {
 	const rest: string[] = [];
 	let cur = resolve(p);
 	for (;;) {
 		try {
-			return join(realpathSync(cur), ...rest);
+			return join(realpathSync.native(cur), ...rest);
 		} catch {
 			const parent = dirname(cur);
 			if (parent === cur) return resolve(p);
@@ -74,7 +79,7 @@ function isInside(child: string, parent: string): boolean {
  * case for a project rooted at the home directory: its vault is ~/.usertrust.
  */
 export function workspaceDir(vaultBase: string, env: NodeJS.ProcessEnv = process.env): string {
-	const root = realpathSync(vaultBase);
+	const root = realpathSync.native(vaultBase);
 	const id = createHash("sha256").update(root).digest("hex").slice(0, 32);
 	const override = env.USERTRUST_WORKSPACE_DIR;
 	const base =

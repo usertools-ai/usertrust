@@ -15,6 +15,22 @@ function files(dir: string): string[] {
 }
 
 /**
+ * Environment variables the ui reads, by exact name. A name a user types in a shell is not the product name in
+ * display text; any other capitalised token fails until someone adds it here on purpose.
+ */
+const ENV_NAMES: readonly string[] = ["USERTRUST_WORKSPACE_DIR"];
+
+/**
+ * Capitalised spellings of the product name in `text`. A path is not a name: ".USERTRUST" in a comment is the vault
+ * directory, case-folded. An all-caps token is taken whole (letters, digits, `_`), so only an exact ENV_NAMES entry
+ * passes.
+ */
+function capitalisedNames(text: string): string[] {
+	const hits = text.match(/(?<!\.)(?:USERTRUST\w*|UserTrust|Usertrust)/g) ?? [];
+	return hits.filter((hit) => !ENV_NAMES.includes(hit));
+}
+
+/**
  * The product name is lowercase wherever this UI prints it (the header once read "USERTRUST · LEDGER"), and the UI
  * ships no font: it names families and the browser uses them only where they are installed. A font, inline or
  * fetched, would also send the page to the network, and this UI is loopback-only.
@@ -22,17 +38,26 @@ function files(dir: string): string[] {
 describe("ui source: brand", () => {
 	const sources = files(SRC).map((path) => ({ path, text: readFileSync(path, "utf-8") }));
 
-	// A path is not a name: ".USERTRUST" in a comment is the vault directory, case-folded.
-	// Nor is an environment variable: "USERTRUST_WORKSPACE_DIR" is what a user types in a shell.
+	it("the capitalised-name check flags display text and passes only listed env names and paths", () => {
+		for (const flagged of [
+			"USERTRUST · LEDGER",
+			"Usertrust",
+			"UserTrust",
+			"USERTRUST ",
+			"USERTRUST_",
+			"USERTRUST_LEDGER",
+			"USERTRUST_WORKSPACE_DIRS",
+		]) {
+			expect({ flagged, hits: capitalisedNames(flagged).length }).toEqual({ flagged, hits: 1 });
+		}
+		for (const passed of ["USERTRUST_WORKSPACE_DIR", ".USERTRUST", "usertrust"]) {
+			expect({ passed, hits: capitalisedNames(passed) }).toEqual({ passed, hits: [] });
+		}
+	});
+
 	it("red-first ('USERTRUST · LEDGER'): never a capitalised product name", () => {
 		for (const { path, text } of sources) {
-			expect({
-				path,
-				hits: text.match(/(?<!\.)(?:USERTRUST(?!_[A-Z])|UserTrust|Usertrust)/g) ?? [],
-			}).toEqual({
-				path,
-				hits: [],
-			});
+			expect({ path, hits: capitalisedNames(text) }).toEqual({ path, hits: [] });
 		}
 	});
 

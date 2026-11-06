@@ -4,6 +4,7 @@
 import {
 	chmodSync,
 	chownSync,
+	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
@@ -205,6 +206,19 @@ describe("workspaceDir", () => {
 		// A second spelling of the same vault resolves to the same workspace.
 		symlinkSync(one, join(tempDir, "alias"));
 		expect(workspaceDir(join(tempDir, "alias"), env)).toBe(workspaceDir(one, env));
+	});
+
+	it("a differently cased spelling of the same project gives the same dir", (ctx) => {
+		const env = { USERTRUST_WORKSPACE_DIR: join(tempDir, "workspaces") };
+		const one = project("one");
+		const upper = one.toUpperCase();
+		// Only a case-insensitive filesystem (the macOS default) has two spellings of one directory.
+		if (!existsSync(upper)) ctx.skip("the tmp filesystem is case-sensitive");
+		expect(workspaceDir(upper, env)).toBe(workspaceDir(one, env));
+		// A differently cased base pointed into the vault is still inside it.
+		expect(() =>
+			workspaceDir(one, { USERTRUST_WORKSPACE_DIR: join(one, ".usertrust", "ws").toUpperCase() }),
+		).toThrow(/workspace would sit inside the vault/);
 	});
 
 	it("never inside the vault", () => {
