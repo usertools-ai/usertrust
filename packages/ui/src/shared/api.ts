@@ -125,8 +125,20 @@ export interface AtPayload {
 	 * (`SummaryPayload.chain.valid`), so a vault that fails for a reason no event marks is invalid at every position.
 	 */
 	chain: { valid: boolean; breakIndex: number | null };
-	/** Today's budget: there is no budget history yet, and `note` says so. */
-	budget: { ut: number | null; note: string };
+	/**
+	 * The budget in force now, with where it came from: there is no budget history yet, so a past position carries
+	 * today's budget, and `note` says so. `ut`, `source`, `writtenAt` and `provenance` are the summary's `budget`,
+	 * `budgetSource`, `budgetWrittenAt` and `budgetProvenance` at the moment of the request: a controller's record of the
+	 * budget it enforces, as of its `writtenAt`; the vault config, not confirmed as enforced; or UNKNOWN (`several`,
+	 * `unreadable`, `unpublished`), when `ut` is null. `provenance` is the wording shown beside the figure.
+	 */
+	budget: {
+		ut: number | null;
+		source: SummaryPayload["budgetSource"];
+		writtenAt: string | null;
+		provenance: string;
+		note: string;
+	};
 	/**
 	 * The monthly plan (`plan.monthlyUt`) in force at the position's running-maximum time (the latest time recorded at
 	 * or before it: the event's own in a log written in order), or null (unset, no time, or settings off).

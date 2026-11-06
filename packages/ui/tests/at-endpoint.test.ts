@@ -16,6 +16,7 @@ import { deriveChainIntegrity, type PersistedAuditEvent, readLedgerEvents } from
 import { canonicalize } from "usertrust-verify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAuditWriter } from "../../core/src/audit/chain.js";
+import { recordEffectiveBudget } from "../../core/src/budget/effective-record.js";
 import { parseZonedTime } from "../src/server/position-index.js";
 import { createUiServer, type UiServer } from "../src/server/server.js";
 import { __tailTestSeam } from "../src/server/tail.js";
@@ -639,6 +640,94 @@ describe("GET /api/at", () => {
 		expect((await at("pos=19")).body).toMatchObject({ pos: 9, head: 9, clamped: true });
 		expect((await at("pos=99999999999999999999999")).body).toMatchObject({ pos: 9, clamped: true });
 	});
+
+	/**
+	 * The budget a position carries, one row per source, as the vault's own files give each (the record a controller
+	 * writes, the vault config, a record naming several controllers, a record that cannot be read, and none at all):
+	 * its source, as-of time and provenance are `/api/summary`'s at the same moment, beside the note that it is today's.
+	 */
+	const BUDGET_CASES: Array<{
+		source: string;
+		arrange: (vault: string) => void;
+		known: boolean;
+		provenance: RegExp;
+	}> = [
+		{
+			source: "governor",
+			arrange: (vault) => recordEffectiveBudget(vault, 2_000),
+			known: true,
+			provenance: /^the enforced budget, as of \d{4}-\d{2}-\d{2}T.*Z$/,
+		},
+		{
+			source: "config",
+			arrange: (vault) =>
+				writeFileSync(join(vault, "usertrust.config.json"), JSON.stringify({ budget: 1_000 })),
+			known: true,
+			provenance: /^from usertrust\.config\.json; not confirmed as enforced$/,
+		},
+		{
+			source: "several",
+			arrange: (vault) =>
+				writeFileSync(
+					join(vault, "effective-budget.json"),
+					JSON.stringify({
+						budget: null,
+						governors: 2,
+						writtenAt: "2026-10-12T00:00:00.000Z",
+						pid: 1,
+						processStartedAt: "2026-10-12T00:00:00.000Z",
+					}),
+				),
+			known: false,
+			provenance:
+				/^unknown: several controllers with different budgets, as of 2026-10-12T00:00:00\.000Z$/,
+		},
+		{
+			source: "unreadable",
+			arrange: (vault) => writeFileSync(join(vault, "effective-budget.json"), "{ not json"),
+			known: false,
+			provenance: /^unknown: the enforced-budget record could not be read; not valid JSON$/,
+		},
+		{
+			source: "unpublished",
+			arrange: () => {},
+			known: false,
+			provenance: /^unknown: not yet published; no controller has recorded the budget it enforces$/,
+		},
+	];
+
+	for (const c of BUDGET_CASES) {
+		it(`the budget at a position carries its source, as-of time and provenance: ${c.source}`, async () => {
+			await seed(3);
+			c.arrange(vaultPath);
+			await start();
+			const summary = (await (await fetch(`http://127.0.0.1:${ui?.port}/api/summary`)).json()) as {
+				budget: number | null;
+				budgetSource: string;
+				budgetWrittenAt: string | null;
+				budgetProvenance: string;
+			};
+			const { body } = await at("pos=1");
+			expect(summary.budgetSource).toBe(c.source);
+			expect(body.budget).toEqual({
+				ut: summary.budget,
+				source: summary.budgetSource,
+				writtenAt: summary.budgetWrittenAt,
+				provenance: summary.budgetProvenance,
+				note: NOTE,
+			});
+			expect(body.budget.provenance).toMatch(c.provenance);
+			if (c.known) expect(body.budget.ut).toEqual(expect.any(Number));
+			else expect(body.budget.ut).toBeNull();
+			if (c.source === "governor") {
+				// The controller's record, read as of the time it was written.
+				expect(body.budget.writtenAt).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/);
+				expect(body.budget.provenance).toContain(body.budget.writtenAt);
+			}
+			if (c.source === "config" || c.source === "unpublished" || c.source === "unreadable")
+				expect(body.budget.writtenAt).toBeNull();
+		});
+	}
 
 	it("plan at T", async () => {
 		writeEvents(chain(Array.from({ length: 5 }, () => ({ kind: "llm_call", data: { cost: 1 } }))));
