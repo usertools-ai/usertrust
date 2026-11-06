@@ -273,21 +273,34 @@ export function verifyVaultReading(vaultPath: string): VaultReading {
 		const lines = content.split("\n").filter((l) => l.trim());
 		for (let i = 0; i < lines.length; i++) {
 			const raw = lines[i] as string;
+			let value: unknown;
 			try {
-				const parsed = JSON.parse(raw) as Record<string, unknown>;
-				events.push({
-					id: typeof parsed.id === "string" ? parsed.id : "",
-					hash: typeof parsed.hash === "string" ? parsed.hash : "",
-					previousHash: typeof parsed.previousHash === "string" ? parsed.previousHash : "",
-					sequence: typeof parsed.sequence === "number" ? parsed.sequence : undefined,
-					timestamp: typeof parsed.timestamp === "string" ? parsed.timestamp : undefined,
-					parsed,
-					sourceFile: segmentFile,
-					line: i + 1,
-				});
+				value = JSON.parse(raw);
 			} catch {
 				errors.push(`malformed JSON (${basename(segmentFile)}:${i + 1})`);
+				continue;
 			}
+			// A line that parses but is not a JSON object (`42`, `[]`, `null`, `"x"`) is not an event,
+			// and is never walked as one. Walked, it had no `sequence`, and one event without a
+			// `sequence` switched the whole vault to the file-order walk below, which skips both
+			// sequence checks: a vault with its leading events deleted then named only the stray
+			// line's hash, never the deletion. It is its own error, and the walk runs over the rest.
+			// Mirrors `core/src/audit/verify.ts`, error string included.
+			if (value === null || typeof value !== "object" || Array.isArray(value)) {
+				errors.push(`non-object line (${scrubForError(basename(segmentFile))}:${i + 1})`);
+				continue;
+			}
+			const parsed = value as Record<string, unknown>;
+			events.push({
+				id: typeof parsed.id === "string" ? parsed.id : "",
+				hash: typeof parsed.hash === "string" ? parsed.hash : "",
+				previousHash: typeof parsed.previousHash === "string" ? parsed.previousHash : "",
+				sequence: typeof parsed.sequence === "number" ? parsed.sequence : undefined,
+				timestamp: typeof parsed.timestamp === "string" ? parsed.timestamp : undefined,
+				parsed,
+				sourceFile: segmentFile,
+				line: i + 1,
+			});
 		}
 	}
 
@@ -373,8 +386,8 @@ export function verifyVaultReading(vaultPath: string): VaultReading {
 			firstEvent,
 			lastEvent,
 		},
-		// A line that parsed to a number, a string or an array was walked (and failed its hash): it
-		// is in the ordered hashes the anchors count, and no event a later check can match.
+		// Every walked line is a JSON object (step 5 refuses the rest, as its own error), so this
+		// filter only narrows the type; it is kept so no later check can ever be handed a non-object.
 		events: ordered
 			.map((e) => e.parsed as unknown)
 			.filter(

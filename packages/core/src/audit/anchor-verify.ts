@@ -746,15 +746,20 @@ export function gatherOrderedEventHashes(vaultPath: string): string[] {
 		}
 		if (content === "") continue;
 		for (const raw of content.split("\n").filter((l) => l.trim())) {
+			let value: unknown;
 			try {
-				const parsed = JSON.parse(raw) as Record<string, unknown>;
-				events.push({
-					hash: typeof parsed.hash === "string" ? parsed.hash : "",
-					sequence: typeof parsed.sequence === "number" ? parsed.sequence : undefined,
-				});
+				value = JSON.parse(raw);
 			} catch {
-				// skip malformed line
+				continue; // skip malformed line
 			}
+			// Skipped like verifyVault skips it: a line that is not a JSON object is not an event,
+			// and counted here it would switch the order to file order and shift every position.
+			if (value === null || typeof value !== "object" || Array.isArray(value)) continue;
+			const parsed = value as Record<string, unknown>;
+			events.push({
+				hash: typeof parsed.hash === "string" ? parsed.hash : "",
+				sequence: typeof parsed.sequence === "number" ? parsed.sequence : undefined,
+			});
 		}
 	}
 	const allHaveSeq = events.every((e) => typeof e.sequence === "number");
