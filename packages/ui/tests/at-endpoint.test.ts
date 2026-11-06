@@ -581,6 +581,11 @@ describe("GET /api/at", () => {
 				: { kind: "llm_call", data: { cost: 1, settled: true, transferId: `tx_${i}` } },
 		);
 		const s = await start();
+		// The tail is opened before the append, and the test waits for the server's own signal: the first `rows` or
+		// `resync` frame, sent once the state holds the appended record. The test's timeout bounds the wait.
+		const tail = (
+			(await fetch(`http://127.0.0.1:${s.port}/api/tail`)).body as ReadableStream<Uint8Array>
+		).getReader();
 		const writer = createAuditWriter(tempDir);
 		await writer.appendEvent({
 			kind: "settlement_ambiguous",
@@ -588,14 +593,19 @@ describe("GET /api/at", () => {
 			data: { error: "post failed", transferId: "tx_live" },
 		});
 		writer.release();
-		type Rows = { rows: Array<{ pos: number; hash: string; status: string }> };
-		let rows: Rows["rows"] = [];
-		const deadline = Date.now() + 8000;
-		while (Date.now() < deadline) {
-			rows = ((await (await fetch(`http://127.0.0.1:${s.port}/api/events`)).json()) as Rows).rows;
-			if (rows.length === 5) break;
-			await new Promise((r) => setTimeout(r, 50));
+		const decoder = new TextDecoder();
+		let frames = "";
+		try {
+			while (!/event: (rows|resync)\n/.test(frames)) {
+				const next = await tail.read();
+				if (next.done) break;
+				frames += decoder.decode(next.value, { stream: true });
+			}
+		} finally {
+			await tail.cancel();
 		}
+		type Rows = { rows: Array<{ pos: number; hash: string; status: string }> };
+		const { rows } = (await (await fetch(`http://127.0.0.1:${s.port}/api/events`)).json()) as Rows;
 		expect(rows.map((r) => r.pos)).toEqual([0, 1, 2, 3, 4]);
 		const row3 = rows[3] as Rows["rows"][number];
 		expect(row3.status).toBe("ambiguous");

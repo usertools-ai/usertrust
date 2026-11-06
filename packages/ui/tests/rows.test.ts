@@ -93,7 +93,7 @@ describe("statusOf", () => {
 	/** Rows as the server builds them: every event indexed by transfer, each row given its TRANSFER's verdict. */
 	function classify(events: PersistedAuditEvent[]) {
 		const index = new TransferIndex();
-		index.add(events);
+		index.add(events, 0);
 		return toLedgerRows(events, OK, index.verdictOf, 0).map((r) => statusOf(r));
 	}
 	// Each event its own hash, as on a chain: rows are indexed by it.
@@ -185,11 +185,12 @@ describe("statusOf", () => {
 	it("a transfer's cached verdict is dropped when an event joins it", () => {
 		const index = new TransferIndex();
 		const optimistic = at(1, { data: { transferId: "tx_c", settled: true } });
-		index.add([optimistic]);
+		index.add([optimistic], 0);
 		expect(index.verdictOf(optimistic)).toBe("SETTLED");
-		const touched = index.add([
-			at(2, { kind: "settlement_ambiguous", data: { transferId: "tx_c", error: "post failed" } }),
-		]);
+		const touched = index.add(
+			[at(2, { kind: "settlement_ambiguous", data: { transferId: "tx_c", error: "post failed" } })],
+			1,
+		);
 		expect([...touched]).toEqual([transferIdHash("tx_c")]);
 		expect(index.keyOfRow(optimistic.hash)).toBe(transferIdHash("tx_c"));
 		expect(index.verdictOf(optimistic)).toBe("AMBIGUOUS");

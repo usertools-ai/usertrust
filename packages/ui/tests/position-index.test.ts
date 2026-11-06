@@ -269,7 +269,10 @@ describe("PositionIndex on the live tail", () => {
 		writer.release();
 	}
 
-	/** Opens the tail, runs `act`, and gives the `pos` of every row in the first `rows` frame, or the frame names. */
+	/**
+	 * Opens the tail, runs `act`, and gives the `pos` of every row in the first `rows` frame, or the frame names up to
+	 * the first `resync`. It waits on the server's own frames, with no clock: the test's timeout bounds the wait.
+	 */
 	async function nextRows(port: number, act: () => Promise<void>): Promise<number[] | string[]> {
 		const res = await fetch(`http://127.0.0.1:${port}/api/tail`);
 		const reader = (res.body as ReadableStream<Uint8Array>).getReader();
@@ -277,14 +280,10 @@ describe("PositionIndex on the live tail", () => {
 		const decoder = new TextDecoder();
 		const names: string[] = [];
 		let buffer = "";
-		const deadline = Date.now() + 8000;
 		try {
-			while (Date.now() < deadline) {
-				const next = await Promise.race([
-					reader.read(),
-					new Promise<undefined>((r) => setTimeout(() => r(undefined), deadline - Date.now())),
-				]);
-				if (next === undefined || next.done) break;
+			for (;;) {
+				const next = await reader.read();
+				if (next.done) break;
 				buffer += decoder.decode(next.value, { stream: true });
 				const blocks = buffer.split("\n\n");
 				buffer = blocks.pop() ?? "";
@@ -337,22 +336,23 @@ describe("PositionIndex on the live tail", () => {
 			timestamp: new Date().toISOString(),
 		};
 		const hash = createHash("sha256").update(canonicalize(rest)).digest("hex");
-		appendFileSync(logPath, `${canonicalize({ ...rest, hash })}\n`);
+		// Waits for the server to take the append in, by either path (a `rows` frame or a `resync`): the assertions
+		// below then tell a reload from an extension.
+		await nextRows(port, async () => {
+			appendFileSync(logPath, `${canonicalize({ ...rest, hash })}\n`);
+		});
 		type Snapshot = {
 			rows: Array<{ id: string; pos: number }>;
 			summary: { chain: { valid: boolean } };
 		};
-		let snapshot: Snapshot | undefined;
-		const deadline = Date.now() + 8000;
-		while (Date.now() < deadline) {
-			snapshot = (await (await fetch(`http://127.0.0.1:${port}/api/events`)).json()) as Snapshot;
-			if (snapshot.rows.length === 4) break;
-			await new Promise((r) => setTimeout(r, 50));
-		}
+		const snapshot = (await (
+			await fetch(`http://127.0.0.1:${port}/api/events`)
+		).json()) as Snapshot;
+		expect(snapshot.rows).toHaveLength(4);
 		const fresh = loadState(vaultPath);
-		expect(snapshot?.rows.map((r) => [r.id, r.pos])).toEqual(fresh.rows.map((r) => [r.id, r.pos]));
-		expect(snapshot?.rows.find((r) => r.id === "late-sequence")?.pos).toBe(1);
-		expect(snapshot?.summary.chain.valid).toBe(false);
+		expect(snapshot.rows.map((r) => [r.id, r.pos])).toEqual(fresh.rows.map((r) => [r.id, r.pos]));
+		expect(snapshot.rows.find((r) => r.id === "late-sequence")?.pos).toBe(1);
+		expect(snapshot.summary.chain.valid).toBe(false);
 	});
 
 	it("a resync rebuilds the index from the whole vault", async () => {
