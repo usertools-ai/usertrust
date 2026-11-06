@@ -342,6 +342,34 @@ describe("settings routes", () => {
 		expect(settingsBytes()).toBeNull();
 	});
 
+	it("a key or value that cannot be turned into text is a 400, and the server keeps serving", async () => {
+		const server = await start();
+		for (const body of [
+			'{"key":{"toString":null},"value":1}',
+			'{"key":"plan.monthlyUt","value":{"valueOf":null}}',
+			'{"key":["a"],"value":1}',
+			'{"key":{"toString":null,"valueOf":null},"value":{"toString":null,"valueOf":null}}',
+		]) {
+			const res = await put(server, body);
+			expect(res.status, body).toBe(400);
+			const { error } = JSON.parse(res.body) as { error: string };
+			expect(error, body).not.toContain("object");
+			expect((await send(server.port, { path: "/api/summary" })).status, body).toBe(200);
+		}
+		expect(settingsBytes()).toBeNull();
+	});
+
+	it("an unknown key is named in the error only as text, cut to 64 characters", async () => {
+		const server = await start();
+		const short = await put(server, JSON.stringify({ key: "plan.nope", value: 1 }));
+		expect(JSON.parse(short.body)).toEqual({ error: 'unknown setting: "plan.nope"' });
+		const long = await put(server, JSON.stringify({ key: "k".repeat(500), value: 1 }));
+		expect(long.status).toBe(400);
+		expect(JSON.parse(long.body)).toEqual({ error: `unknown setting: "${"k".repeat(64)}…"` });
+		const notText = await put(server, JSON.stringify({ key: 7, value: 1 }));
+		expect(JSON.parse(notText.body)).toEqual({ error: "unknown setting key" });
+	});
+
 	it("PUT over 4 KB is 413, with a content-length and chunked", async () => {
 		const server = await start();
 		const big = JSON.stringify({ key: "plan.monthlyUt", value: 1, pad: "x".repeat(5000) });

@@ -171,6 +171,16 @@ function isJson(req: IncomingMessage): boolean {
 	return contentType?.toLowerCase().startsWith("application/json") === true;
 }
 
+/**
+ * The 400 for a key that is not a setting. Only a string is quoted, cut to 64 characters; anything else gets a
+ * fixed message, since turning an arbitrary JSON value into text can throw (`{"toString":null}`).
+ */
+function unknownKeyMessage(key: unknown): string {
+	if (typeof key !== "string") return "unknown setting key";
+	const shown = key.length > 64 ? `${key.slice(0, 64)}…` : key;
+	return `unknown setting: ${JSON.stringify(shown)}`;
+}
+
 export interface UiServer {
 	server: Server;
 	port: number;
@@ -273,6 +283,59 @@ export async function createUiServer(
 			(a, b) => Date.parse(a.at) - Date.parse(b.at),
 		);
 		return { values, history, problem: ws.problem };
+	}
+	/** PUT /api/settings, once the token, content type and size have passed: `raw` is the body. */
+	function putSetting(res: ServerResponse, raw: string): void {
+		let body: unknown;
+		try {
+			body = JSON.parse(raw);
+		} catch {
+			sendJson(res, 400, { error: "body must be JSON" });
+			return;
+		}
+		// Exactly { key, value }: any other field (a client-supplied `at` among them) is refused, so an entry
+		// is always dated by this server, now, and nothing can be backdated.
+		if (
+			typeof body !== "object" ||
+			body === null ||
+			Array.isArray(body) ||
+			Object.keys(body).length !== 2 ||
+			!Object.hasOwn(body, "key") ||
+			!Object.hasOwn(body, "value")
+		) {
+			sendJson(res, 400, { error: "body must be exactly { key, value }" });
+			return;
+		}
+		const { key, value } = body as Record<string, unknown>;
+		if (!isSettingKey(key)) {
+			sendJson(res, 400, { error: unknownKeyMessage(key) });
+			return;
+		}
+		if (!isSettingValue(value)) {
+			sendJson(res, 400, { error: `${key} needs a finite number >= 0, or null` });
+			return;
+		}
+		let ws: Workspace | string;
+		try {
+			ws = openWorkspace();
+		} catch {
+			sendJson(res, 500, { error: SETTINGS_UNREADABLE });
+			return;
+		}
+		if (typeof ws === "string") {
+			sendJson(res, 409, { error: ws });
+			return;
+		}
+		try {
+			ws.append(key, value);
+		} catch (err) {
+			// A safety refusal is the workspace's answer (409, with its reason); anything else is an I/O
+			// failure (a full disk, a permission error) and a server fault, with a fixed message.
+			if (err instanceof WorkspaceRefusal) sendJson(res, 409, { error: err.message });
+			else sendJson(res, 500, { error: "settings could not be saved" });
+			return;
+		}
+		sendSettings(res);
 	}
 	// Extra Host names (`--allow-host`), validated again here so no caller can pass a wildcard in. The bind
 	// below stays 127.0.0.1 whatever is allowed.
@@ -577,56 +640,13 @@ export async function createUiServer(
 				return;
 			}
 			readBody(req, res, SETTINGS_BODY_CAP, (raw) => {
-				let body: unknown;
+				// Nothing thrown in here may leave the listener: an uncaught throw ends the process.
 				try {
-					body = JSON.parse(raw);
+					putSetting(res, raw);
 				} catch {
-					sendJson(res, 400, { error: "body must be JSON" });
-					return;
+					if (!res.headersSent) sendJson(res, 500, { error: "settings request failed" });
+					else res.destroy();
 				}
-				// Exactly { key, value }: any other field (a client-supplied `at` among them) is refused, so an entry
-				// is always dated by this server, now, and nothing can be backdated.
-				if (
-					typeof body !== "object" ||
-					body === null ||
-					Array.isArray(body) ||
-					Object.keys(body).length !== 2 ||
-					!Object.hasOwn(body, "key") ||
-					!Object.hasOwn(body, "value")
-				) {
-					sendJson(res, 400, { error: "body must be exactly { key, value }" });
-					return;
-				}
-				const { key, value } = body as Record<string, unknown>;
-				if (!isSettingKey(key)) {
-					sendJson(res, 400, { error: `unknown setting: ${String(key)}` });
-					return;
-				}
-				if (!isSettingValue(value)) {
-					sendJson(res, 400, { error: `${key} needs a finite number >= 0, or null` });
-					return;
-				}
-				let ws: Workspace | string;
-				try {
-					ws = openWorkspace();
-				} catch {
-					sendJson(res, 500, { error: SETTINGS_UNREADABLE });
-					return;
-				}
-				if (typeof ws === "string") {
-					sendJson(res, 409, { error: ws });
-					return;
-				}
-				try {
-					ws.append(key, value);
-				} catch (err) {
-					// A safety refusal is the workspace's answer (409, with its reason); anything else is an I/O
-					// failure (a full disk, a permission error) and a server fault, with a fixed message.
-					if (err instanceof WorkspaceRefusal) sendJson(res, 409, { error: err.message });
-					else sendJson(res, 500, { error: "settings could not be saved" });
-					return;
-				}
-				sendSettings(res);
 			});
 			return;
 		}
