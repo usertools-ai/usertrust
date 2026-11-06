@@ -83,10 +83,10 @@ function contrast(a: Rgba, b: Rgba): number {
 	return (hi + 0.05) / (lo + 0.05);
 }
 
-/** Resolve one level of `var(--x)` against the :root tokens. */
+/** Resolve `var(--x)` against the :root tokens, through every level of aliasing (`--accent` is `var(--gold)`). */
 function resolve(value: string): string {
 	const m = /^var\((--[\w-]+)\)$/.exec(value);
-	return m ? token(m[1] ?? "") : value;
+	return m ? resolve(token(m[1] ?? "")) : value;
 }
 
 const SURFACES = ["--page", "--surface", "--raised"] as const;
@@ -190,5 +190,34 @@ describe("control borders meet WCAG 1.4.11 non-text contrast", () => {
 			const focus = parseColour(resolve(decl(selector, "border-color")));
 			expect(luminance(over(focus, bg)), selector).toBeGreaterThan(rest);
 		}
+	});
+});
+
+describe("the gold accent meets WCAG AA as text", () => {
+	// The accent colours text (the live pill, a counting figure), so it is held to the 4.5:1 of small text.
+	for (const name of ["--page", "--surface"] as const) {
+		it(`--accent on ${name} is at least 4.5:1`, () => {
+			const bg = parseColour(token(name));
+			expect(resolve("var(--accent)")).toBe(token("--gold"));
+			expect(contrast(parseColour(resolve("var(--accent)")), bg)).toBeGreaterThanOrEqual(4.5);
+		});
+	}
+});
+
+describe("the accent stays off the chart marks and the live pill's states stay apart", () => {
+	it("a bar list's meter fill is the chart colour, not the accent", () => {
+		expect(decl(".ut-blist .ut-meter i", "background")).toBe("var(--chart)");
+		expect(resolve("var(--chart)")).not.toBe(resolve("var(--accent)"));
+	});
+
+	it("the live pill is neutral with a gold dot, and its border and fill differ from reconnecting's amber", () => {
+		const live = ".ut-live";
+		const reconnecting = '.ut-live[data-st="reconnecting"]';
+		const liveBorder = resolve(decl(live, "border").replace(/^1px solid /, ""));
+		expect(liveBorder).toBe(token("--control-line"));
+		expect(liveBorder).not.toBe(resolve(decl(reconnecting, "border-color")));
+		expect(decl(live, "background")).not.toBe(decl(reconnecting, "background"));
+		expect(decl(live, "color")).toBe("var(--ink)");
+		expect(decl('.ut-live[data-st="live"] i', "background")).toBe("var(--accent)");
 	});
 });

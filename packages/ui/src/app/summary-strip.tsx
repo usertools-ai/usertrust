@@ -17,6 +17,7 @@ import {
 import { formatUsd, formatUsdTotal, formatUt, middleTruncate, UT_KEY } from "../shared/format.js";
 import { KIT_MARK_URL, KIT_TIMEOUT_MS } from "../shared/kit.js";
 import type { LiveState } from "./store.js";
+import { TickingFigure } from "./ticking-figure.js";
 import { useNow } from "./use-now.js";
 
 const LIVE_LABEL: Record<LiveState, string> = {
@@ -157,8 +158,8 @@ function AnchorFact(props: { anchorFile: SummaryPayload["anchorFile"] }): React.
 }
 
 /**
- * The vault's spend: dollars lead (2 dp, the exact 4 dp figure on hover) and the ledger's own unit, usertokens,
- * follows on the line below, with an info button that gives the key to the unit.
+ * The vault's spend: dollars lead (2 dp, the exact 4 dp figure on hover, counting to a new total as records arrive) and
+ * the ledger's own unit, usertokens, follows on the line below, with an info button that gives the key to the unit.
  */
 function SpendFact(props: { spentUt: number }): React.JSX.Element {
 	const { open, toggle, rootRef } = usePopover();
@@ -166,7 +167,7 @@ function SpendFact(props: { spentUt: number }): React.JSX.Element {
 		<div className="ut-fact" title="The cost of every llm_call record in the vault">
 			<b>Spend</b>
 			<span className="v" title={formatUsd(props.spentUt)}>
-				{formatUsdTotal(props.spentUt)}
+				<TickingFigure ut={props.spentUt} />
 			</span>
 			<div className="ut-info" ref={rootRef}>
 				<span className="ut-sub mono">{formatUt(props.spentUt)}</span>
