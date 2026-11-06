@@ -19,7 +19,7 @@ import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import pc from "picocolors";
 import { parseAnchorsContent } from "../audit/anchor-verify.js";
-import { deadLettersAgainst, verifyVaultComplete } from "../audit/complete.js";
+import { checkedEvents, deadLettersAgainst, verifyVaultComplete } from "../audit/complete.js";
 import {
 	type ChainDeadLetters,
 	type ChainDeadLettersUnreadable,
@@ -300,9 +300,10 @@ interface ReceiptCheck {
 
 /**
  * The INDEPENDENT count: the caller's own receipts (`--receipts`: JSON Lines, or one JSON array),
- * each checked against `events`, the verification's own reading (never the log read again,
- * where an event that was never hash-checked could audit a receipt). A receipt is audited only if its `auditHash` is its OWN event on
- * the chain: one whose `data.transferId` is its `transferId` and whose kind is the event that
+ * each checked against `events`: the events the verification hash-checked (`checkedEvents`),
+ * never every event on file and never the log read again, where an event that was never
+ * hash-checked could audit a receipt. A receipt is audited only if its `auditHash` is its OWN
+ * event on the chain: one whose `data.transferId` is its `transferId` and whose kind is the event that
  * records its spend (`llm_call`, or an action's `actionKind`). Another event of the same transfer (a
  * detection, a settlement follow-up) is not the spend record, and an event naming no transfer is
  * no receipt's. This sees a gap the dead-letter queue cannot: a dead letter whose own write failed,
@@ -618,10 +619,13 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 	const verifiedAt = new Date().toISOString();
 
 	if (flags.anchorMode) {
-		const { result, events } = verifyVaultWithAnchorsReading(verifiedVault, flags.params);
-		const deadLetters = deadLettersAgainst(verifiedVault, events);
+		const reading = verifyVaultWithAnchorsReading(verifiedVault, flags.params);
+		const { result } = reading;
+		// Evidence counts only the events the walk hash-checked (`checkedEvents`).
+		const checked = checkedEvents(reading);
+		const deadLetters = deadLettersAgainst(verifiedVault, checked);
 		const receipts =
-			flags.receiptsRaw.length > 0 ? checkReceipts(events, flags.receiptsRaw) : undefined;
+			flags.receiptsRaw.length > 0 ? checkReceipts(checked, flags.receiptsRaw) : undefined;
 		const complete = isComplete(deadLetters) && receiptsComplete(receipts);
 		const anchoredExit = exitCodeForAnchored(result, {
 			requireAnchor: flags.requireAnchor,
@@ -688,12 +692,13 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 	}
 
 	// Integrity AND completeness, one function shared with `usertrust report` (audit/complete.ts).
-	const {
-		reading: { result, events },
-		deadLetters,
-	} = verifyVaultComplete(verifiedVault);
+	const { reading, deadLetters } = verifyVaultComplete(verifiedVault);
+	const { result } = reading;
+	// The dead letters were judged against the checked events; the receipts are too.
 	const receipts =
-		flags.receiptsRaw.length > 0 ? checkReceipts(events, flags.receiptsRaw) : undefined;
+		flags.receiptsRaw.length > 0
+			? checkReceipts(checkedEvents(reading), flags.receiptsRaw)
+			: undefined;
 	const complete = isComplete(deadLetters) && receiptsComplete(receipts);
 
 	if (json) {
