@@ -25,21 +25,15 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
+import type { SettingEntry, SettingKey } from "../shared/api.js";
 
-export type SettingKey = "plan.monthlyUt" | "people.rateUsdPerHour";
+// The wire types live with the other shared ones, so the page never imports server code.
+export type { SettingEntry, SettingKey };
 
 export const SETTING_KEYS: readonly SettingKey[] = Object.freeze([
 	"plan.monthlyUt",
 	"people.rateUsdPerHour",
 ]);
-
-export interface SettingEntry {
-	/** ISO-8601 UTC: the time from which `value` is in force. */
-	at: string;
-	key: SettingKey;
-	/** null means the setting is unset from `at` on. */
-	value: number | null;
-}
 
 const SETTINGS_FILE = "settings.jsonl";
 const ZONE = /(?:Z|[+-]\d{2}:?\d{2})$/i;
@@ -87,6 +81,13 @@ export function workspaceDir(vaultBase: string, env: NodeJS.ProcessEnv = process
 			? override
 			: join(homedir(), ".usertrust", "workspace");
 	const dir = join(resolve(base), id);
+	assertOutsideVault(root, dir);
+	return dir;
+}
+
+/** Throws when `dir` would sit inside the vault of the project rooted at `vaultBase`. */
+export function assertOutsideVault(vaultBase: string, dir: string): void {
+	const root = realpathSync.native(vaultBase);
 	const vault = canonical(join(root, ".usertrust"));
 	if (isInside(canonical(dir), vault)) {
 		const why =
@@ -95,7 +96,6 @@ export function workspaceDir(vaultBase: string, env: NodeJS.ProcessEnv = process
 				: "set USERTRUST_WORKSPACE_DIR to a directory outside it";
 		throw new Error(`workspace would sit inside the vault at ${vault}: ${why}`);
 	}
-	return dir;
 }
 
 /** Epoch ms for an ISO time that carries Z or an explicit offset. */
@@ -106,11 +106,12 @@ function parseTime(t: string): number {
 	return ms;
 }
 
-function isSettingKey(key: unknown): key is SettingKey {
+export function isSettingKey(key: unknown): key is SettingKey {
 	return typeof key === "string" && (SETTING_KEYS as readonly string[]).includes(key);
 }
 
-function isSettingValue(value: unknown): value is number | null {
+/** null, or a finite number >= 0. */
+export function isSettingValue(value: unknown): value is number | null {
 	return value === null || (typeof value === "number" && Number.isFinite(value) && value >= 0);
 }
 

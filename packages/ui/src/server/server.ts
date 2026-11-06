@@ -3,7 +3,9 @@
 
 /**
  * Loopback-only HTTP server over a usertrust vault. Read-only except
- * POST /api/export. Non-API routes serve the prebuilt SPA. GET /api/tail
+ * POST /api/export and PUT /api/settings; the vault itself is never written
+ * (settings go to the workspace, outside it). Non-API routes serve the
+ * prebuilt SPA. GET /api/tail
  * streams SSE: appended events are incrementally verified (linkage AND a
  * full hash recompute via usertrust-verify's canonicalize); any mismatch,
  * parse failure, file shrink, or a log replaced by another file triggers a
@@ -14,11 +16,15 @@
  *
  * Hardening (Amendment A3): every response carries
  * `X-Content-Type-Options: nosniff`; requests whose Host header is not the
- * bound loopback host:port are 403'd (DNS-rebinding guard); POSTs with a
- * foreign Origin header are 403'd (CSRF guard).
+ * bound loopback host:port are 403'd (DNS-rebinding guard); any request but
+ * GET, HEAD or OPTIONS with a foreign Origin header is 403'd (CSRF guard);
+ * a route answers 405 to a method it does not take, OPTIONS included, and no
+ * response carries an access-control-* header, so a cross-origin preflight
+ * always fails. PUT /api/settings also needs the per-start token from
+ * GET /api/session in `x-usertrust-token`.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { unwatchFile, watchFile } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname, join, resolve, sep } from "node:path";
@@ -31,6 +37,7 @@ import {
 } from "usertrust";
 import { canonicalize, verifyTransaction } from "usertrust-verify";
 import { isHeaderSpend } from "../shared/aggregate.js";
+import type { SettingKey, SettingsPayload } from "../shared/api.js";
 import { type RowStatus, statusFor, toLedgerRows } from "../shared/rows.js";
 import { hostAllowed, originAllowed, parseAllowHosts } from "./allow-host.js";
 import {
@@ -50,6 +57,14 @@ const BUDGET_POLL_MS = 1000;
 
 import { serveStatic } from "./static.js";
 import { watchLedger } from "./tail.js";
+import {
+	assertOutsideVault,
+	isSettingKey,
+	isSettingValue,
+	SETTING_KEYS,
+	Workspace,
+	workspaceDir,
+} from "./workspace.js";
 
 /** How long close() lets in-flight requests finish before it cuts the connections still open. */
 export const CLOSE_GRACE_MS = 400;
@@ -57,9 +72,88 @@ export const CLOSE_GRACE_MS = 400;
 /** Amendment A5: maximum accepted /api/export request body, in bytes. */
 const EXPORT_BODY_CAP = 64 * 1024;
 
+/** Maximum accepted PUT /api/settings request body, in bytes. */
+const SETTINGS_BODY_CAP = 4 * 1024;
+
+/** The header every settings write carries the session token in. */
+const TOKEN_HEADER = "x-usertrust-token";
+
+/**
+ * The methods each API route takes; any other method on it is a 405. A path under /api/ that is neither listed
+ * here nor under /api/verify/ is a 404, so a route added below without a line here is never reached.
+ */
+const API_METHODS: ReadonlyMap<string, readonly string[]> = new Map([
+	["/api/summary", ["GET"]],
+	["/api/events", ["GET"]],
+	["/api/tail", ["GET"]],
+	["/api/export", ["POST"]],
+	["/api/session", ["GET"]],
+	["/api/settings", ["GET", "PUT"]],
+]);
+
+/** The methods `pathname` takes, or undefined when no route serves it (a 404). */
+function methodsFor(pathname: string): readonly string[] | undefined {
+	const listed = API_METHODS.get(pathname);
+	if (listed !== undefined) return listed;
+	if (pathname.startsWith("/api/verify/")) return ["GET"];
+	if (pathname.startsWith("/api/")) return undefined;
+	// Non-API routes: the prebuilt SPA.
+	return ["GET", "HEAD"];
+}
+
+/** Whether `given` is the token, compared in constant time; a value of another length is simply wrong. */
+function tokenMatches(given: string | string[] | undefined, token: string): boolean {
+	if (typeof given !== "string") return false;
+	const a = Buffer.from(given, "utf-8");
+	const b = Buffer.from(token, "utf-8");
+	return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/**
+ * Reads the request body up to `cap` bytes and hands it to `onBody` as text. Past the cap it answers 413 and
+ * stops reading; `onBody` is then never called.
+ */
+function readBody(
+	req: IncomingMessage,
+	res: ServerResponse,
+	cap: number,
+	onBody: (raw: string) => void,
+): void {
+	const chunks: Buffer[] = [];
+	let received = 0;
+	let overCap = false;
+	req.on("data", (chunk: Buffer) => {
+		if (overCap) return;
+		received += chunk.length;
+		// Flush the 413 before destroying, so the client reliably sees the status.
+		if (received > cap) {
+			overCap = true;
+			const payload = JSON.stringify({ error: "request body too large" });
+			res.writeHead(413, {
+				"content-type": "application/json",
+				"content-length": Buffer.byteLength(payload),
+			});
+			res.end(payload, () => req.destroy());
+			return;
+		}
+		chunks.push(chunk);
+	});
+	req.on("end", () => {
+		if (overCap) return;
+		onBody(Buffer.concat(chunks).toString("utf-8"));
+	});
+}
+
+function isJson(req: IncomingMessage): boolean {
+	const contentType = req.headers["content-type"];
+	return contentType?.toLowerCase().startsWith("application/json") === true;
+}
+
 export interface UiServer {
 	server: Server;
 	port: number;
+	/** The per-start token PUT /api/settings requires (32 random bytes, hex), as GET /api/session gives it. */
+	token: string;
 	close(): Promise<void>;
 	reload(): void;
 }
@@ -79,11 +173,61 @@ function sendJson(
 	res.end(payload);
 }
 
+/**
+ * A refusal sent before the request body is read. It closes the connection: a keep-alive socket whose last
+ * request still has unread body bytes is not safe to reuse, and a client that reused it would see the next
+ * request fail.
+ */
+function refuse(
+	res: ServerResponse,
+	status: number,
+	body: unknown,
+	extraHeaders?: Record<string, string>,
+): void {
+	sendJson(res, status, body, { ...extraHeaders, connection: "close" });
+}
+
 export async function createUiServer(
 	rootDir: string,
-	opts?: { port?: number; appDir?: string; allowHosts?: readonly string[] },
+	opts?: {
+		port?: number;
+		appDir?: string;
+		allowHosts?: readonly string[];
+		/** Where settings are kept. Default `workspaceDir(rootDir)`; never inside the vault either way. */
+		workspaceDir?: string;
+	},
 ): Promise<UiServer> {
 	const vaultPath = join(rootDir, VAULT_DIR);
+	const token = randomBytes(32).toString("hex");
+	// Settings are off, with this reason, when the workspace would sit inside the vault (a project rooted at the
+	// home directory, whose vault is ~/.usertrust). The rest of the dashboard serves as before.
+	let settingsDir: string | null = null;
+	let settingsOff: string | null = null;
+	try {
+		const dir = opts?.workspaceDir ?? workspaceDir(rootDir);
+		assertOutsideVault(rootDir, dir);
+		settingsDir = dir;
+	} catch (err) {
+		settingsOff = err instanceof Error ? err.message : String(err);
+	}
+	/** Opened on the first settings request, so a server that never shows settings creates no directory. */
+	let workspace: Workspace | undefined;
+	function openWorkspace(): Workspace | null {
+		if (settingsDir === null) return null;
+		workspace ??= Workspace.open(settingsDir);
+		return workspace;
+	}
+	function settingsPayload(): SettingsPayload {
+		const ws = openWorkspace();
+		const values = Object.fromEntries(
+			SETTING_KEYS.map((k) => [k, ws === null ? null : ws.valueAt(k, null)]),
+		) as Record<SettingKey, number | null>;
+		if (ws === null) return { values, history: [], problem: settingsOff };
+		const history = SETTING_KEYS.flatMap((k) => ws.history(k)).sort(
+			(a, b) => Date.parse(a.at) - Date.parse(b.at),
+		);
+		return { values, history, problem: ws.problem };
+	}
 	// Extra Host names (`--allow-host`), validated again here so no caller can pass a wildcard in. The bind
 	// below stays 127.0.0.1 whatever is allowed.
 	const parsedHosts = parseAllowHosts(opts?.allowHosts ?? []);
@@ -312,12 +456,13 @@ export async function createUiServer(
 			host !== `localhost:${port}` &&
 			!hostAllowed(host, allowHosts, port)
 		) {
-			sendJson(res, 403, { error: "forbidden host" });
+			refuse(res, 403, { error: "forbidden host" });
 			return;
 		}
 
-		// Amendment A3: CSRF guard — reject POSTs carrying a foreign Origin.
-		if (req.method === "POST") {
+		// Amendment A3: CSRF guard — reject any request that can change something (every method but GET, HEAD and
+		// OPTIONS, so a method added later is covered too) carrying a foreign Origin.
+		if (req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS") {
 			const origin = req.headers.origin;
 			if (
 				origin !== undefined &&
@@ -325,7 +470,7 @@ export async function createUiServer(
 				origin !== `http://localhost:${port}` &&
 				!originAllowed(origin, allowHosts, port)
 			) {
-				sendJson(res, 403, { error: "forbidden origin" });
+				refuse(res, 403, { error: "forbidden origin" });
 				return;
 			}
 		}
@@ -347,15 +492,91 @@ export async function createUiServer(
 			sendJson(res, 400, { error: "malformed request target" });
 			return;
 		}
-		if (url.pathname === "/api/summary" && req.method === "GET") {
+		// Each route takes only its listed methods (`API_METHODS`); the routes below rely on this.
+		const methods = methodsFor(url.pathname);
+		if (methods === undefined) {
+			sendJson(res, 404, { error: "not found" });
+			return;
+		}
+		if (!methods.includes(req.method ?? "")) {
+			refuse(res, 405, { error: "method not allowed" }, { allow: methods.join(", ") });
+			return;
+		}
+		if (url.pathname === "/api/summary") {
 			sendJson(res, 200, state.summary);
 			return;
 		}
-		if (url.pathname === "/api/events" && req.method === "GET") {
+		if (url.pathname === "/api/events") {
 			sendJson(res, 200, { rows: state.rows, summary: state.summary, version });
 			return;
 		}
-		if (url.pathname === "/api/tail" && req.method === "GET") {
+		if (url.pathname === "/api/session") {
+			// Same-origin only by construction: no access-control-* header is ever sent, and the Host guard above
+			// keeps a rebound name from reading it.
+			sendJson(res, 200, { token }, { "cache-control": "no-store" });
+			return;
+		}
+		if (url.pathname === "/api/settings" && req.method === "GET") {
+			sendJson(res, 200, settingsPayload(), { "cache-control": "no-store" });
+			return;
+		}
+		if (url.pathname === "/api/settings") {
+			// PUT. The token is checked before anything is read, so a request without it learns nothing.
+			if (!tokenMatches(req.headers[TOKEN_HEADER], token)) {
+				refuse(res, 403, { error: "missing or wrong token" });
+				return;
+			}
+			if (!isJson(req)) {
+				refuse(res, 415, { error: "content-type must be application/json" });
+				return;
+			}
+			readBody(req, res, SETTINGS_BODY_CAP, (raw) => {
+				let body: unknown;
+				try {
+					body = JSON.parse(raw);
+				} catch {
+					sendJson(res, 400, { error: "body must be JSON" });
+					return;
+				}
+				// Exactly { key, value }: any other field (a client-supplied `at` among them) is refused, so an entry
+				// is always dated by this server, now, and nothing can be backdated.
+				if (
+					typeof body !== "object" ||
+					body === null ||
+					Array.isArray(body) ||
+					Object.keys(body).length !== 2 ||
+					!Object.hasOwn(body, "key") ||
+					!Object.hasOwn(body, "value")
+				) {
+					sendJson(res, 400, { error: "body must be exactly { key, value }" });
+					return;
+				}
+				const { key, value } = body as Record<string, unknown>;
+				if (!isSettingKey(key)) {
+					sendJson(res, 400, { error: `unknown setting: ${String(key)}` });
+					return;
+				}
+				if (!isSettingValue(value)) {
+					sendJson(res, 400, { error: `${key} needs a finite number >= 0, or null` });
+					return;
+				}
+				const ws = openWorkspace();
+				if (ws === null) {
+					sendJson(res, 409, { error: settingsOff });
+					return;
+				}
+				try {
+					ws.append(key, value);
+				} catch (err) {
+					// The workspace refused the write (unsafe, or the file could not be written); nothing was saved.
+					sendJson(res, 409, { error: err instanceof Error ? err.message : String(err) });
+					return;
+				}
+				sendJson(res, 200, settingsPayload(), { "cache-control": "no-store" });
+			});
+			return;
+		}
+		if (url.pathname === "/api/tail") {
 			res.writeHead(200, {
 				"content-type": "text/event-stream",
 				"cache-control": "no-cache",
@@ -366,37 +587,15 @@ export async function createUiServer(
 			req.on("close", () => clients.delete(res));
 			return;
 		}
-		if (url.pathname === "/api/export" && req.method === "POST") {
+		if (url.pathname === "/api/export") {
 			// Amendment A5: JSON bodies only.
-			const contentType = req.headers["content-type"];
-			if (contentType === undefined || !contentType.toLowerCase().startsWith("application/json")) {
-				sendJson(res, 415, { error: "content-type must be application/json" });
+			if (!isJson(req)) {
+				refuse(res, 415, { error: "content-type must be application/json" });
 				return;
 			}
-			const chunks: Buffer[] = [];
-			let received = 0;
-			let overCap = false;
-			req.on("data", (chunk: Buffer) => {
-				if (overCap) return;
-				received += chunk.length;
-				// Amendment A5: cap the request body; flush the 413 before
-				// destroying so the client reliably sees the status.
-				if (received > EXPORT_BODY_CAP) {
-					overCap = true;
-					const payload = JSON.stringify({ error: "request body too large" });
-					res.writeHead(413, {
-						"content-type": "application/json",
-						"content-length": Buffer.byteLength(payload),
-					});
-					res.end(payload, () => req.destroy());
-					return;
-				}
-				chunks.push(chunk);
-			});
-			req.on("end", () => {
-				if (overCap) return;
+			// Amendment A5: cap the request body.
+			readBody(req, res, EXPORT_BODY_CAP, (raw) => {
 				try {
-					const raw = Buffer.concat(chunks).toString("utf-8");
 					const body = JSON.parse(raw || "{}") as { outDir?: string };
 					if (typeof body.outDir !== "string" || body.outDir.length === 0) {
 						sendJson(res, 400, { error: "outDir required" });
@@ -427,7 +626,7 @@ export async function createUiServer(
 			});
 			return;
 		}
-		if (url.pathname.startsWith("/api/verify/") && req.method === "GET") {
+		if (url.pathname.startsWith("/api/verify/")) {
 			// `decodeURIComponent` throws URIError on malformed percent-encoding
 			// (`%`, `%zz`, `%E0%A4%A`). `new URL` does NOT reject those — it carries
 			// an invalid escape through to `pathname` untouched — so the guard above
@@ -459,6 +658,7 @@ export async function createUiServer(
 			return;
 		}
 		if (url.pathname.startsWith("/api/")) {
+			// A path listed in API_METHODS with no branch above.
 			sendJson(res, 404, { error: "not found" });
 			return;
 		}
@@ -522,6 +722,7 @@ export async function createUiServer(
 	return {
 		server,
 		port,
+		token,
 		// A reload is a resync: a new version, and every client told to fetch the new snapshot.
 		reload(): void {
 			handleResync();
