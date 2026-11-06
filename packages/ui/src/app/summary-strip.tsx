@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { useEffect, useRef, useState } from "react";
+import { type CSSProperties, type ReactNode, useEffect, useRef, useState } from "react";
 import markUrl from "../../brand/usertrust-mark.svg?inline";
 import type { AtPayload, SummaryPayload } from "../shared/api.js";
 import { windowNote } from "../shared/asof.js";
@@ -181,10 +181,12 @@ function SpendFact(props: { spentUt: number; past: boolean }): React.JSX.Element
 		>
 			<b>Spend</b>
 			<span className="v" title={formatUsd(props.spentUt)}>
-				<TickingFigure key={props.past ? "past" : "live"} ut={props.spentUt} jump={props.past} />
+				<Fit text={formatUsdTotal(props.spentUt)}>
+					<TickingFigure key={props.past ? "past" : "live"} ut={props.spentUt} jump={props.past} />
+				</Fit>
 			</span>
 			<div className="ut-info" ref={rootRef}>
-				<span className="ut-sub mono">{formatUt(props.spentUt)}</span>
+				<FactLine className="ut-sub mono" text={formatUt(props.spentUt)} />
 				<button
 					type="button"
 					className="ut-info-btn"
@@ -201,9 +203,10 @@ function SpendFact(props: { spentUt: number; past: boolean }): React.JSX.Element
 					</div>
 				)}
 			</div>
-			<span className="ut-sub">
-				{props.past ? "llm calls · up to this point" : "llm calls · whole vault"}
-			</span>
+			<FactLine
+				className="ut-sub"
+				text={props.past ? "llm calls · up to this point" : "llm calls · whole vault"}
+			/>
 		</div>
 	);
 }
@@ -237,17 +240,113 @@ function PastAsAtLine(props: { at: AtPayload }): React.JSX.Element {
  * A fact's line held empty and unseen, so a fact has the same lines in every state, live or past, and the facts row
  * never changes height when the view or the data does (the stylesheet gives each line a fixed height).
  */
-function Reserve(props: { line: "meter" | "amts" | "sub" }): React.JSX.Element {
+function Reserve(props: { line: "meter" | "amts" | "sub" | "why" }): React.JSX.Element {
 	if (props.line === "meter")
 		return <div className="ut-meter" aria-hidden="true" data-reserve="true" />;
 	return (
-		<span
-			className={props.line === "amts" ? "ut-amts" : "ut-sub"}
-			aria-hidden="true"
-			data-reserve="true"
-		>
+		<span className={`ut-${props.line}`} aria-hidden="true" data-reserve="true">
 			{"\u00a0"}
 		</span>
+	);
+}
+
+/**
+ * A one-line figure that shrinks to fit its column instead of being cut: the font size is the line's own, or less,
+ * so that `n` characters fit in the container's width (`.ut-fit` in the stylesheet; the figures are monospace, and
+ * the factor there is a little wider than any monospace advance). `n` is the text's length.
+ */
+function Fit(props: { text: string; children?: ReactNode }): React.JSX.Element {
+	return (
+		<span className="ut-fit" style={{ "--n": Math.max(props.text.length, 1) } as CSSProperties}>
+			{props.children ?? props.text}
+		</span>
+	);
+}
+
+/** Amounts as at most two units, each shrunk to fit a line: the line wraps between them, never inside one. */
+function Units(props: { units: string[] }): React.JSX.Element {
+	return (
+		<>
+			{props.units.map((u, i) => (
+				<span key={u}>
+					{i > 0 && " "}
+					<Fit text={u} />
+				</span>
+			))}
+		</>
+	);
+}
+
+/**
+ * A header fact's line with a fixed height (`ut-amts`, `ut-sub` and `ut-why` hold two lines). Its whole text is in its
+ * title for a pointer. If the box still cuts it (a long server note in a narrow column), the line becomes a button
+ * that opens the whole text, so a keyboard or a touch reaches it too; a screen reader reads the whole text either way.
+ */
+function FactLine(props: {
+	className: string;
+	text: string;
+	title?: string | undefined;
+	children?: ReactNode;
+}): React.JSX.Element {
+	const [el, setEl] = useState<HTMLSpanElement | null>(null);
+	const [cut, setCut] = useState(false);
+	const [open, setOpen] = useState(false);
+	const popRef = useRef<HTMLSpanElement>(null);
+	// biome-ignore lint/correctness/useExhaustiveDependencies: the line is measured again when its text changes
+	useEffect(() => {
+		if (el === null || typeof ResizeObserver === "undefined") return;
+		const measure = (): void =>
+			setCut(el.scrollHeight > el.clientHeight + 1 || el.scrollWidth > el.clientWidth + 1);
+		measure();
+		const ro = new ResizeObserver(measure);
+		ro.observe(el);
+		return () => ro.disconnect();
+	}, [el, props.text]);
+	useEffect(() => {
+		if (!cut) setOpen(false);
+	}, [cut]);
+	useEffect(() => {
+		if (!open) return;
+		const away = (e: PointerEvent): void => {
+			const t = e.target as Node;
+			if (el?.contains(t) !== true && popRef.current?.contains(t) !== true) setOpen(false);
+		};
+		const esc = (e: KeyboardEvent): void => {
+			if (e.key === "Escape") setOpen(false);
+		};
+		document.addEventListener("pointerdown", away);
+		document.addEventListener("keydown", esc);
+		return () => {
+			document.removeEventListener("pointerdown", away);
+			document.removeEventListener("keydown", esc);
+		};
+	}, [open, el]);
+	const toggle = (): void => setOpen((o) => !o);
+	const opener = cut
+		? {
+				role: "button",
+				tabIndex: 0,
+				"aria-expanded": open,
+				"data-cut": "true",
+				onClick: toggle,
+				onKeyDown: (e: React.KeyboardEvent): void => {
+					if (e.key !== "Enter" && e.key !== " ") return;
+					e.preventDefault();
+					toggle();
+				},
+			}
+		: {};
+	return (
+		<>
+			<span ref={setEl} className={props.className} title={props.title ?? props.text} {...opener}>
+				{props.children ?? props.text}
+			</span>
+			{cut && open && (
+				<span ref={popRef} className="ut-pop text" role="note">
+					{props.text}
+				</span>
+			)}
+		</>
 	);
 }
 
@@ -261,17 +360,21 @@ function PastBudgetFact(props: { at: AtPayload }): React.JSX.Element {
 		<div className="ut-fact budget" title={budget.note}>
 			<b>Budget</b>
 			<span className="v na" title="not recorded then">
-				not recorded then
+				<Fit text="not recorded then" />
 			</span>
 			{/* The live fact's lines (the meter's row held empty and unseen), so the header keeps its height when the view
 			    changes. Today's figures are named as today's. */}
 			<Reserve line="meter" />
 			{budget.ut !== null ? (
 				<>
-					<span className="ut-amts" title={formatUsd(budget.ut)}>
-						{`today: ${formatUsdTotal(budget.ut)}`}
-					</span>
-					<span className="ut-sub mono">{`today: ${formatUt(budget.ut)}`}</span>
+					<FactLine
+						className="ut-amts"
+						text={`today: ${formatUsdTotal(budget.ut)}`}
+						title={formatUsd(budget.ut)}
+					>
+						<Units units={[`today: ${formatUsdTotal(budget.ut)}`]} />
+					</FactLine>
+					<FactLine className="ut-sub mono" text={`today: ${formatUt(budget.ut)}`} />
 				</>
 			) : (
 				<>
@@ -279,10 +382,8 @@ function PastBudgetFact(props: { at: AtPayload }): React.JSX.Element {
 					<Reserve line="sub" />
 				</>
 			)}
-			{/* Two lines at most (clamped); the whole note is in the title. */}
-			<span className="ut-why" title={budget.note}>
-				{budget.note}
-			</span>
+			{/* Two lines (clamped): the whole note is in the title, and a cut note opens in full from its line. */}
+			<FactLine className="ut-why" text={budget.note} />
 		</div>
 	);
 }
@@ -312,9 +413,7 @@ function PastIntegrityFact(props: {
 					</span>
 					{/* As live: "chained" is the hash links only, and the vault has no anchor file (today). */}
 					{props.anchorFile !== "present" ? (
-						<span className="ut-sub" title={NOT_ANCHORED_NOTE}>
-							{NOT_ANCHORED_NOTE}
-						</span>
+						<FactLine className="ut-sub" text={NOT_ANCHORED_NOTE} />
 					) : (
 						<Reserve line="sub" />
 					)}
@@ -328,9 +427,7 @@ function PastIntegrityFact(props: {
 					<Reserve line="sub" />
 				</>
 			)}
-			<span className="ut-why" title={why}>
-				{why}
-			</span>
+			<FactLine className="ut-why" text={why} />
 		</div>
 	);
 }
@@ -359,7 +456,9 @@ export function BudgetFact(props: { s: SummaryPayload }): React.JSX.Element {
 			{budget.kind === "known" && s.budget !== null && s.remainingUt !== null ? (
 				<>
 					<span className="v">
-						{budget.leftPct.toFixed(1)}% <small>left</small>
+						<Fit text={`${budget.leftPct.toFixed(1)}% left`}>
+							{budget.leftPct.toFixed(1)}% <small>left</small>
+						</Fit>
 					</span>
 					{/* Decorative: the figure above it carries the number. The fill is what is LEFT, the same figure, so it drains as money is spent. */}
 					<div className="ut-meter" aria-hidden="true">
@@ -367,51 +466,110 @@ export function BudgetFact(props: { s: SummaryPayload }): React.JSX.Element {
 					</div>
 					{s.remainingUt < 0 ? (
 						<>
-							<span
+							<FactLine
 								className="ut-amts red"
+								text={`overspent by ${formatUsdTotal(-s.remainingUt)} of ${formatUsdTotal(s.budget)}`}
 								title={`overspent by ${formatUsd(-s.remainingUt)} of ${formatUsd(s.budget)}`}
 							>
-								overspent by {formatUsdTotal(-s.remainingUt)} of {formatUsdTotal(s.budget)}
-							</span>
-							<span className="ut-sub mono">
-								{formatUt(-s.remainingUt)} of {formatUt(s.budget)}
-							</span>
+								<Units
+									units={[
+										`overspent by ${formatUsdTotal(-s.remainingUt)}`,
+										`of ${formatUsdTotal(s.budget)}`,
+									]}
+								/>
+							</FactLine>
+							<FactLine
+								className="ut-sub mono"
+								text={`${formatUt(-s.remainingUt)} of ${formatUt(s.budget)}`}
+							>
+								<Units units={[formatUt(-s.remainingUt), `of ${formatUt(s.budget)}`]} />
+							</FactLine>
 						</>
 					) : (
 						<>
-							<span
+							<FactLine
 								className="ut-amts"
+								text={`${formatUsdTotal(s.remainingUt)} of ${formatUsdTotal(s.budget)}`}
 								title={`${formatUsd(s.remainingUt)} of ${formatUsd(s.budget)}`}
 							>
-								{formatUsdTotal(s.remainingUt)} of {formatUsdTotal(s.budget)}
-							</span>
-							<span className="ut-sub mono">
-								{formatUt(s.remainingUt)} of {formatUt(s.budget)}
-							</span>
+								<Units units={[formatUsdTotal(s.remainingUt), `of ${formatUsdTotal(s.budget)}`]} />
+							</FactLine>
+							<FactLine
+								className="ut-sub mono"
+								text={`${formatUt(s.remainingUt)} of ${formatUt(s.budget)}`}
+							>
+								<Units units={[formatUt(s.remainingUt), `of ${formatUt(s.budget)}`]} />
+							</FactLine>
 						</>
 					)}
-					<span className="ut-why" title={asOf.title ?? asOf.text}>
-						{asOf.text}
-					</span>
+					<FactLine className="ut-why" text={asOf.text} title={asOf.title ?? asOf.text} />
 				</>
 			) : (
 				<>
 					<span className="v na" title="no remaining figure">
-						no remaining figure
+						<Fit text="no remaining figure" />
 					</span>
 					<Reserve line="meter" />
 					<Reserve line="amts" />
 					<Reserve line="sub" />
 					{/* A controller's record with no usable figure still must not call itself "enforced" once stale. */}
-					<span
+					<FactLine
 						className={`ut-why${s.budgetSource === "unreadable" ? " info" : ""}`}
+						text={asOf.isRecord ? asOf.text : s.budgetProvenance.replace(/^unknown: /, "")}
 						title={asOf.isRecord ? asOf.text : s.budgetProvenance}
-					>
-						{asOf.isRecord ? asOf.text : s.budgetProvenance.replace(/^unknown: /, "")}
-					</span>
+					/>
 				</>
 			)}
 		</div>
+	);
+}
+
+/**
+ * The facts row before the first summary: each fact with the lines it will have once loaded, held empty and unseen
+ * (and the phone's Details toggle held too), so the first load moves nothing. Only a "…" shows.
+ */
+function LoadingFacts(): React.JSX.Element {
+	return (
+		<section className="ut-facts" aria-busy="true" aria-label="vault summary loading">
+			<div className="ut-fact">
+				<b>Spend</b>
+				<span className="v na">…</span>
+				<div className="ut-info" aria-hidden="true">
+					<Reserve line="sub" />
+				</div>
+				<Reserve line="sub" />
+			</div>
+			<div className="ut-fact budget">
+				<b>Budget</b>
+				<span className="v na">…</span>
+				<Reserve line="meter" />
+				<Reserve line="amts" />
+				<Reserve line="sub" />
+				<Reserve line="why" />
+			</div>
+			<span className="ut-more" aria-hidden="true" data-reserve="true">
+				Details
+			</span>
+			<div className="ut-fact detail">
+				<b>Chain</b>
+				<span className="v na">…</span>
+			</div>
+			<div className="ut-fact">
+				<b>Integrity</b>
+				<span className="ut-pill">
+					<i />…
+				</span>
+				<Reserve line="sub" />
+				<Reserve line="why" />
+			</div>
+			<div className="ut-fact detail">
+				<b>Anchor file</b>
+				<div className="ut-info">
+					<span className="ut-tag">…</span>
+					<span className="ut-info-btn" aria-hidden="true" data-reserve="true" />
+				</div>
+			</div>
+		</section>
 	);
 }
 
@@ -440,19 +598,7 @@ export function SummaryStrip(props: {
 			<>
 				<TopBar vaultPath={null} live={props.live} kit={false} />
 				<AsAtLine at={null} />
-				<section className="ut-facts" aria-busy="true" aria-label="vault summary loading">
-					{["Spend", "Budget", "Chain", "Integrity", "Anchor file"].map((label) => (
-						<div
-							key={label}
-							className={
-								label === "Chain" || label === "Anchor file" ? "ut-fact detail" : "ut-fact"
-							}
-						>
-							<b>{label}</b>
-							<span className="v na">…</span>
-						</div>
-					))}
-				</section>
+				<LoadingFacts />
 			</>
 		);
 	const status = chainStatus(s.chain);
@@ -513,7 +659,9 @@ export function SummaryStrip(props: {
 				<div className="ut-fact detail" id="ut-fact-chain">
 					<b>Chain</b>
 					<span className="v">
-						{events.toLocaleString()} <small>{events === 1 ? "event" : "events"}</small>
+						<Fit text={`${events.toLocaleString()} ${events === 1 ? "event" : "events"}`}>
+							{events.toLocaleString()} <small>{events === 1 ? "event" : "events"}</small>
+						</Fit>
 					</span>
 				</div>
 				{at !== null ? (
@@ -544,18 +692,15 @@ export function SummaryStrip(props: {
 						{/* The pill's line under it, in every state (held empty when it has nothing to say), so the fact keeps its
 						    height. */}
 						{status === "verified" && s.anchorFile !== "present" ? (
-							<span className="ut-sub" title={NOT_ANCHORED_NOTE}>
-								{NOT_ANCHORED_NOTE}
-							</span>
+							<FactLine className="ut-sub" text={NOT_ANCHORED_NOTE} />
 						) : (
 							<Reserve line="sub" />
 						)}
-						<span
+						<FactLine
 							className="ut-why"
+							text={verifiedAsOf(s.verifiedAt)}
 							title={`${verifiedAsOf(s.verifiedAt)}. The dashboard is a monitor: usertrust verify is the authoritative check of a vault`}
-						>
-							{verifiedAsOf(s.verifiedAt)}
-						</span>
+						/>
 					</div>
 				)}
 				<AnchorFact anchorFile={s.anchorFile} past={at !== null} />

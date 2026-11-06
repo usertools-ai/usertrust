@@ -30,6 +30,7 @@ interface TimelineProps {
 	loading: boolean;
 	error: string | null;
 	reloaded: boolean;
+	holdNote?: string | null;
 	onPreview(pos: number): void;
 	onCommit(pos: number): void;
 	onLive(): void;
@@ -177,10 +178,13 @@ describe("the header at a past position", () => {
 		// The same number of lines either way: the slot is never added or removed.
 		expect(live.match(/class="ut-asat"/g)).toHaveLength(1);
 		expect(past.match(/class="ut-asat"/g)).toHaveLength(1);
-		// Hidden, not removed, and one line tall either way.
+		// Hidden, not removed, and a fixed height either way: one line, and two on a phone (where it can wrap).
 		const css = readFileSync(join(import.meta.dirname, "..", "src", "app", "styles.css"), "utf-8");
 		expect(css).toMatch(/\.ut-asat\[data-live="true"\] \{\s*visibility: hidden;\s*\}/);
-		expect(css).toMatch(/\.ut-asat \{[^}]*min-height: calc\(12px \* 1\.4\);/);
+		expect(css).toMatch(/\.ut-asat \{[^}]*[^-]height: calc\(12px \* 1\.4\);/);
+		expect(css).not.toMatch(/\.ut-asat \{[^}]*min-height/);
+		const phone = css.slice(css.indexOf("@media (max-width: 760px)"));
+		expect(phone).toMatch(/\.ut-asat \{[^}]*[^-]height: calc\(2 \* 12px \* 1\.4\);/);
 		// The loading header holds the slot too.
 		expect(
 			renderToStaticMarkup(createElement(SummaryStrip, { summary: null, live: "live", at: null })),
@@ -239,22 +243,81 @@ describe("the header at a past position", () => {
 		expect(expected.length).toBeGreaterThanOrEqual(5);
 		for (const s of lives) expect(slots(strip(null, s))).toEqual(expected);
 		for (const s of lives) for (const a of pasts) expect(slots(strip(a, s))).toEqual(expected);
+		// The loading header too: the first summary moves nothing. Its first line is a "…" (a value, or a pill), each
+		// other line held empty.
+		const loading = renderToStaticMarkup(
+			createElement(SummaryStrip, { summary: null, live: "live", at: null }),
+		);
+		expect(slots(loading)).toEqual(expected);
+		// And the phone's Details toggle has its slot while loading.
+		expect(loading).toMatch(/<span class="ut-more" aria-hidden="true" data-reserve="true">/);
+		expect(loading).toContain('<div class="ut-fact budget">');
 	});
 
-	it("each fact line has a fixed height in the stylesheet; long text is clamped, never wrapped taller", () => {
+	it("each fact line has a fixed height in the stylesheet: amounts and sub lines hold two lines and wrap; a value shrinks to fit", () => {
 		const css = readFileSync(join(import.meta.dirname, "..", "src", "app", "styles.css"), "utf-8");
 		const rule = (sel: string): string => {
 			const esc = sel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 			const m = new RegExp(`(?:^|[}\\s])${esc} \\{([^}]*)\\}`, "m").exec(css);
 			return m?.[1] ?? "";
 		};
-		expect(rule(".ut-facts .ut-fact .v")).toMatch(/height: 20px;/);
-		expect(rule(".ut-facts .ut-fact .v")).toMatch(/white-space: nowrap;/);
-		expect(rule(".ut-facts .ut-sub")).toMatch(/height: 14px;/);
-		expect(rule(".ut-facts .ut-amts")).toMatch(/height: 16px;/);
+		const twoLines = (sel: string, line: number): void => {
+			const r = rule(sel);
+			expect(r).toMatch(new RegExp(`(^|[^-])height: ${2 * line}px;`));
+			expect(r).toMatch(new RegExp(`line-height: ${line}px;`));
+			// Fixed, never a minimum: the same height in every state.
+			expect(r).not.toMatch(/min-height|max-height/);
+			// The text wraps in the box; nothing cuts it to one line.
+			expect(r).toMatch(/white-space: normal;/);
+			expect(r).not.toMatch(/text-overflow: ellipsis/);
+		};
+		twoLines(".ut-facts .ut-amts", 16);
+		twoLines(".ut-facts .ut-sub", 14);
 		expect(rule(".ut-facts .ut-why")).toMatch(/height: 34px;/);
 		expect(rule(".ut-facts .ut-why")).toMatch(/-webkit-line-clamp: 2;/);
+		// A value is one line, and shrinks to fit its column rather than being cut.
+		const v = rule(".ut-facts .ut-fact .v");
+		expect(v).toMatch(/height: 20px;/);
+		expect(v).not.toMatch(/text-overflow: ellipsis/);
+		expect(v).toMatch(/container-type: inline-size;/);
+		expect(rule(".ut-facts .ut-fit")).toMatch(
+			/font-size: min\(1em, calc\(100cqi \/ var\(--n, 1\) \/ 0\.62\)\);/,
+		);
 		expect(rule('.ut-facts [data-reserve="true"]')).toMatch(/visibility: hidden;/);
+		// No rule anywhere sets a header fact's line back to one line with an ellipsis.
+		for (const sel of [".ut-facts .ut-amts", ".ut-facts .ut-sub", ".ut-facts .ut-fact .v"]) {
+			const esc = sel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			expect(css).not.toMatch(new RegExp(`${esc} \\{[^}]*text-overflow: ellipsis`));
+		}
+	});
+
+	it("a value, and every amount, carries its length for the fit; amounts wrap between units, never inside one", () => {
+		const fits = (html: string): string[] =>
+			[...html.matchAll(/<span class="ut-fit" style="--n:(\d+)">([\s\S]*?)<\/span>/g)].map(
+				(m) => `${m[1]}:${text(m[2] ?? "")}`,
+			);
+		const over = strip(null, summary({ remainingUt: -5_000_000, budget: 1_000_000 }));
+		const amts =
+			/<span class="ut-amts red"[^>]*>([\s\S]*?)<\/span><span class="ut-sub mono"/.exec(
+				over,
+			)?.[1] ?? "";
+		const units = fits(amts);
+		// Two units: "overspent by $X" and "of $Y", each whole, each with its own length.
+		expect(units).toHaveLength(2);
+		expect(units[0]).toBe(
+			`${`overspent by ${formatUsdTotal(5_000_000)}`.length}:overspent by ${formatUsdTotal(5_000_000)}`,
+		);
+		expect(units[1]).toBe(
+			`${`of ${formatUsdTotal(1_000_000)}`.length}:of ${formatUsdTotal(1_000_000)}`,
+		);
+		expect(text(amts)).toBe(
+			`overspent by ${formatUsdTotal(5_000_000)} of ${formatUsdTotal(1_000_000)}`,
+		);
+		// The Spend figure, the budget's percentage and the chain's count each fit their column.
+		const live = strip(null);
+		expect(live).toContain(`--n:${formatUsdTotal(123_400).length}`);
+		expect(live).toContain(`--n:${"87.7% left".length}`);
+		expect(live).toContain(`--n:${"100 events".length}`);
 	});
 
 	it("a clamped line keeps its full text in a title", () => {
@@ -276,7 +339,10 @@ describe("the list at a past position before the first row held", () => {
 		total: number;
 		phase: "loaded";
 		chain: "verified" | "broken" | "empty" | null;
-		beforeWindow?: { firstHeld: number; upTo: number } | null;
+		beforeWindow?:
+			| { kind: "before"; firstHeld: number; upTo: number }
+			| { kind: "not-held"; upTo: number }
+			| null;
 		selected: null;
 		onOpen(): void;
 		onClearFilters(): void;
@@ -304,7 +370,7 @@ describe("the list at a past position before the first row held", () => {
 					total: 0,
 					phase: "loaded",
 					chain: "verified",
-					beforeWindow: { firstHeld: 50, upTo: 10 },
+					beforeWindow: { kind: "before", firstHeld: 50, upTo: 10 },
 					selected: null,
 					onOpen: () => {},
 					onClearFilters: () => {},
@@ -314,6 +380,27 @@ describe("the list at a past position before the first row held", () => {
 		expect(html).not.toMatch(/failed verification/i);
 		expect(html).toContain("The list starts at position 51, the first record it holds");
 		expect(html).toContain("The 11 records up to this point count in the totals above");
+	});
+
+	it("when the records for the point are not held (a resync gap, or none held), it names no position it does not hold", () => {
+		const html = text(
+			renderToStaticMarkup(
+				createElement(AuditTable, {
+					rows: [],
+					total: 0,
+					phase: "loaded",
+					chain: "verified",
+					beforeWindow: { kind: "not-held", upTo: 10 },
+					selected: null,
+					onOpen: () => {},
+					onClearFilters: () => {},
+				}),
+			),
+		);
+		expect(html).toContain("No records are held for this point yet");
+		expect(html).toContain("The 11 records up to this point count in the totals above");
+		expect(html).not.toMatch(/The list starts at position|Before the first record/);
+		expect(html).not.toMatch(/failed verification/i);
 	});
 });
 
@@ -396,16 +483,28 @@ describe("the timeline", () => {
 		expect(html).toContain("showing the live vault");
 	});
 
-	it("its head row is one fixed height live and past (on a phone, the buttons' row is held under the label)", () => {
+	it("its head row is one fixed height live and past (on a phone, the label wraps in two lines and the buttons' row is held under it)", () => {
 		const css = readFileSync(join(import.meta.dirname, "..", "src", "app", "styles.css"), "utf-8");
 		expect(css).toMatch(/\.ut-tl-head \{[^}]*\bheight: 26px;/);
 		const phone = css.slice(css.indexOf("@media (max-width: 760px)"));
-		expect(phone).toMatch(/\.ut-tl-head \{[^}]*min-height: 53px;/);
-		expect(phone).toMatch(/\.ut-tl-label \{\s*flex-basis: 100%;\s*\}/);
+		expect(phone).toMatch(/\.ut-tl-head \{[^}]*[^-]height: calc\(2 \* 12px \* 1\.4 \+ 36px\);/);
+		const label = /\.ut-tl-label \{([^}]*)\}/.exec(phone)?.[1] ?? "";
+		expect(label).toMatch(/flex-basis: 100%;/);
+		expect(label).toMatch(/[^-]height: calc\(2 \* 12px \* 1\.4\);/);
+		// A long past label ("As recorded at … (latest record)") wraps; it is never cut.
+		expect(label).toMatch(/white-space: normal;/);
+		expect(label).toMatch(/overflow: visible;/);
 		// No rule gives a past label a different size from a live one.
 		expect(css).not.toMatch(
 			/\.ut-tl-label\[data-past="true"\] \{[^}]*(flex-basis|white-space|font)/,
 		);
+	});
+
+	it("says what the dimmed views are waiting for, in a polite live region that is there before any text", () => {
+		const idle = render({ at: at(), wanted: 40 });
+		expect(idle).toMatch(/<span class="ut-tl-held" role="status"><\/span>/);
+		const held = render({ at: at({ pos: 61 }), wanted: 61, holdNote: "Updating to record 62…" });
+		expect(held).toMatch(/<span class="ut-tl-held" role="status">Updating to record 62…<\/span>/);
 	});
 
 	it("an epoch change says the vault was reloaded", () => {

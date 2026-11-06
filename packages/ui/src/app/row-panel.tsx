@@ -148,8 +148,15 @@ export function RowPanel(props: {
 	/** Called once the heading has taken focus for a request, so the request is cleared and a later remount (another
 	 * view and back) does not replay it and take focus from wherever the reader is. */
 	onFocusHandled?: () => void;
+	/**
+	 * Set while the row comes from a held view (a timeline drag, or the moment after one): the header already shows
+	 * another position, so the panel is dimmed and busy, and the status, which depends on the position, is not shown
+	 * as that position's: it reads "updating…" until the view catches up.
+	 */
+	held?: boolean;
 }): React.JSX.Element {
 	const { row, docked, onClose, focusNonce, onFocusHandled } = props;
+	const held = props.held === true;
 	// A verify response is held for the row VERSION it was requested for (the row object: a status correction replaces
 	// it) and shown only while the row is still that version. Clearing the panel when the status changed ran BEFORE an
 	// in-flight response landed, so the earlier status's receipt was then shown beside the corrected status.
@@ -274,10 +281,17 @@ export function RowPanel(props: {
 				</button>
 			</div>
 			<div className="ut-pills">
-				<span className="ut-pill" data-tone={pillTone(STATUS_TONE[status])}>
-					<i />
-					{status}
-				</span>
+				{held ? (
+					<span className="ut-pill">
+						<i />
+						updating…
+					</span>
+				) : (
+					<span className="ut-pill" data-tone={pillTone(STATUS_TONE[status])}>
+						<i />
+						{status}
+					</span>
+				)}
 				{row.integrity === "verified" ? (
 					<span
 						className="ut-pill"
@@ -422,6 +436,8 @@ export function RowPanel(props: {
 				ref={panelRef}
 				className="ut-insp"
 				aria-label={`transaction ${row.kind} seq ${row.seq ?? "?"}`}
+				data-held={held}
+				aria-busy={held}
 			>
 				{body}
 			</aside>
@@ -441,6 +457,8 @@ export function RowPanel(props: {
 				role="dialog"
 				aria-modal="true"
 				aria-label={`transaction ${row.kind} seq ${row.seq ?? "?"}`}
+				data-held={held}
+				aria-busy={held}
 			>
 				{body}
 			</aside>

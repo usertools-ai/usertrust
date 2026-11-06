@@ -13,7 +13,7 @@ import { describe, expect, it } from "vitest";
 import type { AtPayload, SummaryPayload } from "../src/shared/api.js";
 import { listState } from "../src/shared/display.js";
 import { EMPTY_FILTERS } from "../src/shared/filters.js";
-import { heldInput, type ListInput, listView } from "../src/shared/list-view.js";
+import { heldInput, heldNote, type ListInput, listView } from "../src/shared/list-view.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 import { Scrubber } from "../src/shared/scrub.js";
 
@@ -68,7 +68,8 @@ const state = (v: ReturnType<typeof listView>): ReturnType<typeof listState> =>
 
 describe("listView", () => {
 	it("an empty cut at T is before the window, whatever the server's windowStartPos says (a resync gap)", () => {
-		// The server says the window starts at 0, the page's rows start at 50: the cut at 10 is empty.
+		// The server says the window starts at 0, the page's rows start at 50: the cut at 10 is empty. The server's window
+		// covers the position, so these records are not held yet: no position the list holds is named.
 		const v = listView({
 			rows: held,
 			at: at({ pos: 10, windowStartPos: 0 }),
@@ -76,8 +77,19 @@ describe("listView", () => {
 			phase: "loaded",
 			summary: summary(),
 		});
-		expect(v.beforeWindow).toEqual({ firstHeld: 50, upTo: 10 });
+		expect(v.beforeWindow).toEqual({ kind: "not-held", upTo: 10 });
 		expect(state(v)).toBe("before-window");
+	});
+
+	it("a position before the server's window, with rows held, names the first record the list holds", () => {
+		const v = listView({
+			rows: held,
+			at: at({ pos: 10, windowStartPos: 50 }),
+			filters: EMPTY_FILTERS,
+			phase: "loaded",
+			summary: summary(),
+		});
+		expect(v.beforeWindow).toEqual({ kind: "before", firstHeld: 50, upTo: 10 });
 	});
 
 	it("at T, no-rows (the 'failed verification' state) is unreachable, rows held or not", () => {
@@ -95,15 +107,17 @@ describe("listView", () => {
 				}
 	});
 
-	it("with no rows held at all, the list starts where the server says", () => {
-		const v = listView({
-			rows: [],
-			at: at({ pos: 10, windowStartPos: 70 }),
-			filters: EMPTY_FILTERS,
-			phase: "loaded",
-			summary: summary(),
-		});
-		expect(v.beforeWindow).toEqual({ firstHeld: 70, upTo: 10 });
+	it("with no rows held at all, no position is named as where the list starts: it holds none", () => {
+		for (const windowStartPos of [0, 10, 70]) {
+			const v = listView({
+				rows: [],
+				at: at({ pos: 10, windowStartPos }),
+				filters: EMPTY_FILTERS,
+				phase: "loaded",
+				summary: summary(),
+			});
+			expect(v.beforeWindow).toEqual({ kind: "not-held", upTo: 10 });
+		}
 	});
 
 	it("the chain at T is the position's; live, the summary's", () => {
@@ -152,9 +166,10 @@ describe("listView", () => {
 	});
 
 	it("while dragging, the list's input does not change; on release it takes the latest, once", () => {
-		// The page's own wiring, without React: the Scrubber says when a drag is on, and heldInput keeps the list's
-		// input while it is.
-		let holding = false;
+		// The page's own wiring, without React: the Scrubber says when a drag is on, the input is frozen then (from the
+		// last one committed), and heldInput keeps it while it is.
+		let frozen: ListInput | null = null;
+		let committed: ListInput;
 		const frames: Array<() => void> = [];
 		const scrub = new Scrubber(
 			{
@@ -167,7 +182,7 @@ describe("listView", () => {
 			() => {},
 			() => {},
 			(a) => {
-				holding = a;
+				frozen = a ? committed : null;
 			},
 		);
 		const input = (pos: number | null): ListInput => ({
@@ -178,8 +193,10 @@ describe("listView", () => {
 			summary: summary(),
 		});
 		let drawn = input(null);
+		committed = drawn;
 		const render = (next: ListInput): void => {
-			drawn = heldInput(drawn, next, holding);
+			drawn = heldInput(frozen, next);
+			committed = next;
 		};
 		const before = drawn;
 		scrub.move(60);
@@ -191,13 +208,70 @@ describe("listView", () => {
 		expect(drawn).toBe(last);
 	});
 
-	it("the page holds the list while the timeline says a drag is on", () => {
+	it("the page holds the list while the timeline says a drag is on, frozen in the drag's event, not while rendering", () => {
 		const app = readFileSync(join(import.meta.dirname, "..", "src", "app", "app.tsx"), "utf-8");
-		expect(app).toMatch(/heldInput\(/);
-		expect(app).toContain("onHold={setHolding}");
-		// And shows it: the held list is dimmed (opacity only, so nothing shifts).
-		expect(app).toContain("data-holding={holding}");
+		expect(app).toContain("useDeferredValue(heldInput(frozen, listInput))");
+		expect(app).toContain("onHold={onHold}");
+		expect(app).toMatch(/setFrozen\(on \? committed\.current : null\)/);
+		// No ref is written during render: the committed input is recorded in an effect.
+		expect(app).toMatch(
+			/useEffect\(\(\) => \{\s*committed\.current = listInput;\s*\}, \[listInput\]\);/,
+		);
+		expect(app).not.toMatch(/^\t[a-z]+\.current = /m);
+	});
+
+	it("every view drawn from the list's input is marked from the drawn position, not from the drag", () => {
+		const app = readFileSync(join(import.meta.dirname, "..", "src", "app", "app.tsx"), "utf-8");
+		expect(app).toContain("const holdNote = heldNote(list.at, shownAt);");
+		expect(app).not.toMatch(/setHolding|data-holding|aria-busy=\{holding\}/);
+		// The list or Trends, the count, Export, the facets, both inspectors, and the note in the timeline.
+		expect(app).toMatch(/className="ut-pane"[\s\S]{0,200}data-held=\{held\}\s*aria-busy=\{held\}/);
+		expect(app).toContain('<span className="ut-label" role="status" data-held={held}>');
+		expect(app).toMatch(/<ExportButton[\s\S]{0,120}held=\{held\}/);
+		expect(app).toMatch(/<FilterBar [^>]*held=\{held\}/);
+		expect(app.match(/<RowPanel[^>]*held=\{held\}/g)).toHaveLength(2);
+		expect(app).toContain("holdNote={holdNote}");
+		// Dimmed: opacity only, so nothing shifts. The drawer is dimmed inside, so it stays opaque over the page.
 		const css = readFileSync(join(import.meta.dirname, "..", "src", "app", "styles.css"), "utf-8");
-		expect(css).toMatch(/\.ut-body\[data-holding="true"\] \.ut-pane \{\s*opacity: 0\.55;\s*\}/);
+		const dim = /([^{}]*)\{\s*opacity: 0\.55;\s*\}/.exec(
+			css.slice(css.indexOf('.ut-pane[data-held="true"]') - 1),
+		);
+		expect(dim?.[1]).toContain('.ut-pane[data-held="true"]');
+		for (const sel of [
+			'.ut-head .ut-label[data-held="true"]',
+			'.ut-btn[data-held="true"]',
+			'.ut-bar[data-held="true"] .ut-facet',
+			'.ut-insp[data-held="true"] > .ut-insp-in',
+			'.ut-drawer[data-held="true"] > .ut-insp-in',
+		])
+			expect(dim?.[1]).toContain(sel);
+	});
+});
+
+describe("heldNote", () => {
+	it("is null while the drawn views show the header's position, live or past", () => {
+		expect(heldNote(null, null)).toBeNull();
+		expect(heldNote(at({ pos: 40 }), at({ pos: 40 }))).toBeNull();
+		// A re-read of the same position (another answer object) is not a held view.
+		expect(heldNote(at({ pos: 40, statusAt: {} }), at({ pos: 40, epoch: 1 }))).toBeNull();
+	});
+
+	it("names the position coming, from 1, while they show another (during a drag, after one, after Back or Forward)", () => {
+		expect(heldNote(at({ pos: 40 }), at({ pos: 61 }))).toBe("Updating to record 62…");
+		expect(heldNote(null, at({ pos: 1_233 }))).toBe(
+			`Updating to record ${(1_234).toLocaleString()}…`,
+		);
+	});
+
+	it("says live when going Live, until the list catches up", () => {
+		expect(heldNote(at({ pos: 40 }), null)).toBe("Updating to the live vault…");
+	});
+
+	it("after a release: the drag's frozen input is gone, but the list still draws the old position until it renders", () => {
+		// What the page computes in the urgent render after release (the deferred value still the old input), then after.
+		const old = at({ pos: 10 });
+		const now = at({ pos: 63 });
+		expect(heldNote(old, now)).not.toBeNull();
+		expect(heldNote(now, now)).toBeNull();
 	});
 });

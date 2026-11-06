@@ -144,8 +144,11 @@ export const FilterBar = memo(function FilterBar(props: {
 	rows: LedgerRow[];
 	filters: FilterState;
 	onChange(f: FilterState): void;
+	/** The rows are a held view (a timeline drag, or the moment after one): the facets' counts are dimmed and busy. */
+	held?: boolean;
 }): React.JSX.Element {
 	const { rows, filters, onChange } = props;
+	const held = props.held === true;
 	// On a phone the bar is one button, and the filters open in a sheet over the page; elsewhere the button and the
 	// sheet's header are not shown and the bar is the row it always was.
 	const [sheet, setSheet] = useState(false);
@@ -294,6 +297,8 @@ export const FilterBar = memo(function FilterBar(props: {
 				id="ut-filter-sheet"
 				className="ut-bar"
 				data-sheet={sheet}
+				data-held={held}
+				aria-busy={held}
 				// A dialog only while open (and only a phone opens it); otherwise the bar is the plain row it always was.
 				{...(sheet ? { role: "dialog", "aria-modal": true, "aria-label": "Filters" } : {})}
 			>

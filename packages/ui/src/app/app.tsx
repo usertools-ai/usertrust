@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { useCallback, useDeferredValue, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { csvFilename, toCsv } from "../shared/csv.js";
 import { EMPTY_FILTERS, isFiltering } from "../shared/filters.js";
-import { heldInput, type ListInput, listView } from "../shared/list-view.js";
+import { heldInput, heldNote, type ListInput, listView } from "../shared/list-view.js";
 import type { LedgerRow } from "../shared/rows.js";
 import { MAX_SEARCH_LENGTH, type ViewId } from "../shared/url-state.js";
 import { AuditTable } from "./audit-table.js";
+import { ExportButton } from "./export-button.js";
 import { FilterBar } from "./filter-bar.js";
 import { InspectorHint, RowPanel } from "./row-panel.js";
 import { useLedger } from "./store.js";
@@ -47,14 +48,23 @@ export function App(): React.JSX.Element {
 		() => ({ rows, at: shownAt, filters, phase, summary }),
 		[rows, shownAt, filters, phase, summary],
 	);
-	// While a timeline drag is on, the list keeps the input it had (`heldInput`): only the thumb, its label and the header
-	// follow the drag, and the list renders once on release or after the drag sits still.
-	const [holding, setHolding] = useState(false);
-	const held = useRef(listInput);
-	held.current = heldInput(held.current, listInput, holding);
-	const drawn = useDeferredValue(held.current);
+	// While a timeline drag is on, the list keeps the input it had when the drag began (`heldInput`): only the thumb,
+	// its label and the header follow the drag, and the list renders once on release or after the drag sits still. The
+	// input is frozen in the drag's own event (state, never a ref written while rendering), from the last committed one.
+	const [frozen, setFrozen] = useState<ListInput | null>(null);
+	const committed = useRef(listInput);
+	useEffect(() => {
+		committed.current = listInput;
+	}, [listInput]);
+	const onHold = useCallback((on: boolean) => setFrozen(on ? committed.current : null), []);
+	const drawn = useDeferredValue(heldInput(frozen, listInput));
 	const list = useMemo(() => listView(drawn), [drawn]);
 	const { shownRows, filtered } = list;
+	// Whether what the list's input draws (the list, the facets, Trends, the inspector, the count and Export) shows
+	// another position than the header: during a drag, and after it until the deferred render lands (or after Live,
+	// Back, Forward or a link). Those views are dimmed and busy meanwhile, and the timeline says what is coming.
+	const holdNote = heldNote(list.at, shownAt);
+	const held = holdNote !== null;
 	// The selected row's event HASH (unique on the chain, where an id can repeat), resolved from the rows shown: a
 	// `status` correction replaces the row object, and a panel holding the old one kept showing the old status.
 	const open = useMemo(
@@ -135,7 +145,7 @@ export function App(): React.JSX.Element {
 						))}
 					</div>
 					{/* A live region: a filter that changes how many rows are in view says so to a screen reader. */}
-					<span className="ut-label" role="status">
+					<span className="ut-label" role="status" data-held={held}>
 						{count}
 					</span>
 					<span className="ut-grow" />
@@ -148,23 +158,15 @@ export function App(): React.JSX.Element {
 						value={filters.search}
 						onChange={(e) => setFilters({ ...filters, search: e.currentTarget.value })}
 					/>
-					<button
-						type="button"
-						className="ut-btn"
-						onClick={exportCsv}
-						disabled={filtered.length === 0}
-						title={
-							list.at !== null
-								? `Download the records in view as CSV, as recorded at record ${(list.at.pos + 1).toLocaleString()}`
-								: newestOf === undefined
-									? "Download the records in view as CSV"
-									: `Download the records in view as CSV: these are within the newest ${newestOf.toLocaleString()} events only`
-						}
-					>
-						Export {filtered.length.toLocaleString()} {filtered.length === 1 ? "row" : "rows"}
-					</button>
+					<ExportButton
+						count={filtered.length}
+						at={list.at}
+						newestOf={newestOf}
+						held={held}
+						onExport={exportCsv}
+					/>
 				</div>
-				<FilterBar rows={shownRows} filters={filters} onChange={setFilters} />
+				<FilterBar rows={shownRows} filters={filters} onChange={setFilters} held={held} />
 				{/* Never a link that opens something else: when the address does not describe this view, we say so. */}
 				{addressNote === "cannot-hold" && (
 					<div className="ut-notice ut-address-note" role="status">
@@ -180,13 +182,14 @@ export function App(): React.JSX.Element {
 						the previous view. Trying again.
 					</div>
 				)}
-				<div className="ut-body" data-docked={dock} data-holding={holding}>
+				<div className="ut-body" data-docked={dock}>
 					<section
 						className="ut-pane"
 						role="tabpanel"
 						id={`panel-${view}`}
 						aria-labelledby={`tab-${view}`}
-						aria-busy={holding}
+						data-held={held}
+						aria-busy={held}
 					>
 						{view === "audit" ? (
 							<AuditTable
@@ -212,6 +215,7 @@ export function App(): React.JSX.Element {
 								key={open.hash}
 								row={open}
 								docked
+								held={held}
 								onClose={close}
 								focusNonce={kbOpen}
 								onFocusHandled={() => setKbOpen(undefined)}
@@ -230,8 +234,9 @@ export function App(): React.JSX.Element {
 					head={head}
 					error={atView.error}
 					reloaded={atView.reloaded}
+					holdNote={holdNote}
 					onPreview={preview}
-					onHold={setHolding}
+					onHold={onHold}
 					onCommit={setAt}
 					onLive={() => {
 						preview(null);
@@ -240,7 +245,7 @@ export function App(): React.JSX.Element {
 				/>
 			)}
 			{!dock && view === "audit" && open && (
-				<RowPanel key={open.hash} row={open} docked={false} onClose={close} />
+				<RowPanel key={open.hash} row={open} docked={false} held={held} onClose={close} />
 			)}
 		</div>
 	);

@@ -247,6 +247,6 @@ describe("the inspector takes focus from the list", () => {
 describe("the count is a live region", () => {
 	it("the record count in the header is a polite status, so a filter's effect is announced", async () => {
 		const src = await source("app.tsx");
-		expect(src).toMatch(/<span className="ut-label" role="status">\s*\{count\}/);
+		expect(src).toMatch(/<span className="ut-label" role="status"[^>]*>\s*\{count\}/);
 	});
 });

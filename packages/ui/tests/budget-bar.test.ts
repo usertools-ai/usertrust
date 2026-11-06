@@ -39,7 +39,7 @@ async function render(budget: number, remainingUt: number): Promise<string> {
 }
 
 const printedLeft = (html: string): number =>
-	Number(/<span class="v">([\d.]+)%/.exec(html)?.[1] ?? Number.NaN);
+	Number(/<span class="v">(?:<span class="ut-fit"[^>]*>)?([\d.]+)%/.exec(html)?.[1] ?? Number.NaN);
 const barWidth = (html: string): number =>
 	Number(/class="ut-meter"[^>]*><i style="width:([\d.]+)%/.exec(html)?.[1] ?? Number.NaN);
 const barColour = (html: string): string =>

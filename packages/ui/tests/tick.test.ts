@@ -218,7 +218,10 @@ describe("<TickingFigure>", () => {
 			verifiedAt: null,
 		};
 		const strip = renderToStaticMarkup(createElement(SummaryStrip, { summary, live: "live" }));
-		expect(strip).toMatch(/title="\$7\.6045"><span class="ut-tick"[^>]*>\$7\.60<\/span>/);
+		// Inside the span that fits the figure to its column.
+		expect(strip).toMatch(
+			/title="\$7\.6045"><span class="ut-fit"[^>]*><span class="ut-tick"[^>]*>\$7\.60<\/span>/,
+		);
 
 		const Trends = await load<{ rows: never[]; newestOf: number | undefined }>("trends", "Trends");
 		const trends = renderToStaticMarkup(createElement(Trends, { rows: [], newestOf: undefined }));

@@ -42,6 +42,12 @@ export function Timeline(props: {
 	head: number;
 	error: string | null;
 	reloaded: boolean;
+	/**
+	 * Set while the list, the facets, Trends, the inspector and Export still show another position than the header
+	 * (they are dimmed meanwhile): "Updating to record N…". A polite live region, there before any text, so the dim
+	 * means something to everyone.
+	 */
+	holdNote?: string | null;
 	/** Ask for a position without writing the address (a drag in progress). */
 	onPreview(pos: number): void;
 	/** Write the position to the address (the drag settled). */
@@ -127,7 +133,9 @@ export function Timeline(props: {
 				<span className="ut-tl-label" data-past={at !== null}>
 					{label}
 				</span>
-				<span className="ut-grow" />
+				<span className="ut-tl-held" role="status">
+					{props.holdNote ?? ""}
+				</span>
 				{fresh > 0 && (
 					<button
 						type="button"

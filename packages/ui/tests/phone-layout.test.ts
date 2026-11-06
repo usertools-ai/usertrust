@@ -129,8 +129,10 @@ describe("phones: the list flows in the page", () => {
 });
 
 describe("phones: the facts collapse to three, with the rest under Details", () => {
-	it("lays the facts out as one row of three", () => {
-		expect(rule(phone.body, ".ut-facts")).toMatch(/repeat\(3,/);
+	it("lays spend and integrity side by side, and the budget across the row under them", () => {
+		// A third of a phone cut the budget's amounts ("overspent by $X of $Y"): the budget takes the row's width.
+		expect(rule(phone.body, ".ut-facts")).toMatch(/repeat\(2,/);
+		expect(rule(phone.body, ".ut-facts .budget")).toMatch(/grid-column: 1 \/ -1;/);
 	});
 
 	it("hides Chain and Anchor until the toggle opens them", () => {

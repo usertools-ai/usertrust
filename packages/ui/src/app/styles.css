@@ -321,13 +321,14 @@ body {
 	}
 	/* The past view's own line: everything under it is the vault as recorded then. Gold, the accent: amber is kept for
 	   held and in-flight states. */
-	/* Its slot is always there, one line tall: live it is hidden and empty, so entering or leaving the past view moves
-	   nothing below it (a line that appeared pushed the header, the list and the timeline down). */
+	/* Its slot is always there, a fixed height (one line; two on a phone, where the label can wrap): live it is hidden
+	   and empty, so entering or leaving the past view moves nothing below it (a line that appeared pushed the header,
+	   the list and the timeline down). */
 	.ut-asat {
 		display: flex;
 		align-items: center;
 		gap: 8px;
-		min-height: calc(12px * 1.4);
+		height: calc(12px * 1.4);
 		font: 500 12px/1.4 var(--mono);
 		font-variant-numeric: tabular-nums;
 		color: var(--accent);
@@ -414,35 +415,67 @@ body {
 		color: var(--body);
 		overflow-wrap: anywhere;
 	}
-	/* Every line of a header fact has a fixed height: a value, a sub line and an amounts line one line each (cut with an
-	   ellipsis), a "why" line exactly two (clamped). Each fact renders the same lines in every state, live or past
-	   (summary-strip.tsx holds a line it has nothing for empty and unseen: [data-reserve]), so the facts row is the same
-	   height whatever the view and the data, at every width. Every clamped line keeps its whole text in a title. */
+	/* Every line of a header fact has a fixed height, the same in every state, live or past (summary-strip.tsx holds a
+	   line it has nothing for empty and unseen: [data-reserve]), so the facts row is the same height whatever the view
+	   and the data, at every width. Nothing in a fact is cut:
+	   - a value is one line, and shrinks to fit its column instead (.ut-fit);
+	   - an amounts line and a sub line hold two lines: the text wraps there. Amounts are at most two units, each shrunk
+	     to fit a line, so they always fit;
+	   - a "why" line holds two lines, clamped.
+	   A line the box still cuts (a long note in a narrow column) keeps its whole text in a title, and becomes a button
+	   that opens it ([data-cut], summary-strip.tsx FactLine). Popovers open from the fact. */
+	.ut-facts .ut-fact {
+		position: relative;
+	}
 	.ut-facts .ut-fact .v {
 		height: 20px;
 		line-height: 20px;
 		white-space: nowrap;
 		overflow: hidden;
-		text-overflow: ellipsis;
+		container-type: inline-size;
 	}
 	/* Its own font shorthand sets a line-height: the value line's is restated so "no remaining figure" and "87.7% left"
 	   are the same height. */
 	.ut-facts .ut-fact .v.na {
 		line-height: 20px;
 	}
-	.ut-facts .ut-sub {
-		height: 14px;
-		line-height: 14px;
+	/* Smaller words in a value ("left", "events"): a line-height of 1, so their own line box never makes the value's
+	   line taller than its 20px. */
+	.ut-facts .ut-fact .v small {
+		font-size: 0.8125em;
+		line-height: 1;
+	}
+	/* A figure that shrinks to fit: its own size, or the size at which its n characters (--n, set inline) fit the
+	   container's width. 0.62em is a little wider than any monospace advance (0.55-0.6em), and wider than the average
+	   sans letter of the value line's words. The counting figure inside holds its width only where it fits (.ut-tick). */
+	.ut-facts .ut-fit {
+		display: inline-block;
+		vertical-align: top;
 		white-space: nowrap;
+		font-size: min(1em, calc(100cqi / var(--n, 1) / 0.62));
+	}
+	.ut-facts .ut-sub {
+		height: 28px;
+		line-height: 14px;
+		white-space: normal;
+		overflow-wrap: anywhere;
+		display: -webkit-box;
+		-webkit-box-orient: vertical;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
 		overflow: hidden;
-		text-overflow: ellipsis;
 	}
 	.ut-facts .ut-amts {
-		height: 16px;
+		height: 32px;
 		line-height: 16px;
-		white-space: nowrap;
+		white-space: normal;
 		overflow: hidden;
-		text-overflow: ellipsis;
+	}
+	/* The containers the amounts' units fit (the Spend fact's usertoken line sits in a row with its info button, and is
+	   one plain line that wraps). */
+	.ut-facts .ut-amts,
+	.ut-facts .ut-fact > .ut-sub.mono {
+		container-type: inline-size;
 	}
 	.ut-facts .ut-amts.red {
 		color: var(--stakes);
@@ -456,11 +489,25 @@ body {
 		line-clamp: 2;
 		overflow: hidden;
 	}
+	.ut-facts [data-cut="true"] {
+		cursor: pointer;
+		text-decoration: underline dotted;
+		text-underline-offset: 3px;
+	}
+	.ut-facts [data-cut="true"]:focus-visible {
+		outline: 2px solid var(--words);
+		outline-offset: 2px;
+		border-radius: 4px;
+	}
+	.ut-facts .ut-fact > .ut-pop.text {
+		width: min(300px, calc(100vw - 32px));
+	}
+	/* The anchor file's tag wraps rather than being cut ("today: not set up" in a narrow column): the Anchor fact is
+	   never the row's tallest, so a second line moves nothing. */
 	.ut-facts .ut-tag {
 		max-width: 100%;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
+		min-width: 0;
+		overflow-wrap: anywhere;
 	}
 	.ut-facts [data-reserve="true"] {
 		visibility: hidden;
@@ -858,9 +905,16 @@ body {
 		overflow: hidden;
 		border-radius: 0 0 15px 15px;
 	}
-	/* A timeline drag holds the list and Trends at their last view until it is released or sits still: dimmed, so it is
-	   plain they have not caught up. Opacity only: nothing moves, and nothing animates. */
-	.ut-body[data-holding="true"] .ut-pane {
+	/* Everything drawn from the list's input while it shows another position than the header (a timeline drag, the
+	   moment after one, Live, Back or Forward): the list or Trends, the count, Export, the facets and the inspector.
+	   Dimmed, so it is plain they have not caught up; the timeline says what is coming (.ut-tl-held). Opacity only:
+	   nothing moves, and nothing animates. The drawer is dimmed inside, so it stays opaque over the page. */
+	.ut-pane[data-held="true"],
+	.ut-head .ut-label[data-held="true"],
+	.ut-btn[data-held="true"],
+	.ut-bar[data-held="true"] .ut-facet,
+	.ut-insp[data-held="true"] > .ut-insp-in,
+	.ut-drawer[data-held="true"] > .ut-insp-in {
 		opacity: 0.55;
 	}
 	.ut-body[data-docked="true"] {
@@ -1575,6 +1629,17 @@ body {
 	.ut-tl-label[data-past="true"] {
 		color: var(--accent);
 	}
+	/* "Updating to record N…" while the views below still show another position. Always there (a live region, empty
+	   when nothing is held), taking the room between the label and the buttons; two short lines fit the row. */
+	.ut-tl-held {
+		flex: 1 1 auto;
+		min-width: 0;
+		max-height: 26px;
+		overflow: hidden;
+		text-align: right;
+		font: 400 11px/13px var(--sans);
+		color: var(--body);
+	}
 	.ut-tl-msg {
 		font: 400 12px/1.45 var(--sans);
 		color: #ededf2;
@@ -1636,14 +1701,16 @@ body {
 			padding: 0;
 		}
 
-		/* Facts: one row of three (spend, budget, integrity); chain and anchor open under a Details button. */
+		/* Facts: spend and integrity side by side, the budget across the row under them (its amounts, "overspent by $X
+		   of $Y" among them, need the width: a third of a phone cut them); chain and anchor open under a Details
+		   button. */
 		.ut-facts {
-			grid-template-columns: repeat(3, minmax(0, 1fr));
+			grid-template-columns: repeat(2, minmax(0, 1fr));
 			gap: 10px;
 			padding: 12px;
 		}
 		.ut-facts .budget {
-			grid-column: auto;
+			grid-column: 1 / -1;
 		}
 		/* A label may wrap to two lines here (Budget and its source word): each fact's label holds two, so one that does not
 		   wrap is the same height as one that does, live or past. */
@@ -1657,6 +1724,14 @@ body {
 		}
 		.ut-facts .ut-fact .v {
 			font-size: 15px;
+		}
+		/* The as-at line can wrap here: its slot holds two lines, live and past. */
+		.ut-asat {
+			height: calc(2 * 12px * 1.4);
+			align-items: flex-start;
+		}
+		.ut-asat::before {
+			margin-top: calc(12px * 0.7 - 1px);
 		}
 		.ut-facts .ut-more {
 			display: flex;
@@ -1837,17 +1912,23 @@ body {
 			padding: 12px 12px;
 			padding-bottom: calc(12px + env(safe-area-inset-bottom));
 		}
-		/* The label takes its own line and the buttons' row is held under it in both views (16.8px label, 10px gap,
-		   26px buttons), so entering or leaving the past view changes nothing's size. */
+		/* The label takes its own two lines (it wraps, never cut) and the buttons' row is held under it in both views
+		   (two 16.8px lines, a 10px gap, 26px buttons), so entering or leaving the past view changes nothing's size. */
 		.ut-tl-head {
 			flex-wrap: wrap;
 			align-content: flex-start;
 			row-gap: 10px;
-			height: auto;
-			min-height: 53px;
+			height: calc(2 * 12px * 1.4 + 36px);
 		}
 		.ut-tl-label {
 			flex-basis: 100%;
+			height: calc(2 * 12px * 1.4);
+			white-space: normal;
+			overflow-wrap: anywhere;
+			overflow: visible;
+		}
+		.ut-tl-held {
+			text-align: left;
 		}
 	}
 

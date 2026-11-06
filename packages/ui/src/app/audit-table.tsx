@@ -217,12 +217,23 @@ function Empty(props: {
 			);
 		case "before-window": {
 			// Counted from 1, as the window note and the integrity texts count.
-			const upTo = (props.before?.upTo ?? 0) + 1;
+			const before = props.before;
+			const upTo = (before?.upTo ?? 0) + 1;
+			const counted = `The ${upTo.toLocaleString()} ${upTo === 1 ? "record" : "records"} up to this point count in the totals above.`;
+			// Only a record the list holds is named as where it starts; otherwise (a resync gap, or no rows held yet) the
+			// text says the records for this point are not held, and names no position.
+			if (before?.kind !== "before")
+				return (
+					<div className="ut-empty" role="status">
+						<b>No records are held for this point yet</b>
+						{counted}
+					</div>
+				);
 			return (
 				<div className="ut-empty" role="status">
 					<b>Before the first record the list holds</b>
-					{`The list starts at position ${((props.before?.firstHeld ?? 0) + 1).toLocaleString()}, the first record it holds. `}
-					{`The ${upTo.toLocaleString()} ${upTo === 1 ? "record" : "records"} up to this point count in the totals above.`}
+					{`The list starts at position ${(before.firstHeld + 1).toLocaleString()}, the first record it holds. `}
+					{counted}
 				</div>
 			);
 		}
