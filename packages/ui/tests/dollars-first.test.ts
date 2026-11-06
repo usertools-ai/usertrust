@@ -81,7 +81,8 @@ describe("the Spend fact", () => {
 		const html = renderToStaticMarkup(
 			createElement(SummaryStrip, { summary: summary(), live: "live" }),
 		);
-		expect(html).toContain('title="$7.6045">$7.60</span>');
+		// The figure renders through the counter, whose visible span carries the 2 dp total.
+		expect(html).toMatch(/title="\$7\.6045"><span class="ut-tick"[^>]*>\$7\.60<\/span>/);
 		expect(at(html, "$7.60")).toBeLessThan(at(html, "76,045 UT"));
 	});
 

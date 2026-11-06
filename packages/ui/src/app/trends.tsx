@@ -15,7 +15,6 @@ import { type ChartSummary, chartSummary } from "../shared/chart-summary.js";
 import {
 	formatUsd,
 	formatUsdAxis,
-	formatUsdTotal,
 	formatUt,
 	formatUtcMinute,
 	UT_KEY,
@@ -23,6 +22,7 @@ import {
 } from "../shared/format.js";
 import { JOB_TYPE_CAVEAT, type LedgerRow } from "../shared/rows.js";
 import { BarList } from "./bar-list.js";
+import { TickingFigure } from "./ticking-figure.js";
 
 type Granularity = "day" | "hour";
 
@@ -93,7 +93,8 @@ function formatBucketUtc(t: number, granularity: Granularity): string {
 
 function Tile(props: {
 	label: string;
-	value: string;
+	/** A string, or a figure that renders itself (the cost total counts to a new value). */
+	value: React.ReactNode;
 	sub: string;
 	tone?: "red" | "alert";
 	/** The exact figure, on hover, behind a rounded one. */
@@ -152,7 +153,7 @@ export function Trends(props: {
 				    only, over the whole vault, and is labelled as that: two rules, each named. */}
 				<Tile
 					label="Cost in view"
-					value={formatUsdTotal(tiles.totalCostUt)}
+					value={<TickingFigure ut={tiles.totalCostUt} />}
 					valueTitle={formatUsd(tiles.totalCostUt)}
 					sub={`${formatUt(tiles.totalCostUt)} · every costed record`}
 				/>
