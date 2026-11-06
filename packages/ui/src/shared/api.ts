@@ -6,6 +6,8 @@
  * from `../shared/api.js` — never from server code (Amendment A2).
  */
 
+import type { RowStatus } from "./rows.js";
+
 export interface SummaryPayload {
 	vaultPath: string;
 	/**
@@ -85,4 +87,47 @@ export interface SettingsPayload {
 export interface SettingUpdate {
 	key: SettingKey;
 	value: number | null;
+}
+
+/** What `AtPayload.counts` counts: `llm_call` records (not `llm_call_failed`), denials, and every other record. */
+export type AtCounts = Record<"llm_call" | "denied" | "other", number>;
+
+/**
+ * GET /api/at?pos=N or GET /api/at?t=<ISO>: the vault as recorded at one position. A position is an event's index in
+ * the ordered list the chain is verified over, across the whole vault (`LedgerRow.pos`).
+ */
+export interface AtPayload {
+	/** The position answered: the one asked for, the head when the one asked for is past it, or the last at `t`. */
+	pos: number;
+	/** The event's time at `pos`, as recorded. */
+	ts: string;
+	/** The last position (the number of positions, minus 1). */
+	head: number;
+	/** Whether the position asked for was past the head, so `pos` is the head instead. */
+	clamped: boolean;
+	/**
+	 * Bumped by every full reload: a position names a record only within one epoch, so a page holding `#at=N` from
+	 * another epoch knows that N may now name another record.
+	 */
+	epoch: number;
+	/** Spend at `pos`: the cost of every `llm_call` record at positions `0..pos` (the header's Spend rule). */
+	spentUt: number;
+	/** Records at positions `0..pos`: `llm_call` (not `llm_call_failed`), denials (`policy_denied`, `ledger_rejected`), and the rest. */
+	counts: AtCounts;
+	/**
+	 * Whether the chain verifies up to and including `pos`: `breakIndex` is the position of the first event that breaks
+	 * it (over the whole vault), or null.
+	 */
+	chain: { valid: boolean; breakIndex: number | null };
+	/** Today's budget: there is no budget history yet, and `note` says so. */
+	budget: { ut: number | null; note: string };
+	/** The monthly plan (`plan.monthlyUt`) in force at the position's time, or null (unset, or settings off). */
+	plan: number | null;
+	/** The position of the first row held (`/api/events`), or `head + 1` when none is. */
+	windowStartPos: number;
+	/**
+	 * The status at `pos` of each held row, by event hash, whose status there can differ from its status now: a row at or
+	 * before `pos` whose transfer has a record after it. Every other row at or before `pos` has its current status.
+	 */
+	statusAt: Record<string, RowStatus>;
 }

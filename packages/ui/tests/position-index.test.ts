@@ -112,6 +112,9 @@ describe("PositionIndex", () => {
 		const index = indexOf(chain([{ kind: "llm_call" }]));
 		expect(() => index.positionAt("2026-11-06T10:01:00")).toThrow(RangeError);
 		expect(() => index.positionAt("not a time")).toThrow(RangeError);
+		// A date alone ends in digits an offset would end in; it names no time and no zone.
+		expect(() => index.positionAt("2026-11-06")).toThrow(RangeError);
+		expect(() => index.positionAt("2026-11-06T10:01:00+0200")).toThrow(RangeError);
 		expect(new PositionIndex().positionAt("2026-11-06T10:01:00.000Z")).toBeNull();
 	});
 

@@ -44,6 +44,12 @@ export interface LedgerState {
 	 * `summary.chain.breakIndex` points into), not only the rows held; the live tail extends it.
 	 */
 	positions: PositionIndex;
+	/**
+	 * The index, in the FULL ordered list the chain was verified over (a position), of the first event that breaks the
+	 * chain, or null when none does. The rows' integrity uses a copy re-derived for the slice held (relative to its
+	 * first row); anything that compares a break with a position compares with this one.
+	 */
+	fullBreakIndex: number | null;
 	summary: SummaryPayload;
 	lastHash: string;
 	/**
@@ -500,17 +506,19 @@ function loadPass(
 	const noUniqueTip = tip === undefined && events.some((e) => typeof e.hash === "string");
 	const verified = loadSucceeded && readValid && !noUniqueTip;
 
+	// Kept before the slice's re-derivation below, which moves the index to the first row held.
+	const fullBreakIndex = integrity.breakIndex;
 	const truncated = events.length > rowCap;
 	const visible = truncated ? events.slice(-rowCap) : events;
 	// Integrity indexes are relative to the full ordered list; re-derive for the slice.
 	const offset = events.length - visible.length;
 	const sliceIntegrity =
-		integrity.breakIndex === null
+		fullBreakIndex === null
 			? integrity
-			: { valid: false, breakIndex: Math.max(0, integrity.breakIndex - offset) };
+			: { valid: false, breakIndex: Math.max(0, fullBreakIndex - offset) };
 	// Every event, not only the visible slice: a visible row's verdict can rest on an earlier record of its transfer.
 	const transfers = new TransferIndex();
-	transfers.add(events);
+	transfers.add(events, 0);
 	// Every event too: a past position can fall before the rows held, and its totals are still exact.
 	const positions = new PositionIndex();
 	for (const e of events) positions.add(e);
@@ -520,6 +528,7 @@ function loadPass(
 		rows,
 		transfers,
 		positions,
+		fullBreakIndex,
 		summary: {
 			vaultPath,
 			...budgetSummary(vaultPath, spentUt),
@@ -528,7 +537,7 @@ function loadPass(
 				events: events.length,
 				valid,
 				empty: valid && events.length === 0,
-				breakIndex: integrity.breakIndex,
+				breakIndex: fullBreakIndex,
 				errors,
 			},
 			anchorFile: anchorFile(vaultPath),
