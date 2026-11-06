@@ -414,10 +414,56 @@ body {
 		color: var(--body);
 		overflow-wrap: anywhere;
 	}
-	/* The budget's last line holds two lines live and at a past position (where it carries the server's note), so the
-	   header keeps its height when the view changes. */
-	.ut-fact.budget .ut-why {
-		min-height: calc(2 * 12px * 1.45);
+	/* Every line of a header fact has a fixed height: a value, a sub line and an amounts line one line each (cut with an
+	   ellipsis), a "why" line exactly two (clamped). Each fact renders the same lines in every state, live or past
+	   (summary-strip.tsx holds a line it has nothing for empty and unseen: [data-reserve]), so the facts row is the same
+	   height whatever the view and the data, at every width. Every clamped line keeps its whole text in a title. */
+	.ut-facts .ut-fact .v {
+		height: 20px;
+		line-height: 20px;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	/* Its own font shorthand sets a line-height: the value line's is restated so "no remaining figure" and "87.7% left"
+	   are the same height. */
+	.ut-facts .ut-fact .v.na {
+		line-height: 20px;
+	}
+	.ut-facts .ut-sub {
+		height: 14px;
+		line-height: 14px;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.ut-facts .ut-amts {
+		height: 16px;
+		line-height: 16px;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.ut-facts .ut-amts.red {
+		color: var(--stakes);
+	}
+	.ut-facts .ut-why {
+		height: 34px;
+		line-height: 17px;
+		display: -webkit-box;
+		-webkit-box-orient: vertical;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
+		overflow: hidden;
+	}
+	.ut-facts .ut-tag {
+		max-width: 100%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.ut-facts [data-reserve="true"] {
+		visibility: hidden;
 	}
 	.ut-why.info {
 		color: var(--info);
@@ -811,6 +857,11 @@ body {
 		min-height: 0;
 		overflow: hidden;
 		border-radius: 0 0 15px 15px;
+	}
+	/* A timeline drag holds the list and Trends at their last view until it is released or sits still: dimmed, so it is
+	   plain they have not caught up. Opacity only: nothing moves, and nothing animates. */
+	.ut-body[data-holding="true"] .ut-pane {
+		opacity: 0.55;
 	}
 	.ut-body[data-docked="true"] {
 		grid-template-columns: minmax(0, 1fr) 380px;
@@ -1503,12 +1554,14 @@ body {
 	.ut-tl[data-past="true"] {
 		border-color: rgba(232, 181, 75, 0.45);
 	}
+	/* One row, the same height live (the label alone) and past (the label and its buttons), so the timeline never
+	   changes height when the view does. */
 	.ut-tl-head {
 		display: flex;
 		align-items: center;
 		gap: 6px 10px;
 		min-width: 0;
-		min-height: 26px;
+		height: 26px;
 	}
 	.ut-tl-label {
 		min-width: 0;
@@ -1592,9 +1645,13 @@ body {
 		.ut-facts .budget {
 			grid-column: auto;
 		}
+		/* A label may wrap to two lines here (Budget and its source word): each fact's label holds two, so one that does not
+		   wrap is the same height as one that does, live or past. */
 		.ut-facts .ut-fact > b {
 			flex-wrap: wrap;
+			align-content: flex-start;
 			gap: 4px 6px;
+			min-height: 26px;
 			letter-spacing: 1px;
 			white-space: normal;
 		}
@@ -1780,13 +1837,17 @@ body {
 			padding: 12px 12px;
 			padding-bottom: calc(12px + env(safe-area-inset-bottom));
 		}
+		/* The label takes its own line and the buttons' row is held under it in both views (16.8px label, 10px gap,
+		   26px buttons), so entering or leaving the past view changes nothing's size. */
 		.ut-tl-head {
 			flex-wrap: wrap;
+			align-content: flex-start;
 			row-gap: 10px;
+			height: auto;
+			min-height: 53px;
 		}
-		.ut-tl-label[data-past="true"] {
+		.ut-tl-label {
 			flex-basis: 100%;
-			white-space: normal;
 		}
 	}
 

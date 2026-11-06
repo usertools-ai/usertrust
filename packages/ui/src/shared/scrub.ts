@@ -30,6 +30,8 @@ export class Scrubber {
 		private readonly io: ScrubIo,
 		private readonly onPreview: (pos: number) => void,
 		private readonly onCommit: (pos: number) => void,
+		/** A drag started (true, on its first move) or ended (false: released, idle, cancelled, or overtaken). */
+		private readonly onActive: (active: boolean) => void = () => {},
 	) {}
 
 	/** The position moved to and not yet written to the address, or null. */
@@ -38,6 +40,7 @@ export class Scrubber {
 	}
 
 	move(pos: number): void {
+		if (this.latest === null) this.onActive(true);
 		this.latest = pos;
 		if (this.cancelFrame === null) {
 			this.cancelFrame = this.io.frame(() => {
@@ -74,10 +77,12 @@ export class Scrubber {
 
 	/** Drop whatever is pending, writing nothing (going live mid-drag, unmount). */
 	cancel(): void {
+		const wasActive = this.latest !== null;
 		this.latest = null;
 		this.cancelFrame?.();
 		this.cancelFrame = null;
 		this.cancelIdle?.();
 		this.cancelIdle = null;
+		if (wasActive) this.onActive(false);
 	}
 }

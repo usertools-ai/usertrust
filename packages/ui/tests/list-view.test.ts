@@ -13,8 +13,9 @@ import { describe, expect, it } from "vitest";
 import type { AtPayload, SummaryPayload } from "../src/shared/api.js";
 import { listState } from "../src/shared/display.js";
 import { EMPTY_FILTERS } from "../src/shared/filters.js";
-import { listView } from "../src/shared/list-view.js";
+import { heldInput, type ListInput, listView } from "../src/shared/list-view.js";
 import type { LedgerRow } from "../src/shared/rows.js";
+import { Scrubber } from "../src/shared/scrub.js";
 
 function row(pos: number): LedgerRow {
 	return {
@@ -148,5 +149,55 @@ describe("listView", () => {
 		expect(app).toContain("listView(drawn)");
 		expect(app).toContain("phase={list.phase}");
 		expect(app).not.toMatch(/phase=\{phase\}/);
+	});
+
+	it("while dragging, the list's input does not change; on release it takes the latest, once", () => {
+		// The page's own wiring, without React: the Scrubber says when a drag is on, and heldInput keeps the list's
+		// input while it is.
+		let holding = false;
+		const frames: Array<() => void> = [];
+		const scrub = new Scrubber(
+			{
+				frame: (fn) => {
+					frames.push(fn);
+					return () => {};
+				},
+				later: () => () => {},
+			},
+			() => {},
+			() => {},
+			(a) => {
+				holding = a;
+			},
+		);
+		const input = (pos: number | null): ListInput => ({
+			rows: held,
+			at: pos === null ? null : at({ pos }),
+			filters: EMPTY_FILTERS,
+			phase: "loaded",
+			summary: summary(),
+		});
+		let drawn = input(null);
+		const render = (next: ListInput): void => {
+			drawn = heldInput(drawn, next, holding);
+		};
+		const before = drawn;
+		scrub.move(60);
+		for (const pos of [60, 61, 62, 63]) render(input(pos));
+		expect(drawn).toBe(before);
+		scrub.release();
+		const last = input(63);
+		render(last);
+		expect(drawn).toBe(last);
+	});
+
+	it("the page holds the list while the timeline says a drag is on", () => {
+		const app = readFileSync(join(import.meta.dirname, "..", "src", "app", "app.tsx"), "utf-8");
+		expect(app).toMatch(/heldInput\(/);
+		expect(app).toContain("onHold={setHolding}");
+		// And shows it: the held list is dimmed (opacity only, so nothing shifts).
+		expect(app).toContain("data-holding={holding}");
+		const css = readFileSync(join(import.meta.dirname, "..", "src", "app", "styles.css"), "utf-8");
+		expect(css).toMatch(/\.ut-body\[data-holding="true"\] \.ut-pane \{\s*opacity: 0\.55;\s*\}/);
 	});
 });

@@ -4,7 +4,7 @@
 import { useCallback, useDeferredValue, useMemo, useRef, useState } from "react";
 import { csvFilename, toCsv } from "../shared/csv.js";
 import { EMPTY_FILTERS, isFiltering } from "../shared/filters.js";
-import { type ListInput, listView } from "../shared/list-view.js";
+import { heldInput, type ListInput, listView } from "../shared/list-view.js";
 import type { LedgerRow } from "../shared/rows.js";
 import { MAX_SEARCH_LENGTH, type ViewId } from "../shared/url-state.js";
 import { AuditTable } from "./audit-table.js";
@@ -47,7 +47,12 @@ export function App(): React.JSX.Element {
 		() => ({ rows, at: shownAt, filters, phase, summary }),
 		[rows, shownAt, filters, phase, summary],
 	);
-	const drawn = useDeferredValue(listInput);
+	// While a timeline drag is on, the list keeps the input it had (`heldInput`): only the thumb, its label and the header
+	// follow the drag, and the list renders once on release or after the drag sits still.
+	const [holding, setHolding] = useState(false);
+	const held = useRef(listInput);
+	held.current = heldInput(held.current, listInput, holding);
+	const drawn = useDeferredValue(held.current);
 	const list = useMemo(() => listView(drawn), [drawn]);
 	const { shownRows, filtered } = list;
 	// The selected row's event HASH (unique on the chain, where an id can repeat), resolved from the rows shown: a
@@ -175,12 +180,13 @@ export function App(): React.JSX.Element {
 						the previous view. Trying again.
 					</div>
 				)}
-				<div className="ut-body" data-docked={dock}>
+				<div className="ut-body" data-docked={dock} data-holding={holding}>
 					<section
 						className="ut-pane"
 						role="tabpanel"
 						id={`panel-${view}`}
 						aria-labelledby={`tab-${view}`}
+						aria-busy={holding}
 					>
 						{view === "audit" ? (
 							<AuditTable
@@ -225,6 +231,7 @@ export function App(): React.JSX.Element {
 					error={atView.error}
 					reloaded={atView.reloaded}
 					onPreview={preview}
+					onHold={setHolding}
 					onCommit={setAt}
 					onLive={() => {
 						preview(null);

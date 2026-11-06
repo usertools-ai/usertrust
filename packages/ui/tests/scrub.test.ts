@@ -26,10 +26,12 @@ function harness() {
 	};
 	const previews: number[] = [];
 	const commits: number[] = [];
+	const active: boolean[] = [];
 	const scrub = new Scrubber(
 		io,
 		(p) => previews.push(p),
 		(p) => commits.push(p),
+		(a) => active.push(a),
 	);
 	const runFrame = (): void => {
 		for (const fn of frames.splice(0)) fn();
@@ -37,7 +39,7 @@ function harness() {
 	const runIdle = (): void => {
 		for (const t of timers.splice(0)) if (!t.cancelled) t.fn();
 	};
-	return { scrub, frames, timers, previews, commits, runFrame, runIdle };
+	return { scrub, frames, timers, previews, commits, active, runFrame, runIdle };
 }
 
 describe("Scrubber", () => {
@@ -113,5 +115,26 @@ describe("Scrubber", () => {
 		h.scrub.sync(5);
 		h.scrub.release();
 		expect(h.commits).toEqual([5, 6]);
+	});
+
+	it("says when a drag starts and ends: once each, on the first move and on release, idle, cancel or an outside change", () => {
+		const h = harness();
+		h.scrub.move(1);
+		h.scrub.move(2);
+		expect(h.active).toEqual([true]);
+		h.scrub.release();
+		expect(h.active).toEqual([true, false]);
+		h.scrub.move(3);
+		h.runIdle();
+		expect(h.active).toEqual([true, false, true, false]);
+		h.scrub.move(4);
+		h.scrub.cancel();
+		h.scrub.move(5);
+		h.scrub.sync(40);
+		expect(h.active).toEqual([true, false, true, false, true, false, true, false]);
+		// Nothing pending: a release or cancel says nothing.
+		h.scrub.release();
+		h.scrub.cancel();
+		expect(h.active).toHaveLength(8);
 	});
 });

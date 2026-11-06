@@ -63,3 +63,12 @@ export function listView(input: ListInput): ListView {
 		at,
 	};
 }
+
+/**
+ * The list's input while a timeline drag is on: the one it had when the drag began. Only the thumb, its label and the
+ * header follow a drag; the list, the facets, Trends and Export keep their last view (dimmed) and render once when the
+ * drag is released or sits still, so no pass over the rows runs while the thumb moves.
+ */
+export function heldInput(drawn: ListInput, next: ListInput, holding: boolean): ListInput {
+	return holding ? drawn : next;
+}

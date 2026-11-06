@@ -234,6 +234,24 @@ function PastAsAtLine(props: { at: AtPayload }): React.JSX.Element {
 }
 
 /**
+ * A fact's line held empty and unseen, so a fact has the same lines in every state, live or past, and the facts row
+ * never changes height when the view or the data does (the stylesheet gives each line a fixed height).
+ */
+function Reserve(props: { line: "meter" | "amts" | "sub" }): React.JSX.Element {
+	if (props.line === "meter")
+		return <div className="ut-meter" aria-hidden="true" data-reserve="true" />;
+	return (
+		<span
+			className={props.line === "amts" ? "ut-amts" : "ut-sub"}
+			aria-hidden="true"
+			data-reserve="true"
+		>
+			{"\u00a0"}
+		</span>
+	);
+}
+
+/**
  * The Budget fact at a past position. There is no budget history yet, so there is no budget then to show: the server's
  * note says so, and today's budget is named as today's, never shown as the budget at that point.
  */
@@ -242,19 +260,29 @@ function PastBudgetFact(props: { at: AtPayload }): React.JSX.Element {
 	return (
 		<div className="ut-fact budget" title={budget.note}>
 			<b>Budget</b>
-			<span className="v na">not recorded then</span>
-			{/* The live fact's lines, kept (the meter's row held empty and unseen), so the header does not change height
-			    when the view does. Today's figures are named as today's. */}
-			{budget.ut !== null && (
+			<span className="v na" title="not recorded then">
+				not recorded then
+			</span>
+			{/* The live fact's lines (the meter's row held empty and unseen), so the header keeps its height when the view
+			    changes. Today's figures are named as today's. */}
+			<Reserve line="meter" />
+			{budget.ut !== null ? (
 				<>
-					<div className="ut-meter" aria-hidden="true" style={{ visibility: "hidden" }} />
 					<span className="ut-amts" title={formatUsd(budget.ut)}>
 						{`today: ${formatUsdTotal(budget.ut)}`}
 					</span>
 					<span className="ut-sub mono">{`today: ${formatUt(budget.ut)}`}</span>
 				</>
+			) : (
+				<>
+					<Reserve line="amts" />
+					<Reserve line="sub" />
+				</>
 			)}
-			<span className="ut-why">{budget.note}</span>
+			{/* Two lines at most (clamped); the whole note is in the title. */}
+			<span className="ut-why" title={budget.note}>
+				{budget.note}
+			</span>
 		</div>
 	);
 }
@@ -283,15 +311,26 @@ function PastIntegrityFact(props: {
 						chained
 					</span>
 					{/* As live: "chained" is the hash links only, and the vault has no anchor file (today). */}
-					{props.anchorFile !== "present" && <span className="ut-sub">{NOT_ANCHORED_NOTE}</span>}
+					{props.anchorFile !== "present" ? (
+						<span className="ut-sub" title={NOT_ANCHORED_NOTE}>
+							{NOT_ANCHORED_NOTE}
+						</span>
+					) : (
+						<Reserve line="sub" />
+					)}
 				</>
 			) : (
-				<span className="ut-pill" data-tone="stakes">
-					<i />
-					broken
-				</span>
+				<>
+					<span className="ut-pill" data-tone="stakes">
+						<i />
+						broken
+					</span>
+					<Reserve line="sub" />
+				</>
 			)}
-			<span className="ut-why">{why}</span>
+			<span className="ut-why" title={why}>
+				{why}
+			</span>
 		</div>
 	);
 }
@@ -329,7 +368,7 @@ export function BudgetFact(props: { s: SummaryPayload }): React.JSX.Element {
 					{s.remainingUt < 0 ? (
 						<>
 							<span
-								className="ut-why red"
+								className="ut-amts red"
 								title={`overspent by ${formatUsd(-s.remainingUt)} of ${formatUsd(s.budget)}`}
 							>
 								overspent by {formatUsdTotal(-s.remainingUt)} of {formatUsdTotal(s.budget)}
@@ -351,15 +390,23 @@ export function BudgetFact(props: { s: SummaryPayload }): React.JSX.Element {
 							</span>
 						</>
 					)}
-					<span className="ut-why" title={asOf.title ?? undefined}>
+					<span className="ut-why" title={asOf.title ?? asOf.text}>
 						{asOf.text}
 					</span>
 				</>
 			) : (
 				<>
-					<span className="v na">no remaining figure</span>
-					<span className={`ut-why${s.budgetSource === "unreadable" ? " info" : ""}`}>
-						{/* A controller's record with no usable figure still must not call itself "enforced" once stale. */}
+					<span className="v na" title="no remaining figure">
+						no remaining figure
+					</span>
+					<Reserve line="meter" />
+					<Reserve line="amts" />
+					<Reserve line="sub" />
+					{/* A controller's record with no usable figure still must not call itself "enforced" once stale. */}
+					<span
+						className={`ut-why${s.budgetSource === "unreadable" ? " info" : ""}`}
+						title={asOf.isRecord ? asOf.text : s.budgetProvenance}
+					>
 						{asOf.isRecord ? asOf.text : s.budgetProvenance.replace(/^unknown: /, "")}
 					</span>
 				</>
@@ -477,13 +524,10 @@ export function SummaryStrip(props: {
 						{/* "chained", never "verified": this is the hash links re-checked by the dashboard, not an explicit,
 					    anchored check. Without an anchor file it says so under the pill. */}
 						{status === "verified" && (
-							<>
-								<span className="ut-pill" data-tone="approve" title={CHAINED_TITLE}>
-									<i />
-									chained
-								</span>
-								{s.anchorFile !== "present" && <span className="ut-sub">{NOT_ANCHORED_NOTE}</span>}
-							</>
+							<span className="ut-pill" data-tone="approve" title={CHAINED_TITLE}>
+								<i />
+								chained
+							</span>
 						)}
 						{status === "broken" && (
 							<span className="ut-pill" data-tone="stakes">
@@ -497,9 +541,18 @@ export function SummaryStrip(props: {
 								no events
 							</span>
 						)}
+						{/* The pill's line under it, in every state (held empty when it has nothing to say), so the fact keeps its
+						    height. */}
+						{status === "verified" && s.anchorFile !== "present" ? (
+							<span className="ut-sub" title={NOT_ANCHORED_NOTE}>
+								{NOT_ANCHORED_NOTE}
+							</span>
+						) : (
+							<Reserve line="sub" />
+						)}
 						<span
 							className="ut-why"
-							title="The dashboard is a monitor: usertrust verify is the authoritative check of a vault"
+							title={`${verifiedAsOf(s.verifiedAt)}. The dashboard is a monitor: usertrust verify is the authoritative check of a vault`}
 						>
 							{verifiedAsOf(s.verifiedAt)}
 						</span>

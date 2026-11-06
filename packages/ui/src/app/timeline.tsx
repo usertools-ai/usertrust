@@ -46,6 +46,8 @@ export function Timeline(props: {
 	onPreview(pos: number): void;
 	/** Write the position to the address (the drag settled). */
 	onCommit(pos: number): void;
+	/** A drag started (true) or ended (false): the page holds the list meanwhile. */
+	onHold(holding: boolean): void;
 	onLive(): void;
 }): React.JSX.Element {
 	const { at, wanted, head } = props;
@@ -65,6 +67,7 @@ export function Timeline(props: {
 				setThumb(null);
 				handlers.current.onCommit(p);
 			},
+			(active) => handlers.current.onHold(active),
 		);
 	useEffect(() => () => scrub.current?.cancel(), []);
 	// Back, Forward or a link moved the address under a drag: drop its pending commit, and the thumb with it.

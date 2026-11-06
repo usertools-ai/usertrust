@@ -201,6 +201,69 @@ describe("the header at a past position", () => {
 		expect(lines(past)).toBe(lines(live));
 	});
 
+	it("every fact has the same lines live and past, in every state, so the facts row never changes height", () => {
+		/** Each fact's line slots, in order: what the stylesheet gives a fixed height. */
+		const slots = (html: string): string[] => {
+			const facts = html.slice(html.indexOf('class="ut-facts"'));
+			return facts
+				.split('<div class="ut-fact')
+				.slice(1)
+				.map((f) =>
+					(
+						f.match(
+							/class="(v|v na|ut-meter|ut-amts|ut-amts red|ut-sub|ut-sub mono|ut-why|ut-why info|ut-pill|ut-info)"/g,
+						) ?? []
+					)
+						.map((c) => c.replace(/class="|"/g, "").split(" ")[0])
+						.join(","),
+				);
+		};
+		const lives = [
+			summary(),
+			summary({
+				budget: null,
+				remainingUt: null,
+				budgetSource: "unpublished",
+				budgetProvenance: "unknown: none",
+			}),
+			summary({ remainingUt: -5_000 }),
+			summary({ anchorFile: "present" }),
+			summary({ chain: { events: 100, valid: false, empty: false, breakIndex: 30, errors: [] } }),
+		];
+		const pasts = [
+			at(),
+			at({ budget: { ut: null, note: NOTE } }),
+			at({ chain: { valid: false, breakIndex: 30 } }),
+		];
+		const expected = slots(strip(null, lives[0]));
+		expect(expected.length).toBeGreaterThanOrEqual(5);
+		for (const s of lives) expect(slots(strip(null, s))).toEqual(expected);
+		for (const s of lives) for (const a of pasts) expect(slots(strip(a, s))).toEqual(expected);
+	});
+
+	it("each fact line has a fixed height in the stylesheet; long text is clamped, never wrapped taller", () => {
+		const css = readFileSync(join(import.meta.dirname, "..", "src", "app", "styles.css"), "utf-8");
+		const rule = (sel: string): string => {
+			const esc = sel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			const m = new RegExp(`(?:^|[}\\s])${esc} \\{([^}]*)\\}`, "m").exec(css);
+			return m?.[1] ?? "";
+		};
+		expect(rule(".ut-facts .ut-fact .v")).toMatch(/height: 20px;/);
+		expect(rule(".ut-facts .ut-fact .v")).toMatch(/white-space: nowrap;/);
+		expect(rule(".ut-facts .ut-sub")).toMatch(/height: 14px;/);
+		expect(rule(".ut-facts .ut-amts")).toMatch(/height: 16px;/);
+		expect(rule(".ut-facts .ut-why")).toMatch(/height: 34px;/);
+		expect(rule(".ut-facts .ut-why")).toMatch(/-webkit-line-clamp: 2;/);
+		expect(rule('.ut-facts [data-reserve="true"]')).toMatch(/visibility: hidden;/);
+	});
+
+	it("a clamped line keeps its full text in a title", () => {
+		const html = strip(at());
+		expect(html).toMatch(
+			new RegExp(`<span class="ut-why" title="${NOTE.replace("'", "&#x27;")}">`),
+		);
+	});
+
 	it("the anchor file at T is today's, and says so", () => {
 		expect(text(strip(at()))).toMatch(/today: not set up/);
 		expect(text(strip(null))).not.toMatch(/today:/);
@@ -331,6 +394,18 @@ describe("the timeline", () => {
 		const html = text(render({ wanted: 41, error: "the vault has no records" }));
 		expect(html).toContain("the vault has no records");
 		expect(html).toContain("showing the live vault");
+	});
+
+	it("its head row is one fixed height live and past (on a phone, the buttons' row is held under the label)", () => {
+		const css = readFileSync(join(import.meta.dirname, "..", "src", "app", "styles.css"), "utf-8");
+		expect(css).toMatch(/\.ut-tl-head \{[^}]*\bheight: 26px;/);
+		const phone = css.slice(css.indexOf("@media (max-width: 760px)"));
+		expect(phone).toMatch(/\.ut-tl-head \{[^}]*min-height: 53px;/);
+		expect(phone).toMatch(/\.ut-tl-label \{\s*flex-basis: 100%;\s*\}/);
+		// No rule gives a past label a different size from a live one.
+		expect(css).not.toMatch(
+			/\.ut-tl-label\[data-past="true"\] \{[^}]*(flex-basis|white-space|font)/,
+		);
 	});
 
 	it("an epoch change says the vault was reloaded", () => {
