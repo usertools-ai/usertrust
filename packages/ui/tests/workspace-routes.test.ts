@@ -14,9 +14,10 @@ import {
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAuditWriter } from "../../core/src/audit/chain.js";
 import { createUiServer, type UiServer } from "../src/server/server.js";
+import { Workspace } from "../src/server/workspace.js";
 import type { SettingsPayload } from "../src/shared/api.js";
 
 const posix = process.platform !== "win32";
@@ -27,11 +28,24 @@ interface Reply {
 	body: string;
 }
 
-/** Raw HTTP request: lets a test set Host and Origin, and send any method and body. */
+/**
+ * Raw HTTP request: lets a test set Host and Origin, and send any method and body. A body is sent with its
+ * content-length, unless `chunked` asks for chunked transfer encoding.
+ */
 function send(
 	port: number,
-	options: { method?: string; path: string; headers?: Record<string, string>; body?: string },
+	options: {
+		method?: string;
+		path: string;
+		headers?: Record<string, string>;
+		body?: string;
+		chunked?: boolean;
+	},
 ): Promise<Reply> {
+	const headers: Record<string, string | number> = { ...options.headers };
+	if (options.body !== undefined && options.chunked !== true) {
+		headers["content-length"] = Buffer.byteLength(options.body);
+	}
 	return new Promise((resolvePromise, reject) => {
 		const req = request(
 			{
@@ -39,7 +53,7 @@ function send(
 				port,
 				method: options.method ?? "GET",
 				path: options.path,
-				headers: options.headers,
+				headers,
 			},
 			(res) => {
 				const chunks: Buffer[] = [];
@@ -92,6 +106,7 @@ describe("settings routes", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		await ui?.close();
 		ui = undefined;
 		rmSync(tempDir, { recursive: true, force: true });
@@ -111,6 +126,7 @@ describe("settings routes", () => {
 		server: UiServer,
 		body: string,
 		headers: Record<string, string> = {},
+		chunked = false,
 	): Promise<Reply> {
 		return send(server.port, {
 			method: "PUT",
@@ -121,6 +137,7 @@ describe("settings routes", () => {
 				...headers,
 			},
 			body,
+			chunked,
 		});
 	}
 
@@ -282,14 +299,68 @@ describe("settings routes", () => {
 		expect(settingsBytes()).toBeNull();
 	});
 
-	it("PUT over 4 KB is 413", async () => {
+	it("PUT over 4 KB is 413, with a content-length and chunked", async () => {
 		const server = await start();
-		const res = await put(
-			server,
-			JSON.stringify({ key: "plan.monthlyUt", value: 1, pad: "x".repeat(5000) }),
-		);
-		expect(res.status).toBe(413);
+		const big = JSON.stringify({ key: "plan.monthlyUt", value: 1, pad: "x".repeat(5000) });
+		// The rest of the body is read and dropped before the 413, so the close is clean and the client always
+		// reads the status; a reset would surface here as a rejected request, not a status.
+		for (const chunked of [false, true]) {
+			const res = await put(server, big, {}, chunked);
+			expect(res.status, chunked ? "chunked" : "content-length").toBe(413);
+			expect(res.headers.connection).toBe("close");
+		}
 		expect(settingsBytes()).toBeNull();
+		// The server still answers after both.
+		expect((await put(server, valid)).status).toBe(200);
+	});
+
+	it("a settings log that throws on read is a 500, and the server keeps serving", async () => {
+		const server = await start();
+		expect((await put(server, valid)).status).toBe(200);
+		// A read that throws from inside the workspace (an I/O error, the file swapped mid-read): a file that is
+		// merely the wrong kind is caught by the safety check first and never read, so this uses a seam.
+		const eio = Object.assign(new Error("EIO: i/o error, read"), { code: "EIO" });
+		const history = vi.spyOn(Workspace.prototype, "history").mockImplementation(() => {
+			throw eio;
+		});
+		const get = await send(server.port, { path: "/api/settings" });
+		expect(get.status).toBe(500);
+		expect(JSON.parse(get.body)).toEqual({ error: "settings could not be read" });
+		// A write whose read-back throws: saved, but the answer is the same 500.
+		const written = await put(server, JSON.stringify({ key: "people.rateUsdPerHour", value: 90 }));
+		expect(written.status).toBe(500);
+		expect(JSON.parse(written.body)).toEqual({ error: "settings could not be read" });
+		// The process is alive.
+		expect((await send(server.port, { path: "/api/summary" })).status).toBe(200);
+		history.mockRestore();
+		expect((await getSettings(server)).history).toHaveLength(2);
+	});
+
+	it("an I/O failure on write is a 500 with a fixed message", async () => {
+		const server = await start();
+		const enospc = Object.assign(new Error("ENOSPC: no space left on device, write"), {
+			code: "ENOSPC",
+		});
+		vi.spyOn(Workspace.prototype, "append").mockImplementation(() => {
+			throw enospc;
+		});
+		const res = await put(server, valid);
+		expect(res.status).toBe(500);
+		expect(JSON.parse(res.body)).toEqual({ error: "settings could not be saved" });
+		expect((await send(server.port, { path: "/api/summary" })).status).toBe(200);
+	});
+
+	it("an unknown api path is 404 and closes the connection, so the next request is not lost", async () => {
+		const server = await start();
+		const res = await send(server.port, {
+			method: "POST",
+			path: "/api/nope",
+			headers: { "content-type": "application/json" },
+			body: valid,
+		});
+		expect(res.status).toBe(404);
+		expect(res.headers.connection).toBe("close");
+		expect((await send(server.port, { path: "/api/session" })).status).toBe(200);
 	});
 
 	it("the vault directory is byte-identical after PUTs", async () => {

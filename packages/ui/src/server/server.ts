@@ -63,6 +63,7 @@ import {
 	isSettingValue,
 	SETTING_KEYS,
 	Workspace,
+	WorkspaceRefusal,
 	workspaceDir,
 } from "./workspace.js";
 
@@ -74,6 +75,9 @@ const EXPORT_BODY_CAP = 64 * 1024;
 
 /** Maximum accepted PUT /api/settings request body, in bytes. */
 const SETTINGS_BODY_CAP = 4 * 1024;
+
+/** The answer when the settings log cannot be read. */
+const SETTINGS_UNREADABLE = "settings could not be read";
 
 /** The header every settings write carries the session token in. */
 const TOKEN_HEADER = "x-usertrust-token";
@@ -109,9 +113,15 @@ function tokenMatches(given: string | string[] | undefined, token: string): bool
 	return a.length === b.length && timingSafeEqual(a, b);
 }
 
+/** How much of an over-cap body is read and dropped before the 413; past this the connection is cut. */
+const DRAIN_CAP = 1024 * 1024;
+
 /**
- * Reads the request body up to `cap` bytes and hands it to `onBody` as text. Past the cap it answers 413 and
- * stops reading; `onBody` is then never called.
+ * Reads the request body up to `cap` bytes and hands it to `onBody` as text. Past the cap nothing more is kept and
+ * `onBody` is never called: the rest is read and dropped, and the 413 is sent once the body ends, with the
+ * connection closed. Closing with body bytes still unread would make the close a reset, which can reach the
+ * client before it has read the 413. A body more than DRAIN_CAP past the cap gets the 413 at once and the socket
+ * is cut.
  */
 function readBody(
 	req: IncomingMessage,
@@ -122,24 +132,36 @@ function readBody(
 	const chunks: Buffer[] = [];
 	let received = 0;
 	let overCap = false;
+	let cut = false;
+	const tooLarge = { error: "request body too large" };
 	req.on("data", (chunk: Buffer) => {
-		if (overCap) return;
+		if (cut) return;
 		received += chunk.length;
-		// Flush the 413 before destroying, so the client reliably sees the status.
-		if (received > cap) {
-			overCap = true;
-			const payload = JSON.stringify({ error: "request body too large" });
+		if (received > cap + DRAIN_CAP) {
+			cut = true;
+			// Flush the 413 before destroying, so the client has the best chance to see the status.
+			const payload = JSON.stringify(tooLarge);
 			res.writeHead(413, {
 				"content-type": "application/json",
 				"content-length": Buffer.byteLength(payload),
+				connection: "close",
 			});
 			res.end(payload, () => req.destroy());
+			return;
+		}
+		if (received > cap) {
+			overCap = true;
+			chunks.length = 0;
 			return;
 		}
 		chunks.push(chunk);
 	});
 	req.on("end", () => {
-		if (overCap) return;
+		if (cut) return;
+		if (overCap) {
+			refuse(res, 413, tooLarge);
+			return;
+		}
 		onBody(Buffer.concat(chunks).toString("utf-8"));
 	});
 }
@@ -216,6 +238,20 @@ export async function createUiServer(
 		if (settingsDir === null) return null;
 		workspace ??= Workspace.open(settingsDir);
 		return workspace;
+	}
+	/**
+	 * Answers with the settings. A read of the log can throw (an I/O error, the file replaced mid-read): that is a
+	 * 500 with a fixed message, never a throw out of the handler, which would end the process.
+	 */
+	function sendSettings(res: ServerResponse): void {
+		let payload: SettingsPayload;
+		try {
+			payload = settingsPayload();
+		} catch {
+			sendJson(res, 500, { error: SETTINGS_UNREADABLE });
+			return;
+		}
+		sendJson(res, 200, payload, { "cache-control": "no-store" });
 	}
 	function settingsPayload(): SettingsPayload {
 		const ws = openWorkspace();
@@ -495,7 +531,7 @@ export async function createUiServer(
 		// Each route takes only its listed methods (`API_METHODS`); the routes below rely on this.
 		const methods = methodsFor(url.pathname);
 		if (methods === undefined) {
-			sendJson(res, 404, { error: "not found" });
+			refuse(res, 404, { error: "not found" });
 			return;
 		}
 		if (!methods.includes(req.method ?? "")) {
@@ -517,7 +553,7 @@ export async function createUiServer(
 			return;
 		}
 		if (url.pathname === "/api/settings" && req.method === "GET") {
-			sendJson(res, 200, settingsPayload(), { "cache-control": "no-store" });
+			sendSettings(res);
 			return;
 		}
 		if (url.pathname === "/api/settings") {
@@ -560,7 +596,13 @@ export async function createUiServer(
 					sendJson(res, 400, { error: `${key} needs a finite number >= 0, or null` });
 					return;
 				}
-				const ws = openWorkspace();
+				let ws: Workspace | null;
+				try {
+					ws = openWorkspace();
+				} catch {
+					sendJson(res, 500, { error: SETTINGS_UNREADABLE });
+					return;
+				}
 				if (ws === null) {
 					sendJson(res, 409, { error: settingsOff });
 					return;
@@ -568,11 +610,13 @@ export async function createUiServer(
 				try {
 					ws.append(key, value);
 				} catch (err) {
-					// The workspace refused the write (unsafe, or the file could not be written); nothing was saved.
-					sendJson(res, 409, { error: err instanceof Error ? err.message : String(err) });
+					// A safety refusal is the workspace's answer (409, with its reason); anything else is an I/O
+					// failure (a full disk, a permission error) and a server fault, with a fixed message.
+					if (err instanceof WorkspaceRefusal) sendJson(res, 409, { error: err.message });
+					else sendJson(res, 500, { error: "settings could not be saved" });
 					return;
 				}
-				sendJson(res, 200, settingsPayload(), { "cache-control": "no-store" });
+				sendSettings(res);
 			});
 			return;
 		}
@@ -659,7 +703,7 @@ export async function createUiServer(
 		}
 		if (url.pathname.startsWith("/api/")) {
 			// A path listed in API_METHODS with no branch above.
-			sendJson(res, 404, { error: "not found" });
+			refuse(res, 404, { error: "not found" });
 			return;
 		}
 		// Non-API routes: the prebuilt SPA, with index.html fallback for client routing.

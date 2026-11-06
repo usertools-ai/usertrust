@@ -148,6 +148,14 @@ function notPrivate(st: Stats, name: string, forbidden: number): string | null {
 	return null;
 }
 
+/**
+ * A write the workspace refused for safety (it is unsafe, or the settings file is not a private regular file).
+ * Any other failure of a write is an I/O error and is thrown as it is.
+ */
+export class WorkspaceRefusal extends Error {
+	override name = "WorkspaceRefusal";
+}
+
 export class Workspace {
 	readonly #dir: string;
 	readonly #file: string;
@@ -192,7 +200,7 @@ export class Workspace {
 		const unsafe = this.#check();
 		if (unsafe !== null) {
 			this.#unsafe = unsafe;
-			throw new Error(`settings are not saved: ${unsafe}`);
+			throw new WorkspaceRefusal(`settings are not saved: ${unsafe}`);
 		}
 		const entry: SettingEntry = { at: at.toISOString(), key, value };
 		const fd = openSync(
@@ -202,9 +210,11 @@ export class Workspace {
 		);
 		try {
 			const st = fstatSync(fd);
-			if (!st.isFile()) throw new Error(`settings are not saved: ${SETTINGS_FILE} is not a file`);
+			if (!st.isFile()) {
+				throw new WorkspaceRefusal(`settings are not saved: ${SETTINGS_FILE} is not a file`);
+			}
 			const why = notPrivate(st, SETTINGS_FILE, 0o077);
-			if (why !== null) throw new Error(`settings are not saved: ${why}`);
+			if (why !== null) throw new WorkspaceRefusal(`settings are not saved: ${why}`);
 			// A torn last line stays as it is; the new line starts on a line of its own.
 			const lead = st.size > 0 && this.#lastByte(st.size) !== 0x0a ? "\n" : "";
 			const bytes = Buffer.from(`${lead}${JSON.stringify(entry)}\n`, "utf-8");
