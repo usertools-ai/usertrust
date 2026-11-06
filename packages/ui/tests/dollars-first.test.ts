@@ -63,6 +63,8 @@ function rows(...costs: number[]): LedgerRow[] {
 	return toLedgerRows(
 		costs.map((c, i) => evt(i + 1, c)),
 		{ valid: true, breakIndex: null },
+		undefined,
+		0,
 	);
 }
 

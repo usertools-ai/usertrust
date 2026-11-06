@@ -38,6 +38,7 @@ describe("formatUtc", () => {
 	it("the date a row shows is the date the date filters keep it under", () => {
 		const row: LedgerRow = {
 			seq: 1,
+			pos: 0,
 			id: "e1",
 			ts: "2026-10-10T23:41:08.311Z",
 			kind: "llm_call",
@@ -56,6 +57,7 @@ describe("formatUtc", () => {
 	it("a timestamp written with an offset is shown AND filtered at its UTC date, never its local one", () => {
 		const row: LedgerRow = {
 			seq: 1,
+			pos: 0,
 			id: "e2",
 			ts: "2026-10-13T01:30:00+02:00",
 			kind: "llm_call",
