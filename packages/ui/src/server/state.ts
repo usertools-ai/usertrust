@@ -50,6 +50,12 @@ export interface LedgerState {
 	 * first row); anything that compares a break with a position compares with this one.
 	 */
 	fullBreakIndex: number | null;
+	/**
+	 * Whether the chain break (`fullBreakIndex`) is the vault's ONLY failure, so the events before it verify on their
+	 * own. False when there is no break, and whenever the vault also fails for a reason no event marks (a malformed or
+	 * torn line, an anchor, a sequence gap, a deletion, a read that failed) or the load cannot tell (`breakIsOnlyFailure`).
+	 */
+	breakIsOnlyFailure: boolean;
 	summary: SummaryPayload;
 	lastHash: string;
 	/**
@@ -529,6 +535,7 @@ function loadPass(
 		transfers,
 		positions,
 		fullBreakIndex,
+		breakIsOnlyFailure: breakIsOnlyFailure(fullBreakIndex, errors, loadSucceeded),
 		summary: {
 			vaultPath,
 			...budgetSummary(vaultPath, spentUt),
@@ -591,6 +598,33 @@ function loadPass(
 	};
 	loadSeam.afterPass?.({ consistent, readSucceeded, contained });
 	return { state, consistent, contained };
+}
+
+/**
+ * The verifier's errors that name one event, by its 1-based index in the list it walked: "Event N (id): hash mismatch"
+ * and "Event N (id): previousHash mismatch". The prefix is the verifier's own text (the id follows it), so a vault cannot
+ * make another error read as one of these. Every other error it writes (malformed JSON, an anchor, a sequence gap, a
+ * deletion, a file it could not read) names no event.
+ */
+const EVENT_ERROR = /^Event (\d+) \(/;
+
+/**
+ * Whether the chain break at `breakIndex` is the vault's only failure: the load read the vault whole, and every error
+ * of the verdict names an event at or after the break (which the break already accounts for). Any error that names no
+ * event, or an event before the break, means the vault fails for another reason too, and so does a load that did not
+ * read the vault whole, or a break the verifier reported nothing for: the answer is then false, never a guess, and
+ * no position reads valid.
+ */
+function breakIsOnlyFailure(
+	breakIndex: number | null,
+	errors: readonly string[],
+	loadSucceeded: boolean,
+): boolean {
+	if (breakIndex === null || !loadSucceeded || errors.length === 0) return false;
+	return errors.every((e) => {
+		const m = EVENT_ERROR.exec(e);
+		return m !== null && Number(m[1]) - 1 >= breakIndex;
+	});
 }
 
 /**

@@ -19,9 +19,10 @@ const INITIAL_CAPACITY = 65_536;
 /**
  * A time given as input: ISO-8601 extended form, a date AND a time, with its zone (`Z` or a `±hh:mm` offset), seconds and
  * a fraction optional. A time with no zone would be read as local time; a date alone, as UTC midnight, by accident.
+ * The `T` and the `Z` may be lower case, as RFC 3339 allows.
  */
 const ZONED_ISO =
-	/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|([+-])(\d{2}):(\d{2}))$/;
+	/^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:[Zz]|([+-])(\d{2}):(\d{2}))$/;
 
 /**
  * Epoch ms for a time given as input (`ZONED_ISO`), or NaN when it is not one. Every field is checked against the
@@ -31,7 +32,9 @@ export function parseZonedTime(t: string): number {
 	const m = ZONED_ISO.exec(t);
 	if (m === null) return Number.NaN;
 	const [, y, mo, d, h, mi, s, sign, oh, om] = m;
-	const ms = Date.parse(t);
+	// Upper-cased for `Date.parse`, whose format names `T` and `Z` in upper case; the pattern has passed, so only those
+	// two letters can change.
+	const ms = Date.parse(t.toUpperCase());
 	if (Number.isNaN(ms) || Number(oh ?? 0) > 23 || Number(om ?? 0) > 59) return Number.NaN;
 	const offsetMin = (sign === "-" ? -1 : 1) * (Number(oh ?? 0) * 60 + Number(om ?? 0));
 	// The wall clock the input names, read back from the instant: any field out of range shows as a difference.

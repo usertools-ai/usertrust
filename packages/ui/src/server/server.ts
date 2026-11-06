@@ -434,8 +434,9 @@ export async function createUiServer(
 	let version = 0;
 	/**
 	 * Bumped by a full reload (`handleResync`) that yields other records than the state it replaces: another log
-	 * (`logId`), another number of events, or another tip (`lastHash`). A position can then name another record (a log
-	 * replaced, truncated, rotated). Never by an append, and never by a reload of an unchanged vault (the periodic
+	 * (`logId`), another number of events, another tip (`lastHash`), or another break index (`fullBreakIndex`: a record
+	 * rewritten in place, the tip kept). A position can then name another record (a log replaced, truncated, rotated)
+	 * or one that reads otherwise. Never by an append, and never by a reload of an unchanged vault (the periodic
 	 * re-verify), which would read to the page as a reload every few minutes. `AtPayload.epoch` carries it.
 	 */
 	let epoch = 0;
@@ -588,7 +589,8 @@ export async function createUiServer(
 		if (
 			state.logId !== before.logId ||
 			state.positions.length !== before.positions.length ||
-			state.lastHash !== before.lastHash
+			state.lastHash !== before.lastHash ||
+			state.fullBreakIndex !== before.fullBreakIndex
 		)
 			epoch += 1;
 		auditDirSeen ||= state.auditDirPresent;
@@ -619,10 +621,12 @@ export async function createUiServer(
 	 *   is -Infinity), so the 404 is judged against the first time that does. Such records stay reachable by `pos`.
 	 * - `counts`: `llm_call` records (an `llm_call_failed` is not one: it counts as `other`), denials (`policy_denied`
 	 *   and `ledger_rejected`), and every other record, at positions `0..pos`. `spentUt` is the header's Spend rule.
-	 * - `chain`: never claims more than the whole-vault verdict. With a break, valid while `pos` is before the
-	 *   FULL-list break index (`LedgerState.fullBreakIndex`), never the slice-relative index the rows use. With no break,
-	 *   the whole-vault verdict (`summary.chain.valid`) at every position: a vault that fails for a reason no event marks
-	 *   (a mismatched anchor, a torn line, a latched deletion) is invalid at every position.
+	 * - `chain`: never claims more than the whole-vault verdict. A position before the break reads valid only when the
+	 *   break is the vault's ONLY failure (`LedgerState.breakIsOnlyFailure`), and then while `pos` is before the
+	 *   FULL-list break index (`LedgerState.fullBreakIndex`), never the slice-relative index the rows use. A vault that
+	 *   also fails for a reason no event marks (a malformed or torn line, an anchor mismatch, a latched deletion), or
+	 *   whose load cannot tell, is invalid at every position, break or not. With no break, it is the whole-vault verdict
+	 *   (`summary.chain.valid`) at every position.
 	 * - `plan`: the workspace value in force at the position's RUNNING-MAXIMUM time (`timeMsAt`: the latest time
 	 *   recorded at or before it), not necessarily the event's own `ts`. In a log written in order the two are the
 	 *   same; in one whose times are out of order (several writers), it is the instant `positionAt` searches over, so
@@ -683,7 +687,10 @@ export async function createUiServer(
 			spentUt: positions.spentUtAt(pos),
 			counts: positions.countsAt(pos),
 			chain: {
-				valid: breakIndex === null ? state.summary.chain.valid : pos < breakIndex,
+				valid:
+					breakIndex === null
+						? state.summary.chain.valid
+						: state.breakIsOnlyFailure && pos < breakIndex,
 				breakIndex,
 			},
 			budget: { ut: state.summary.budget, note: BUDGET_NOTE },
@@ -709,11 +716,17 @@ export async function createUiServer(
 
 	/**
 	 * The status at `pos` of each held row at or before it whose transfer has a record after it. The rows held are
-	 * contiguous by position from `windowStartPos`, so a row is found by its position; one not held is skipped.
+	 * contiguous by position from `windowStartPos`, so a row is found by its position; one not held is skipped. A
+	 * position before the first row held has no held row at or before it, and a transfer whose rows up to `pos` all fall
+	 * before the window has none either: neither costs a verdict.
 	 */
 	function statusAt(pos: number, windowStartPos: number): Record<string, RowStatus> {
 		const out: Record<string, RowStatus> = {};
+		if (pos < windowStartPos) return out;
 		for (const { key, rowPositions } of state.transfers.openAcross(pos)) {
+			// Increasing: the last is the latest row at or before `pos`.
+			const last = rowPositions.at(-1);
+			if (last === undefined || last < windowStartPos) continue;
 			// Undefined when `transferVerdict` gives none over the records up to `pos`: `statusFor` takes undefined
 			// explicitly and reads an outcome row with no verdict as "unknown", as the rows built at load do.
 			const verdict: TransferStatus | undefined = state.transfers.verdictAt(key, pos);

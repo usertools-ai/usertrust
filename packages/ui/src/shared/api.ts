@@ -106,8 +106,11 @@ export interface AtPayload {
 	/** Whether the position asked for was past the head, so `pos` is the head instead. */
 	clamped: boolean;
 	/**
-	 * Bumped by every full reload: a position names a record only within one epoch, so a page holding `#at=N` from
-	 * another epoch knows that N may now name another record.
+	 * Bumped by a full reload whose records differ from the state it replaces: another log identity, event count, tip
+	 * hash or break index. A reload of an unchanged vault (the periodic re-verify) and an append leave it as it was. A
+	 * position names a record only within one epoch, so a page holding `#at=N` from another epoch knows that N may now
+	 * name another record. It starts at 0 on every server start, so two starts can share a value: a page reconnects and
+	 * reloads when the server restarts, and never compares epochs across one.
 	 */
 	epoch: number;
 	/** Spend at `pos`: the cost of every `llm_call` record at positions `0..pos` (the header's Spend rule). */

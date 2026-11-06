@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deriveChainIntegrity, type PersistedAuditEvent, readLedgerEvents } from "usertrust";
 import { canonicalize } from "usertrust-verify";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAuditWriter } from "../../core/src/audit/chain.js";
 import { parseZonedTime } from "../src/server/position-index.js";
 import { createUiServer, type UiServer } from "../src/server/server.js";
@@ -30,6 +30,7 @@ const T0 = Date.parse("2026-11-06T10:00:00.000Z");
 const NOTE = "budget history starts with the first budget record; this is today's budget";
 
 type Spec = { kind: string; data?: Record<string, unknown>; timestamp?: string };
+type SummaryChain = { valid: boolean; breakIndex: number | null; errors: string[] };
 
 /** A hash-linked chain with `sequence`, one event per spec; event i is at 10:00Z plus i minutes unless given. */
 function chain(specs: readonly Spec[]): PersistedAuditEvent[] {
@@ -88,6 +89,12 @@ describe("GET /api/at", () => {
 		return { status: res.status, body: (await res.json()) as AtPayload & { error?: string } };
 	}
 
+	/** The whole-vault verdict, as `/api/summary` gives it. */
+	async function summaryChain(): Promise<SummaryChain> {
+		const res = await fetch(`http://127.0.0.1:${(ui as UiServer).port}/api/summary`);
+		return ((await res.json()) as { chain: SummaryChain }).chain;
+	}
+
 	async function seed(count: number, spec?: (i: number) => Spec): Promise<void> {
 		const writer = createAuditWriter(tempDir);
 		for (let i = 0; i < count; i++) {
@@ -117,6 +124,7 @@ describe("GET /api/at", () => {
 			data: { cost: (i % 9) + 0.5, settled: true, transferId: `tx_${i}` },
 		}));
 		await start();
+		expect(await summaryChain()).toMatchObject({ valid: true, breakIndex: null });
 		const lines = readFileSync(logPath, "utf-8").trim().split("\n");
 		for (const pos of [0, 10, 49]) {
 			const { status, body } = await at(`pos=${pos}`);
@@ -232,7 +240,11 @@ describe("GET /api/at", () => {
 		expect(parseZonedTime("2026-11-06T10:00:00.000Z")).toBe(T0);
 		expect(parseZonedTime("2026-11-06T05:30:00-04:30")).toBe(T0);
 		expect(parseZonedTime("2028-02-29T00:00:00Z")).toBe(Date.parse("2028-02-29T00:00:00Z"));
+		expect(parseZonedTime("2026-11-06t10:00:00z")).toBe(T0);
+		expect(parseZonedTime("2026-11-06t05:30:00-04:30")).toBe(T0);
 		for (const bad of [
+			"2026-11-06T23:59:60Z",
+			"2026-11-06x10:00:00Z",
 			"2026-11-06",
 			"2026-11-06T10:00:00",
 			"2026-11-06T10:00:00+02",
@@ -251,6 +263,8 @@ describe("GET /api/at", () => {
 		await seed(12);
 		tamper(8);
 		await start();
+		// The whole vault fails, and the break is its only failure: the prefix before it verifies.
+		expect(await summaryChain()).toMatchObject({ valid: false, breakIndex: 8 });
 		expect((await at("pos=5")).body.chain).toEqual({ valid: true, breakIndex: 8 });
 		expect((await at("pos=7")).body.chain.valid).toBe(true);
 		expect((await at("pos=8")).body.chain.valid).toBe(false);
@@ -261,6 +275,7 @@ describe("GET /api/at", () => {
 		await seed(40);
 		tamper(5);
 		await start({ rowCap: 10 });
+		expect(await summaryChain()).toMatchObject({ valid: false, breakIndex: 5 });
 		const three = await at("pos=3");
 		expect(three.body.chain).toEqual({ valid: true, breakIndex: 5 });
 		expect(three.body.windowStartPos).toBe(30);
@@ -272,12 +287,13 @@ describe("GET /api/at", () => {
 		await seed(40);
 		tamper(33);
 		await start({ rowCap: 10 });
+		expect(await summaryChain()).toMatchObject({ valid: false, breakIndex: 33 });
 		// The slice-relative index (3) would read this position as past the break.
 		expect((await at("pos=20")).body.chain).toEqual({ valid: true, breakIndex: 33 });
 		expect((await at("pos=34")).body.chain).toEqual({ valid: false, breakIndex: 33 });
 	});
 
-	it("unparseable line before a tampered one", async () => {
+	it("unparseable line before a tampered one: the break indexes the verifier's list, and the vault fails everywhere", async () => {
 		await seed(12);
 		const lines = readFileSync(logPath, "utf-8").trim().split("\n");
 		writeFileSync(
@@ -296,8 +312,38 @@ describe("GET /api/at", () => {
 			rows: Array<{ pos: number; id: string }>;
 		};
 		expect(rows.find((r) => r.id === tampered.id)?.pos).toBe(verifierIndex);
-		expect((await at("pos=6")).body.chain).toEqual({ valid: true, breakIndex: verifierIndex });
+		// The unparseable line is a failure no event marks: the break is not the vault's only one, so no position
+		// before it reads valid.
+		const summary = await summaryChain();
+		expect(summary).toMatchObject({ valid: false, breakIndex: verifierIndex });
+		expect(summary.errors.some((e) => e.startsWith("malformed JSON"))).toBe(true);
+		expect((await at("pos=0")).body.chain).toEqual({ valid: false, breakIndex: verifierIndex });
+		expect((await at("pos=6")).body.chain).toEqual({ valid: false, breakIndex: verifierIndex });
 		expect((await at("pos=7")).body.chain).toEqual({ valid: false, breakIndex: verifierIndex });
+	});
+
+	it("a torn tail beside an earlier break: invalid at every position", async () => {
+		await seed(8);
+		tamper(3);
+		appendFileSync(logPath, "{ not json");
+		await start();
+		expect(await summaryChain()).toMatchObject({ valid: false, breakIndex: 3 });
+		expect((await at("pos=1")).body.chain).toEqual({ valid: false, breakIndex: 3 });
+		expect((await at("pos=7")).body.chain).toEqual({ valid: false, breakIndex: 3 });
+	});
+
+	it("a mismatched anchor beside a break: invalid at every position", async () => {
+		await seed(8);
+		tamper(5);
+		// The anchor records more events than the log holds: a failure no event marks.
+		const meta = `${logPath}.meta`;
+		const anchor = JSON.parse(readFileSync(meta, "utf-8")) as Record<string, unknown>;
+		writeFileSync(meta, JSON.stringify({ ...anchor, sequence: 99 }));
+		await start();
+		const summary = await summaryChain();
+		expect(summary).toMatchObject({ valid: false, breakIndex: 5 });
+		expect(summary.errors.some((e) => e.startsWith("anchor mismatch"))).toBe(true);
+		expect((await at("pos=2")).body.chain).toEqual({ valid: false, breakIndex: 5 });
 	});
 
 	it("t with mixed precision and no zone", async () => {
@@ -318,6 +364,20 @@ describe("GET /api/at", () => {
 		expect((await at("t=2027-01-01T00:00:00Z")).body).toMatchObject({ pos: 4, head: 4 });
 		const early = await at("t=2026-11-06T09:59:59Z");
 		expect(early).toEqual({ status: 404, body: { error: "no records before this time" } });
+	});
+
+	it("t edges: a leap second, the first and last years, a lowercase t and z", async () => {
+		writeEvents(chain(Array.from({ length: 5 }, () => ({ kind: "llm_call", data: { cost: 1 } }))));
+		await start();
+		expect((await at("t=2026-11-06T23:59:60Z")).status).toBe(400);
+		expect(await at("t=0000-01-01T00:00:00Z")).toEqual({
+			status: 404,
+			body: { error: "no records before this time" },
+		});
+		expect((await at("t=9999-12-31T23:59:59Z")).body).toMatchObject({ pos: 4, head: 4 });
+		// RFC 3339 allows both letters in lower case.
+		expect((await at("t=2026-11-06t10:02:00z")).body.pos).toBe(2);
+		expect((await at("t=2026-11-06t10:02:00Z")).body.pos).toBe(2);
 	});
 
 	it("a first record whose time does not parse: a t before the first time that does is a 404", async () => {
@@ -375,8 +435,13 @@ describe("GET /api/at", () => {
 
 	it("epoch stays the same over the periodic re-verify of an unchanged vault", async () => {
 		await seed(5);
-		const saved = __tailTestSeam.reverifyMs;
-		__tailTestSeam.reverifyMs = 200;
+		// Only the intervals are faked: the watcher's re-verify is a `setInterval`, so advancing the clock runs it
+		// at once, with no wall-clock wait. Timeouts, I/O and HTTP stay real. The seam (read when the watcher starts)
+		// makes the re-verify 1 s and the 1 s backstop an hour, so advancing 2 s runs the two re-verifies and nothing else.
+		const saved = { reverifyMs: __tailTestSeam.reverifyMs, backstopMs: __tailTestSeam.backstopMs };
+		__tailTestSeam.reverifyMs = 1000;
+		__tailTestSeam.backstopMs = 3_600_000;
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
 		try {
 			const s = await start();
 			const port = s.port;
@@ -385,16 +450,64 @@ describe("GET /api/at", () => {
 					.version;
 			const v0 = await version();
 			const e0 = (await at("pos=4")).body.epoch;
-			// The re-verify is a full reload: it bumps the version, so waiting on the version proves one ran.
-			const deadline = Date.now() + 8000;
-			while ((await version()) < v0 + 2 && Date.now() < deadline) {
-				await new Promise((r) => setTimeout(r, 50));
-			}
-			expect(await version()).toBeGreaterThanOrEqual(v0 + 2);
+			// Two periods: two full reloads. Each bumps the version, which proves they ran.
+			vi.advanceTimersByTime(2000);
+			expect(await version()).toBe(v0 + 2);
 			expect((await at("pos=4")).body.epoch).toBe(e0);
+			await s.close();
+			ui = undefined;
 		} finally {
-			__tailTestSeam.reverifyMs = saved;
+			vi.useRealTimers();
+			__tailTestSeam.reverifyMs = saved.reverifyMs;
+			__tailTestSeam.backstopMs = saved.backstopMs;
 		}
+	});
+
+	it("an in-place rewrite that keeps the tip bumps epoch", async () => {
+		await seed(6);
+		const s = await start();
+		const before = await at("pos=5");
+		// Same log, same number of events, same tip: only the break index moves (null to 2).
+		const tip = readFileSync(logPath, "utf-8").trim().split("\n").at(-1);
+		tamper(2);
+		expect(readFileSync(logPath, "utf-8").trim().split("\n").at(-1)).toBe(tip);
+		s.reload();
+		const after = await at("pos=5");
+		expect(after.body.chain.breakIndex).toBe(2);
+		expect(after.body.head).toBe(before.body.head);
+		expect(after.body.epoch).toBeGreaterThan(before.body.epoch);
+	});
+
+	it("statusAt after a live append: an earlier position keeps the status it had", async () => {
+		await seed(4, (i) =>
+			i === 3
+				? { kind: "llm_call", data: { cost: 5, settled: true, transferId: "tx_live" } }
+				: { kind: "llm_call", data: { cost: 1, settled: true, transferId: `tx_${i}` } },
+		);
+		const s = await start();
+		const writer = createAuditWriter(tempDir);
+		await writer.appendEvent({
+			kind: "settlement_ambiguous",
+			actor: "local",
+			data: { error: "post failed", transferId: "tx_live" },
+		});
+		writer.release();
+		type Rows = { rows: Array<{ pos: number; hash: string; status: string }> };
+		let rows: Rows["rows"] = [];
+		const deadline = Date.now() + 8000;
+		while (Date.now() < deadline) {
+			rows = ((await (await fetch(`http://127.0.0.1:${s.port}/api/events`)).json()) as Rows).rows;
+			if (rows.length === 5) break;
+			await new Promise((r) => setTimeout(r, 50));
+		}
+		expect(rows.map((r) => r.pos)).toEqual([0, 1, 2, 3, 4]);
+		const row3 = rows[3] as Rows["rows"][number];
+		expect(row3.status).toBe("ambiguous");
+		const three = await at("pos=3");
+		// Extended by the append, not reloaded: same epoch, and the appended record is the head.
+		expect(three.body).toMatchObject({ head: 4, epoch: 0 });
+		expect(three.body.statusAt).toEqual({ [row3.hash]: "settled" });
+		expect((await at("pos=4")).body.statusAt).toEqual({});
 	});
 
 	it("a vault that fails with no break index reads invalid at every position", async () => {
@@ -441,6 +554,18 @@ describe("GET /api/at", () => {
 		const { status, body } = await at("pos=1");
 		expect(status).toBe(200);
 		expect(body.plan).toBeNull();
+	});
+
+	it("plan is null with a workspace that cannot be read, never an error", async () => {
+		writeEvents(chain([{ kind: "llm_call" }, { kind: "llm_call" }]));
+		const wsDir = join(wsBase, "workspace");
+		// The settings log is a directory: reading it fails.
+		mkdirSync(join(wsDir, "settings.jsonl"), { recursive: true, mode: 0o700 });
+		await start({ workspaceDir: wsDir });
+		const { status, body } = await at("pos=1");
+		expect(status).toBe(200);
+		expect(body.plan).toBeNull();
+		expect(body.pos).toBe(1);
 	});
 
 	it("bad params are 400", async () => {
