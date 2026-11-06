@@ -2,8 +2,8 @@
 // Copyright 2026 Usertools, Inc.
 
 import { describe, expect, it } from "vitest";
-import type { AtPayload } from "../src/shared/api.js";
-import { cutRows, windowNoteAt } from "../src/shared/asof.js";
+import type { AtPayload, SummaryPayload } from "../src/shared/api.js";
+import { cutRows, windowNote, windowNoteAt } from "../src/shared/asof.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 
 function row(pos: number, overrides: Partial<LedgerRow> = {}): LedgerRow {
@@ -81,5 +81,52 @@ describe("windowNoteAt", () => {
 	it("is null when the position is inside the window", () => {
 		expect(windowNoteAt(at({ pos: 100, windowStartPos: 100 }))).toBeNull();
 		expect(windowNoteAt(at({ pos: 2, windowStartPos: 0 }))).toBeNull();
+	});
+});
+
+describe("cutRows edge cases", () => {
+	it("a statusAt key whose row is past the cut leaves the row out", () => {
+		const out = cutRows(ROWS, at({ pos: 1, statusAt: { [ROWS[3]?.hash ?? ""]: "pending" } }));
+		expect(out.map((r) => r.pos)).toEqual([0, 1]);
+	});
+
+	it("a statusAt value equal to the current status keeps the same object", () => {
+		const out = cutRows(ROWS, at({ pos: 2, statusAt: { [ROWS[1]?.hash ?? ""]: "settled" } }));
+		expect(out[1]).toBe(ROWS[1]);
+	});
+
+	it("a __proto__ key is ignored", () => {
+		const statusAt = JSON.parse('{"__proto__":"pending"}') as AtPayload["statusAt"];
+		const protoRow = row(0, { hash: "__proto__" });
+		const out = cutRows([protoRow], at({ pos: 0, statusAt: {} }));
+		expect(out[0]).toBe(protoRow);
+		const out2 = cutRows(ROWS, at({ pos: 4, statusAt }));
+		out2.forEach((r, i) => {
+			expect(r).toBe(ROWS[i]);
+		});
+	});
+
+	it("pos one before the window start returns the note", () => {
+		expect(windowNoteAt(at({ pos: 99, windowStartPos: 100 }))).not.toBeNull();
+	});
+});
+
+describe("windowNote", () => {
+	const summary = (truncated: boolean): SummaryPayload =>
+		({ truncated, rowCount: 5, chain: { events: 50 } }) as unknown as SummaryPayload;
+
+	it("before the window: only the position's note", () => {
+		const n = windowNote(summary(true), at({ pos: 40, windowStartPos: 100 }));
+		expect(n).toBe(windowNoteAt(at({ pos: 40, windowStartPos: 100 })));
+	});
+
+	it("inside a truncated window: only the live notice", () => {
+		const n = windowNote(summary(true), at({ pos: 120, windowStartPos: 100 }));
+		expect(n).toMatch(/^Showing the newest 5 of 50 events/);
+	});
+
+	it("live and untruncated: null", () => {
+		expect(windowNote(summary(false), null)).toBeNull();
+		expect(windowNote(summary(false), at({ pos: 120, windowStartPos: 100 }))).toBeNull();
 	});
 });

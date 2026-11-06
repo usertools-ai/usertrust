@@ -170,8 +170,9 @@ export function decodeUrlState(hash: string): UrlState {
 
 		const view = params.get("view");
 		const open = params.get("open");
-		const atText = params.get("at");
-		const at = atText !== null && INTEGER.test(atText) ? Number(atText) : null;
+		const atTexts = params.getAll("at");
+		const atText = atTexts.length === 1 ? atTexts[0] : undefined;
+		const at = atText !== undefined && INTEGER.test(atText) ? Number(atText) : null;
 		return {
 			view: VIEWS.find((v) => v === view) ?? DEFAULT_VIEW,
 			filters,
@@ -191,7 +192,7 @@ function described(s: UrlState): string {
 	return JSON.stringify([
 		s.view,
 		s.open,
-		s.at,
+		s.at === null ? null : String(s.at),
 		f.search,
 		opt(f.from),
 		opt(f.to),
@@ -213,8 +214,9 @@ export function addressHolds(state: UrlState): boolean {
 
 /**
  * What to do with the address when the state changes from `prev` to `next` while the address reads `currentHash`.
- * Changing the view or the open record, or entering or leaving a position, pushes an entry, so Back returns to the previous view or record; a filter
- * tweak or a move between positions replaces the current one, so typing in the search box does not flood the back button. Nothing is written when
+ * Changing the view or the open record, or entering or leaving a position, pushes an entry, so Back returns to the
+ * previous view or record; a filter tweak or a move between positions replaces the current one, so typing in the
+ * search box or dragging along the timeline does not flood the back button. Nothing is written when
  * the address already describes `next` (the state came from the address, or a write already landed). A state the
  * address cannot hold (`addressHolds`) writes the empty hash: a reload or a copied link opens a clean page, never a
  * different filter set, and the page tells the user.

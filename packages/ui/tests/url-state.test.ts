@@ -490,10 +490,22 @@ describe("the at field", () => {
 	});
 
 	it("at refuses", () => {
-		for (const v of ["-1", "01", "1.5", "1e3", "9007199254740992", "", "abc", "+5"]) {
+		for (const v of ["-1", "01", "1.5", "1e3", "9007199254740992", "", "abc", "+5", "１２"]) {
 			expect(decodeUrlState(`#at=${encodeURIComponent(v)}`).at, `at=${v}`).toBeNull();
 		}
 		expect(decodeUrlState("#at=9007199254740991").at).toBe(9007199254740991);
+	});
+
+	it("a doubled at is refused", () => {
+		expect(decodeUrlState("#at=1&at=2").at).toBeNull();
+		expect(decodeUrlState("#at=1&at=1").at).toBeNull();
+	});
+
+	it("addressHolds refuses a position that is not a safe non-negative integer", () => {
+		for (const at of [Number.NaN, Number.POSITIVE_INFINITY, 1.5, -1]) {
+			expect(addressHolds({ ...EMPTY_URL_STATE, at }), `at=${at}`).toBe(false);
+		}
+		expect(addressHolds({ ...EMPTY_URL_STATE, at: 7 })).toBe(true);
 	});
 
 	it("entering and leaving a position pushes", () => {

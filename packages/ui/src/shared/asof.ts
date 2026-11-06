@@ -6,7 +6,8 @@
  * the status each held row had there; this module cuts the rows the page already holds to match. Pure.
  */
 
-import type { AtPayload } from "./api.js";
+import type { AtPayload, SummaryPayload } from "./api.js";
+import { windowNotice } from "./display.js";
 import type { LedgerRow } from "./rows.js";
 
 /**
@@ -30,4 +31,9 @@ export function cutRows(rows: LedgerRow[], at: AtPayload): LedgerRow[] {
 export function windowNoteAt(at: AtPayload): string | null {
 	if (at.pos >= at.windowStartPos) return null;
 	return `The list holds records from position ${at.windowStartPos}; earlier records still count in the totals above.`;
+}
+
+/** The one note about the list's window: the position's own when it applies, else the live truncation notice. */
+export function windowNote(summary: SummaryPayload, at: AtPayload | null): string | null {
+	return (at !== null ? windowNoteAt(at) : null) ?? windowNotice(summary);
 }
