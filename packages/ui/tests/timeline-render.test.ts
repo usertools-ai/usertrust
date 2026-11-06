@@ -9,7 +9,7 @@
 
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AtPayload, SummaryPayload } from "../src/shared/api.js";
 import { formatUsdTotal } from "../src/shared/format.js";
 import { timelineLabel } from "../src/shared/timeline-view.js";
@@ -28,7 +28,8 @@ interface TimelineProps {
 	loading: boolean;
 	error: string | null;
 	reloaded: boolean;
-	onMove(pos: number): void;
+	onPreview(pos: number): void;
+	onCommit(pos: number): void;
 	onLive(): void;
 }
 
@@ -146,20 +147,76 @@ describe("the header at a past position", () => {
 				summary({ truncated: true, rowCount: 50, chain: { ...summary().chain, events: 100 } }),
 			),
 		);
-		expect(html).toContain("The list holds records from position 50");
+		// Positions count from 1, as the integrity texts do: position 50 (0-based) is the 51st record.
+		expect(html).toContain("The list holds records from position 51");
 		// One note, not two: the live truncation notice gives way to the position's own.
 		expect(html).not.toContain("Showing the newest");
 	});
 
-	it("a position inside the window keeps the live truncation notice", () => {
+	it("a position inside a truncated window says where the list starts, in figures true at T", () => {
 		const html = text(
 			strip(
 				at({ pos: 60, windowStartPos: 50 }),
 				summary({ truncated: true, rowCount: 50, chain: { ...summary().chain, events: 100 } }),
 			),
 		);
-		expect(html).toContain("Showing the newest 50 of 100 events");
-		expect(html).not.toContain("The list holds records from position");
+		expect(html).toContain(
+			"The list holds records from position 51 (the newest 50 now); earlier ones count in the totals above.",
+		);
+		// The live "of 100 events" is not a figure at T.
+		expect(html).not.toContain("Showing the newest");
+	});
+
+	it("the anchor file at T is today's, and says so", () => {
+		expect(text(strip(at()))).toMatch(/today: not set up/);
+		expect(text(strip(null))).not.toMatch(/today:/);
+	});
+});
+
+describe("the list at a past position before the first row held", () => {
+	type TableProps = {
+		rows: never[];
+		total: number;
+		phase: "loaded";
+		chain: "verified" | "broken" | "empty" | null;
+		beforeWindow?: { firstHeld: number; upTo: number } | null;
+		selected: null;
+		onOpen(): void;
+		onClearFilters(): void;
+	};
+	let AuditTable: Component<TableProps>;
+	beforeAll(async () => {
+		AuditTable = (await app<{ AuditTable: typeof AuditTable }>("audit-table")).AuditTable;
+	});
+	beforeEach(() => {
+		// The list reads the viewport width: there is no browser here.
+		vi.stubGlobal("window", {
+			matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+		});
+	});
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it("a healthy vault never reads as one that failed verification", () => {
+		// As the page passes it at T: no rows held at or before the position, the chain read from at.chain.
+		const html = text(
+			renderToStaticMarkup(
+				createElement(AuditTable, {
+					rows: [],
+					total: 0,
+					phase: "loaded",
+					chain: "verified",
+					beforeWindow: { firstHeld: 50, upTo: 10 },
+					selected: null,
+					onOpen: () => {},
+					onClearFilters: () => {},
+				}),
+			),
+		);
+		expect(html).not.toMatch(/failed verification/i);
+		expect(html).toContain("The list starts at position 51, the first record it holds");
+		expect(html).toContain("The 11 records up to this point count in the totals above");
 	});
 });
 
@@ -171,14 +228,15 @@ describe("the timeline", () => {
 		loading: false,
 		error: null,
 		reloaded: false,
-		onMove: () => {},
+		onPreview: () => {},
+		onCommit: () => {},
 		onLive: () => {},
 		...over,
 	});
 	const render = (over: Partial<TimelineProps> = {}): string =>
 		renderToStaticMarkup(createElement(Timeline, props(over)));
 
-	it("is a native range over 0..head whose aria-valuetext is the label: live", () => {
+	it("is a native range over 0..head whose aria-valuetext says Live when live", () => {
 		const html = render();
 		expect(html).toMatch(/<input[^>]*type="range"/);
 		expect(html).toMatch(/<input[^>]*min="0"/);
@@ -189,12 +247,12 @@ describe("the timeline", () => {
 		expect(html).not.toMatch(/<button[^>]*>Live<\/button>/);
 	});
 
-	it("at a past position, aria-valuetext equals the visible label, and Live is a real button", () => {
+	it("at a past position, aria-valuetext gives the record and the visible label, and Live is a real button", () => {
 		const a = at();
 		const label = timelineLabel(a, new Date().toISOString());
 		const html = render({ at: a, wanted: 40 });
 		expect(label).toContain("As recorded at");
-		expect(html).toContain(`aria-valuetext="${label}"`);
+		expect(html).toContain(`aria-valuetext="Record 41 of 100 · ${label}"`);
 		expect(text(html)).toContain(label);
 		expect(html).toMatch(/<input[^>]*value="40"/);
 		expect(html).toMatch(/<button type="button"[^>]*>Live<\/button>/);
@@ -210,7 +268,23 @@ describe("the timeline", () => {
 	it("while the first answer loads, it says so and never claims Live", () => {
 		const html = render({ wanted: 40, loading: true });
 		expect(html).not.toMatch(/aria-valuetext="Live"/);
-		expect(html).toMatch(/aria-valuetext="Loading[^"]*"/);
+		expect(html).toContain('aria-valuetext="Record 41 of 100 · loading"');
+	});
+
+	it("a position the answer has not caught up with never announces the old time", () => {
+		// The thumb is at 41, the screen still shows 40's answer.
+		const html = render({ at: at({ pos: 40 }), wanted: 41 });
+		expect(html).toContain('aria-valuetext="Record 42 of 100 · loading"');
+	});
+
+	it("a clamped position puts the thumb on the record answered, and stops calling it the latest once more arrive", () => {
+		const a = at({ pos: 99, head: 99, clamped: true });
+		const html = render({ at: a, wanted: 500 });
+		expect(html).toMatch(/<input[^>]*value="99"/);
+		expect(text(html)).toContain("(latest record)");
+		const later = render({ at: a, wanted: 500, head: 120 });
+		expect(text(later)).not.toContain("(latest record)");
+		expect(later).toMatch(/<input[^>]*value="99"/);
 	});
 
 	it("an error is a short inline note beside the last good view", () => {

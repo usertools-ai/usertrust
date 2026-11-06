@@ -126,7 +126,11 @@ function usePopover(): {
 }
 
 /** The explainer a bare "absent" never had: a small popover, toggled by click or keyboard, closed by Escape. */
-function AnchorFact(props: { anchorFile: SummaryPayload["anchorFile"] }): React.JSX.Element {
+function AnchorFact(props: {
+	anchorFile: SummaryPayload["anchorFile"];
+	/** At a past position: the file is today's, and the tag says so. */
+	past?: boolean;
+}): React.JSX.Element {
 	const shown = anchorView(props.anchorFile);
 	const { open, toggle, rootRef } = usePopover();
 	const [before, after] = shown.explainer.split(ANCHOR_VERIFY_COMMAND);
@@ -135,7 +139,7 @@ function AnchorFact(props: { anchorFile: SummaryPayload["anchorFile"] }): React.
 			<b>Anchor file</b>
 			<div className="ut-info" ref={rootRef}>
 				<span className="ut-tag" title={shown.explainer}>
-					{shown.label}
+					{props.past === true ? `today: ${shown.label}` : shown.label}
 				</span>
 				<button
 					type="button"
@@ -202,6 +206,12 @@ function SpendFact(props: { spentUt: number; past: boolean }): React.JSX.Element
 			</span>
 		</div>
 	);
+}
+
+/** The past view's own line. It alone reads the clock (for the year), so a live header never re-renders on its tick. */
+function AsAtLine(props: { at: AtPayload }): React.JSX.Element {
+	const now = useNow();
+	return <p className="ut-asat">{timelineLabel(props.at, new Date(now).toISOString())}</p>;
 }
 
 /**
@@ -334,7 +344,6 @@ export function SummaryStrip(props: {
 }): React.JSX.Element {
 	const s = props.summary;
 	const at = props.at ?? null;
-	const now = useNow();
 	// Phone only: the Chain and Anchor facts sit behind a button. Elsewhere every fact shows and the button does not.
 	const [detailsOpen, setDetailsOpen] = useState(false);
 	const detailsRef = useRef<HTMLButtonElement>(null);
@@ -393,7 +402,7 @@ export function SummaryStrip(props: {
 				</div>
 			)}
 			{/* The live alarm above stays: it is the vault now. Everything below this line is the vault then. */}
-			{at !== null && <p className="ut-asat">{timelineLabel(at, new Date(now).toISOString())}</p>}
+			{at !== null && <AsAtLine at={at} />}
 			{notice !== null && (
 				<div className="ut-notice" role="status">
 					<b>Window</b>
@@ -463,7 +472,7 @@ export function SummaryStrip(props: {
 						</span>
 					</div>
 				)}
-				<AnchorFact anchorFile={s.anchorFile} />
+				<AnchorFact anchorFile={s.anchorFile} past={at !== null} />
 			</section>
 		</>
 	);

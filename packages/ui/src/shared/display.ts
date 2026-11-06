@@ -111,22 +111,33 @@ export function transferView(row: LedgerRow): { kind: "transfer"; id: string } |
 }
 
 export type LoadPhase = "loading" | "loaded" | "failed";
-export type ListState = "loading" | "failed" | "first-run" | "no-rows" | "filtered-out" | "rows";
+export type ListState =
+	| "loading"
+	| "failed"
+	| "first-run"
+	| "no-rows"
+	| "before-window"
+	| "filtered-out"
+	| "rows";
 
 /**
  * What the ledger list shows. Rows start empty while the first snapshot is in flight, and the list printed "no
  * matching transactions — clear filters" for that, for an empty vault, and for filters that hide every row alike.
  * A vault with no rows is a first run only when its chain is empty: a deleted log has no rows either.
+ * `beforeWindow`: a past position before the first row held. No row is shown because the list starts later, not
+ * because anything is wrong, whatever the chain says.
  */
 export function listState(input: {
 	phase: LoadPhase;
 	chain: ChainStatus | null;
 	total: number;
 	shown: number;
+	beforeWindow?: boolean;
 }): ListState {
 	if (input.total === 0) {
 		if (input.phase === "failed") return "failed";
 		if (input.phase === "loading" || input.chain === null) return "loading";
+		if (input.beforeWindow === true) return "before-window";
 		return input.chain === "empty" ? "first-run" : "no-rows";
 	}
 	return input.shown === 0 ? "filtered-out" : "rows";

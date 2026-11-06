@@ -7,7 +7,7 @@
  */
 
 import type { AtPayload, SummaryPayload } from "./api.js";
-import { windowNotice } from "./display.js";
+import { type ChainStatus, windowNotice } from "./display.js";
 import type { LedgerRow } from "./rows.js";
 
 /**
@@ -24,16 +24,37 @@ export function cutRows(rows: LedgerRow[], at: AtPayload): LedgerRow[] {
 	return out;
 }
 
+/** A position as the page prints it: counted from 1, as the integrity texts count chain positions. */
+function shownPosition(pos: number): string {
+	return (pos + 1).toLocaleString();
+}
+
 /**
- * The note for a position before the first row held, or null. A position inside the window says nothing here; a
- * truncated window is then described by `windowNotice` as it is when live.
+ * The note for a position before the first row held, or null. A position inside the window says nothing here;
+ * `windowNote` says where the list starts then.
  */
 export function windowNoteAt(at: AtPayload): string | null {
 	if (at.pos >= at.windowStartPos) return null;
-	return `The list holds records from position ${at.windowStartPos}; earlier records still count in the totals above.`;
+	return `The list holds records from position ${shownPosition(at.windowStartPos)}; earlier records still count in the totals above.`;
 }
 
-/** The one note about the list's window: the position's own when it applies, else the live truncation notice. */
-export function windowNote(summary: SummaryPayload, at: AtPayload | null): string | null {
-	return (at !== null ? windowNoteAt(at) : null) ?? windowNotice(summary);
+/**
+ * The one note about the list's window. Live, the truncation notice. At a position: the position's own note before
+ * the window, and inside a truncated window where the list starts, in figures true at T (the live event count is
+ * not one: `rowCount` is said to be now).
+ */
+export function windowNote(
+	summary: Pick<SummaryPayload, "truncated" | "rowCount" | "chain">,
+	at: AtPayload | null,
+): string | null {
+	if (at === null) return windowNotice(summary);
+	const before = windowNoteAt(at);
+	if (before !== null) return before;
+	if (!summary.truncated) return null;
+	return `The list holds records from position ${shownPosition(at.windowStartPos)} (the newest ${summary.rowCount.toLocaleString()} now); earlier ones count in the totals above.`;
+}
+
+/** The list's chain at a position: the position's own reading (`at.chain`), never the live verdict. */
+export function chainAt(at: AtPayload): ChainStatus {
+	return at.chain.valid ? "verified" : "broken";
 }

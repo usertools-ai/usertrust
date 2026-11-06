@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { useCallback, useMemo, useRef, useState } from "react";
-import { cutRows } from "../shared/asof.js";
+import { useCallback, useDeferredValue, useMemo, useRef, useState } from "react";
+import { chainAt, cutRows } from "../shared/asof.js";
 import { csvFilename, toCsv } from "../shared/csv.js";
 import { chainStatus } from "../shared/display.js";
 import { applyFilters, EMPTY_FILTERS, isFiltering } from "../shared/filters.js";
 import type { LedgerRow } from "../shared/rows.js";
 import { MAX_SEARCH_LENGTH, type ViewId } from "../shared/url-state.js";
-import { AuditTable } from "./audit-table.js";
+import { AuditTable, type BeforeWindow } from "./audit-table.js";
 import { FilterBar } from "./filter-bar.js";
 import { InspectorHint, RowPanel } from "./row-panel.js";
 import { useLedger } from "./store.js";
@@ -34,10 +34,11 @@ export function App(): React.JSX.Element {
 	// The view, filters and open record live in the page address (`location.hash`): a reload keeps them, a link shares them.
 	const { view, setView, filters, setFilters, openHash, setOpenHash, at, setAt, addressNote } =
 		useUrlState();
-	// The past position shown (`#at=N`), from /api/at. Until its first answer lands, or when it fails with nothing
-	// loaded, the screen stays live and the timeline says so: a past view is only ever drawn from its own answer.
-	const atView = useAt(at, summary);
-	const shownAt = at === null ? null : atView.at;
+	// The past position shown (`#at=N`, or a drag's preview before it is written there), from /api/at. Until its first
+	// answer lands, or when it fails with nothing loaded, the screen stays live and the timeline says so: a past view is
+	// only ever drawn from its own answer.
+	const { view: atView, preview } = useAt(at, summary, live);
+	const shownAt = atView.at;
 	const head = summary === null ? -1 : summary.chain.events - 1;
 	// The rows as recorded at the position: cut there, with the status each had there. Before the filters, so the
 	// filters, the list, Trends and Export all see the vault then.
@@ -52,6 +53,30 @@ export function App(): React.JSX.Element {
 		[shownRows, openHash],
 	);
 	const filtered = useMemo(() => applyFilters(shownRows, filters), [shownRows, filters]);
+	// What the list and Trends draw, as one value so they never mix two positions: deferred, so a scrub that lands a
+	// new answer keeps the thumb and the header responsive while the list and the charts catch up. At a position the
+	// list's chain is the position's (`chainAt`), never the live verdict, and a position before the first row held says
+	// so instead of reading as a vault with no rows.
+	const drawn = useDeferredValue(
+		useMemo(
+			() => ({
+				filtered,
+				total: shownRows.length,
+				at: shownAt,
+				chain:
+					shownAt !== null
+						? chainAt(shownAt)
+						: summary === null
+							? null
+							: chainStatus(summary.chain),
+				beforeWindow:
+					shownAt !== null && shownAt.pos < shownAt.windowStartPos
+						? ({ firstHeld: shownAt.windowStartPos, upTo: shownAt.pos } satisfies BeforeWindow)
+						: null,
+			}),
+			[filtered, shownRows, shownAt, summary],
+		),
+	);
 	const docked = useMediaQuery(DOCK_QUERY);
 	// Enter or Space on a row asks the docked inspector to take focus; a click clears the request. The restore request
 	// sends focus back to the row when the inspector closes. Each carries a counter so a repeat of the same row counts.
@@ -76,7 +101,7 @@ export function App(): React.JSX.Element {
 		const url = URL.createObjectURL(blob);
 		const a = document.createElement("a");
 		a.href = url;
-		a.download = csvFilename(new Date(), isFiltering(filters), newestOf);
+		a.download = csvFilename(new Date(), isFiltering(filters), newestOf, shownAt);
 		a.click();
 		URL.revokeObjectURL(url);
 	}
@@ -136,9 +161,11 @@ export function App(): React.JSX.Element {
 						onClick={exportCsv}
 						disabled={filtered.length === 0}
 						title={
-							newestOf === undefined
-								? "Download the records in view as CSV"
-								: `Download the records in view as CSV: these are within the newest ${newestOf.toLocaleString()} events only`
+							shownAt !== null
+								? `Download the records in view as CSV, as recorded at record ${(shownAt.pos + 1).toLocaleString()}`
+								: newestOf === undefined
+									? "Download the records in view as CSV"
+									: `Download the records in view as CSV: these are within the newest ${newestOf.toLocaleString()} events only`
 						}
 					>
 						Export {filtered.length.toLocaleString()} {filtered.length === 1 ? "row" : "rows"}
@@ -169,10 +196,11 @@ export function App(): React.JSX.Element {
 					>
 						{view === "audit" ? (
 							<AuditTable
-								rows={filtered}
-								total={shownRows.length}
+								rows={drawn.filtered}
+								total={drawn.total}
 								phase={phase}
-								chain={summary === null ? null : chainStatus(summary.chain)}
+								chain={drawn.chain}
+								beforeWindow={drawn.beforeWindow}
 								liveIds={liveIds}
 								selected={openHash}
 								restoreFocus={restoreFocus}
@@ -183,7 +211,7 @@ export function App(): React.JSX.Element {
 								onClearFilters={() => setFilters(EMPTY_FILTERS)}
 							/>
 						) : (
-							<Trends rows={filtered} newestOf={newestOf} at={shownAt} />
+							<Trends rows={drawn.filtered} newestOf={newestOf} at={drawn.at} />
 						)}
 					</section>
 					{dock &&
@@ -203,16 +231,20 @@ export function App(): React.JSX.Element {
 				</div>
 			</main>
 			{/* Shown once the vault has records, and whenever a position is asked for (so Live is always reachable). */}
-			{(head >= 0 || at !== null) && (
+			{(head >= 0 || at !== null || atView.wanted !== null) && (
 				<Timeline
 					at={shownAt}
-					wanted={at}
+					wanted={atView.wanted}
 					head={head}
 					loading={atView.loading}
 					error={atView.error}
 					reloaded={atView.reloaded}
-					onMove={setAt}
-					onLive={() => setAt(null)}
+					onPreview={preview}
+					onCommit={setAt}
+					onLive={() => {
+						preview(null);
+						setAt(null);
+					}}
 				/>
 			)}
 			{!dock && view === "audit" && open && (

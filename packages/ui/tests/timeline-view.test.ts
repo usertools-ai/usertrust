@@ -3,7 +3,13 @@
 
 import { describe, expect, it } from "vitest";
 import type { AtPayload } from "../src/shared/api.js";
-import { atFailureText, newSince, stepFor, timelineLabel } from "../src/shared/timeline-view.js";
+import {
+	atFailureText,
+	newSince,
+	stepFor,
+	timelineLabel,
+	timelineValueText,
+} from "../src/shared/timeline-view.js";
 
 const NOW = "2026-11-06T12:00:00.000Z";
 
@@ -103,5 +109,27 @@ describe("atFailureText", () => {
 		expect(atFailureText(404)).toBe("the vault has no records");
 		expect(atFailureText(500)).toBe("the dashboard could not read the vault at that point");
 		expect(atFailureText(null)).toBe("the dashboard did not answer");
+	});
+});
+
+describe("timelineValueText", () => {
+	it("names the record, and the time only when the screen shows that record", () => {
+		const shown = at({ pos: 40 });
+		expect(timelineValueText(null, 99, null, NOW)).toBe("Live");
+		expect(timelineValueText(40, 99, shown, NOW)).toBe(
+			"Record 41 of 100 · As recorded at 11-06 10:04:05Z",
+		);
+		expect(timelineValueText(41, 99, shown, NOW)).toBe("Record 42 of 100 · loading");
+		expect(timelineValueText(41, 99, null, NOW)).toBe("Record 42 of 100 · loading");
+	});
+
+	it("a clamped answer stops calling itself the latest once records arrive after it", () => {
+		const shown = at({ pos: 99, head: 99, clamped: true });
+		expect(timelineValueText(99, 99, shown, NOW)).toBe(
+			"Record 100 of 100 · As recorded at 11-06 10:04:05Z (latest record)",
+		);
+		expect(timelineValueText(99, 120, shown, NOW)).toBe(
+			"Record 100 of 121 · As recorded at 11-06 10:04:05Z",
+		);
 	});
 });

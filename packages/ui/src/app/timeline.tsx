@@ -1,52 +1,111 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
+import { useEffect, useRef, useState } from "react";
 import type { AtPayload } from "../shared/api.js";
-import { isStepKey, newSince, stepFor, timelineLabel } from "../shared/timeline-view.js";
+import { Scrubber, type ScrubIo } from "../shared/scrub.js";
+import {
+	isStepKey,
+	newSince,
+	shownLabel,
+	stepFor,
+	timelineValueText,
+} from "../shared/timeline-view.js";
 import { useNow } from "./use-now.js";
+
+const browserFrames: ScrubIo = {
+	frame(fn) {
+		const id = requestAnimationFrame(() => fn());
+		return () => cancelAnimationFrame(id);
+	},
+	later(fn, ms) {
+		const id = setTimeout(fn, ms);
+		return () => clearTimeout(id);
+	},
+};
 
 /**
  * The timeline along the bottom of the page: a native range over the vault's positions, `0..head`. Moving it shows the
  * whole screen as the vault was recorded at that position; the Live button returns to now. While a past position is
  * shown and new records arrive, "N new since" says how many (pressing it goes live too).
  *
- * The range is the browser's own slider (`role="slider"`, focusable, draggable), with `aria-valuetext` equal to the
- * label on screen, so a screen reader reads the time, not a bare index. The keys move it by `stepFor`: the arrows one
- * position, PageUp and PageDown 5%, Home and End to the ends. The label always describes what the screen shows, which
- * during a fast drag can be the last answer that landed, a moment behind the thumb.
+ * A drag moves the thumb at once (local state), asks for the position at most once a frame (`onPreview`), and writes
+ * the address once, on release, key up, blur, or after it sits still (`onCommit`, through `Scrubber`): the browser
+ * limits how often a page may rewrite its address.
+ *
+ * The range is the browser's own slider (`role="slider"`, focusable, draggable). Its `aria-valuetext` names the record
+ * and, once the screen shows it, its time. The keys move it by `stepFor`: the arrows one position, PageUp and PageDown
+ * 5%, Home and End to the ends. The visible label always describes what the screen shows, which during a fast drag
+ * can be the last answer that landed, a moment behind the thumb.
  */
 export function Timeline(props: {
 	/** The answer shown (null: live, or nothing loaded yet for `wanted`). */
 	at: AtPayload | null;
-	/** The position asked for (the address's), or null for live. */
+	/** The position asked for (a preview, or the address's), or null for live. */
 	wanted: number | null;
 	/** The live vault's last position; -1 when it has no records. */
 	head: number;
 	loading: boolean;
 	error: string | null;
 	reloaded: boolean;
-	onMove(pos: number): void;
+	/** Ask for a position without writing the address (a drag in progress). */
+	onPreview(pos: number): void;
+	/** Write the position to the address (the drag settled). */
+	onCommit(pos: number): void;
 	onLive(): void;
 }): React.JSX.Element {
-	const { at, wanted, head, onMove, onLive } = props;
+	const { at, wanted, head } = props;
 	const now = useNow();
-	const past = wanted !== null;
+	const nowIso = new Date(now).toISOString();
+	// The thumb while a drag or a key is moving it, ahead of the answers; null once it is written to the address.
+	const [thumb, setThumb] = useState<number | null>(null);
+	const handlers = useRef(props);
+	handlers.current = props;
+	const scrub = useRef<Scrubber | null>(null);
+	if (scrub.current === null)
+		scrub.current = new Scrubber(
+			browserFrames,
+			(p) => handlers.current.onPreview(p),
+			(p) => {
+				setThumb(null);
+				handlers.current.onCommit(p);
+			},
+		);
+	useEffect(() => () => scrub.current?.cancel(), []);
+
 	const max = Math.max(head, 0);
-	const value = Math.min(wanted ?? max, max);
+	// A position asked for past the head was answered with the head: the thumb sits on the record answered.
+	const settled =
+		wanted === null
+			? max
+			: at?.clamped === true && wanted > at.pos
+				? at.pos
+				: Math.min(wanted, max);
+	const value = thumb ?? settled;
+	const past = wanted !== null || thumb !== null;
 	const label = !past
 		? "Live"
 		: at !== null
-			? timelineLabel(at, new Date(now).toISOString())
+			? shownLabel(at, head, nowIso)
 			: props.loading
 				? "Loading this point…"
 				: "Live (that point did not load)";
+	const valueText = !past
+		? "Live"
+		: at === null && !props.loading && thumb === null
+			? `Record ${(value + 1).toLocaleString()} of ${(head + 1).toLocaleString()} · ${label}`
+			: timelineValueText(value, head, at, nowIso);
 	const fresh = past ? newSince(at, head) : 0;
 
-	const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
-		if (!isStepKey(e.key) || head < 0) return;
-		e.preventDefault();
-		const next = stepFor(e.key, value, head);
-		if (next !== value) onMove(next);
+	const move = (next: number): void => {
+		setThumb(next);
+		scrub.current?.move(next);
+	};
+	const release = (): void => scrub.current?.release();
+	const live = (): void => {
+		scrub.current?.cancel();
+		setThumb(null);
+		props.onLive();
 	};
 
 	return (
@@ -72,7 +131,7 @@ export function Timeline(props: {
 						type="button"
 						className="ut-tl-btn"
 						title={`${fresh.toLocaleString()} ${fresh === 1 ? "record was" : "records were"} added after this point was chosen: go live to see them`}
-						onClick={onLive}
+						onClick={live}
 					>
 						{`${fresh.toLocaleString()} new since`}
 					</button>
@@ -82,7 +141,7 @@ export function Timeline(props: {
 						type="button"
 						className="ut-tl-btn"
 						title="Show the vault as it is now"
-						onClick={onLive}
+						onClick={live}
 					>
 						Live
 					</button>
@@ -97,12 +156,20 @@ export function Timeline(props: {
 				value={value}
 				disabled={head < 0}
 				aria-label="Show the vault as recorded at"
-				aria-valuetext={label}
+				aria-valuetext={valueText}
 				onChange={(e) => {
 					const next = Number(e.currentTarget.value);
-					if (Number.isSafeInteger(next) && next !== value) onMove(next);
+					if (Number.isSafeInteger(next) && next !== value) move(next);
 				}}
-				onKeyDown={onKeyDown}
+				onKeyDown={(e) => {
+					if (!isStepKey(e.key) || head < 0) return;
+					e.preventDefault();
+					const next = stepFor(e.key, value, head);
+					if (next !== value) move(next);
+				}}
+				onKeyUp={release}
+				onPointerUp={release}
+				onBlur={release}
 			/>
 		</section>
 	);

@@ -84,3 +84,29 @@ export function atFailureText(status: number | null): string {
 	if (status === 404) return "the vault has no records";
 	return "the dashboard could not read the vault at that point";
 }
+
+/**
+ * The label for the answer shown against the live head: a clamped answer ("latest record") stops saying so once
+ * records have arrived after it.
+ */
+export function shownLabel(at: AtPayload | null, head: number, nowIso: string): string {
+	if (at === null || !at.clamped || newSince(at, head) === 0) return timelineLabel(at, nowIso);
+	return timelineLabel({ ...at, clamped: false }, nowIso);
+}
+
+/**
+ * The slider's `aria-valuetext`: `Live`, or the record the thumb is on (counted from 1, of the live count) and, only
+ * when the screen shows that record, its label. A thumb the answer has not caught up with says `loading`, so a
+ * screen reader never hears the previous position's time for a new position.
+ */
+export function timelineValueText(
+	value: number | null,
+	head: number,
+	shown: AtPayload | null,
+	nowIso: string,
+): string {
+	if (value === null) return "Live";
+	const record = `Record ${(value + 1).toLocaleString()} of ${(head + 1).toLocaleString()}`;
+	if (shown === null || shown.pos !== value) return `${record} · loading`;
+	return `${record} · ${shownLabel(shown, head, nowIso)}`;
+}

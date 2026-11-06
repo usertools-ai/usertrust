@@ -1,0 +1,94 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
+import { describe, expect, it } from "vitest";
+import { COMMIT_IDLE_MS, Scrubber, type ScrubIo } from "../src/shared/scrub.js";
+
+/** Frames and timers the test runs by hand. */
+function harness() {
+	const frames: Array<() => void> = [];
+	const timers: Array<{ fn: () => void; ms: number; cancelled: boolean }> = [];
+	const io: ScrubIo = {
+		frame(fn) {
+			frames.push(fn);
+			return () => {
+				const i = frames.indexOf(fn);
+				if (i >= 0) frames.splice(i, 1);
+			};
+		},
+		later(fn, ms) {
+			const t = { fn, ms, cancelled: false };
+			timers.push(t);
+			return () => {
+				t.cancelled = true;
+			};
+		},
+	};
+	const previews: number[] = [];
+	const commits: number[] = [];
+	const scrub = new Scrubber(
+		io,
+		(p) => previews.push(p),
+		(p) => commits.push(p),
+	);
+	const runFrame = (): void => {
+		for (const fn of frames.splice(0)) fn();
+	};
+	const runIdle = (): void => {
+		for (const t of timers.splice(0)) if (!t.cancelled) t.fn();
+	};
+	return { scrub, frames, timers, previews, commits, runFrame, runIdle };
+}
+
+describe("Scrubber", () => {
+	it("a drag is previewed at most once a frame, with the latest position", () => {
+		const h = harness();
+		h.scrub.move(10);
+		h.scrub.move(11);
+		h.scrub.move(12);
+		expect(h.frames).toHaveLength(1);
+		expect(h.previews).toEqual([]);
+		h.runFrame();
+		expect(h.previews).toEqual([12]);
+		h.scrub.move(13);
+		h.runFrame();
+		expect(h.previews).toEqual([12, 13]);
+		// Nothing is written to the address while the drag goes on.
+		expect(h.commits).toEqual([]);
+	});
+
+	it("release commits the latest position once, and a second release does nothing", () => {
+		const h = harness();
+		h.scrub.move(10);
+		h.scrub.move(20);
+		h.scrub.release();
+		expect(h.previews).toEqual([20]);
+		expect(h.commits).toEqual([20]);
+		// The frame that was pending is cancelled: it does not preview again.
+		expect(h.frames).toHaveLength(0);
+		h.scrub.release();
+		expect(h.commits).toEqual([20]);
+	});
+
+	it(`${COMMIT_IDLE_MS} ms without a move commits on its own`, () => {
+		const h = harness();
+		h.scrub.move(5);
+		h.scrub.move(6);
+		// Each move re-arms the idle timer; only the last one is live.
+		expect(h.timers.filter((t) => !t.cancelled)).toHaveLength(1);
+		expect(h.timers.every((t) => t.ms === COMMIT_IDLE_MS)).toBe(true);
+		h.runIdle();
+		expect(h.commits).toEqual([6]);
+	});
+
+	it("cancel drops a pending move: going live while dragging writes nothing", () => {
+		const h = harness();
+		h.scrub.move(5);
+		h.scrub.cancel();
+		h.runFrame();
+		h.runIdle();
+		expect(h.previews).toEqual([]);
+		expect(h.commits).toEqual([]);
+		expect(h.scrub.pending).toBeNull();
+	});
+});

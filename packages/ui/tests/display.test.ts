@@ -137,6 +137,17 @@ describe("listState", () => {
 		expect(listState({ phase: "loaded", chain: "empty", total: 0, shown: 0 })).toBe("first-run");
 	});
 
+	it("a past position before the first row held is its own state, never a failure", () => {
+		for (const chain of ["verified", "broken", "empty"] as const)
+			expect(listState({ phase: "loaded", chain, total: 0, shown: 0, beforeWindow: true })).toBe(
+				"before-window",
+			);
+		// Loading still wins: nothing is claimed before the rows arrive.
+		expect(
+			listState({ phase: "loading", chain: null, total: 0, shown: 0, beforeWindow: true }),
+		).toBe("loading");
+	});
+
 	it("a broken vault with no rows is never shown as a first run", () => {
 		expect(listState({ phase: "loaded", chain: "broken", total: 0, shown: 0 })).toBe("no-rows");
 	});

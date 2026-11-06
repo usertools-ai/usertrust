@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { AtPayload, SummaryPayload } from "../src/shared/api.js";
-import { cutRows, windowNote, windowNoteAt } from "../src/shared/asof.js";
+import { chainAt, cutRows, windowNote, windowNoteAt } from "../src/shared/asof.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 
 function row(pos: number, overrides: Partial<LedgerRow> = {}): LedgerRow {
@@ -51,8 +51,8 @@ describe("cutRows", () => {
 	});
 
 	it("cut applies statusAt", () => {
-		const out = cutRows(ROWS, at({ pos: 2, statusAt: { [ROWS[1]?.hash ?? ""]: "pending" } }));
-		expect(out[1]?.status).toBe("pending");
+		const out = cutRows(ROWS, at({ pos: 2, statusAt: { [ROWS[1]?.hash ?? ""]: "ambiguous" } }));
+		expect(out[1]?.status).toBe("ambiguous");
 		expect(out[1]).not.toBe(ROWS[1]);
 		expect(ROWS[1]?.status).toBe("settled");
 		expect(out[0]).toBe(ROWS[0]);
@@ -64,7 +64,7 @@ describe("cutRows", () => {
 		const payload = at({ pos: 40, head: 101, windowStartPos: 100 });
 		expect(cutRows(held, payload)).toEqual([]);
 		expect(windowNoteAt(payload)).toBe(
-			"The list holds records from position 100; earlier records still count in the totals above.",
+			"The list holds records from position 101; earlier records still count in the totals above.",
 		);
 	});
 
@@ -86,7 +86,7 @@ describe("windowNoteAt", () => {
 
 describe("cutRows edge cases", () => {
 	it("a statusAt key whose row is past the cut leaves the row out", () => {
-		const out = cutRows(ROWS, at({ pos: 1, statusAt: { [ROWS[3]?.hash ?? ""]: "pending" } }));
+		const out = cutRows(ROWS, at({ pos: 1, statusAt: { [ROWS[3]?.hash ?? ""]: "ambiguous" } }));
 		expect(out.map((r) => r.pos)).toEqual([0, 1]);
 	});
 
@@ -96,7 +96,7 @@ describe("cutRows edge cases", () => {
 	});
 
 	it("a __proto__ key is ignored", () => {
-		const statusAt = JSON.parse('{"__proto__":"pending"}') as AtPayload["statusAt"];
+		const statusAt = JSON.parse('{"__proto__":"ambiguous"}') as AtPayload["statusAt"];
 		const protoRow = row(0, { hash: "__proto__" });
 		const out = cutRows([protoRow], at({ pos: 0, statusAt: {} }));
 		expect(out[0]).toBe(protoRow);
@@ -120,13 +120,28 @@ describe("windowNote", () => {
 		expect(n).toBe(windowNoteAt(at({ pos: 40, windowStartPos: 100 })));
 	});
 
-	it("inside a truncated window: only the live notice", () => {
+	it("inside a truncated window at T: the position's own wording, never the live figures", () => {
 		const n = windowNote(summary(true), at({ pos: 120, windowStartPos: 100 }));
-		expect(n).toMatch(/^Showing the newest 5 of 50 events/);
+		expect(n).toBe(
+			"The list holds records from position 101 (the newest 5 now); earlier ones count in the totals above.",
+		);
+		// The live count of events (50) is not a figure at T.
+		expect(n).not.toMatch(/of 50/);
+	});
+
+	it("inside a truncated window live: the live notice", () => {
+		expect(windowNote(summary(true), null)).toMatch(/^Showing the newest 5 of 50 events/);
 	});
 
 	it("live and untruncated: null", () => {
 		expect(windowNote(summary(false), null)).toBeNull();
 		expect(windowNote(summary(false), at({ pos: 120, windowStartPos: 100 }))).toBeNull();
+	});
+});
+
+describe("chainAt", () => {
+	it("the list's chain at T is the position's, never the live verdict", () => {
+		expect(chainAt(at({ chain: { valid: true, breakIndex: null } }))).toBe("verified");
+		expect(chainAt(at({ chain: { valid: false, breakIndex: 3 } }))).toBe("broken");
 	});
 });

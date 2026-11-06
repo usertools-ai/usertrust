@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AtPayload } from "../src/shared/api.js";
 import { AtFollower, type AtView } from "../src/shared/at-follow.js";
 import { newSince } from "../src/shared/timeline-view.js";
@@ -28,14 +28,15 @@ function at(overrides: Partial<AtPayload> = {}): AtPayload {
 function harness() {
 	const calls: Array<{
 		pos: number;
+		signal: AbortSignal;
 		resolve(p: AtPayload): void;
 		reject(e: unknown): void;
 	}> = [];
 	const views: AtView[] = [];
 	const follower = new AtFollower(
-		(pos) =>
+		(pos, signal) =>
 			new Promise<AtPayload>((resolve, reject) => {
-				calls.push({ pos, resolve, reject });
+				calls.push({ pos, signal, resolve, reject });
 			}),
 		(v) => views.push(v),
 	);
@@ -46,9 +47,9 @@ function harness() {
 	};
 	// Let the loader's promise settle and the follower's handlers run.
 	const flush = async (): Promise<void> => {
-		for (let i = 0; i < 5; i++) await Promise.resolve();
+		for (let i = 0; i < 20; i++) await Promise.resolve();
 	};
-	return { follower, calls, last, flush };
+	return { follower, calls, views, last, flush };
 }
 
 describe("AtFollower", () => {
@@ -117,11 +118,11 @@ describe("AtFollower", () => {
 		h.follower.refresh();
 		expect(h.calls.map((c) => c.pos)).toEqual([40, 40]);
 		// A later record settled a transfer held at 40: its status there is fresh, the position is not moved.
-		h.calls[1]?.resolve(at({ pos: 40, head: 120, statusAt: { ["a".repeat(64)]: "held" } }));
+		h.calls[1]?.resolve(at({ pos: 40, head: 120, statusAt: { ["a".repeat(64)]: "ambiguous" } }));
 		await h.flush();
 		const shown = h.last().at;
 		expect(shown?.pos).toBe(40);
-		expect(shown?.statusAt).toEqual({ ["a".repeat(64)]: "held" });
+		expect(shown?.statusAt).toEqual({ ["a".repeat(64)]: "ambiguous" });
 		expect(newSince(shown ?? null, 120)).toBe(21);
 		expect(h.last().reloaded).toBe(false);
 	});
@@ -185,5 +186,88 @@ describe("AtFollower", () => {
 		h.calls[1]?.resolve(at({ epoch: 2 }));
 		await h.flush();
 		expect(h.last().reloaded).toBe(false);
+	});
+
+	it("the view names the position wanted, so the page knows a past view is asked for before it loads", () => {
+		const h = harness();
+		h.follower.want(7);
+		expect(h.last().wanted).toBe(7);
+		h.follower.want(null);
+		expect(h.last().wanted).toBeNull();
+	});
+
+	it("a re-read that changes nothing publishes nothing new: the same answer object stays", async () => {
+		const h = harness();
+		h.follower.want(40);
+		h.calls[0]?.resolve(at({ pos: 40, head: 99 }));
+		await h.flush();
+		const before = h.last().at;
+		const published = h.views.length;
+		h.follower.refresh();
+		// Only the head moved: the figures, the chain and the statuses at 40 are what they were.
+		h.calls[1]?.resolve(at({ pos: 40, head: 120 }));
+		await h.flush();
+		expect(h.last().at).toBe(before);
+		expect(h.views.length).toBe(published);
+	});
+
+	describe("a request that never answers", () => {
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
+		it("is given up after 10 s, down the failure path, and a later position is served", async () => {
+			vi.useFakeTimers();
+			const h = harness();
+			h.follower.want(1);
+			await vi.advanceTimersByTimeAsync(9_999);
+			expect(h.last().error).toBeNull();
+			await vi.advanceTimersByTimeAsync(1);
+			expect(h.calls[0]?.signal.aborted).toBe(true);
+			expect(h.last().error).toBe("the dashboard did not answer");
+			h.follower.want(2);
+			expect(h.calls.map((c) => c.pos)).toEqual([1, 2]);
+			h.calls[1]?.resolve(at({ pos: 2 }));
+			await h.flush();
+			expect(h.last()).toMatchObject({ error: null });
+			expect(h.last().at?.pos).toBe(2);
+		});
+	});
+
+	describe("reconnected (the server may have restarted, and epochs restart with it)", () => {
+		it("forgets the epoch and the baseline: the re-read is a new baseline, not a reload", async () => {
+			const h = harness();
+			h.follower.want(40);
+			h.calls[0]?.resolve(at({ pos: 40, head: 99, epoch: 3 }));
+			await h.flush();
+			h.follower.reconnected();
+			expect(h.calls.map((c) => c.pos)).toEqual([40, 40]);
+			// A restarted server starts its epochs at 0 again, and holds more records.
+			h.calls[1]?.resolve(at({ pos: 40, head: 120, epoch: 0 }));
+			await h.flush();
+			expect(h.last().reloaded).toBe(false);
+			// The new baseline's head: nothing is "new since" a position just re-read.
+			expect(newSince(h.last().at, 120)).toBe(0);
+			expect(h.last().at?.epoch).toBe(0);
+		});
+
+		it("an answer from before the reconnect is dropped, never compared with the new server's epochs", async () => {
+			const h = harness();
+			h.follower.want(40);
+			h.follower.reconnected();
+			h.calls[0]?.resolve(at({ pos: 40, epoch: 5, spentUt: 1 }));
+			await h.flush();
+			expect(h.last().at).toBeNull();
+			h.calls[1]?.resolve(at({ pos: 40, epoch: 0, spentUt: 2 }));
+			await h.flush();
+			expect(h.last()).toMatchObject({ reloaded: false });
+			expect(h.last().at?.spentUt).toBe(2);
+		});
+
+		it("while live it asks for nothing", () => {
+			const h = harness();
+			h.follower.reconnected();
+			expect(h.calls).toHaveLength(0);
+		});
 	});
 });

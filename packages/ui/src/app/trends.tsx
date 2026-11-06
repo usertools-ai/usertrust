@@ -145,6 +145,10 @@ export function Trends(props: {
 	);
 	const tiles = useMemo(() => statTiles(props.rows), [props.rows]);
 	const window = useMemo(() => timeWindow(props.rows), [props.rows]);
+	// Each a pass over every row: computed once per row set, not on every render (a granularity switch, the table).
+	const byKind = useMemo(() => costByKind(props.rows), [props.rows]);
+	const byModel = useMemo(() => costByModel(props.rows), [props.rows]);
+	const byJobType = useMemo(() => costByJobType(props.rows), [props.rows]);
 	// Everything here is the rows in view: never the vault, when the server holds a window of it.
 	const scope =
 		props.newestOf === undefined
@@ -294,14 +298,14 @@ export function Trends(props: {
 				)}
 			</div>
 			<div className="ut-split">
-				<BarList title="Cost by kind" totals={costByKind(props.rows)} />
-				<BarList title="Cost by model" totals={costByModel(props.rows)} />
+				<BarList title="Cost by kind" totals={byKind} />
+				<BarList title="Cost by model" totals={byModel} />
 			</div>
 			<div className="ut-split">
 				<BarList
 					title={`Cost by job type (${JOB_TYPE_CAVEAT})`}
 					note={`The type each caller declared when it authorized the job. "untyped": no type was declared. Every bucket is listed, and together they add up to the total in view.`}
-					totals={costByJobType(props.rows)}
+					totals={byJobType}
 					limit={Number.POSITIVE_INFINITY}
 				/>
 			</div>

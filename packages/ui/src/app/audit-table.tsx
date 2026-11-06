@@ -174,9 +174,16 @@ export function AuditRow(props: {
 	);
 }
 
+/** A past position before the first row held: the first position the list holds and the position shown (0-based). */
+export interface BeforeWindow {
+	firstHeld: number;
+	upTo: number;
+}
+
 function Empty(props: {
 	state: Exclude<ReturnType<typeof listState>, "rows">;
 	hidden: number;
+	before: BeforeWindow | null;
 	onClearFilters(): void;
 }): React.JSX.Element {
 	switch (props.state) {
@@ -211,6 +218,17 @@ function Empty(props: {
 					The vault failed verification: see the integrity failure above.
 				</div>
 			);
+		case "before-window": {
+			// Counted from 1, as the window note and the integrity texts count.
+			const upTo = (props.before?.upTo ?? 0) + 1;
+			return (
+				<div className="ut-empty" role="status">
+					<b>Before the first record the list holds</b>
+					{`The list starts at position ${((props.before?.firstHeld ?? 0) + 1).toLocaleString()}, the first record it holds. `}
+					{`The ${upTo.toLocaleString()} ${upTo === 1 ? "record" : "records"} up to this point count in the totals above.`}
+				</div>
+			);
+		}
 		case "filtered-out":
 			return (
 				<div className="ut-empty" role="status">
@@ -233,6 +251,8 @@ export function AuditTable(props: {
 	total: number;
 	phase: LoadPhase;
 	chain: ChainStatus | null;
+	/** Set at a past position before the first row held: the list is empty because it starts later. */
+	beforeWindow?: BeforeWindow | null;
 	liveIds?: Set<string>;
 	selected: string | null;
 	/** `viaKeyboard`: opened with Enter or Space, so the inspector should take focus. A click leaves focus alone. */
@@ -384,6 +404,7 @@ export function AuditTable(props: {
 		chain: props.chain,
 		total: props.total,
 		shown: sorted.length,
+		beforeWindow: (props.beforeWindow ?? null) !== null,
 	});
 
 	return (
@@ -430,6 +451,7 @@ export function AuditTable(props: {
 					<Empty
 						state={state}
 						hidden={props.total - sorted.length}
+						before={props.beforeWindow ?? null}
 						onClearFilters={props.onClearFilters}
 					/>
 				) : (
