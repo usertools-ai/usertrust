@@ -4,7 +4,14 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { csvFilename, toCsv } from "../shared/csv.js";
 import { EMPTY_FILTERS, isFiltering } from "../shared/filters.js";
-import { heldInput, heldNote, type ListInput, listView } from "../shared/list-view.js";
+import {
+	type HoldAnnouncement,
+	heldInput,
+	heldNote,
+	holdAnnouncement,
+	type ListInput,
+	listView,
+} from "../shared/list-view.js";
 import type { LedgerRow } from "../shared/rows.js";
 import { MAX_SEARCH_LENGTH, type ViewId } from "../shared/url-state.js";
 import { AuditTable } from "./audit-table.js";
@@ -65,6 +72,11 @@ export function App(): React.JSX.Element {
 	// Back, Forward or a link). Those views are dimmed and busy meanwhile, and the timeline says what is coming.
 	const holdNote = heldNote(list.at, shownAt);
 	const held = holdNote !== null;
+	// What a screen reader hears about it: once when the views start to lag, once when they catch up, never per answer.
+	const [announce, setAnnounce] = useState<HoldAnnouncement>({ held: false, text: "" });
+	useEffect(() => {
+		setAnnounce((prev) => holdAnnouncement(prev, holdNote, shownAt));
+	}, [holdNote, shownAt]);
 	// The selected row's event HASH (unique on the chain, where an id can repeat), resolved from the rows shown: a
 	// `status` correction replaces the row object, and a panel holding the old one kept showing the old status.
 	const open = useMemo(
@@ -235,6 +247,7 @@ export function App(): React.JSX.Element {
 					error={atView.error}
 					reloaded={atView.reloaded}
 					holdNote={holdNote}
+					announce={announce.text}
 					onPreview={preview}
 					onHold={onHold}
 					onCommit={setAt}

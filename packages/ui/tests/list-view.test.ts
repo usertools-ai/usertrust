@@ -13,7 +13,14 @@ import { describe, expect, it } from "vitest";
 import type { AtPayload, SummaryPayload } from "../src/shared/api.js";
 import { listState } from "../src/shared/display.js";
 import { EMPTY_FILTERS } from "../src/shared/filters.js";
-import { heldInput, heldNote, type ListInput, listView } from "../src/shared/list-view.js";
+import {
+	type HoldAnnouncement,
+	heldInput,
+	heldNote,
+	holdAnnouncement,
+	type ListInput,
+	listView,
+} from "../src/shared/list-view.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 import { Scrubber } from "../src/shared/scrub.js";
 
@@ -273,5 +280,46 @@ describe("heldNote", () => {
 		const now = at({ pos: 63 });
 		expect(heldNote(old, now)).not.toBeNull();
 		expect(heldNote(now, now)).toBeNull();
+	});
+});
+
+describe("holdAnnouncement", () => {
+	const start: HoldAnnouncement = { held: false, text: "" };
+
+	it("speaks twice per drag, however many answers land: once as the views lag, once as they catch up", () => {
+		// A drag from 40 to 63, an answer for every position on the way, then the release and the deferred render.
+		let a = start;
+		const said: string[] = [];
+		const step = (drawn: number, shown: number): void => {
+			const next = holdAnnouncement(
+				a,
+				heldNote(at({ pos: drawn }), at({ pos: shown })),
+				at({ pos: shown }),
+			);
+			if (next.text !== a.text) said.push(next.text);
+			a = next;
+		};
+		step(40, 40);
+		for (let shown = 41; shown <= 63; shown++) step(40, shown);
+		step(63, 63);
+		expect(said).toEqual(["Updating to record 42…", "Showing record 64"]);
+	});
+
+	it("returns the same object when nothing flips, so the page does not re-render for it", () => {
+		const lagging = holdAnnouncement(start, "Updating to record 42…", at({ pos: 41 }));
+		expect(holdAnnouncement(lagging, "Updating to record 50…", at({ pos: 49 }))).toBe(lagging);
+		expect(holdAnnouncement(start, null, at({ pos: 41 }))).toBe(start);
+	});
+
+	it("says live when the views catch up with Live", () => {
+		const lagging = holdAnnouncement(start, "Updating to the live vault…", null);
+		expect(lagging.text).toBe("Updating to the live vault…");
+		expect(holdAnnouncement(lagging, null, null).text).toBe("Showing the live vault");
+	});
+
+	it("the page feeds it the held note and the header's position, and hands its text to the timeline", () => {
+		const app = readFileSync(join(import.meta.dirname, "..", "src", "app", "app.tsx"), "utf-8");
+		expect(app).toContain("setAnnounce((prev) => holdAnnouncement(prev, holdNote, shownAt));");
+		expect(app).toContain("announce={announce.text}");
 	});
 });

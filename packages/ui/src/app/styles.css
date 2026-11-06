@@ -1640,6 +1640,10 @@ body {
 		font: 400 11px/13px var(--sans);
 		color: var(--body);
 	}
+	/* Folded into Live on a phone only (the "N new since" button is shown everywhere else). */
+	.ut-tl-count {
+		display: none;
+	}
 	.ut-tl-msg {
 		font: 400 12px/1.45 var(--sans);
 		color: #ededf2;
@@ -1792,26 +1796,32 @@ body {
 			z-index: 5;
 		}
 
-		/* Head: the view tabs and the count, then the search and Export on one row. */
+		/* Head: the view tabs and the count, then the search and Export on one row. Two flex rows, never one grid: a grid
+		   sized its first column by the tabs (row one) and its last by Export (row two), so the two had to fit side by
+		   side although they never share a row, and "Export 100,000 rows" made the page wider than a 320px screen. The
+		   spacer between the count and the search takes a whole line of no height: it ends row one. */
 		.ut-head {
-			display: grid;
-			grid-template-columns: auto minmax(0, 1fr) auto;
-			gap: 8px 10px;
+			display: flex;
+			flex-wrap: wrap;
+			/* Rows: 4px, the spacer's empty line, 4px: the 8px the rows always had. */
+			gap: 4px 10px;
 			padding: 10px 12px;
 		}
 		.ut-head .ut-grow {
-			display: none;
+			flex: 0 0 100%;
+			height: 0;
 		}
 		.ut-head .ut-label {
-			grid-column: 2 / 4;
+			flex: 1 1 0;
+			min-width: 0;
 		}
 		.ut-head .ut-search {
-			grid-column: 1 / 3;
+			flex: 1 1 0;
 			min-width: 0;
-			width: 100%;
+			width: auto;
 		}
 		.ut-head .ut-btn {
-			grid-column: 3;
+			flex: 0 0 auto;
 		}
 
 		/* Filters: the bar is one button; the filters open in a sheet over the page. */
@@ -1902,33 +1912,41 @@ body {
 		}
 
 		/* The timeline stays at the bottom of the screen while the page scrolls past the records, clear of the home
-		   indicator. A past label takes its own line, so the buttons never squeeze it; everything it adds grows upward,
-		   so the range stays under the finger. The gaps are the room the buttons' 44px areas need. */
+		   indicator. One row (the label, then Live) and the range directly under it, the same height live and past. The
+		   top padding and the gap are the room Live's 44px area needs above and below it (tests/hit-areas.test.ts); the
+		   range's box is its own 44px area, so little is needed under it. */
 		.ut-tl {
 			position: sticky;
 			bottom: 0;
 			z-index: 6;
 			gap: 10px;
-			padding: 12px 12px;
-			padding-bottom: calc(12px + env(safe-area-inset-bottom));
+			padding: 10px 12px;
+			padding-bottom: calc(6px + env(safe-area-inset-bottom));
 		}
-		/* The label takes its own two lines (it wraps, never cut) and the buttons' row is held under it in both views
-		   (two 16.8px lines, a 10px gap, 26px buttons), so entering or leaving the past view changes nothing's size. */
+		/* The label and Live share the row. The row holds the label's two lines whether or not it wraps, and whether or not
+		   Live is there, so entering or leaving the past view changes nothing's size. */
 		.ut-tl-head {
-			flex-wrap: wrap;
-			align-content: flex-start;
-			row-gap: 10px;
-			height: calc(2 * 12px * 1.4 + 36px);
+			flex-wrap: nowrap;
+			height: calc(2 * 12px * 1.4);
 		}
+		/* It wraps in its two lines, never cut. "N new since" is folded into Live here (.ut-tl-count), so one button at
+		   most sits beside it. */
 		.ut-tl-label {
-			flex-basis: 100%;
+			flex: 1 1 0;
+			display: flex;
+			align-items: center;
 			height: calc(2 * 12px * 1.4);
 			white-space: normal;
 			overflow-wrap: anywhere;
 			overflow: visible;
 		}
-		.ut-tl-held {
-			text-align: left;
+		/* No room beside the label for the visible note: the dimmed views and the announcement carry it. */
+		.ut-tl-held,
+		.ut-tl-new {
+			display: none;
+		}
+		.ut-tl-count {
+			display: inline;
 		}
 	}
 
@@ -2046,7 +2064,7 @@ body {
 		.ut-ghost::after {
 			inset: -9.5px -2px;
 		}
-		/* 44.5px, inside the phone timeline's 12px padding and 10px gaps. */
+		/* 44.5px, inside the phone timeline's 10px top padding and its 10px gap to the range. */
 		.ut-tl-btn::after {
 			inset: -10.5px -3px;
 		}

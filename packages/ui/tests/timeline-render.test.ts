@@ -31,6 +31,7 @@ interface TimelineProps {
 	error: string | null;
 	reloaded: boolean;
 	holdNote?: string | null;
+	announce?: string;
 	onPreview(pos: number): void;
 	onCommit(pos: number): void;
 	onLive(): void;
@@ -483,28 +484,65 @@ describe("the timeline", () => {
 		expect(html).toContain("showing the live vault");
 	});
 
-	it("its head row is one fixed height live and past (on a phone, the label wraps in two lines and the buttons' row is held under it)", () => {
+	it("its head row is one fixed height live and past (on a phone, the label and Live share one row of two lines)", () => {
 		const css = readFileSync(join(import.meta.dirname, "..", "src", "app", "styles.css"), "utf-8");
 		expect(css).toMatch(/\.ut-tl-head \{[^}]*\bheight: 26px;/);
 		const phone = css.slice(css.indexOf("@media (max-width: 760px)"));
-		expect(phone).toMatch(/\.ut-tl-head \{[^}]*[^-]height: calc\(2 \* 12px \* 1\.4 \+ 36px\);/);
+		// One row: the label's two lines, Live beside it; the range directly under.
+		const head = /\.ut-tl-head \{([^}]*)\}/.exec(phone)?.[1] ?? "";
+		expect(head).toMatch(/flex-wrap: nowrap;/);
+		expect(head).toMatch(/[^-]height: calc\(2 \* 12px \* 1\.4\);/);
+		expect(head).not.toMatch(/36px|min-height/);
 		const label = /\.ut-tl-label \{([^}]*)\}/.exec(phone)?.[1] ?? "";
-		expect(label).toMatch(/flex-basis: 100%;/);
+		expect(label).toMatch(/flex: 1 1 0;/);
+		expect(label).not.toMatch(/flex-basis: 100%/);
 		expect(label).toMatch(/[^-]height: calc\(2 \* 12px \* 1\.4\);/);
 		// A long past label ("As recorded at … (latest record)") wraps; it is never cut.
 		expect(label).toMatch(/white-space: normal;/);
 		expect(label).toMatch(/overflow: visible;/);
+		// At most one button beside it: "N new since" is folded into Live, and the visible note has no room.
+		expect(phone).toMatch(/\.ut-tl-held,\s*\.ut-tl-new \{\s*display: none;\s*\}/);
+		expect(phone).toMatch(/\.ut-tl-count \{\s*display: inline;\s*\}/);
+		const wide = css.slice(0, css.indexOf("@media (max-width: 900px)"));
+		expect(wide).toMatch(/\.ut-tl-count \{\s*display: none;\s*\}/);
+		// A compact box: the top padding and the gap Live's 44px area needs, and little under the range's own 44px box.
+		const tl = /\.ut-tl \{([^}]*)\}/.exec(phone)?.[1] ?? "";
+		expect(tl).toMatch(/gap: 10px;/);
+		expect(tl).toMatch(/padding: 10px 12px;/);
+		expect(tl).toMatch(/padding-bottom: calc\(6px \+ env\(safe-area-inset-bottom\)\);/);
 		// No rule gives a past label a different size from a live one.
 		expect(css).not.toMatch(
 			/\.ut-tl-label\[data-past="true"\] \{[^}]*(flex-basis|white-space|font)/,
 		);
 	});
 
-	it("says what the dimmed views are waiting for, in a polite live region that is there before any text", () => {
+	it("on a phone the new-since count rides in Live: the same action, one button", () => {
+		const html = render({ at: at({ head: 99 }), wanted: 40, head: 120 });
+		expect(html).toMatch(
+			/<button type="button" class="ut-tl-btn ut-tl-new"[^>]*>21 new since<\/button>/,
+		);
+		// "+21" (short, so a long label keeps its two lines beside it at 320px), "new records" for a screen reader.
+		expect(html).toMatch(
+			/<button type="button" class="ut-tl-btn"[^>]*>Live<span class="ut-tl-count"> \+21<span class="sr-only"> new records<\/span><\/span><\/button>/,
+		);
+		expect(render({ at: at({ head: 99 }), wanted: 40, head: 99 })).not.toContain("ut-tl-count");
+	});
+
+	it("announces the held views once as they start to lag and once as they catch up, in a region there before any text", () => {
 		const idle = render({ at: at(), wanted: 40 });
-		expect(idle).toMatch(/<span class="ut-tl-held" role="status"><\/span>/);
-		const held = render({ at: at({ pos: 61 }), wanted: 61, holdNote: "Updating to record 62…" });
-		expect(held).toMatch(/<span class="ut-tl-held" role="status">Updating to record 62…<\/span>/);
+		expect(idle).toMatch(/<span class="sr-only" role="status"><\/span>/);
+		const held = render({
+			at: at({ pos: 61 }),
+			wanted: 61,
+			holdNote: "Updating to record 62…",
+			announce: "Updating to record 62…",
+		});
+		expect(held).toMatch(/<span class="sr-only" role="status">Updating to record 62…<\/span>/);
+		// The visible note follows every answer, so it is hidden from the screen reader: only `announce` is read.
+		expect(held).toMatch(
+			/<span class="ut-tl-held" aria-hidden="true">Updating to record 62…<\/span>/,
+		);
+		expect(held.match(/role="status"/g)).toHaveLength(1);
 	});
 
 	it("an epoch change says the vault was reloaded", () => {

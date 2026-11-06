@@ -95,3 +95,31 @@ export function heldNote(drawnAt: AtPayload | null, shownAt: AtPayload | null): 
 		? "Updating to the live vault…"
 		: `Updating to record ${(shown + 1).toLocaleString()}…`;
 }
+
+/** What the timeline's live region says about the held views, and whether they were held when it last changed. */
+export interface HoldAnnouncement {
+	held: boolean;
+	text: string;
+}
+
+/**
+ * The live region's text moves only when the held state flips: once when the views start to lag the header ("Updating to
+ * record N…"), once when they catch up ("Showing record N", or the live vault). In between it keeps its text, so a
+ * screen reader hears two announcements per drag, not one per answer. Returns `prev` itself when nothing flips.
+ */
+export function holdAnnouncement(
+	prev: HoldAnnouncement,
+	note: string | null,
+	shownAt: AtPayload | null,
+): HoldAnnouncement {
+	const held = note !== null;
+	if (held === prev.held) return prev;
+	if (note !== null) return { held, text: note };
+	return {
+		held,
+		text:
+			shownAt === null
+				? "Showing the live vault"
+				: `Showing record ${(shownAt.pos + 1).toLocaleString()}`,
+	};
+}

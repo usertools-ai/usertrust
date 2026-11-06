@@ -44,10 +44,15 @@ export function Timeline(props: {
 	reloaded: boolean;
 	/**
 	 * Set while the list, the facets, Trends, the inspector and Export still show another position than the header
-	 * (they are dimmed meanwhile): "Updating to record N…". A polite live region, there before any text, so the dim
-	 * means something to everyone.
+	 * (they are dimmed meanwhile): "Updating to record N…", shown beside the label where there is room (not on a phone).
+	 * It follows every answer, so it is not announced: `announce` is.
 	 */
 	holdNote?: string | null;
+	/**
+	 * The polite live region's text (`holdAnnouncement`): it changes once when the views start to lag and once when they
+	 * catch up, so a drag is two announcements, not one per answer. The region is there before any text.
+	 */
+	announce?: string;
 	/** Ask for a position without writing the address (a drag in progress). */
 	onPreview(pos: number): void;
 	/** Write the position to the address (the drag settled). */
@@ -133,13 +138,16 @@ export function Timeline(props: {
 				<span className="ut-tl-label" data-past={at !== null}>
 					{label}
 				</span>
-				<span className="ut-tl-held" role="status">
+				<span className="ut-tl-held" aria-hidden="true">
 					{props.holdNote ?? ""}
+				</span>
+				<span className="sr-only" role="status">
+					{props.announce ?? ""}
 				</span>
 				{fresh > 0 && (
 					<button
 						type="button"
-						className="ut-tl-btn"
+						className="ut-tl-btn ut-tl-new"
 						title={`${fresh.toLocaleString()} ${fresh === 1 ? "record was" : "records were"} added after this point was chosen: go live to see them`}
 						onClick={live}
 					>
@@ -154,6 +162,13 @@ export function Timeline(props: {
 						onClick={live}
 					>
 						Live
+						{/* On a phone the "N new since" button is folded in here, so the label and one button share a row. */}
+						{fresh > 0 && (
+							<span className="ut-tl-count">
+								{` +${fresh.toLocaleString()}`}
+								<span className="sr-only"> new records</span>
+							</span>
+						)}
 					</button>
 				)}
 			</div>
