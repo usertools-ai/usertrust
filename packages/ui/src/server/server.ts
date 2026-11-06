@@ -22,9 +22,10 @@
  * response carries an access-control-* header, so a cross-origin preflight
  * always fails. PUT /api/settings also needs the per-start token from
  * GET /api/session in `x-usertrust-token`.
+ * GET /api/at answers the vault as recorded at a past position (`AtPayload`).
  */
 
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { realpathSync, statSync, unwatchFile, watchFile } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname, join, resolve, sep } from "node:path";
@@ -35,13 +36,15 @@ import {
 	type PersistedAuditEvent,
 	VAULT_DIR,
 } from "usertrust";
-import { canonicalize, verifyTransaction } from "usertrust-verify";
+import { type TransferStatus, verifyTransaction } from "usertrust-verify";
 import { isHeaderSpend } from "../shared/aggregate.js";
-import type { SettingKey, SettingsPayload } from "../shared/api.js";
+import type { AtPayload, SettingKey, SettingsPayload } from "../shared/api.js";
 import { type RowStatus, statusFor, toLedgerRows } from "../shared/rows.js";
 import { hostAllowed, originAllowed, parseAllowHosts } from "./allow-host.js";
+import { parseZonedTime } from "./position-index.js";
 import {
 	budgetSummary,
+	contentHash,
 	type DeletionCause,
 	type LedgerState,
 	type LogHead,
@@ -80,6 +83,12 @@ const SETTINGS_BODY_CAP = 4 * 1024;
 /** The answer when the settings log cannot be read. */
 const SETTINGS_UNREADABLE = "settings could not be read";
 
+/** What `AtPayload.budget.note` says until the vault records budget changes: the budget shown is today's. */
+const BUDGET_NOTE = "budget history starts with the first budget record; this is today's budget";
+
+/** A position as a query gives it: digits only (no sign, no exponent, no fraction, no spaces). */
+const POSITION = /^\d+$/;
+
 /** The header every settings write carries the session token in. */
 const TOKEN_HEADER = "x-usertrust-token";
 
@@ -94,6 +103,7 @@ const API_METHODS: ReadonlyMap<string, readonly string[]> = new Map([
 	["/api/export", ["POST"]],
 	["/api/session", ["GET"]],
 	["/api/settings", ["GET", "PUT"]],
+	["/api/at", ["GET"]],
 ]);
 
 /** The methods `pathname` takes, or undefined when no route serves it (a 404). */
@@ -250,6 +260,8 @@ export async function createUiServer(
 		allowHosts?: readonly string[];
 		/** Where settings are kept. Default `workspaceDir(<the resolved root>)`; never inside the project or its vault. */
 		workspaceDir?: string;
+		/** How many rows are held and served (the latest ones). Default `ROW_CAP`. */
+		rowCap?: number;
 	},
 ): Promise<UiServer> {
 	// One root for the whole server: the vault it shows and reads, the export guard and the settings checks.
@@ -369,7 +381,10 @@ export async function createUiServer(
 	const allowHosts: readonly string[] = parsedHosts.names;
 	// Compiled location is dist/server/ — the built SPA sits beside it in dist/app/.
 	const appDir = opts?.appDir ?? join(dirname(fileURLToPath(import.meta.url)), "..", "app");
-	let state: LedgerState = loadState(vaultPath);
+	const rowCap = opts?.rowCap ?? ROW_CAP;
+	if (!Number.isSafeInteger(rowCap) || rowCap < 1)
+		throw new Error("rowCap must be a whole number >= 1");
+	let state: LedgerState = loadState(vaultPath, rowCap);
 	/**
 	 * Whether this process has ever seen the vault's audit directory, listable or not. A resync that finds it gone
 	 * after that is a deletion, not a first run (`loadState`'s `auditDirSeen`); a verified append proves it exists.
@@ -418,6 +433,16 @@ export async function createUiServer(
 	const clients = new Set<ServerResponse>();
 	/** The state's version: bumped on every change, sent as each frame's SSE `id` and with each snapshot. */
 	let version = 0;
+	/**
+	 * Bumped by a full reload (`handleResync`) that yields other records than the state it replaces: another log
+	 * (`logId`), another number of events, another tip (`lastHash`), another break index (`fullBreakIndex`), or another
+	 * records digest (`LedgerState.records`: any record whose recomputed content or stored hash differs, or sits
+	 * elsewhere, such as a record rewritten in place after an existing break with every stored hash, the tip, the count
+	 * and the break kept). A position can then name another record (a log replaced, truncated, rotated) or one that
+	 * reads otherwise. Never by an append (which extends the digest), and never by a reload of an unchanged vault (the
+	 * periodic re-verify), which would read to the page as a reload every few minutes. `AtPayload.epoch` carries it.
+	 */
+	let epoch = 0;
 
 	function broadcast(eventName: string, data: unknown): void {
 		const frame = `id: ${version}\nevent: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -473,19 +498,33 @@ export async function createUiServer(
 			const complete = appended.subarray(0, lastNewline + 1).toString("utf-8");
 			const lines = complete.split("\n").filter((l) => l.trim());
 			const fresh: PersistedAuditEvent[] = [];
+			// Each appended record's recomputed content hash, for the state's records digest once every line verified.
+			const freshContent: string[] = [];
 			let lastHash = state.lastHash;
+			let lastSequence = state.lastSequence;
 			for (const line of lines) {
 				const e = JSON.parse(line) as PersistedAuditEvent;
 				if (e.previousHash !== lastHash) throw new Error("linkage mismatch");
+				// A vault ordered by `sequence` stays in that order only if each append's sequence is above the last: the
+				// next full read would sort a lower one earlier, which moves positions and can break the chain. Reload.
+				if (lastSequence !== null) {
+					if (typeof e.sequence !== "number" || !(e.sequence > lastSequence))
+						throw new Error("sequence out of order");
+					lastSequence = e.sequence;
+				}
 				// Amendment A4: linkage alone doesn't catch forged payloads —
 				// recompute the hash exactly as usertrust-verify does.
-				const { hash, ...rest } = e;
-				const computed = createHash("sha256").update(canonicalize(rest)).digest("hex");
-				if (computed !== hash) throw new Error("hash mismatch");
+				const computed = contentHash(e);
+				if (computed !== e.hash) throw new Error("hash mismatch");
 				fresh.push(e);
+				freshContent.push(computed);
 				lastHash = e.hash;
 			}
-			const touched = state.transfers.add(fresh);
+			// Every appended event was verified onto the chain the last full load verified, so each takes the next position.
+			const firstPos = state.positions.length;
+			const touched = state.transfers.add(fresh, firstPos);
+			for (const e of fresh) state.positions.add(e);
+			for (const [i, e] of fresh.entries()) state.records.add(freshContent[i] as string, e.hash);
 			// A new record can change an EARLIER row's verdict (an ambiguity appended after an optimistic
 			// settlement), so every visible row of a touched transfer is re-classified, and each change is sent.
 			// Each change names its row by event HASH (unique on the chain); the id rides along for display only.
@@ -507,9 +546,11 @@ export async function createUiServer(
 				fresh,
 				{ valid: true, breakIndex: null },
 				state.transfers.verdictOf,
+				firstPos,
 			);
 			state.rows.push(...rows);
 			state.lastHash = lastHash;
+			state.lastSequence = lastSequence;
 			state.lastLine = lastLineOfAppend(state.byteOffset, appended, lastNewline);
 			state.byteOffset += lastNewline + 1;
 			state.logTimes = read.times;
@@ -528,9 +569,9 @@ export async function createUiServer(
 			auditDirSeen = true;
 			// A verified append is the first activity of a vault that had none.
 			if (fresh.length > 0) state.summary.chain.empty = false;
-			// Amendment A4: enforce ROW_CAP after append.
-			if (state.rows.length > ROW_CAP) {
-				state.rows.splice(0, state.rows.length - ROW_CAP);
+			// Amendment A4: enforce the row cap after append.
+			if (state.rows.length > rowCap) {
+				state.rows.splice(0, state.rows.length - rowCap);
 				state.summary.truncated = true;
 			}
 			state.summary.rowCount = state.rows.length;
@@ -544,12 +585,21 @@ export async function createUiServer(
 	}
 
 	function handleResync(): void {
+		const before = state;
 		loading = true;
 		try {
-			state = loadState(vaultPath, ROW_CAP, auditDirSeen, deletionSeen, auditDirId, head);
+			state = loadState(vaultPath, rowCap, auditDirSeen, deletionSeen, auditDirId, head);
 		} finally {
 			loading = false;
 		}
+		if (
+			state.logId !== before.logId ||
+			state.positions.length !== before.positions.length ||
+			state.lastHash !== before.lastHash ||
+			state.fullBreakIndex !== before.fullBreakIndex ||
+			state.records.value() !== before.records.value()
+		)
+			epoch += 1;
 		auditDirSeen ||= state.auditDirPresent;
 		auditDirId ??= state.auditDirId;
 		deletionSeen = state.deletionCauses;
@@ -563,6 +613,147 @@ export async function createUiServer(
 		version += 1;
 		broadcast("resync", {});
 		broadcast("summary", state.summary);
+	}
+
+	/**
+	 * GET /api/at: the vault as recorded at one position, from `?pos=N` or `?t=<ISO>` (exactly one). Every figure is
+	 * read from prefix sums kept over the whole vault (`PositionIndex`) and the transfer index, never by a pass over
+	 * the events; only the rows whose status at the position can differ from now are classified again.
+	 *
+	 * - `pos`: digits only. Past the head, it is the head, with `clamped: true`.
+	 * - `t`: an ISO-8601 date and time with `Z` or an offset (`parseZonedTime`; a `+` must be sent as `%2B`), compared
+	 *   in epoch ms. It answers the last position whose events are all at or before `t` (`positionAt`). A `t` before
+	 *   the first record is a 404 `{ error: "no records before this time" }`. "The first record" is the first whose time
+	 *   PARSES: when the first record's time does not parse, `positionAt` answers it for any `t` (its running maximum
+	 *   is -Infinity), so the 404 is judged against the first time that does. Such records stay reachable by `pos`.
+	 * - `counts`: `llm_call` records (an `llm_call_failed` is not one: it counts as `other`), denials (`policy_denied`
+	 *   and `ledger_rejected`), and every other record, at positions `0..pos`. `spentUt` is the header's Spend rule.
+	 * - `chain`: never claims more than the whole-vault verdict. A position before the break reads valid only when the
+	 *   break is the vault's ONLY failure (`LedgerState.breakIsOnlyFailure`), and then while `pos` is before the
+	 *   FULL-list break index (`LedgerState.fullBreakIndex`), never the slice-relative index the rows use. A vault that
+	 *   also fails for a reason no event marks (a malformed or torn line, an anchor mismatch, a latched deletion), or
+	 *   whose load cannot tell, is invalid at every position, break or not. With no break, it is the whole-vault verdict
+	 *   (`summary.chain.valid`) at every position.
+	 * - `plan`: the workspace value in force at the position's RUNNING-MAXIMUM time (`timeMsAt`: the latest time
+	 *   recorded at or before it), not necessarily the event's own `ts`. In a log written in order the two are the
+	 *   same; in one whose times are out of order (several writers), it is the instant `positionAt` searches over, so
+	 *   `?t=` and the position it resolves read the same plan. Null when it is unset, no time up to the position parses,
+	 *   settings are off, or the settings cannot be read: the rest of the answer does not depend on them.
+	 * - `statusAt`: by event hash, the status at `pos` of each held row at or before `pos` whose transfer has a record
+	 *   after it (`TransferIndex.openAcross`, `verdictAt`), with the mapping the rows use (`statusFor`).
+	 */
+	function answerAt(res: ServerResponse, params: URLSearchParams): void {
+		const posArgs = params.getAll("pos");
+		const tArgs = params.getAll("t");
+		if (posArgs.length + tArgs.length !== 1) {
+			sendJson(res, 400, { error: "give exactly one of pos or t" });
+			return;
+		}
+		const positions = state.positions;
+		const head = positions.length - 1;
+		let pos: number;
+		let clamped = false;
+		const [posArg] = posArgs;
+		if (posArg !== undefined) {
+			if (!POSITION.test(posArg)) {
+				sendJson(res, 400, { error: "pos must be a whole number >= 0" });
+				return;
+			}
+			if (head < 0) {
+				sendJson(res, 404, { error: "no records" });
+				return;
+			}
+			const asked = Number(posArg);
+			clamped = asked > head;
+			pos = clamped ? head : asked;
+		} else {
+			const t = tArgs[0] as string;
+			const ms = parseZonedTime(t);
+			if (Number.isNaN(ms)) {
+				sendJson(res, 400, {
+					error: "t must be an ISO-8601 date and time with Z or an offset",
+				});
+				return;
+			}
+			const first = positions.firstTimedMs;
+			const found = first === null || ms < first ? null : positions.positionAt(t);
+			if (found === null) {
+				sendJson(res, 404, { error: "no records before this time" });
+				return;
+			}
+			pos = found;
+		}
+		const windowStartPos = state.rows[0]?.pos ?? head + 1;
+		const breakIndex = state.fullBreakIndex;
+		const body: AtPayload = {
+			pos,
+			ts: positions.tsAt(pos),
+			head,
+			clamped,
+			epoch,
+			spentUt: positions.spentUtAt(pos),
+			counts: positions.countsAt(pos),
+			chain: {
+				valid:
+					breakIndex === null
+						? state.summary.chain.valid
+						: state.breakIsOnlyFailure && pos < breakIndex,
+				breakIndex,
+			},
+			budget: {
+				ut: state.summary.budget,
+				source: state.summary.budgetSource,
+				writtenAt: state.summary.budgetWrittenAt,
+				provenance: state.summary.budgetProvenance,
+				note: BUDGET_NOTE,
+			},
+			plan: planAt(positions.timeMsAt(pos)),
+			windowStartPos,
+			statusAt: statusAt(pos, windowStartPos),
+		};
+		sendJson(res, 200, body, { "cache-control": "no-store" });
+	}
+
+	/** `plan.monthlyUt` in force at `ms`, or null: no time, settings off, or settings that cannot be read. */
+	function planAt(ms: number | null): number | null {
+		if (ms === null) return null;
+		try {
+			const ws = openWorkspace();
+			return typeof ws === "string"
+				? null
+				: ws.valueAt("plan.monthlyUt", new Date(ms).toISOString());
+		} catch {
+			return null;
+		}
+	}
+
+	/**
+	 * The status at `pos` of each held row at or before it whose transfer has a record after it. The rows held are
+	 * contiguous by position from `windowStartPos`, so a row is found by its position; one not held is skipped. A
+	 * position before the first row held has no held row at or before it, and a transfer whose rows up to `pos` all fall
+	 * before the window has none either: neither costs a verdict.
+	 */
+	function statusAt(pos: number, windowStartPos: number): Record<string, RowStatus> {
+		const out: Record<string, RowStatus> = {};
+		if (pos < windowStartPos) return out;
+		for (const { key, rowPositions } of state.transfers.openAcross(pos)) {
+			// Increasing: the last is the latest row at or before `pos`.
+			const last = rowPositions.at(-1);
+			if (last === undefined || last < windowStartPos) continue;
+			// Undefined when `transferVerdict` gives none over the records up to `pos`: `statusFor` takes undefined
+			// explicitly and reads an outcome row with no verdict as "unknown", as the rows built at load do.
+			const verdict: TransferStatus | undefined = state.transfers.verdictAt(key, pos);
+			for (const p of rowPositions) {
+				const row = state.rows[p - windowStartPos];
+				if (row === undefined || row.pos !== p) continue;
+				out[row.hash] = statusFor(
+					row.kind,
+					row.settled !== undefined ? { settled: row.settled } : {},
+					verdict,
+				);
+			}
+		}
+		return out;
 	}
 
 	/** Set first thing in close(). Once true, a request that starts during the grace is refused. */
@@ -642,6 +833,16 @@ export async function createUiServer(
 		}
 		if (url.pathname === "/api/events") {
 			sendJson(res, 200, { rows: state.rows, summary: state.summary, version });
+			return;
+		}
+		if (url.pathname === "/api/at") {
+			// A throw here would leave the listener and end the process: a fault is a 500 with a fixed message.
+			try {
+				answerAt(res, url.searchParams);
+			} catch {
+				if (!res.headersSent) sendJson(res, 500, { error: "position could not be read" });
+				else res.destroy();
+			}
 			return;
 		}
 		if (url.pathname === "/api/session") {

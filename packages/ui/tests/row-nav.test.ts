@@ -161,6 +161,8 @@ describe("rowAccessibleName", () => {
 		const [row] = toLedgerRows(
 			[evt(1, { data: { model: "gpt-5", cost: 1234, provider: "openai" } })],
 			{ valid: true, breakIndex: null },
+			undefined,
+			0,
 		);
 		const name = rowAccessibleName(row as NonNullable<typeof row>);
 		expect(name).toContain("gpt-5");
@@ -170,17 +172,27 @@ describe("rowAccessibleName", () => {
 	});
 
 	it("names the kind where a row has no model, and says plainly when no cost was recorded", () => {
-		const [row] = toLedgerRows([evt(1, { kind: "policy_denied", data: {} })], {
-			valid: true,
-			breakIndex: null,
-		});
+		const [row] = toLedgerRows(
+			[evt(1, { kind: "policy_denied", data: {} })],
+			{
+				valid: true,
+				breakIndex: null,
+			},
+			undefined,
+			0,
+		);
 		const name = rowAccessibleName(row as NonNullable<typeof row>);
 		expect(name.startsWith("policy_denied, no cost recorded, ")).toBe(true);
 		expect(name).not.toContain(" 0 UT");
 	});
 
 	it("says so for a row after a chain break", () => {
-		const rows = toLedgerRows([evt(1, {}), evt(2, {})], { valid: false, breakIndex: 1 });
+		const rows = toLedgerRows(
+			[evt(1, {}), evt(2, {})],
+			{ valid: false, breakIndex: 1 },
+			undefined,
+			0,
+		);
 		expect(rowAccessibleName(rows[0] as NonNullable<(typeof rows)[0]>)).not.toContain(
 			"after break",
 		);

@@ -52,7 +52,7 @@ function tenBuckets() {
 		evt(20, { cost: 3, job: "jx", jobType: "made-up", typeSource: "agent" }),
 		evt(21, { cost: 1 }),
 	];
-	return toLedgerRows(events, { valid: true, breakIndex: null });
+	return toLedgerRows(events, { valid: true, breakIndex: null }, undefined, 0);
 }
 
 const drawn = (html: string): number[] =>

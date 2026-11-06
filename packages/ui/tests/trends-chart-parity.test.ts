@@ -81,6 +81,8 @@ describe("the table prints each bucket as the chart's tooltip does", () => {
 		const rows = toLedgerRows(
 			DAYS.map(([ts, cost], i) => evt(i + 1, ts, cost)),
 			{ valid: true, breakIndex: null },
+			undefined,
+			0,
 		);
 		const Trends = await load();
 		const html = renderToStaticMarkup(createElement(Trends, { rows, newestOf: undefined }));

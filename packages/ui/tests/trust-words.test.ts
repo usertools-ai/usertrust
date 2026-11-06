@@ -60,6 +60,7 @@ function summary(over: Partial<SummaryPayload> = {}): SummaryPayload {
 function row(over: Partial<LedgerRow> = {}): LedgerRow {
 	return {
 		seq: 1,
+		pos: 0,
 		id: "e1",
 		ts: "2026-10-12T17:59:02.770Z",
 		kind: "llm_call",

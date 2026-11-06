@@ -8,6 +8,7 @@ import type { LedgerRow } from "../src/shared/rows.js";
 function row(id: string, hash: string, status: LedgerRow["status"]): LedgerRow {
 	return {
 		seq: null,
+		pos: 0,
 		id,
 		ts: "2026-10-12T00:00:00.000Z",
 		kind: "llm_call",

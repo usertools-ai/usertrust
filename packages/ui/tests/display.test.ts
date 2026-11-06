@@ -19,6 +19,7 @@ import type { LedgerRow } from "../src/shared/rows.js";
 function row(overrides: Partial<LedgerRow> = {}): LedgerRow {
 	return {
 		seq: 1,
+		pos: 0,
 		id: "5d014ce0-8008-4b5e-b44b-e1b1c8daf2d8",
 		ts: "2026-10-12T17:59:02.770Z",
 		kind: "llm_call",

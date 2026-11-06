@@ -183,6 +183,7 @@ describe("verifyOutcome on this dashboard's own check", () => {
 describe("heldFor: a verify response belongs to the row VERSION it was requested for", () => {
 	const settled: LedgerRow = {
 		seq: 13,
+		pos: 12,
 		id: "e13",
 		ts: "2026-10-11T21:36:58.402Z",
 		kind: "llm_call",
