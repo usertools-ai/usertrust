@@ -144,7 +144,7 @@ export function RowPanel(props: {
 	 * Set (to a number that changes on each request) when the row was opened with the keyboard: a docked inspector then
 	 * takes focus on its heading. Unset for a click, which leaves focus where it is.
 	 */
-	focusNonce?: number;
+	focusNonce?: number | undefined;
 	/** Called once the heading has taken focus for a request, so the request is cleared and a later remount (another
 	 * view and back) does not replay it and take focus from wherever the reader is. */
 	onFocusHandled?: () => void;

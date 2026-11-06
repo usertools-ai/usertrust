@@ -81,6 +81,7 @@ describe("encodeUrlState / decodeUrlState", () => {
 		const s: UrlState = {
 			view: "trends",
 			open: H,
+			at: null,
 			filters: {
 				...EMPTY_FILTERS,
 				statuses: ["failed", "denied"],
