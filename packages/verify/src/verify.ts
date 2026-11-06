@@ -111,6 +111,21 @@ export function verifyChain(logPath: string): ChainVerificationResult {
 			continue;
 		}
 
+		// A line that parses but is not a JSON object is skipped like a malformed one. `null`
+		// threw on its first field read; a number, string, boolean or array was hashed as an
+		// object it is not, and its missing hash became the link the next event was checked against.
+		if (event === null || typeof event !== "object" || Array.isArray(event)) {
+			errors.push(
+				JSON.stringify({
+					line: i + 1,
+					error: "non-object line",
+					raw: line.substring(0, 100),
+				}),
+			);
+			skipped++;
+			continue;
+		}
+
 		if (event.previousHash !== expectedPreviousHash) {
 			errors.push(
 				`Event ${i + 1} (${event.id}): previousHash mismatch. ` +

@@ -280,6 +280,106 @@ describe("HARDEN: core vs verify pkg agree on I/O FAILURE paths", () => {
 	});
 });
 
+/** {@link buildContinuousChain} with each event's `sequence` given: a chain re-rooted or gapped. */
+function buildSequencedChain(sequences: readonly number[]): string[] {
+	let previousHash = GENESIS_HASH;
+	const lines: string[] = [];
+	for (let i = 0; i < sequences.length; i++) {
+		const event = {
+			id: `evt-${i + 1}`,
+			kind: "test.event",
+			timestamp: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(),
+			previousHash,
+			data: { n: i + 1 },
+			sequence: sequences[i] as number,
+		};
+		const hash = createHash("sha256").update(canonicalize(event)).digest("hex");
+		lines.push(JSON.stringify({ ...event, hash }));
+		previousHash = hash;
+	}
+	return lines;
+}
+
+describe("HARDEN: core vs verify pkg agree on a log holding a non-object line", () => {
+	/**
+	 * A line that parses as JSON but is not an object (`42`, `[]`) is not an event. Both verifiers
+	 * must report it as its own error and keep the sequence checks running over the events that
+	 * remain, and must say so in the same words. Agreement alone is not enough here: the two once
+	 * agreed on a verdict that named neither the stray line nor the deletion beside it, so each row
+	 * also pins what core says.
+	 */
+	afterEach(() => {
+		for (const d of dirs.splice(0)) {
+			rmSync(d, { recursive: true, force: true });
+		}
+	});
+
+	/** Every field of the two verdicts, compared whole. */
+	function assertFullAgree(vaultPath: string): ReturnType<typeof coreVerifyVault> {
+		const core = coreVerifyVault(vaultPath);
+		const pkg = pkgVerifyVault(vaultPath);
+		const pick = (r: typeof core) => ({
+			valid: r.valid,
+			errors: r.errors,
+			chainLength: r.chainLength,
+			validHashes: r.validHashes,
+			merkleRoot: r.merkleRoot,
+			firstEvent: r.firstEvent,
+			lastEvent: r.lastEvent,
+		});
+		expect(pick(core)).toEqual(pick(pkg));
+		return core;
+	}
+
+	function vaultWith(lines: readonly string[]): string {
+		const root = makeRoot("harden-diff-nonobject-");
+		const auditDir = join(root, VAULT_DIR, "audit");
+		mkdirSync(auditDir, { recursive: true });
+		writeFileSync(join(auditDir, "events.jsonl"), `${lines.join("\n")}\n`);
+		return join(root, VAULT_DIR);
+	}
+
+	function withLine(lines: readonly string[], at: number, extra: string): string[] {
+		const out = [...lines];
+		out.splice(at, 0, extra);
+		return out;
+	}
+
+	const rows = ["42", "[]"].flatMap((garbage) => [
+		{ garbage, where: "first", at: 0, line: 1 },
+		{ garbage, where: "middle", at: 2, line: 3 },
+	]);
+
+	it.each(rows)(
+		"16. leading deletion + a $garbage line ($where): both name the deletion and the line",
+		({ garbage, at, line }) => {
+			const lines = withLine(buildSequencedChain([5, 6, 7, 8]), at, garbage);
+			const core = assertFullAgree(vaultWith(lines));
+			expect(core.valid).toBe(false);
+			expect(core.errors.some((e) => e.includes("Sequence starts at 5, expected 1"))).toBe(true);
+			expect(core.errors).toContain(`non-object line (events.jsonl:${line})`);
+		},
+	);
+
+	it.each(rows)(
+		"17. sequence gap + a $garbage line ($where): both name the gap and the line",
+		({ garbage, at, line }) => {
+			const lines = withLine(buildSequencedChain([1, 2, 4, 5]), at, garbage);
+			const core = assertFullAgree(vaultWith(lines));
+			expect(core.valid).toBe(false);
+			expect(core.errors.some((e) => e.includes("Sequence gap: event 4 follows 2"))).toBe(true);
+			expect(core.errors).toContain(`non-object line (events.jsonl:${line})`);
+		},
+	);
+
+	it("18. clean chain + a 42 line in the middle: both report exactly that line", () => {
+		const core = assertFullAgree(vaultWith(withLine(buildSequencedChain([1, 2, 3, 4]), 2, "42")));
+		expect(core.valid).toBe(false);
+		expect(core.errors).toEqual(["non-object line (events.jsonl:3)"]);
+		expect(core.chainLength).toBe(4);
+	});
+});
+
 describe("HARDEN: core vs verify pkg agree on inclusion-proof topology", () => {
 	it("7. both generators produce proofs both verifiers accept (sizes 1..17)", () => {
 		for (let size = 1; size <= 17; size++) {
