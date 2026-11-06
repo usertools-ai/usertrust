@@ -15,7 +15,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { SummaryPayload } from "../src/shared/api.js";
 import { formatUsdTotal } from "../src/shared/format.js";
-import { tickFrames } from "../src/shared/tick.js";
+import { frameAt, tickFrames } from "../src/shared/tick.js";
 
 const CSS = readFileSync(
 	join(import.meta.dirname, "..", "src", "app", "styles.css"),
@@ -94,6 +94,32 @@ describe("tickFrames", () => {
 	});
 });
 
+describe("frameAt", () => {
+	const frames = tickFrames(0, 76_045);
+
+	it("a frame timestamp from before the count began shows the first frame, never the final value", () => {
+		// requestAnimationFrame's timestamp can be earlier than the performance.now() taken when the count began.
+		expect(frameAt(frames, -5)).toBe(frames[0]);
+		expect(frameAt(frames, -5)).not.toBe(76_045);
+		expect(frameAt(frames, Number.NaN)).toBe(frames[0]);
+	});
+
+	it("past the end shows the last frame", () => {
+		expect(frameAt(frames, 600)).toBe(76_045);
+		expect(frameAt(frames, 1e9)).toBe(76_045);
+		expect(frameAt(frames, Number.POSITIVE_INFINITY)).toBe(76_045);
+	});
+
+	it("every index in between is the frame for that elapsed time", () => {
+		for (let i = 0; i < frames.length; i++) {
+			expect(frameAt(frames, i * 16), `start of frame ${i}`).toBe(frames[i]);
+			expect(frameAt(frames, i * 16 + 15.9), `end of frame ${i}`).toBe(frames[i]);
+		}
+		expect(frameAt([1, 2, 3], 25, 10)).toBe(3);
+		expect(frameAt([1, 2, 3], 10, 10)).toBe(2);
+	});
+});
+
 describe("the accent is gold", () => {
 	/** A custom property declared in :root. */
 	const token = (name: string): string => {
@@ -115,6 +141,11 @@ describe("the accent is gold", () => {
 
 	it("no violet tint is left in the page's styles", () => {
 		expect(CSS.match(/rgba\(\s*155\s*,\s*123\s*,\s*255/g) ?? []).toEqual([]);
+	});
+
+	it("no violet hex appears outside the --intel token itself", () => {
+		const hits = [...CSS.matchAll(/([\w-]+)\s*:[^;{}]*#(?:cbbcff|9b7bff)\b/gi)].map((m) => m[1]);
+		expect(hits).toEqual(["--intel"]);
 	});
 
 	it("amber --info stays its own colour, never the accent", () => {
@@ -140,8 +171,13 @@ describe("reduced motion", () => {
 		throw new Error("unclosed reduced-motion block");
 	}
 
-	it("reduced motion lists the ticking class", () => {
-		expect(block()).toMatch(/\.ut-tick\b[^{]*\{[^}]*color:\s*inherit/);
+	// The count is script, skipped under reduced motion by the component; the class itself carries no CSS motion or
+	// colour change, so the block has nothing of it to hold back.
+	it("the ticking class carries no CSS motion and no colour change, so the block needs no entry for it", () => {
+		expect(block()).not.toContain(".ut-tick");
+		const rules = [...CSS.matchAll(/([^{}]*\.ut-tick\b[^{}]*)\{([^}]*)\}/g)].map((m) => m[2] ?? "");
+		expect(rules.length).toBeGreaterThan(0);
+		for (const body of rules) expect(body).not.toMatch(/\b(transition|animation|color)\s*:/);
 	});
 });
 
@@ -154,7 +190,7 @@ describe("<TickingFigure>", () => {
 		const tick = /<span class="ut-tick"([^>]*)>([^<]*)<\/span>/.exec(html);
 		expect(tick, html).not.toBeNull();
 		expect(tick?.[1]).toContain('aria-hidden="true"');
-		expect(tick?.[1]).toContain('aria-live="off"');
+		expect(tick?.[1]).not.toContain("aria-live");
 		expect(tick?.[1]).toContain(`min-width:${final.length}ch`);
 		expect(tick?.[2]).toBe(final);
 		expect(html).toContain(`<span class="sr-only">${final}</span>`);

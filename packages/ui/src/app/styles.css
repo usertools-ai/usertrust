@@ -2,11 +2,11 @@
 
 /*
  * Gold accent on near-black, dark only: there is no light theme. usertrust gold (--accent, the brand colour) is the one
- * accent: the logo, the rule beside the title, a healthy budget bar, selection, the active tab, progress fills, the live
- * pill and a figure while it counts. The budget bar turns orange past 80% used and red past 95%. Amber (--info) is kept
+ * accent: the logo, the rule beside the title, a healthy budget bar, selection, the active tab, hover and focus borders
+ * and the live pill's dot (the pill itself is neutral). The budget bar turns orange past 80% used and red past 95%. Amber (--info) is kept
  * for held and in-flight states, never the accent. Green (--approve, aliased --verify) is kept for the chain's integrity
  * and an anchored check: the integrity pills, the Verify button and the anchored verdict. An unanchored pass is neutral.
- * Chart marks keep their own colour (--chart); blue (--words) is the focus ring. Fonts are named, never shipped or
+ * Chart marks, the bar lists' meters among them, keep their own colour (--chart); blue (--words) is the focus ring. Fonts are named, never shipped or
  * fetched: a family is used only where it is already installed, else the system stack after it.
  */
 
@@ -238,9 +238,9 @@ body {
 		text-transform: uppercase;
 		padding: 5px 9px;
 		border-radius: 999px;
-		border: 1px solid rgba(232, 181, 75, 0.45);
-		color: var(--accent);
-		background: rgba(232, 181, 75, 0.08);
+		border: 1px solid var(--control-line);
+		color: var(--ink);
+		background: transparent;
 	}
 	.ut-live i {
 		width: 7px;
@@ -249,12 +249,16 @@ body {
 		background: currentColor;
 		position: relative;
 	}
+	/* Live: a neutral pill with a gold dot, so it never reads as the amber of connecting and reconnecting. */
+	.ut-live[data-st="live"] i {
+		background: var(--accent);
+	}
 	.ut-live[data-st="live"] i::after {
 		content: "";
 		position: absolute;
 		inset: -4px;
 		border-radius: 50%;
-		border: 2px solid currentColor;
+		border: 2px solid var(--accent);
 		animation: ut-pulse 1.8s ease-out infinite;
 	}
 	.ut-live[data-st="reconnecting"],
@@ -398,11 +402,12 @@ body {
 		background: rgba(255, 255, 255, 0.08);
 		overflow: hidden;
 	}
+	/* The budget meter sets its own fill inline (gold, orange or red); this is the fallback, the healthy one. */
 	.ut-meter i {
 		display: block;
 		height: 100%;
 		border-radius: 2px;
-		background: var(--accent);
+		background: var(--gold);
 	}
 	.ut-mark {
 		font: 500 10.5px/1 var(--sans);
@@ -679,7 +684,7 @@ body {
 		font: 400 10.5px/1 var(--mono);
 	}
 	.ut-chip.on .n {
-		color: #cbbcff;
+		color: #f4dca4; /* a light gold, on the selected chip's gold tint */
 	}
 	.ut-chip .chev {
 		color: var(--faint-text);
@@ -1376,15 +1381,10 @@ body {
 		color: var(--body);
 	}
 	/* A figure that counts to a new value: tabular digits, and a width (set inline, in ch) held for the whole count, so
-	   nothing beside it moves. It reads gold while it counts and settles back to the figure's own colour. */
+	   nothing beside it moves. The count is script, and the component skips it under reduced motion. */
 	.ut-tick {
 		display: inline-block;
 		font-variant-numeric: tabular-nums;
-		transition: color 600ms var(--ease-enter);
-	}
-	.ut-tick[data-ticking="true"] {
-		color: var(--accent);
-		transition: none;
 	}
 	/* Text for a screen reader only: out of the layout, still in the accessibility tree. */
 	.ut-sr-only {
@@ -1431,6 +1431,10 @@ body {
 	.ut-blist .ut-meter {
 		grid-column: 1 / -1;
 		margin-bottom: 8px;
+	}
+	/* A bar list's meters are chart marks: the chart colour, never the accent. */
+	.ut-blist .ut-meter i {
+		background: var(--chart);
 	}
 
 	/* Phone-only controls: the details toggle, the Filters button and the sheet's header. Shown by the narrow-screen
@@ -1797,10 +1801,5 @@ body {
 	.ut-row.fresh {
 		box-shadow: inset 2px 0 0 var(--accent);
 		background: rgba(232, 181, 75, 0.12);
-	}
-	/* A changed figure shows its final value at once (the component skips the count), in its own colour. */
-	.ut-tick,
-	.ut-tick[data-ticking="true"] {
-		color: inherit;
 	}
 }

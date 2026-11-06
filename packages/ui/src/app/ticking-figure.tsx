@@ -3,7 +3,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { formatUsdTotal } from "../shared/format.js";
-import { TICK_FRAME_MS, tickFrames } from "../shared/tick.js";
+import { frameAt, TICK_FRAME_MS, tickFrames } from "../shared/tick.js";
 
 /** Whether the reader asked for reduced motion. Outside a browser (server rendering, tests) there is no motion. */
 function reducedMotion(): boolean {
@@ -17,8 +17,8 @@ function reducedMotion(): boolean {
 /**
  * A dollar total that counts to its new value when it changes, like a precision counter: whole usertokens a frame,
  * eased out, landing exactly on the value. The digits are tabular and the span holds the widest string of the count
- * (the final value's width at rest), so nothing beside it moves. The counting span is hidden from assistive tech and
- * never announced; a visually hidden span beside it holds the final value. With reduced motion asked for, the final
+ * (the final value's width at rest), so nothing beside it moves. The counting span is hidden from assistive tech; a
+ * visually hidden span beside it holds the final value, so a screen reader reads that and never the count. With reduced motion asked for, the final
  * value shows at once. The first render shows the value as it is: only a change counts.
  */
 export function TickingFigure(props: { ut: number }): React.JSX.Element {
@@ -45,13 +45,14 @@ export function TickingFigure(props: { ut: number }): React.JSX.Element {
 		setWidth(Math.max(...[from, ...frames].map((f) => formatUsdTotal(f).length)));
 		setTicking(true);
 		const start = performance.now();
+		const end = (frames.length - 1) * TICK_FRAME_MS;
 		let raf = requestAnimationFrame(function step(now: number): void {
-			const i = Math.min(frames.length - 1, Math.floor((now - start) / TICK_FRAME_MS));
-			if (i === frames.length - 1) {
+			const elapsed = now - start;
+			if (elapsed >= end) {
 				land();
 				return;
 			}
-			const v = frames[i] ?? ut;
+			const v = frameAt(frames, elapsed);
 			shownRef.current = v;
 			setShown(v);
 			raf = requestAnimationFrame(step);
@@ -65,7 +66,6 @@ export function TickingFigure(props: { ut: number }): React.JSX.Element {
 			<span
 				className="ut-tick"
 				aria-hidden="true"
-				aria-live="off"
 				data-ticking={ticking ? "true" : undefined}
 				style={{ minWidth: `${width}ch` }}
 			>

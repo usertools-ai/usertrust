@@ -203,3 +203,21 @@ describe("the gold accent meets WCAG AA as text", () => {
 		});
 	}
 });
+
+describe("the accent stays off the chart marks and the live pill's states stay apart", () => {
+	it("a bar list's meter fill is the chart colour, not the accent", () => {
+		expect(decl(".ut-blist .ut-meter i", "background")).toBe("var(--chart)");
+		expect(resolve("var(--chart)")).not.toBe(resolve("var(--accent)"));
+	});
+
+	it("the live pill is neutral with a gold dot, and its border and fill differ from reconnecting's amber", () => {
+		const live = ".ut-live";
+		const reconnecting = '.ut-live[data-st="reconnecting"]';
+		const liveBorder = resolve(decl(live, "border").replace(/^1px solid /, ""));
+		expect(liveBorder).toBe(token("--control-line"));
+		expect(liveBorder).not.toBe(resolve(decl(reconnecting, "border-color")));
+		expect(decl(live, "background")).not.toBe(decl(reconnecting, "background"));
+		expect(decl(live, "color")).toBe("var(--ink)");
+		expect(decl('.ut-live[data-st="live"] i', "background")).toBe("var(--accent)");
+	});
+});

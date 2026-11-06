@@ -42,3 +42,14 @@ export function tickFrames(
 	frames.push(toUt);
 	return frames;
 }
+
+/**
+ * The frame to show `elapsedMs` into a count: frame `floor(elapsed / frameMs)`, clamped to the frames there are. A
+ * requestAnimationFrame timestamp can be earlier than the clock read when the count began, so a negative (or NaN)
+ * elapsed time shows the first frame, never the last one ahead of its time.
+ */
+export function frameAt(frames: number[], elapsedMs: number, frameMs = TICK_FRAME_MS): number {
+	if (frames.length === 0) throw new RangeError("frameAt: no frames");
+	const i = elapsedMs > 0 ? Math.floor(elapsedMs / frameMs) : 0;
+	return frames[Math.min(frames.length - 1, i)] as number;
+}
