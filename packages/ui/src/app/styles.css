@@ -321,13 +321,19 @@ body {
 	}
 	/* The past view's own line: everything under it is the vault as recorded then. Gold, the accent: amber is kept for
 	   held and in-flight states. */
+	/* Its slot is always there, one line tall: live it is hidden and empty, so entering or leaving the past view moves
+	   nothing below it (a line that appeared pushed the header, the list and the timeline down). */
 	.ut-asat {
 		display: flex;
 		align-items: center;
 		gap: 8px;
+		min-height: calc(12px * 1.4);
 		font: 500 12px/1.4 var(--mono);
 		font-variant-numeric: tabular-nums;
 		color: var(--accent);
+	}
+	.ut-asat[data-live="true"] {
+		visibility: hidden;
 	}
 	.ut-asat::before {
 		content: "";
@@ -407,6 +413,11 @@ body {
 		font: 400 12px/1.45 var(--sans);
 		color: var(--body);
 		overflow-wrap: anywhere;
+	}
+	/* The budget's last line holds two lines live and at a past position (where it carries the server's note), so the
+	   header keeps its height when the view changes. */
+	.ut-fact.budget .ut-why {
+		min-height: calc(2 * 12px * 1.45);
 	}
 	.ut-why.info {
 		color: var(--info);

@@ -209,9 +209,28 @@ function SpendFact(props: { spentUt: number; past: boolean }): React.JSX.Element
 }
 
 /** The past view's own line. It alone reads the clock (for the year), so a live header never re-renders on its tick. */
-function AsAtLine(props: { at: AtPayload }): React.JSX.Element {
+/**
+ * The past view's own line. Its slot is always there: live it is empty and hidden (`visibility: hidden`, out of the
+ * accessibility tree), so entering or leaving the past view moves nothing below it. Only the past line reads the
+ * clock (for the year), so the live header never re-renders on its tick.
+ */
+function AsAtLine(props: { at: AtPayload | null }): React.JSX.Element {
+	if (props.at === null)
+		return (
+			<p className="ut-asat" data-live="true" aria-hidden="true">
+				{"\u00a0"}
+			</p>
+		);
+	return <PastAsAtLine at={props.at} />;
+}
+
+function PastAsAtLine(props: { at: AtPayload }): React.JSX.Element {
 	const now = useNow();
-	return <p className="ut-asat">{timelineLabel(props.at, new Date(now).toISOString())}</p>;
+	return (
+		<p className="ut-asat" data-live="false">
+			{timelineLabel(props.at, new Date(now).toISOString())}
+		</p>
+	);
 }
 
 /**
@@ -224,10 +243,16 @@ function PastBudgetFact(props: { at: AtPayload }): React.JSX.Element {
 		<div className="ut-fact budget" title={budget.note}>
 			<b>Budget</b>
 			<span className="v na">not recorded then</span>
+			{/* The live fact's lines, kept (the meter's row held empty and unseen), so the header does not change height
+			    when the view does. Today's figures are named as today's. */}
 			{budget.ut !== null && (
-				<span className="ut-sub mono" title={formatUsd(budget.ut)}>
-					{`today: ${formatUsdTotal(budget.ut)}`}
-				</span>
+				<>
+					<div className="ut-meter" aria-hidden="true" style={{ visibility: "hidden" }} />
+					<span className="ut-amts" title={formatUsd(budget.ut)}>
+						{`today: ${formatUsdTotal(budget.ut)}`}
+					</span>
+					<span className="ut-sub mono">{`today: ${formatUt(budget.ut)}`}</span>
+				</>
 			)}
 			<span className="ut-why">{budget.note}</span>
 		</div>
@@ -238,7 +263,10 @@ function PastBudgetFact(props: { at: AtPayload }): React.JSX.Element {
  * The Integrity fact at a past position, read from `at.chain` only: the server never reads a position as intact when
  * the vault fails for a reason no record marks. "chained", never "verified", as live.
  */
-function PastIntegrityFact(props: { at: AtPayload }): React.JSX.Element {
+function PastIntegrityFact(props: {
+	at: AtPayload;
+	anchorFile: SummaryPayload["anchorFile"];
+}): React.JSX.Element {
 	const { chain, pos } = props.at;
 	const why = chain.valid
 		? "the links up to this point are intact"
@@ -249,10 +277,14 @@ function PastIntegrityFact(props: { at: AtPayload }): React.JSX.Element {
 		<div className="ut-fact">
 			<b>Integrity</b>
 			{chain.valid ? (
-				<span className="ut-pill" data-tone="approve" title={CHAINED_TITLE}>
-					<i />
-					chained
-				</span>
+				<>
+					<span className="ut-pill" data-tone="approve" title={CHAINED_TITLE}>
+						<i />
+						chained
+					</span>
+					{/* As live: "chained" is the hash links only, and the vault has no anchor file (today). */}
+					{props.anchorFile !== "present" && <span className="ut-sub">{NOT_ANCHORED_NOTE}</span>}
+				</>
 			) : (
 				<span className="ut-pill" data-tone="stakes">
 					<i />
@@ -360,6 +392,7 @@ export function SummaryStrip(props: {
 		return (
 			<>
 				<TopBar vaultPath={null} live={props.live} kit={false} />
+				<AsAtLine at={null} />
 				<section className="ut-facts" aria-busy="true" aria-label="vault summary loading">
 					{["Spend", "Budget", "Chain", "Integrity", "Anchor file"].map((label) => (
 						<div
@@ -402,7 +435,7 @@ export function SummaryStrip(props: {
 				</div>
 			)}
 			{/* The live alarm above stays: it is the vault now. Everything below this line is the vault then. */}
-			{at !== null && <AsAtLine at={at} />}
+			<AsAtLine at={at} />
 			{notice !== null && (
 				<div className="ut-notice" role="status">
 					<b>Window</b>
@@ -437,7 +470,7 @@ export function SummaryStrip(props: {
 					</span>
 				</div>
 				{at !== null ? (
-					<PastIntegrityFact at={at} />
+					<PastIntegrityFact at={at} anchorFile={s.anchorFile} />
 				) : (
 					<div className="ut-fact">
 						<b>Integrity</b>

@@ -91,4 +91,27 @@ describe("Scrubber", () => {
 		expect(h.commits).toEqual([]);
 		expect(h.scrub.pending).toBeNull();
 	});
+
+	it("an outside change to the address (Back, Forward, a link) drops a pending commit", () => {
+		const h = harness();
+		h.scrub.move(5);
+		// The address moved to 30 without this drag writing it.
+		h.scrub.sync(30);
+		h.runFrame();
+		h.runIdle();
+		expect(h.commits).toEqual([]);
+		expect(h.scrub.pending).toBeNull();
+	});
+
+	it("its own commit coming back as the address is not an outside change", () => {
+		const h = harness();
+		h.scrub.move(5);
+		h.runIdle();
+		expect(h.commits).toEqual([5]);
+		// The drag goes on, then the address catches up with the commit it wrote.
+		h.scrub.move(6);
+		h.scrub.sync(5);
+		h.scrub.release();
+		expect(h.commits).toEqual([5, 6]);
+	});
 });

@@ -4,14 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { AtPayload } from "../shared/api.js";
 import { Scrubber, type ScrubIo } from "../shared/scrub.js";
-import {
-	isStepKey,
-	newSince,
-	shownLabel,
-	stepFor,
-	timelineValueText,
-} from "../shared/timeline-view.js";
-import { useNow } from "./use-now.js";
+import { isStepKey, newSince, stepFor, timelineTexts } from "../shared/timeline-view.js";
 
 const browserFrames: ScrubIo = {
 	frame(fn) {
@@ -43,9 +36,10 @@ export function Timeline(props: {
 	at: AtPayload | null;
 	/** The position asked for (a preview, or the address's), or null for live. */
 	wanted: number | null;
+	/** The address's position (`#at`): a change the drag did not write drops its pending commit. */
+	committed: number | null;
 	/** The live vault's last position; -1 when it has no records. */
 	head: number;
-	loading: boolean;
 	error: string | null;
 	reloaded: boolean;
 	/** Ask for a position without writing the address (a drag in progress). */
@@ -55,8 +49,9 @@ export function Timeline(props: {
 	onLive(): void;
 }): React.JSX.Element {
 	const { at, wanted, head } = props;
-	const now = useNow();
-	const nowIso = new Date(now).toISOString();
+	// Read at render, never subscribed to: the clock only decides whether a label names the year, and a ticking clock
+	// re-rendered the timeline every 15 s while live for nothing.
+	const nowIso = new Date().toISOString();
 	// The thumb while a drag or a key is moving it, ahead of the answers; null once it is written to the address.
 	const [thumb, setThumb] = useState<number | null>(null);
 	const handlers = useRef(props);
@@ -72,6 +67,14 @@ export function Timeline(props: {
 			},
 		);
 	useEffect(() => () => scrub.current?.cancel(), []);
+	// Back, Forward or a link moved the address under a drag: drop its pending commit, and the thumb with it.
+	useEffect(() => {
+		const s = scrub.current;
+		if (s === null) return;
+		const hadPending = s.pending !== null;
+		s.sync(props.committed);
+		if (hadPending && s.pending === null) setThumb(null);
+	}, [props.committed]);
 
 	const max = Math.max(head, 0);
 	// A position asked for past the head was answered with the head: the thumb sits on the record answered.
@@ -83,18 +86,14 @@ export function Timeline(props: {
 				: Math.min(wanted, max);
 	const value = thumb ?? settled;
 	const past = wanted !== null || thumb !== null;
-	const label = !past
-		? "Live"
-		: at !== null
-			? shownLabel(at, head, nowIso)
-			: props.loading
-				? "Loading this point…"
-				: "Live (that point did not load)";
-	const valueText = !past
-		? "Live"
-		: at === null && !props.loading && thumb === null
-			? `Record ${(value + 1).toLocaleString()} of ${(head + 1).toLocaleString()} · ${label}`
-			: timelineValueText(value, head, at, nowIso);
+	const { label, valueText } = timelineTexts({
+		value,
+		head,
+		past,
+		at,
+		error: props.error,
+		nowIso,
+	});
 	const fresh = past ? newSince(at, head) : 0;
 
 	const move = (next: number): void => {

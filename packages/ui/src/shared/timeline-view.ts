@@ -110,3 +110,35 @@ export function timelineValueText(
 	if (shown === null || shown.pos !== value) return `${record} · loading`;
 	return `${record} · ${shownLabel(shown, head, nowIso)}`;
 }
+
+/**
+ * The timeline's visible label and its `aria-valuetext`. `past`: a position is asked for or the thumb is moving. With
+ * no answer yet and no failure it is loading, including the first move from live, before anything has been asked:
+ * never "did not load" for a request that has not failed.
+ */
+export function timelineTexts(input: {
+	value: number;
+	head: number;
+	past: boolean;
+	at: AtPayload | null;
+	error: string | null;
+	nowIso: string;
+}): { label: string; valueText: string } {
+	const { value, head, past, at, error, nowIso } = input;
+	if (!past) return { label: "Live", valueText: "Live" };
+	if (at !== null)
+		return {
+			label: shownLabel(at, head, nowIso),
+			valueText: timelineValueText(value, head, at, nowIso),
+		};
+	if (error === null)
+		return {
+			label: "Loading this point…",
+			valueText: timelineValueText(value, head, null, nowIso),
+		};
+	const label = "Live (that point did not load)";
+	return {
+		label,
+		valueText: `Record ${(value + 1).toLocaleString()} of ${(head + 1).toLocaleString()} · ${label}`,
+	};
+}

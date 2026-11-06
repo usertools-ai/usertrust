@@ -2,13 +2,12 @@
 // Copyright 2026 Usertools, Inc.
 
 import { useCallback, useDeferredValue, useMemo, useRef, useState } from "react";
-import { chainAt, cutRows } from "../shared/asof.js";
 import { csvFilename, toCsv } from "../shared/csv.js";
-import { chainStatus } from "../shared/display.js";
-import { applyFilters, EMPTY_FILTERS, isFiltering } from "../shared/filters.js";
+import { EMPTY_FILTERS, isFiltering } from "../shared/filters.js";
+import { type ListInput, listView } from "../shared/list-view.js";
 import type { LedgerRow } from "../shared/rows.js";
 import { MAX_SEARCH_LENGTH, type ViewId } from "../shared/url-state.js";
-import { AuditTable, type BeforeWindow } from "./audit-table.js";
+import { AuditTable } from "./audit-table.js";
 import { FilterBar } from "./filter-bar.js";
 import { InspectorHint, RowPanel } from "./row-panel.js";
 import { useLedger } from "./store.js";
@@ -40,42 +39,22 @@ export function App(): React.JSX.Element {
 	const { view: atView, preview } = useAt(at, summary, live);
 	const shownAt = atView.at;
 	const head = summary === null ? -1 : summary.chain.events - 1;
-	// The rows as recorded at the position: cut there, with the status each had there. Before the filters, so the
-	// filters, the list, Trends and Export all see the vault then.
-	const shownRows = useMemo(
-		() => (shownAt === null ? rows : cutRows(rows, shownAt)),
-		[rows, shownAt],
+	// What the list, the facets, Trends and Export draw: ONE input, deferred, so a timeline drag paints the thumb, its
+	// label and the header first and the rest follows when there is time, never mixing one position's rows with
+	// another moment's phase or chain (`listView`). The rows are cut at the position before the filters, so all of them
+	// see the vault then.
+	const listInput = useMemo<ListInput>(
+		() => ({ rows, at: shownAt, filters, phase, summary }),
+		[rows, shownAt, filters, phase, summary],
 	);
+	const drawn = useDeferredValue(listInput);
+	const list = useMemo(() => listView(drawn), [drawn]);
+	const { shownRows, filtered } = list;
 	// The selected row's event HASH (unique on the chain, where an id can repeat), resolved from the rows shown: a
 	// `status` correction replaces the row object, and a panel holding the old one kept showing the old status.
 	const open = useMemo(
 		() => (openHash === null ? null : (shownRows.find((r) => r.hash === openHash) ?? null)),
 		[shownRows, openHash],
-	);
-	const filtered = useMemo(() => applyFilters(shownRows, filters), [shownRows, filters]);
-	// What the list and Trends draw, as one value so they never mix two positions: deferred, so a scrub that lands a
-	// new answer keeps the thumb and the header responsive while the list and the charts catch up. At a position the
-	// list's chain is the position's (`chainAt`), never the live verdict, and a position before the first row held says
-	// so instead of reading as a vault with no rows.
-	const drawn = useDeferredValue(
-		useMemo(
-			() => ({
-				filtered,
-				total: shownRows.length,
-				at: shownAt,
-				chain:
-					shownAt !== null
-						? chainAt(shownAt)
-						: summary === null
-							? null
-							: chainStatus(summary.chain),
-				beforeWindow:
-					shownAt !== null && shownAt.pos < shownAt.windowStartPos
-						? ({ firstHeld: shownAt.windowStartPos, upTo: shownAt.pos } satisfies BeforeWindow)
-						: null,
-			}),
-			[filtered, shownRows, shownAt, summary],
-		),
 	);
 	const docked = useMediaQuery(DOCK_QUERY);
 	// Enter or Space on a row asks the docked inspector to take focus; a click clears the request. The restore request
@@ -92,6 +71,15 @@ export function App(): React.JSX.Element {
 		},
 		[openHash, setOpenHash],
 	);
+	// Stable, so the memoized list does not re-render for a new callback on every timeline answer.
+	const openRow = useCallback(
+		(r: LedgerRow, viaKeyboard: boolean) => {
+			setOpenHash(r.hash);
+			setKbOpen(viaKeyboard ? ++requests.current : undefined);
+		},
+		[setOpenHash],
+	);
+	const clearFilters = useCallback(() => setFilters(EMPTY_FILTERS), [setFilters]);
 	const newestOf = summary?.truncated ? summary.rowCount : undefined;
 
 	// Export what the operator is looking at — the filtered set, not the vault, and within the server's window: the
@@ -101,7 +89,7 @@ export function App(): React.JSX.Element {
 		const url = URL.createObjectURL(blob);
 		const a = document.createElement("a");
 		a.href = url;
-		a.download = csvFilename(new Date(), isFiltering(filters), newestOf, shownAt);
+		a.download = csvFilename(new Date(), isFiltering(drawn.filters), newestOf, list.at);
 		a.click();
 		URL.revokeObjectURL(url);
 	}
@@ -161,8 +149,8 @@ export function App(): React.JSX.Element {
 						onClick={exportCsv}
 						disabled={filtered.length === 0}
 						title={
-							shownAt !== null
-								? `Download the records in view as CSV, as recorded at record ${(shownAt.pos + 1).toLocaleString()}`
+							list.at !== null
+								? `Download the records in view as CSV, as recorded at record ${(list.at.pos + 1).toLocaleString()}`
 								: newestOf === undefined
 									? "Download the records in view as CSV"
 									: `Download the records in view as CSV: these are within the newest ${newestOf.toLocaleString()} events only`
@@ -196,22 +184,19 @@ export function App(): React.JSX.Element {
 					>
 						{view === "audit" ? (
 							<AuditTable
-								rows={drawn.filtered}
-								total={drawn.total}
-								phase={phase}
-								chain={drawn.chain}
-								beforeWindow={drawn.beforeWindow}
+								rows={list.filtered}
+								total={list.total}
+								phase={list.phase}
+								chain={list.chain}
+								beforeWindow={list.beforeWindow}
 								liveIds={liveIds}
 								selected={openHash}
 								restoreFocus={restoreFocus}
-								onOpen={(r: LedgerRow, viaKeyboard: boolean) => {
-									setOpenHash(r.hash);
-									setKbOpen(viaKeyboard ? ++requests.current : undefined);
-								}}
-								onClearFilters={() => setFilters(EMPTY_FILTERS)}
+								onOpen={openRow}
+								onClearFilters={clearFilters}
 							/>
 						) : (
-							<Trends rows={drawn.filtered} newestOf={newestOf} at={drawn.at} />
+							<Trends rows={list.filtered} newestOf={newestOf} at={list.at} />
 						)}
 					</section>
 					{dock &&
@@ -235,8 +220,8 @@ export function App(): React.JSX.Element {
 				<Timeline
 					at={shownAt}
 					wanted={atView.wanted}
+					committed={at}
 					head={head}
-					loading={atView.loading}
 					error={atView.error}
 					reloaded={atView.reloaded}
 					onPreview={preview}

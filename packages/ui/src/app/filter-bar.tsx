@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
 	activeFilterCount,
 	EMPTY_FILTERS,
@@ -27,14 +27,25 @@ function counted(values: Array<string | undefined>): Array<{ value: string; n: n
 		.map(([value, n]) => ({ value, n }));
 }
 
+/** Each facet's value of a row: module-level, so a facet's memo sees the same function on every render. */
+const KIND = (r: LedgerRow): string => r.kind;
+const MODEL = (r: LedgerRow): string | undefined => r.model;
+const ACTOR = (r: LedgerRow): string => r.actor;
+const STATUS = (r: LedgerRow): string => statusOf(r);
+
 function Facet(props: {
 	label: string;
-	options: Array<{ value: string; n: number }>;
+	/** The rows the values are counted over, and each row's value. Counted only while the list is open. */
+	rows: LedgerRow[];
+	valueFor(r: LedgerRow): string | undefined;
 	selected: string[];
 	onChange(next: string[]): void;
 }): React.JSX.Element {
-	const { label, options, selected, onChange } = props;
+	const { label, rows, valueFor, selected, onChange } = props;
 	const [open, setOpen] = useState(false);
+	// A pass over every row, so never while closed: a timeline drag changes the rows on every answer, and six closed
+	// facets counting 100,000 rows each time held the drag up for nothing anyone could see.
+	const options = useMemo(() => (open ? counted(rows.map(valueFor)) : []), [open, rows, valueFor]);
 	// Placed when it opens: a fixed width, its left edge clamped 16 px inside BOTH window edges (aligning to the trigger's
 	// right edge alone pushed a narrow screen's first facet off the left), and no taller than the room below the trigger.
 	const [place, setPlace] = useState({ left: 0, width: 260, maxHeight: 300 });
@@ -128,7 +139,8 @@ function Facet(props: {
 	);
 }
 
-export function FilterBar(props: {
+/** Memoized: the page re-renders on every timeline answer, and the bar's rows (deferred) change only after it. */
+export const FilterBar = memo(function FilterBar(props: {
 	rows: LedgerRow[];
 	filters: FilterState;
 	onChange(f: FilterState): void;
@@ -187,13 +199,6 @@ export function FilterBar(props: {
 		m.addEventListener("change", on);
 		return () => m.removeEventListener("change", on);
 	}, [sheet]);
-
-	const kinds = useMemo(() => counted(rows.map((r) => r.kind)), [rows]);
-	const models = useMemo(() => counted(rows.map((r) => r.model)), [rows]);
-	const actors = useMemo(() => counted(rows.map((r) => r.actor)), [rows]);
-	const statuses = useMemo(() => counted(rows.map((r) => statusOf(r))), [rows]);
-	const jobTypes = useMemo(() => counted(rows.map(jobTypeOf)), [rows]);
-	const typeSources = useMemo(() => counted(rows.map(typeSourceOf)), [rows]);
 
 	const chips: Array<{ label: string; clear(): void }> = [];
 	if (filters.search.trim() !== "")
@@ -300,37 +305,43 @@ export function FilterBar(props: {
 				</div>
 				<Facet
 					label="kind"
-					options={kinds}
+					rows={rows}
+					valueFor={KIND}
 					selected={filters.kinds}
 					onChange={(v) => onChange({ ...filters, kinds: v })}
 				/>
 				<Facet
 					label="model"
-					options={models}
+					rows={rows}
+					valueFor={MODEL}
 					selected={filters.models}
 					onChange={(v) => onChange({ ...filters, models: v })}
 				/>
 				<Facet
 					label="actor"
-					options={actors}
+					rows={rows}
+					valueFor={ACTOR}
 					selected={filters.actors}
 					onChange={(v) => onChange({ ...filters, actors: v })}
 				/>
 				<Facet
 					label="status"
-					options={statuses}
+					rows={rows}
+					valueFor={STATUS}
 					selected={filters.statuses}
 					onChange={(v) => onChange({ ...filters, statuses: v })}
 				/>
 				<Facet
 					label="job type (declared)"
-					options={jobTypes}
+					rows={rows}
+					valueFor={jobTypeOf}
 					selected={filters.jobTypes}
 					onChange={(v) => onChange({ ...filters, jobTypes: v })}
 				/>
 				<Facet
 					label="type declared by"
-					options={typeSources}
+					rows={rows}
+					valueFor={typeSourceOf}
 					selected={filters.typeSources}
 					onChange={(v) => onChange({ ...filters, typeSources: v })}
 				/>
@@ -404,4 +415,4 @@ export function FilterBar(props: {
 			)}
 		</>
 	);
-}
+});

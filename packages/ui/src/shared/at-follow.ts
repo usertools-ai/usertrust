@@ -90,6 +90,8 @@ export class AtFollower {
 	private due = false;
 	private error: string | null = null;
 	private reloaded = false;
+	/** After a reconnect, the position the lost baseline was answered at: re-read that, not the one asked for. */
+	private reread: number | null = null;
 	private published: AtView | null = null;
 
 	constructor(
@@ -104,6 +106,7 @@ export class AtFollower {
 		this.wanted = pos;
 		this.choice += 1;
 		this.chosen = null;
+		this.reread = null;
 		this.reloaded = false;
 		if (pos === null) {
 			this.shown = null;
@@ -122,14 +125,21 @@ export class AtFollower {
 		this.kick();
 	}
 
-	/** The live stream reconnected: the server may be a new one. Forget its epoch and re-read. Nothing while live. */
+	/**
+	 * The live stream reconnected: the server may be a new one. Forget its epoch, the baseline and any reloaded note
+	 * (the old server's epochs say nothing about the new one), and re-read the position answered (a clamped one stays
+	 * the record shown). Nothing while live.
+	 */
 	reconnected(): void {
 		this.generation += 1;
+		this.reread = this.chosen?.pos ?? null;
 		this.epoch = null;
 		this.chosen = null;
+		this.reloaded = false;
 		this.choice += 1;
 		if (this.wanted === null) return;
 		this.kick();
+		this.emit();
 	}
 
 	private kick(): void {
@@ -154,11 +164,13 @@ export class AtFollower {
 			abort.signal.addEventListener("abort", () => reject(new Error(NO_ANSWER)), { once: true });
 		});
 		const timer = setTimeout(() => abort.abort(), this.timeoutMs);
-		Promise.race([this.load(chosen?.pos ?? wanted, abort.signal), timedOut])
+		Promise.race([this.load(chosen?.pos ?? this.reread ?? wanted, abort.signal), timedOut])
 			.then(
 				(answer) => this.take(answer, choice, generation),
 				(err: unknown) => {
 					if (this.wanted === null || generation !== this.generation) return;
+					// A failure for a position the user has left says nothing about the one they are on now.
+					if (choice !== this.choice) return;
 					this.error = err instanceof Error && err.message !== "" ? err.message : NO_ANSWER;
 				},
 			)
@@ -185,6 +197,7 @@ export class AtFollower {
 		} else if (this.chosen === null || this.chosen === answer) {
 			this.chosen = answer;
 			this.shown = answer;
+			this.reread = null;
 		} else if (this.shown === null || !sameReading(this.shown, answer)) {
 			this.shown = { ...answer, head: this.chosen.head, clamped: this.chosen.clamped };
 		}

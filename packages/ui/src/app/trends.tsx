@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { useId, useMemo, useState } from "react";
+import { memo, useId, useMemo, useState } from "react";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import {
 	costByJobType,
@@ -116,7 +116,8 @@ function Tile(props: {
 	);
 }
 
-export function Trends(props: {
+/** Memoized: the page re-renders on every timeline answer, and the rows it draws (deferred) change only after it. */
+export const Trends = memo(function Trends(props: {
 	/** The rows in view, after the filters. */
 	rows: LedgerRow[];
 	/** The server's row window, when it holds only the newest N events. */
@@ -317,4 +318,4 @@ export function Trends(props: {
 			<div className="ut-sub mono">{UT_KEY}</div>
 		</div>
 	);
-}
+});

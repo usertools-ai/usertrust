@@ -23,6 +23,8 @@ export class Scrubber {
 	private latest: number | null = null;
 	private cancelFrame: (() => void) | null = null;
 	private cancelIdle: (() => void) | null = null;
+	/** The last position this drag wrote to the address: the address catching up with it is not an outside change. */
+	private committed: number | null = null;
 
 	constructor(
 		private readonly io: ScrubIo,
@@ -55,8 +57,19 @@ export class Scrubber {
 		const pos = this.latest;
 		this.cancel();
 		if (pos === null) return;
+		this.committed = pos;
 		this.onPreview(pos);
 		this.onCommit(pos);
+	}
+
+	/**
+	 * The address now says `at`. A change this drag did not write (Back, Forward, a followed link, going live) drops a
+	 * pending move, so a commit 250 ms later never overwrites where the user went.
+	 */
+	sync(at: number | null): void {
+		if (at === this.committed) return;
+		this.committed = at;
+		this.cancel();
 	}
 
 	/** Drop whatever is pending, writing nothing (going live mid-drag, unmount). */

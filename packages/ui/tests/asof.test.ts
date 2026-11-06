@@ -145,3 +145,35 @@ describe("chainAt", () => {
 		expect(chainAt(at({ chain: { valid: false, breakIndex: 3 } }))).toBe("broken");
 	});
 });
+
+describe("cutRows on a large, position-ordered window", () => {
+	const big = Array.from({ length: 100_000 }, (_, i) => row(1_000 + i));
+
+	it("is the prefix up to the position, by binary search, with every unchanged row the same object", () => {
+		const out = cutRows(big, at({ pos: 51_234, head: 100_999 }));
+		expect(out).toHaveLength(51_234 - 1_000 + 1);
+		expect(out[0]).toBe(big[0]);
+		expect(out.at(-1)).toBe(big[50_234]);
+	});
+
+	it("overlays statusAt on the rows it names, and only those", () => {
+		const named = big[50_000];
+		const out = cutRows(
+			big,
+			at({ pos: 51_234, head: 100_999, statusAt: { [named?.hash ?? ""]: "ambiguous" } }),
+		);
+		expect(out[50_000]?.status).toBe("ambiguous");
+		expect(out[50_000]).not.toBe(named);
+		expect(out[49_999]).toBe(big[49_999]);
+	});
+
+	it("a position before the window is an empty cut; one past it is the whole window", () => {
+		expect(cutRows(big, at({ pos: 999, head: 100_999 }))).toEqual([]);
+		expect(cutRows(big, at({ pos: 200_000, head: 200_000 }))).toHaveLength(100_000);
+	});
+
+	it("rows that are not in position order are still cut right (no prefix assumed)", () => {
+		const shuffled = [row(3), row(1), row(4), row(0), row(2)];
+		expect(cutRows(shuffled, at({ pos: 2 })).map((r) => r.pos)).toEqual([1, 0, 2]);
+	});
+});

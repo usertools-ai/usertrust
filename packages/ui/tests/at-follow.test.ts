@@ -234,7 +234,51 @@ describe("AtFollower", () => {
 		});
 	});
 
+	describe("a failure for a position the user has left", () => {
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
+		it("is never shown while a newer request runs", async () => {
+			vi.useFakeTimers();
+			const h = harness();
+			h.follower.want(1);
+			// The user moves on while 1 is still unanswered.
+			h.follower.want(2);
+			await vi.advanceTimersByTimeAsync(10_000);
+			// 1 timed out; its failure belongs to a position nobody is looking at.
+			expect(h.views.some((v) => v.error !== null)).toBe(false);
+			expect(h.calls.map((c) => c.pos)).toEqual([1, 2]);
+			expect(h.last()).toMatchObject({ wanted: 2, loading: true, error: null });
+			h.calls[1]?.resolve(at({ pos: 2 }));
+			await h.flush();
+			expect(h.last().at?.pos).toBe(2);
+		});
+	});
+
 	describe("reconnected (the server may have restarted, and epochs restart with it)", () => {
+		it("re-reads the position answered (a clamped one), not the one asked for", async () => {
+			const h = harness();
+			h.follower.want(500);
+			h.calls[0]?.resolve(at({ pos: 99, head: 99, clamped: true }));
+			await h.flush();
+			h.follower.reconnected();
+			expect(h.calls[1]?.pos).toBe(99);
+		});
+
+		it("clears the reloaded note: the old server's epochs say nothing about the new one", async () => {
+			const h = harness();
+			h.follower.want(40);
+			h.calls[0]?.resolve(at({ epoch: 1 }));
+			await h.flush();
+			h.follower.refresh();
+			h.calls[1]?.resolve(at({ epoch: 2 }));
+			await h.flush();
+			expect(h.last().reloaded).toBe(true);
+			h.follower.reconnected();
+			expect(h.last().reloaded).toBe(false);
+		});
+
 		it("forgets the epoch and the baseline: the re-read is a new baseline, not a reload", async () => {
 			const h = harness();
 			h.follower.want(40);

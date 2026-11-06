@@ -98,6 +98,28 @@ describe("applyFilters", () => {
 	});
 });
 
+describe("the drag path's fast paths", () => {
+	it("no filter at all returns the rows themselves: nothing is copied or scanned", () => {
+		const rows = [
+			{ seq: 1, pos: 1, id: "a", kind: "llm_call", actor: "x" },
+			{ seq: 2, pos: 2, id: "b", kind: "llm_call", actor: "x" },
+		] as unknown as Parameters<typeof applyFilters>[0];
+		expect(applyFilters(rows, EMPTY_FILTERS)).toBe(rows);
+	});
+
+	it("a list already in position order sorts by position as a copy, in either direction", () => {
+		const rows = Array.from({ length: 5 }, (_, i) => ({
+			seq: i,
+			pos: i,
+			id: `r${i}`,
+		})) as unknown as Parameters<typeof sortRows>[0];
+		const asc = sortRows(rows, "seq", false);
+		expect(asc).not.toBe(rows);
+		expect(asc.map((r) => r.id)).toEqual(["r0", "r1", "r2", "r3", "r4"]);
+		expect(sortRows(rows, "seq", true).map((r) => r.id)).toEqual(["r4", "r3", "r2", "r1", "r0"]);
+	});
+});
+
 describe("sortRows", () => {
 	const rows = [
 		row({ id: "a", seq: 1, costUt: 5, ts: "2026-07-25T09:00:00.000Z" }),

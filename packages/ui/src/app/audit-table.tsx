@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { useVirtualizer, useWindowVirtualizer } from "@tanstack/react-virtual";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
 	type ChainStatus,
 	costView,
@@ -14,6 +14,7 @@ import {
 import { type SortKey, sortRows } from "../shared/filters.js";
 import { compactActor, formatUtc, UT_KEY } from "../shared/format.js";
 import { PHONE_QUERY } from "../shared/layout.js";
+import type { BeforeWindow } from "../shared/list-view.js";
 import {
 	nextRowIndex,
 	pageSizeFromItems,
@@ -174,11 +175,7 @@ export function AuditRow(props: {
 	);
 }
 
-/** A past position before the first row held: the first position the list holds and the position shown (0-based). */
-export interface BeforeWindow {
-	firstHeld: number;
-	upTo: number;
-}
+export type { BeforeWindow };
 
 function Empty(props: {
 	state: Exclude<ReturnType<typeof listState>, "rows">;
@@ -244,7 +241,8 @@ function Empty(props: {
 	}
 }
 
-export function AuditTable(props: {
+/** Memoized: the page re-renders on every timeline answer, and the rows it draws (deferred) change only after it. */
+export const AuditTable = memo(function AuditTable(props: {
 	/** The rows in view, after the filters. */
 	rows: LedgerRow[];
 	/** Every row held, before the filters. */
@@ -497,7 +495,7 @@ export function AuditTable(props: {
 			</div>
 		</>
 	);
-}
+});
 
 /** One ledger row's body as the list draws it, exported so its marks can be rendered in a test. */
 export const Row = RowBody;

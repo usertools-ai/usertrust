@@ -7,6 +7,8 @@
  * "verified".
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -165,6 +167,38 @@ describe("the header at a past position", () => {
 		);
 		// The live "of 100 events" is not a figure at T.
 		expect(html).not.toContain("Showing the newest");
+	});
+
+	it("the as-at line's slot is in the live markup too, hidden, so entering the past view moves nothing", () => {
+		const live = strip(null);
+		expect(live).toMatch(/<p class="ut-asat" data-live="true" aria-hidden="true">/);
+		const past = strip(at());
+		expect(past).toMatch(/<p class="ut-asat" data-live="false">/);
+		// The same number of lines either way: the slot is never added or removed.
+		expect(live.match(/class="ut-asat"/g)).toHaveLength(1);
+		expect(past.match(/class="ut-asat"/g)).toHaveLength(1);
+		// Hidden, not removed, and one line tall either way.
+		const css = readFileSync(join(import.meta.dirname, "..", "src", "app", "styles.css"), "utf-8");
+		expect(css).toMatch(/\.ut-asat\[data-live="true"\] \{\s*visibility: hidden;\s*\}/);
+		expect(css).toMatch(/\.ut-asat \{[^}]*min-height: calc\(12px \* 1\.4\);/);
+		// The loading header holds the slot too.
+		expect(
+			renderToStaticMarkup(createElement(SummaryStrip, { summary: null, live: "live", at: null })),
+		).toContain('class="ut-asat" data-live="true"');
+	});
+
+	it("the past Budget keeps the live one's lines (meter row, amounts, usertokens, note), so it does not change height", () => {
+		const past = strip(at());
+		const live = strip(null);
+		const lines = (html: string): number => {
+			const budget =
+				/<div class="ut-fact budget"[^>]*>([\s\S]*?)<\/div><(?:button|div class="ut-fact)/.exec(
+					html,
+				)?.[1] ?? "";
+			return (budget.match(/class="(?:v|v na|ut-meter|ut-amts|ut-sub mono|ut-why)[" ]/g) ?? [])
+				.length;
+		};
+		expect(lines(past)).toBe(lines(live));
 	});
 
 	it("the anchor file at T is today's, and says so", () => {

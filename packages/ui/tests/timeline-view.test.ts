@@ -8,6 +8,7 @@ import {
 	newSince,
 	stepFor,
 	timelineLabel,
+	timelineTexts,
 	timelineValueText,
 } from "../src/shared/timeline-view.js";
 
@@ -131,5 +132,39 @@ describe("timelineValueText", () => {
 		expect(timelineValueText(99, 120, shown, NOW)).toBe(
 			"Record 100 of 121 · As recorded at 11-06 10:04:05Z",
 		);
+	});
+});
+
+describe("timelineTexts", () => {
+	it("the first move from live, before anything is asked or answered, is loading, never a failure", () => {
+		const t = timelineTexts({
+			value: 60,
+			head: 99,
+			past: true,
+			at: null,
+			error: null,
+			nowIso: NOW,
+		});
+		expect(t.label).toBe("Loading this point…");
+		expect(t.valueText).toBe("Record 61 of 100 · loading");
+	});
+
+	it("a failure with nothing loaded says so, and that the live vault is shown", () => {
+		const t = timelineTexts({
+			value: 60,
+			head: 99,
+			past: true,
+			at: null,
+			error: "the dashboard did not answer",
+			nowIso: NOW,
+		});
+		expect(t.label).toBe("Live (that point did not load)");
+		expect(t.valueText).toBe("Record 61 of 100 · Live (that point did not load)");
+	});
+
+	it("live is Live", () => {
+		expect(
+			timelineTexts({ value: 99, head: 99, past: false, at: null, error: null, nowIso: NOW }),
+		).toEqual({ label: "Live", valueText: "Live" });
 	});
 });
