@@ -191,7 +191,8 @@ describe("<TickingFigure>", () => {
 		expect(tick, html).not.toBeNull();
 		expect(tick?.[1]).toContain('aria-hidden="true"');
 		expect(tick?.[1]).not.toContain("aria-live");
-		expect(tick?.[1]).toContain(`min-width:${final.length}ch`);
+		// The width is held only where it fits: on a narrow column the figure wraps instead of overrunning it.
+		expect(tick?.[1]).toContain(`min-width:min(${final.length}ch, 100%)`);
 		expect(tick?.[2]).toBe(final);
 		expect(html).toContain(`<span class="sr-only">${final}</span>`);
 	});
@@ -228,5 +229,14 @@ describe("<TickingFigure>", () => {
 		const rule = /\.ut-tick\s*\{([^}]*)\}/.exec(CSS)?.[1] ?? "";
 		expect(rule).toMatch(/font-variant-numeric:\s*tabular-nums/);
 		expect(rule).toMatch(/display:\s*inline-block/);
+	});
+
+	it("red-first (a $123,456.78 Spend overran its 81px phone column): the figure never grows past its column", () => {
+		const rule = /\.ut-tick\s*\{([^}]*)\}/.exec(CSS)?.[1] ?? "";
+		expect(rule).toMatch(/max-width:\s*100%/);
+		// The span inherits the fact's wrapping, so a long amount still breaks inside it.
+		expect(rule).not.toMatch(/overflow-wrap|white-space|word-break/);
+		const fact = /\.ut-fact \.v\s*\{([^}]*)\}/.exec(CSS)?.[1] ?? "";
+		expect(fact).toMatch(/overflow-wrap:\s*anywhere/);
 	});
 });

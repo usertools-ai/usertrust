@@ -1381,9 +1381,12 @@ body {
 		color: var(--body);
 	}
 	/* A figure that counts to a new value: tabular digits, and a width (set inline, in ch) held for the whole count, so
-	   nothing beside it moves. The count is script, and the component skips it under reduced motion. */
+	   nothing beside it moves. The held width and the span stop at the column's width, so on a narrow phone column a
+	   long amount wraps (the fact's overflow-wrap is inherited) instead of running into the next fact. The count is
+	   script, and the component skips it under reduced motion. */
 	.ut-tick {
 		display: inline-block;
+		max-width: 100%;
 		font-variant-numeric: tabular-nums;
 	}
 	/* Text for a screen reader only: out of the layout, still in the accessibility tree. */

@@ -67,7 +67,8 @@ export function TickingFigure(props: { ut: number }): React.JSX.Element {
 				className="ut-tick"
 				aria-hidden="true"
 				data-ticking={ticking ? "true" : undefined}
-				style={{ minWidth: `${width}ch` }}
+				// Held only where it fits: in a column narrower than the figure it wraps, as the fact's text always has.
+				style={{ minWidth: `min(${width}ch, 100%)` }}
 			>
 				{formatUsdTotal(shown)}
 			</span>
