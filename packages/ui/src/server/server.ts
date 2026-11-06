@@ -486,6 +486,9 @@ export async function createUiServer(
 				lastHash = e.hash;
 			}
 			const touched = state.transfers.add(fresh);
+			// Every appended event was verified onto the chain the last full load verified, so each takes the next position.
+			const firstPos = state.positions.length;
+			for (const e of fresh) state.positions.add(e);
 			// A new record can change an EARLIER row's verdict (an ambiguity appended after an optimistic
 			// settlement), so every visible row of a touched transfer is re-classified, and each change is sent.
 			// Each change names its row by event HASH (unique on the chain); the id rides along for display only.
@@ -507,6 +510,7 @@ export async function createUiServer(
 				fresh,
 				{ valid: true, breakIndex: null },
 				state.transfers.verdictOf,
+				firstPos,
 			);
 			state.rows.push(...rows);
 			state.lastHash = lastHash;

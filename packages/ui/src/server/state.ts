@@ -27,6 +27,7 @@ import { isHeaderSpend } from "../shared/aggregate.js";
 import type { SummaryPayload } from "../shared/api.js";
 import { type RemoteSettings, remoteSettings } from "../shared/kit.js";
 import { type LedgerRow, toLedgerRows } from "../shared/rows.js";
+import { PositionIndex } from "./position-index.js";
 import { TransferIndex } from "./verdicts.js";
 
 export type { SummaryPayload } from "../shared/api.js";
@@ -38,6 +39,11 @@ export interface LedgerState {
 	rows: LedgerRow[];
 	/** Every event by transfer, for each row's TRANSFER verdict; the live tail adds to it. */
 	transfers: TransferIndex;
+	/**
+	 * Prefix sums over every event by position (its index in the list the chain was verified over, the one
+	 * `summary.chain.breakIndex` points into), not only the rows held; the live tail extends it.
+	 */
+	positions: PositionIndex;
 	summary: SummaryPayload;
 	lastHash: string;
 	/**
@@ -499,11 +505,15 @@ function loadPass(
 	// Every event, not only the visible slice: a visible row's verdict can rest on an earlier record of its transfer.
 	const transfers = new TransferIndex();
 	transfers.add(events);
-	const rows = toLedgerRows(visible, sliceIntegrity, transfers.verdictOf);
+	// Every event too: a past position can fall before the rows held, and its totals are still exact.
+	const positions = new PositionIndex();
+	for (const e of events) positions.add(e);
+	const rows = toLedgerRows(visible, sliceIntegrity, transfers.verdictOf, offset);
 
 	const state: LedgerState = {
 		rows,
 		transfers,
+		positions,
 		summary: {
 			vaultPath,
 			...budgetSummary(vaultPath, spentUt),
