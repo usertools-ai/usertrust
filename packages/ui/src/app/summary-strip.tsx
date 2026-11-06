@@ -3,7 +3,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import markUrl from "../../brand/usertrust-mark.svg?inline";
-import type { SummaryPayload } from "../shared/api.js";
+import type { AtPayload, SummaryPayload } from "../shared/api.js";
+import { windowNote } from "../shared/asof.js";
 import { budgetAsOf, budgetDisplay, budgetSourceWord } from "../shared/budget-display.js";
 import {
 	ANCHOR_VERIFY_COMMAND,
@@ -12,10 +13,10 @@ import {
 	chainStatus,
 	NOT_ANCHORED_NOTE,
 	verifiedAsOf,
-	windowNotice,
 } from "../shared/display.js";
 import { formatUsd, formatUsdTotal, formatUt, middleTruncate, UT_KEY } from "../shared/format.js";
 import { KIT_MARK_URL, KIT_TIMEOUT_MS } from "../shared/kit.js";
+import { timelineLabel } from "../shared/timeline-view.js";
 import type { LiveState } from "./store.js";
 import { TickingFigure } from "./ticking-figure.js";
 import { useNow } from "./use-now.js";
@@ -160,14 +161,23 @@ function AnchorFact(props: { anchorFile: SummaryPayload["anchorFile"] }): React.
 /**
  * The vault's spend: dollars lead (2 dp, the exact 4 dp figure on hover, counting to a new total as records arrive) and
  * the ledger's own unit, usertokens, follows on the line below, with an info button that gives the key to the unit.
+ * At a past position (`past`) it is the spend up to there, and it jumps from value to value instead of counting; the
+ * figure is remounted when the view switches between live and past, so that switch jumps too.
  */
-function SpendFact(props: { spentUt: number }): React.JSX.Element {
+function SpendFact(props: { spentUt: number; past: boolean }): React.JSX.Element {
 	const { open, toggle, rootRef } = usePopover();
 	return (
-		<div className="ut-fact" title="The cost of every llm_call record in the vault">
+		<div
+			className="ut-fact"
+			title={
+				props.past
+					? "The cost of every llm_call record up to this point"
+					: "The cost of every llm_call record in the vault"
+			}
+		>
 			<b>Spend</b>
 			<span className="v" title={formatUsd(props.spentUt)}>
-				<TickingFigure ut={props.spentUt} />
+				<TickingFigure key={props.past ? "past" : "live"} ut={props.spentUt} jump={props.past} />
 			</span>
 			<div className="ut-info" ref={rootRef}>
 				<span className="ut-sub mono">{formatUt(props.spentUt)}</span>
@@ -187,7 +197,59 @@ function SpendFact(props: { spentUt: number }): React.JSX.Element {
 					</div>
 				)}
 			</div>
-			<span className="ut-sub">llm calls · whole vault</span>
+			<span className="ut-sub">
+				{props.past ? "llm calls · up to this point" : "llm calls · whole vault"}
+			</span>
+		</div>
+	);
+}
+
+/**
+ * The Budget fact at a past position. There is no budget history yet, so there is no budget then to show: the server's
+ * note says so, and today's budget is named as today's, never shown as the budget at that point.
+ */
+function PastBudgetFact(props: { at: AtPayload }): React.JSX.Element {
+	const { budget } = props.at;
+	return (
+		<div className="ut-fact budget" title={budget.note}>
+			<b>Budget</b>
+			<span className="v na">not recorded then</span>
+			{budget.ut !== null && (
+				<span className="ut-sub mono" title={formatUsd(budget.ut)}>
+					{`today: ${formatUsdTotal(budget.ut)}`}
+				</span>
+			)}
+			<span className="ut-why">{budget.note}</span>
+		</div>
+	);
+}
+
+/**
+ * The Integrity fact at a past position, read from `at.chain` only: the server never reads a position as intact when
+ * the vault fails for a reason no record marks. "chained", never "verified", as live.
+ */
+function PastIntegrityFact(props: { at: AtPayload }): React.JSX.Element {
+	const { chain, pos } = props.at;
+	const why = chain.valid
+		? "the links up to this point are intact"
+		: chain.breakIndex !== null && pos >= chain.breakIndex
+			? `broken from chain position ${chain.breakIndex + 1}`
+			: "the vault reads broken at every point";
+	return (
+		<div className="ut-fact">
+			<b>Integrity</b>
+			{chain.valid ? (
+				<span className="ut-pill" data-tone="approve" title={CHAINED_TITLE}>
+					<i />
+					chained
+				</span>
+			) : (
+				<span className="ut-pill" data-tone="stakes">
+					<i />
+					broken
+				</span>
+			)}
+			<span className="ut-why">{why}</span>
 		</div>
 	);
 }
@@ -267,8 +329,12 @@ export function BudgetFact(props: { s: SummaryPayload }): React.JSX.Element {
 export function SummaryStrip(props: {
 	summary: SummaryPayload | null;
 	live: LiveState;
+	/** The vault as recorded at a past position, or null (or absent) for live. */
+	at?: AtPayload | null;
 }): React.JSX.Element {
 	const s = props.summary;
+	const at = props.at ?? null;
+	const now = useNow();
 	// Phone only: the Chain and Anchor facts sit behind a button. Elsewhere every fact shows and the button does not.
 	const [detailsOpen, setDetailsOpen] = useState(false);
 	const detailsRef = useRef<HTMLButtonElement>(null);
@@ -301,7 +367,9 @@ export function SummaryStrip(props: {
 			</>
 		);
 	const status = chainStatus(s.chain);
-	const notice = windowNotice(s);
+	// One note about the list's window: the position's own when it is before the rows held, else the live one.
+	const notice = windowNote(s, at);
+	const events = at === null ? s.chain.events : at.pos + 1;
 
 	return (
 		<>
@@ -324,6 +392,8 @@ export function SummaryStrip(props: {
 					)}
 				</div>
 			)}
+			{/* The live alarm above stays: it is the vault now. Everything below this line is the vault then. */}
+			{at !== null && <p className="ut-asat">{timelineLabel(at, new Date(now).toISOString())}</p>}
 			{notice !== null && (
 				<div className="ut-notice" role="status">
 					<b>Window</b>
@@ -336,8 +406,8 @@ export function SummaryStrip(props: {
 				data-details={detailsOpen}
 				onKeyDown={onKeyDown}
 			>
-				<SpendFact spentUt={s.spentUt} />
-				<BudgetFact s={s} />
+				<SpendFact spentUt={at === null ? s.spentUt : at.spentUt} past={at !== null} />
+				{at === null ? <BudgetFact s={s} /> : <PastBudgetFact at={at} />}
 				<button
 					ref={detailsRef}
 					type="button"
@@ -354,42 +424,45 @@ export function SummaryStrip(props: {
 				<div className="ut-fact detail" id="ut-fact-chain">
 					<b>Chain</b>
 					<span className="v">
-						{s.chain.events.toLocaleString()}{" "}
-						<small>{s.chain.events === 1 ? "event" : "events"}</small>
+						{events.toLocaleString()} <small>{events === 1 ? "event" : "events"}</small>
 					</span>
 				</div>
-				<div className="ut-fact">
-					<b>Integrity</b>
-					{/* "chained", never "verified": this is the hash links re-checked by the dashboard, not an explicit,
+				{at !== null ? (
+					<PastIntegrityFact at={at} />
+				) : (
+					<div className="ut-fact">
+						<b>Integrity</b>
+						{/* "chained", never "verified": this is the hash links re-checked by the dashboard, not an explicit,
 					    anchored check. Without an anchor file it says so under the pill. */}
-					{status === "verified" && (
-						<>
-							<span className="ut-pill" data-tone="approve" title={CHAINED_TITLE}>
+						{status === "verified" && (
+							<>
+								<span className="ut-pill" data-tone="approve" title={CHAINED_TITLE}>
+									<i />
+									chained
+								</span>
+								{s.anchorFile !== "present" && <span className="ut-sub">{NOT_ANCHORED_NOTE}</span>}
+							</>
+						)}
+						{status === "broken" && (
+							<span className="ut-pill" data-tone="stakes">
 								<i />
-								chained
+								broken
 							</span>
-							{s.anchorFile !== "present" && <span className="ut-sub">{NOT_ANCHORED_NOTE}</span>}
-						</>
-					)}
-					{status === "broken" && (
-						<span className="ut-pill" data-tone="stakes">
-							<i />
-							broken
+						)}
+						{status === "empty" && (
+							<span className="ut-pill" title="No events yet: nothing to verify, nothing wrong">
+								<i />
+								no events
+							</span>
+						)}
+						<span
+							className="ut-why"
+							title="The dashboard is a monitor: usertrust verify is the authoritative check of a vault"
+						>
+							{verifiedAsOf(s.verifiedAt)}
 						</span>
-					)}
-					{status === "empty" && (
-						<span className="ut-pill" title="No events yet: nothing to verify, nothing wrong">
-							<i />
-							no events
-						</span>
-					)}
-					<span
-						className="ut-why"
-						title="The dashboard is a monitor: usertrust verify is the authoritative check of a vault"
-					>
-						{verifiedAsOf(s.verifiedAt)}
-					</span>
-				</div>
+					</div>
+				)}
 				<AnchorFact anchorFile={s.anchorFile} />
 			</section>
 		</>

@@ -19,6 +19,7 @@ const DESKTOP_MIN = 32;
 const PHONE_MIN = 44;
 const PHONE_QUERY = "@media (max-width: 760px)";
 const MARKER = "/* ── Hit areas ──";
+const TIMELINE_RANGE = ".ut-tl-range";
 
 // ── A small CSS reader: rules in source order, each with its at-rule (media) and cascade-layer context ──────────────────────────────
 
@@ -241,6 +242,19 @@ const CONTROLS: Control[] = [
 		inlineRoom: [{ read: (v) => gap(".ut-active", v, "column"), factor: 0.5 }],
 		labelWidth: true,
 	},
+	{
+		// The timeline's Live and "N new since" buttons: above them the timeline's padding (or, on a phone, the label),
+		// below them the range, one row gap away; beside each other, the head's column gap.
+		name: "timeline button",
+		host: ".ut-tl-btn",
+		expander: ".ut-tl-btn::after",
+		blockRoom: [
+			{ read: (v) => gap(".ut-tl", v, "row"), factor: 1 },
+			{ read: (v) => paddingTop(".ut-tl", v), factor: 1 },
+		],
+		inlineRoom: [{ read: (v) => gap(".ut-tl-head", v, "column"), factor: 0.5 }],
+		labelWidth: true,
+	},
 ];
 
 /** A rule can name a control as part of a comma list (".ut-seg.small button" also matches ".ut-seg button"). */
@@ -414,6 +428,12 @@ describe("hit areas (audit finding F4)", () => {
 			]);
 			for (const r of block) {
 				for (const prop of r.decls.keys()) {
+					// A range input has no ::after: its hit area is its own box, so the block gives it a height, and
+					// only it.
+					if (prop === "height") {
+						expect(r.selectors, `${r.selectors.join(", ")} sets height`).toEqual([TIMELINE_RANGE]);
+						continue;
+					}
 					expect(allowed.has(prop), `${r.selectors.join(", ")} sets ${prop}`).toBe(true);
 				}
 			}
@@ -549,6 +569,34 @@ describe("hit areas (audit finding F4)", () => {
 		});
 	});
 
+	// The timeline's range is a native <input type="range">, which takes no ::after: a press anywhere on its box moves
+	// the thumb there, so its box IS the hit area, and the block makes that box tall enough.
+	describe("the timeline's range", () => {
+		const blockRules = (): Rule[] => parseRules(CSS.slice(CSS.lastIndexOf(MARKER)));
+		for (const [viewport, min] of [
+			["desktop", DESKTOP_MIN],
+			["phone", PHONE_MIN],
+		] as const) {
+			it(`${viewport}: its box is at least ${min}px tall`, () => {
+				const h = cascade(TIMELINE_RANGE, viewport).get("height");
+				expect(h, `${TIMELINE_RANGE} has no height`).toBeDefined();
+				expect(px(h ?? "0")).toBeGreaterThanOrEqual(min);
+			});
+		}
+		it("its height is set in the hit-area block, on desktop and at the phone width", () => {
+			const own = blockRules().filter((r) => r.selectors.includes(TIMELINE_RANGE));
+			expect(own.some((r) => r.media === undefined && r.decls.has("height"))).toBe(true);
+			expect(own.some((r) => r.media === PHONE_QUERY && r.decls.has("height"))).toBe(true);
+		});
+		it("it keeps no margin or border that would move its box off the area the test reads", () => {
+			for (const v of ["desktop", "phone"] as const) {
+				const d = cascade(TIMELINE_RANGE, v);
+				expect(d.get("margin")).toBe("0");
+				expect(d.has("border")).toBe(false);
+			}
+		});
+	});
+
 	describe("the reader itself", () => {
 		it("reads the visible sizes the report states", () => {
 			// The measured sizes from the audit: info 20x20, chip 26, sort 21, seg 24, X 30, Export 30.
@@ -565,6 +613,7 @@ describe("hit areas (audit finding F4)", () => {
 			expect(visible(by("small segmented tab"), "desktop").height).toBe(21);
 			expect(visible(by("button"), "desktop").height).toBe(30);
 			expect(visible(by("ghost button"), "desktop").height).toBe(27);
+			expect(visible(by("timeline button"), "desktop").height).toBe(25.5);
 		});
 	});
 });

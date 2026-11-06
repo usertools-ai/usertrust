@@ -2,6 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { useCallback, useMemo, useRef, useState } from "react";
+import { cutRows } from "../shared/asof.js";
 import { csvFilename, toCsv } from "../shared/csv.js";
 import { chainStatus } from "../shared/display.js";
 import { applyFilters, EMPTY_FILTERS, isFiltering } from "../shared/filters.js";
@@ -12,7 +13,9 @@ import { FilterBar } from "./filter-bar.js";
 import { InspectorHint, RowPanel } from "./row-panel.js";
 import { useLedger } from "./store.js";
 import { SummaryStrip } from "./summary-strip.js";
+import { Timeline } from "./timeline.js";
 import { Trends } from "./trends.js";
+import { useAt } from "./use-at.js";
 import { useMediaQuery } from "./use-media-query.js";
 import { useUrlState } from "./use-url-state.js";
 
@@ -29,14 +32,26 @@ const DOCK_QUERY = "(min-width: 1100px)";
 export function App(): React.JSX.Element {
 	const { rows, summary, phase, live, liveIds } = useLedger();
 	// The view, filters and open record live in the page address (`location.hash`): a reload keeps them, a link shares them.
-	const { view, setView, filters, setFilters, openHash, setOpenHash, addressNote } = useUrlState();
-	// The selected row's event HASH (unique on the chain, where an id can repeat), resolved from the current rows: a
+	const { view, setView, filters, setFilters, openHash, setOpenHash, at, setAt, addressNote } =
+		useUrlState();
+	// The past position shown (`#at=N`), from /api/at. Until its first answer lands, or when it fails with nothing
+	// loaded, the screen stays live and the timeline says so: a past view is only ever drawn from its own answer.
+	const atView = useAt(at, summary);
+	const shownAt = at === null ? null : atView.at;
+	const head = summary === null ? -1 : summary.chain.events - 1;
+	// The rows as recorded at the position: cut there, with the status each had there. Before the filters, so the
+	// filters, the list, Trends and Export all see the vault then.
+	const shownRows = useMemo(
+		() => (shownAt === null ? rows : cutRows(rows, shownAt)),
+		[rows, shownAt],
+	);
+	// The selected row's event HASH (unique on the chain, where an id can repeat), resolved from the rows shown: a
 	// `status` correction replaces the row object, and a panel holding the old one kept showing the old status.
 	const open = useMemo(
-		() => (openHash === null ? null : (rows.find((r) => r.hash === openHash) ?? null)),
-		[rows, openHash],
+		() => (openHash === null ? null : (shownRows.find((r) => r.hash === openHash) ?? null)),
+		[shownRows, openHash],
 	);
-	const filtered = useMemo(() => applyFilters(rows, filters), [rows, filters]);
+	const filtered = useMemo(() => applyFilters(shownRows, filters), [shownRows, filters]);
 	const docked = useMediaQuery(DOCK_QUERY);
 	// Enter or Space on a row asks the docked inspector to take focus; a click clears the request. The restore request
 	// sends focus back to the row when the inspector closes. Each carries a counter so a repeat of the same row counts.
@@ -74,15 +89,15 @@ export function App(): React.JSX.Element {
 	};
 
 	const count =
-		filtered.length === rows.length
-			? `${rows.length.toLocaleString()} ${rows.length === 1 ? "record" : "records"}`
-			: `${filtered.length.toLocaleString()} of ${rows.length.toLocaleString()} records`;
+		filtered.length === shownRows.length
+			? `${shownRows.length.toLocaleString()} ${shownRows.length === 1 ? "record" : "records"}`
+			: `${filtered.length.toLocaleString()} of ${shownRows.length.toLocaleString()} records`;
 	// An empty vault has nothing to select: the list takes the width.
-	const dock = docked && view === "audit" && rows.length > 0;
+	const dock = docked && view === "audit" && shownRows.length > 0;
 
 	return (
 		<div className="ut-app">
-			<SummaryStrip summary={summary} live={live} />
+			<SummaryStrip summary={summary} live={live} at={shownAt} />
 			<main className="ut-work">
 				<div className="ut-head">
 					<div className="ut-seg" role="tablist" aria-label="View" onKeyDown={onTabKey}>
@@ -129,7 +144,7 @@ export function App(): React.JSX.Element {
 						Export {filtered.length.toLocaleString()} {filtered.length === 1 ? "row" : "rows"}
 					</button>
 				</div>
-				<FilterBar rows={rows} filters={filters} onChange={setFilters} />
+				<FilterBar rows={shownRows} filters={filters} onChange={setFilters} />
 				{/* Never a link that opens something else: when the address does not describe this view, we say so. */}
 				{addressNote === "cannot-hold" && (
 					<div className="ut-notice ut-address-note" role="status">
@@ -155,7 +170,7 @@ export function App(): React.JSX.Element {
 						{view === "audit" ? (
 							<AuditTable
 								rows={filtered}
-								total={rows.length}
+								total={shownRows.length}
 								phase={phase}
 								chain={summary === null ? null : chainStatus(summary.chain)}
 								liveIds={liveIds}
@@ -168,7 +183,7 @@ export function App(): React.JSX.Element {
 								onClearFilters={() => setFilters(EMPTY_FILTERS)}
 							/>
 						) : (
-							<Trends rows={filtered} newestOf={newestOf} />
+							<Trends rows={filtered} newestOf={newestOf} at={shownAt} />
 						)}
 					</section>
 					{dock &&
@@ -187,6 +202,19 @@ export function App(): React.JSX.Element {
 						))}
 				</div>
 			</main>
+			{/* Shown once the vault has records, and whenever a position is asked for (so Live is always reachable). */}
+			{(head >= 0 || at !== null) && (
+				<Timeline
+					at={shownAt}
+					wanted={at}
+					head={head}
+					loading={atView.loading}
+					error={atView.error}
+					reloaded={atView.reloaded}
+					onMove={setAt}
+					onLive={() => setAt(null)}
+				/>
+			)}
 			{!dock && view === "audit" && open && (
 				<RowPanel key={open.hash} row={open} docked={false} onClose={close} />
 			)}

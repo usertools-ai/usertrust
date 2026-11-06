@@ -31,7 +31,7 @@ const browserAddress: AddressIo = {
 };
 
 /**
- * The view, the filters and the open record, kept in the page address (`location.hash`). Starts from the hash; a
+ * The view, the filters, the open record and the position shown, kept in the page address (`location.hash`). Starts from the hash; a
  * change writes it back (replace for a filter tweak, push for a view or record change, see `planHistory`); a hash the
  * user edits or navigates to (Back, Forward, a pasted link) is applied. The hash stays in the browser: nothing is sent.
  * When the address does not describe the page (a state it cannot hold, or a write the browser refused and that is being
@@ -44,6 +44,9 @@ export function useUrlState(): {
 	setFilters(filters: FilterState): void;
 	openHash: string | null;
 	setOpenHash(hash: string | null): void;
+	/** The position shown (the vault as recorded there), or null for live. */
+	at: number | null;
+	setAt(at: number | null): void;
 	/** Why the address does not describe the page right now, or null; the page shows it. */
 	addressNote: AddressNote;
 } {
@@ -80,6 +83,11 @@ export function useUrlState(): {
 		[],
 	);
 	const setOpenHash = useCallback((open: string | null) => setState((s) => ({ ...s, open })), []);
+	// Entering or leaving a position pushes an entry; moving between positions replaces it (`planHistory`).
+	const setAt = useCallback(
+		(at: number | null) => setState((s) => (s.at === at ? s : { ...s, at })),
+		[],
+	);
 	const holds = useMemo(() => addressHolds(state), [state]);
 	const addressNote: AddressNote = addressNoteFor(holds, behind);
 	return {
@@ -89,6 +97,8 @@ export function useUrlState(): {
 		setFilters,
 		openHash: state.open,
 		setOpenHash,
+		at: state.at,
+		setAt,
 		addressNote,
 	};
 }

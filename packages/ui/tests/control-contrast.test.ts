@@ -102,6 +102,7 @@ const CONTROLS: Array<[selector: string, what: string]> = [
 	[".ut-x", "close button"],
 	[".ut-seg", "Audit/Trends and bucket tablists"],
 	[".ut-info-btn", "info button"],
+	[".ut-tl-btn", "timeline Live and new-since buttons"],
 ];
 
 /** Decorative: panel edges, rules, separators and non-interactive labels keep the quiet tier. */

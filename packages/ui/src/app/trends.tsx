@@ -11,6 +11,7 @@ import {
 	statTiles,
 	timeWindow,
 } from "../shared/aggregate.js";
+import type { AtPayload } from "../shared/api.js";
 import { type ChartSummary, chartSummary } from "../shared/chart-summary.js";
 import {
 	formatUsd,
@@ -21,6 +22,7 @@ import {
 	Y_AXIS_ALLOW_DECIMALS,
 } from "../shared/format.js";
 import { JOB_TYPE_CAVEAT, type LedgerRow } from "../shared/rows.js";
+import { timelineLabel } from "../shared/timeline-view.js";
 import { BarList } from "./bar-list.js";
 import { TickingFigure } from "./ticking-figure.js";
 
@@ -119,7 +121,10 @@ export function Trends(props: {
 	rows: LedgerRow[];
 	/** The server's row window, when it holds only the newest N events. */
 	newestOf: number | undefined;
+	/** The past position the rows are cut at (`cutRows`), or null (or absent) for live. */
+	at?: AtPayload | null;
 }): React.JSX.Element {
+	const at = props.at ?? null;
 	const [granularity, setGranularity] = useState<Granularity>("day");
 	const [tableShown, setTableShown] = useState(false);
 	const series = useMemo(
@@ -153,7 +158,14 @@ export function Trends(props: {
 				    only, over the whole vault, and is labelled as that: two rules, each named. */}
 				<Tile
 					label="Cost in view"
-					value={<TickingFigure ut={tiles.totalCostUt} />}
+					value={
+						// A scrub jumps from recorded value to recorded value; the switch between live and past remounts it.
+						<TickingFigure
+							key={at === null ? "live" : "past"}
+							ut={tiles.totalCostUt}
+							jump={at !== null}
+						/>
+					}
 					valueTitle={formatUsd(tiles.totalCostUt)}
 					sub={`${formatUt(tiles.totalCostUt)} · every costed record`}
 				/>
@@ -296,6 +308,7 @@ export function Trends(props: {
 			<div className="ut-sub mono">
 				{props.rows.length.toLocaleString()} records {scope}
 				{window && ` · ${formatUtcMinute(window.first)} to ${formatUtcMinute(window.last)}`}
+				{at !== null && ` · ${timelineLabel(at, new Date().toISOString())}`}
 			</div>
 			<div className="ut-sub mono">{UT_KEY}</div>
 		</div>

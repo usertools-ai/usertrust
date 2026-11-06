@@ -319,6 +319,24 @@ body {
 		font-weight: 600;
 		margin-right: 6px;
 	}
+	/* The past view's own line: everything under it is the vault as recorded then. Gold, the accent: amber is kept for
+	   held and in-flight states. */
+	.ut-asat {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		font: 500 12px/1.4 var(--mono);
+		font-variant-numeric: tabular-nums;
+		color: var(--accent);
+	}
+	.ut-asat::before {
+		content: "";
+		flex: 0 0 auto;
+		width: 14px;
+		height: 2px;
+		border-radius: 2px;
+		background: var(--accent);
+	}
 
 	/* ── Header facts ── */
 	.ut-facts {
@@ -1458,6 +1476,77 @@ body {
 	.ut-range > .to {
 		color: var(--faint-text);
 	}
+	/* ── Timeline: the vault as recorded at a past position ──
+	   A native range along the bottom, the label for what the screen shows, and the Live and "N new since" buttons. Their
+	   hit areas are in the hit-area block at the end. Nothing here moves: no animation, no transition. */
+	.ut-tl {
+		flex: 0 0 auto;
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		padding: 8px 14px;
+		border: 1px solid var(--line);
+		border-radius: 14px;
+		background: var(--surface);
+	}
+	.ut-tl[data-past="true"] {
+		border-color: rgba(232, 181, 75, 0.45);
+	}
+	.ut-tl-head {
+		display: flex;
+		align-items: center;
+		gap: 6px 10px;
+		min-width: 0;
+		min-height: 26px;
+	}
+	.ut-tl-label {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font: 500 12px/1.4 var(--mono);
+		font-variant-numeric: tabular-nums;
+		color: var(--body);
+	}
+	.ut-tl-label[data-past="true"] {
+		color: var(--accent);
+	}
+	.ut-tl-msg {
+		font: 400 12px/1.45 var(--sans);
+		color: #ededf2;
+	}
+	.ut-tl-btn {
+		border: 1px solid var(--control-line);
+		background: transparent;
+		color: var(--ink);
+		font: 500 11.5px/1 var(--sans);
+		padding: 6px 10px;
+		border-radius: 999px;
+		cursor: pointer;
+		white-space: nowrap;
+		flex: 0 0 auto;
+	}
+	.ut-tl-btn:hover {
+		border-color: var(--accent);
+	}
+	/* The browser's own slider, in gold. Its box is its hit area (a press anywhere on it moves the thumb there): the
+	   hit-area block sets its height. No margin or border, so the box is exactly that height. */
+	.ut-tl-range {
+		display: block;
+		width: 100%;
+		margin: 0;
+		accent-color: var(--accent);
+		cursor: pointer;
+	}
+	.ut-tl-range:disabled {
+		opacity: 0.4;
+		cursor: default;
+	}
+	.ut-tl-range:focus-visible {
+		outline: 2px solid var(--words);
+		outline-offset: 2px;
+		border-radius: 6px;
+	}
 	@media (max-width: 900px) {
 		.ut-facts {
 			grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1668,6 +1757,26 @@ body {
 			box-shadow: 0 -20px 60px rgba(0, 0, 0, 0.6);
 			animation-name: ut-sheet-in;
 		}
+
+		/* The timeline stays at the bottom of the screen while the page scrolls past the records, clear of the home
+		   indicator. A past label takes its own line, so the buttons never squeeze it; everything it adds grows upward,
+		   so the range stays under the finger. The gaps are the room the buttons' 44px areas need. */
+		.ut-tl {
+			position: sticky;
+			bottom: 0;
+			z-index: 6;
+			gap: 10px;
+			padding: 12px 12px;
+			padding-bottom: calc(12px + env(safe-area-inset-bottom));
+		}
+		.ut-tl-head {
+			flex-wrap: wrap;
+			row-gap: 10px;
+		}
+		.ut-tl-label[data-past="true"] {
+			flex-basis: 100%;
+			white-space: normal;
+		}
 	}
 
 	/* ── Hit areas ──
@@ -1683,7 +1792,8 @@ body {
 	.ut-cap button,
 	.ut-seg button,
 	.ut-btn,
-	.ut-ghost {
+	.ut-ghost,
+	.ut-tl-btn {
 		position: relative;
 	}
 	.ut-info-btn::after,
@@ -1692,7 +1802,8 @@ body {
 	.ut-cap button::after,
 	.ut-seg button::after,
 	.ut-btn::after,
-	.ut-ghost::after {
+	.ut-ghost::after,
+	.ut-tl-btn::after {
 		content: "";
 		position: absolute;
 	}
@@ -1734,6 +1845,15 @@ body {
 	.ut-ghost::after {
 		inset: -3.5px -2px;
 	}
+	/* The timeline's Live and "N new since": padding box 23.5px high (11.5px text, 6px padding, 1px border): 32.5px,
+	   inside the timeline's 8px padding above and its 6px gap to the range below. The 10px gap between them is split. */
+	.ut-tl-btn::after {
+		inset: -4.5px -3px;
+	}
+	/* The timeline's range takes no ::after: its own box is the area. */
+	.ut-tl-range {
+		height: 32px;
+	}
 
 	@media (max-width: 760px) {
 		/* Each chip owns its 44.5px band alone: its area reaches 9.5px past the border, so rows are 19px apart (two
@@ -1772,6 +1892,13 @@ body {
 		}
 		.ut-ghost::after {
 			inset: -9.5px -2px;
+		}
+		/* 44.5px, inside the phone timeline's 12px padding and 10px gaps. */
+		.ut-tl-btn::after {
+			inset: -10.5px -3px;
+		}
+		.ut-tl-range {
+			height: 44px;
 		}
 		/* The filter sheet stacks one full-width chip per facet (33.5px with the sheet's 10px padding, a 31.5px padding box):
 		   each chip's area reaches 44px with 6.25px above and below, inside a row gap widened to 13px, and the head (its Done
