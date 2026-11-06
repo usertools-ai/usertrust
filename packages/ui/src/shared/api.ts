@@ -116,12 +116,16 @@ export interface AtPayload {
 	counts: AtCounts;
 	/**
 	 * Whether the chain verifies up to and including `pos`: `breakIndex` is the position of the first event that breaks
-	 * it (over the whole vault), or null.
+	 * it (over the whole vault), or null. Never more than the whole-vault verdict: with no break, `valid` is that verdict
+	 * (`SummaryPayload.chain.valid`), so a vault that fails for a reason no event marks is invalid at every position.
 	 */
 	chain: { valid: boolean; breakIndex: number | null };
 	/** Today's budget: there is no budget history yet, and `note` says so. */
 	budget: { ut: number | null; note: string };
-	/** The monthly plan (`plan.monthlyUt`) in force at the position's time, or null (unset, or settings off). */
+	/**
+	 * The monthly plan (`plan.monthlyUt`) in force at the position's running-maximum time (the latest time recorded at
+	 * or before it: the event's own in a log written in order), or null (unset, no time, or settings off).
+	 */
 	plan: number | null;
 	/** The position of the first row held (`/api/events`), or `head + 1` when none is. */
 	windowStartPos: number;

@@ -36,7 +36,7 @@ import {
 	type PersistedAuditEvent,
 	VAULT_DIR,
 } from "usertrust";
-import { canonicalize, verifyTransaction } from "usertrust-verify";
+import { canonicalize, type TransferStatus, verifyTransaction } from "usertrust-verify";
 import { isHeaderSpend } from "../shared/aggregate.js";
 import type { AtPayload, SettingKey, SettingsPayload } from "../shared/api.js";
 import { type RowStatus, statusFor, toLedgerRows } from "../shared/rows.js";
@@ -433,8 +433,10 @@ export async function createUiServer(
 	/** The state's version: bumped on every change, sent as each frame's SSE `id` and with each snapshot. */
 	let version = 0;
 	/**
-	 * Bumped by every full reload (`handleResync`), never by an append: a reload re-reads the vault, and a position can
-	 * then name another record (a log replaced, truncated, rotated). `AtPayload.epoch` carries it.
+	 * Bumped by a full reload (`handleResync`) that yields other records than the state it replaces: another log
+	 * (`logId`), another number of events, or another tip (`lastHash`). A position can then name another record (a log
+	 * replaced, truncated, rotated). Never by an append, and never by a reload of an unchanged vault (the periodic
+	 * re-verify), which would read to the page as a reload every few minutes. `AtPayload.epoch` carries it.
 	 */
 	let epoch = 0;
 
@@ -576,13 +578,19 @@ export async function createUiServer(
 	}
 
 	function handleResync(): void {
+		const before = state;
 		loading = true;
 		try {
 			state = loadState(vaultPath, rowCap, auditDirSeen, deletionSeen, auditDirId, head);
 		} finally {
 			loading = false;
 		}
-		epoch += 1;
+		if (
+			state.logId !== before.logId ||
+			state.positions.length !== before.positions.length ||
+			state.lastHash !== before.lastHash
+		)
+			epoch += 1;
 		auditDirSeen ||= state.auditDirPresent;
 		auditDirId ??= state.auditDirId;
 		deletionSeen = state.deletionCauses;
@@ -611,11 +619,15 @@ export async function createUiServer(
 	 *   is -Infinity), so the 404 is judged against the first time that does. Such records stay reachable by `pos`.
 	 * - `counts`: `llm_call` records (an `llm_call_failed` is not one: it counts as `other`), denials (`policy_denied`
 	 *   and `ledger_rejected`), and every other record, at positions `0..pos`. `spentUt` is the header's Spend rule.
-	 * - `chain`: valid while `pos` is before the FULL-list break index (`LedgerState.fullBreakIndex`), never the
-	 *   slice-relative index the rows use.
-	 * - `plan`: the workspace value in force at the position's time (`timeMsAt`: its latest recorded time, the event's
-	 *   own in a log written in order), or null when it is unset, no time up to the position parses, settings are off,
-	 *   or the settings cannot be read: the rest of the answer does not depend on them.
+	 * - `chain`: never claims more than the whole-vault verdict. With a break, valid while `pos` is before the
+	 *   FULL-list break index (`LedgerState.fullBreakIndex`), never the slice-relative index the rows use. With no break,
+	 *   the whole-vault verdict (`summary.chain.valid`) at every position: a vault that fails for a reason no event marks
+	 *   (a mismatched anchor, a torn line, a latched deletion) is invalid at every position.
+	 * - `plan`: the workspace value in force at the position's RUNNING-MAXIMUM time (`timeMsAt`: the latest time
+	 *   recorded at or before it), not necessarily the event's own `ts`. In a log written in order the two are the
+	 *   same; in one whose times are out of order (several writers), it is the instant `positionAt` searches over, so
+	 *   `?t=` and the position it resolves read the same plan. Null when it is unset, no time up to the position parses,
+	 *   settings are off, or the settings cannot be read: the rest of the answer does not depend on them.
 	 * - `statusAt`: by event hash, the status at `pos` of each held row at or before `pos` whose transfer has a record
 	 *   after it (`TransferIndex.openAcross`, `verdictAt`), with the mapping the rows use (`statusFor`).
 	 */
@@ -670,7 +682,10 @@ export async function createUiServer(
 			epoch,
 			spentUt: positions.spentUtAt(pos),
 			counts: positions.countsAt(pos),
-			chain: { valid: breakIndex === null || pos < breakIndex, breakIndex },
+			chain: {
+				valid: breakIndex === null ? state.summary.chain.valid : pos < breakIndex,
+				breakIndex,
+			},
 			budget: { ut: state.summary.budget, note: BUDGET_NOTE },
 			plan: planAt(positions.timeMsAt(pos)),
 			windowStartPos,
@@ -699,7 +714,9 @@ export async function createUiServer(
 	function statusAt(pos: number, windowStartPos: number): Record<string, RowStatus> {
 		const out: Record<string, RowStatus> = {};
 		for (const { key, rowPositions } of state.transfers.openAcross(pos)) {
-			const verdict = state.transfers.verdictAt(key, pos);
+			// Undefined when `transferVerdict` gives none over the records up to `pos`: `statusFor` takes undefined
+			// explicitly and reads an outcome row with no verdict as "unknown", as the rows built at load do.
+			const verdict: TransferStatus | undefined = state.transfers.verdictAt(key, pos);
 			for (const p of rowPositions) {
 				const row = state.rows[p - windowStartPos];
 				if (row === undefined || row.pos !== p) continue;

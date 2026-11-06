@@ -2,7 +2,14 @@
 // Copyright 2026 Usertools, Inc.
 
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	appendFileSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deriveChainIntegrity, type PersistedAuditEvent, readLedgerEvents } from "usertrust";
@@ -11,6 +18,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAuditWriter } from "../../core/src/audit/chain.js";
 import { parseZonedTime } from "../src/server/position-index.js";
 import { createUiServer, type UiServer } from "../src/server/server.js";
+import { __tailTestSeam } from "../src/server/tail.js";
 import { TransferIndex } from "../src/server/verdicts.js";
 import { Workspace } from "../src/server/workspace.js";
 import { isHeaderSpend } from "../src/shared/aggregate.js";
@@ -352,6 +360,54 @@ describe("GET /api/at", () => {
 		} finally {
 			rmSync(other, { recursive: true, force: true });
 		}
+	});
+
+	it("epoch stays the same over a forced reload of an unchanged vault", async () => {
+		await seed(5);
+		const s = await start();
+		const before = await at("pos=4");
+		s.reload();
+		s.reload();
+		const after = await at("pos=4");
+		expect(after.body.epoch).toBe(before.body.epoch);
+		expect(after.body).toEqual(before.body);
+	});
+
+	it("epoch stays the same over the periodic re-verify of an unchanged vault", async () => {
+		await seed(5);
+		const saved = __tailTestSeam.reverifyMs;
+		__tailTestSeam.reverifyMs = 200;
+		try {
+			const s = await start();
+			const port = s.port;
+			const version = async () =>
+				((await (await fetch(`http://127.0.0.1:${port}/api/events`)).json()) as { version: number })
+					.version;
+			const v0 = await version();
+			const e0 = (await at("pos=4")).body.epoch;
+			// The re-verify is a full reload: it bumps the version, so waiting on the version proves one ran.
+			const deadline = Date.now() + 8000;
+			while ((await version()) < v0 + 2 && Date.now() < deadline) {
+				await new Promise((r) => setTimeout(r, 50));
+			}
+			expect(await version()).toBeGreaterThanOrEqual(v0 + 2);
+			expect((await at("pos=4")).body.epoch).toBe(e0);
+		} finally {
+			__tailTestSeam.reverifyMs = saved;
+		}
+	});
+
+	it("a vault that fails with no break index reads invalid at every position", async () => {
+		await seed(5);
+		// A torn last line: the vault does not verify, and no event breaks the chain.
+		appendFileSync(logPath, "{ not json");
+		await start();
+		const summary = (await (await fetch(`http://127.0.0.1:${ui?.port}/api/summary`)).json()) as {
+			chain: { valid: boolean; breakIndex: number | null };
+		};
+		expect(summary.chain).toMatchObject({ valid: false, breakIndex: null });
+		expect((await at("pos=0")).body.chain).toEqual({ valid: false, breakIndex: null });
+		expect((await at("pos=4")).body.chain).toEqual({ valid: false, breakIndex: null });
 	});
 
 	it("at clamps after resync", async () => {
