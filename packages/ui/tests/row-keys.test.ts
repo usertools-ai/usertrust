@@ -67,7 +67,7 @@ function rows(n: number): Row[] {
 		data: { model: "gpt-5", cost: 100 + i },
 		sequence: i,
 	}));
-	return toLedgerRows(events, { valid: true, breakIndex: null });
+	return toLedgerRows(events, { valid: true, breakIndex: null }, undefined, 0);
 }
 const noop = () => {};
 const tabStops = (html: string) => [...html.matchAll(/tabindex="(-?\d+)"/gi)].map((m) => m[1]);

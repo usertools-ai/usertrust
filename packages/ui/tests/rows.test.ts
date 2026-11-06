@@ -45,6 +45,8 @@ describe("toLedgerRows", () => {
 				}),
 			],
 			{ valid: true, breakIndex: null },
+			undefined,
+			0,
 		);
 		expect(rows[0]).toMatchObject({
 			seq: 1,
@@ -62,10 +64,15 @@ describe("toLedgerRows", () => {
 	});
 
 	it("keeps unknown kinds with generic columns", () => {
-		const rows = toLedgerRows([evt({ kind: "mystery", data: { weird: true } })], {
-			valid: true,
-			breakIndex: null,
-		});
+		const rows = toLedgerRows(
+			[evt({ kind: "mystery", data: { weird: true } })],
+			{
+				valid: true,
+				breakIndex: null,
+			},
+			undefined,
+			0,
+		);
 		expect(rows[0]?.kind).toBe("mystery");
 		expect(rows[0]?.model).toBeUndefined();
 	});
@@ -74,6 +81,8 @@ describe("toLedgerRows", () => {
 		const rows = toLedgerRows(
 			[evt({ sequence: 1 }), evt({ id: "id-2", sequence: 2 }), evt({ id: "id-3", sequence: 3 })],
 			{ valid: false, breakIndex: 1 },
+			undefined,
+			0,
 		);
 		expect(rows.map((r) => r.integrity)).toEqual(["verified", "after-break", "after-break"]);
 	});
@@ -85,7 +94,7 @@ describe("statusOf", () => {
 	function classify(events: PersistedAuditEvent[]) {
 		const index = new TransferIndex();
 		index.add(events);
-		return toLedgerRows(events, OK, index.verdictOf).map((r) => statusOf(r));
+		return toLedgerRows(events, OK, index.verdictOf, 0).map((r) => statusOf(r));
 	}
 	// Each event its own hash, as on a chain: rows are indexed by it.
 	const at = (n: number, o: Partial<PersistedAuditEvent> & { data?: Record<string, unknown> }) =>
@@ -198,7 +207,7 @@ describe("statusOf", () => {
 			}),
 		];
 		expect(classify(events)).toEqual(["denied", "denied"]);
-		const [policyDenied, ledgerRejected] = toLedgerRows(events, OK);
+		const [policyDenied, ledgerRejected] = toLedgerRows(events, OK, undefined, 0);
 		// No fabricated zero cost — a denial spent nothing and reports nothing.
 		expect(policyDenied?.costUt).toBeUndefined();
 		expect(ledgerRejected?.costUt).toBeUndefined();
@@ -237,6 +246,8 @@ describe("statusOf", () => {
 		const [row] = toLedgerRows(
 			[evt({ kind: "ungoverned_call", data: { method: "embeddings.create", provider: "openai" } })],
 			{ valid: true, breakIndex: null },
+			undefined,
+			0,
 		);
 		expect(statusOf(row as never)).toBe("ungoverned");
 	});
@@ -288,17 +299,27 @@ describe("KIND_CLASS", () => {
 		"red-first (a function or an object as the status): %s is not a listed kind",
 		(kind) => {
 			expect(kindClass(kind, {})).toBe("unknown");
-			const [row] = toLedgerRows([evt({ kind, data: {} })], { valid: true, breakIndex: null });
+			const [row] = toLedgerRows(
+				[evt({ kind, data: {} })],
+				{ valid: true, breakIndex: null },
+				undefined,
+				0,
+			);
 			expect(statusOf(row as never)).toBe("unknown");
 		},
 	);
 
 	it("a kind nobody writes is UNKNOWN, never pending or settled", () => {
 		expect(kindClass("something_new", {})).toBe("unknown");
-		const [row] = toLedgerRows([evt({ kind: "something_new", data: {} })], {
-			valid: true,
-			breakIndex: null,
-		});
+		const [row] = toLedgerRows(
+			[evt({ kind: "something_new", data: {} })],
+			{
+				valid: true,
+				breakIndex: null,
+			},
+			undefined,
+			0,
+		);
 		expect(statusOf(row as never)).toBe("unknown");
 	});
 

@@ -50,6 +50,8 @@ function threeDays(): LedgerRow[] {
 			evt(3, "2026-11-03T10:00:00.000Z", 9_000),
 		],
 		{ valid: true, breakIndex: null },
+		undefined,
+		0,
 	);
 }
 

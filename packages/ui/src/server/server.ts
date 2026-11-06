@@ -474,9 +474,17 @@ export async function createUiServer(
 			const lines = complete.split("\n").filter((l) => l.trim());
 			const fresh: PersistedAuditEvent[] = [];
 			let lastHash = state.lastHash;
+			let lastSequence = state.lastSequence;
 			for (const line of lines) {
 				const e = JSON.parse(line) as PersistedAuditEvent;
 				if (e.previousHash !== lastHash) throw new Error("linkage mismatch");
+				// A vault ordered by `sequence` stays in that order only if each append's sequence is above the last: the
+				// next full read would sort a lower one earlier, which moves positions and can break the chain. Reload.
+				if (lastSequence !== null) {
+					if (typeof e.sequence !== "number" || !(e.sequence > lastSequence))
+						throw new Error("sequence out of order");
+					lastSequence = e.sequence;
+				}
 				// Amendment A4: linkage alone doesn't catch forged payloads —
 				// recompute the hash exactly as usertrust-verify does.
 				const { hash, ...rest } = e;
@@ -514,6 +522,7 @@ export async function createUiServer(
 			);
 			state.rows.push(...rows);
 			state.lastHash = lastHash;
+			state.lastSequence = lastSequence;
 			state.lastLine = lastLineOfAppend(state.byteOffset, appended, lastNewline);
 			state.byteOffset += lastNewline + 1;
 			state.logTimes = read.times;

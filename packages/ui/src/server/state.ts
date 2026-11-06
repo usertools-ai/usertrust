@@ -47,6 +47,12 @@ export interface LedgerState {
 	summary: SummaryPayload;
 	lastHash: string;
 	/**
+	 * The last event's `sequence` when EVERY event carries a numeric one, else null. The reader then orders the vault by
+	 * `sequence` (`readLedgerEvents`), so an append extends this state only while each appended event's sequence is above
+	 * it: one at or below it would be sorted earlier by the next full read, moving every later position.
+	 */
+	lastSequence: number | null;
+	/**
 	 * Where the next read of `events.jsonl` starts: the log's size as the load's descriptor saw it (0 when absent), a
 	 * fragment after its last newline included. Not the offset after that newline: the load already counted such a
 	 * fragment as a malformed line, so a range read from there could join it to a later line onto a verdict that has
@@ -532,6 +538,10 @@ function loadPass(
 			verifiedAt: loadSucceeded ? new Date().toISOString() : null,
 		},
 		lastHash: events.at(-1)?.hash ?? GENESIS,
+		lastSequence:
+			events.length > 0 && events.every((e) => typeof e.sequence === "number")
+				? (events.at(-1)?.sequence as number)
+				: null,
 		byteOffset: snapshot?.byteOffset ?? 0,
 		pendingFragment: snapshot?.pendingFragment ?? false,
 		logId: snapshot?.id,

@@ -2,7 +2,14 @@
 // Copyright 2026 Usertools, Inc.
 
 import { createHash } from "node:crypto";
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+	appendFileSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PersistedAuditEvent } from "usertrust";
@@ -305,6 +312,44 @@ describe("PositionIndex on the live tail", () => {
 			rows: Array<{ pos: number }>;
 		};
 		expect(rows.map((r) => r.pos)).toEqual([0, 1, 2, 3, 4, 5]);
+	});
+
+	it("an append whose sequence is not above the last is a full reload: positions are what a reload gives", async () => {
+		await append(3);
+		ui = await createUiServer(tempDir, { port: 0 });
+		const port = ui.port;
+		const vaultPath = join(tempDir, ".usertrust");
+		const logPath = join(vaultPath, "audit", "events.jsonl");
+		// Links onto the tip, so linkage and the hash pass; the reader would sort it to second place by its sequence.
+		const tip = JSON.parse(readFileSync(logPath, "utf-8").trim().split("\n").at(-1) as string) as {
+			hash: string;
+			[k: string]: unknown;
+		};
+		const { hash: _tipHash, ...shape } = tip;
+		const rest = {
+			...shape,
+			id: "late-sequence",
+			previousHash: tip.hash,
+			sequence: 1,
+			timestamp: new Date().toISOString(),
+		};
+		const hash = createHash("sha256").update(canonicalize(rest)).digest("hex");
+		appendFileSync(logPath, `${canonicalize({ ...rest, hash })}\n`);
+		type Snapshot = {
+			rows: Array<{ id: string; pos: number }>;
+			summary: { chain: { valid: boolean } };
+		};
+		let snapshot: Snapshot | undefined;
+		const deadline = Date.now() + 8000;
+		while (Date.now() < deadline) {
+			snapshot = (await (await fetch(`http://127.0.0.1:${port}/api/events`)).json()) as Snapshot;
+			if (snapshot.rows.length === 4) break;
+			await new Promise((r) => setTimeout(r, 50));
+		}
+		const fresh = loadState(vaultPath);
+		expect(snapshot?.rows.map((r) => [r.id, r.pos])).toEqual(fresh.rows.map((r) => [r.id, r.pos]));
+		expect(snapshot?.rows.find((r) => r.id === "late-sequence")?.pos).toBe(1);
+		expect(snapshot?.summary.chain.valid).toBe(false);
 	});
 
 	it("a resync rebuilds the index from the whole vault", async () => {

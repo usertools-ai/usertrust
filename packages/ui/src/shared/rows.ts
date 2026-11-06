@@ -123,13 +123,13 @@ function bool(v: unknown): boolean | undefined {
  * `verdictOf` gives an event's TRANSFER verdict (the server builds it over every event of the transfer, with
  * usertrust-verify's `transferVerdict`). Without it, a row whose kind carries a transfer's outcome is "unknown":
  * this module never guesses an outcome from one row's fields. `firstPos` is the position of `events[0]` (`pos`), which
- * only the caller knows: the rows held can start anywhere in the vault.
+ * only the caller knows: the rows held can start anywhere in the vault, so it has no default.
  */
 export function toLedgerRows(
 	events: PersistedAuditEvent[],
 	integrity: ChainIntegrity,
-	verdictOf?: (e: PersistedAuditEvent) => TransferStatus | undefined,
-	firstPos = 0,
+	verdictOf: ((e: PersistedAuditEvent) => TransferStatus | undefined) | undefined,
+	firstPos: number,
 ): LedgerRow[] {
 	return events.map((e, i) => {
 		const model = str(e.data.model);

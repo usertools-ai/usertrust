@@ -46,7 +46,7 @@ function evt(data: Record<string, unknown>, n = 1): PersistedAuditEvent {
 }
 
 const rowsOf = (events: PersistedAuditEvent[]): LedgerRow[] =>
-	toLedgerRows(events, { valid: true, breakIndex: null });
+	toLedgerRows(events, { valid: true, breakIndex: null }, undefined, 0);
 
 /** A mixed fixture: typed (both sources), a value outside the lists, and records with no type at all. */
 function mixed(): LedgerRow[] {
