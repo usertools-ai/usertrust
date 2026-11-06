@@ -51,3 +51,38 @@ export interface SummaryPayload {
 	 */
 	verifiedAt: string | null;
 }
+
+/** A dashboard setting kept in the workspace (never in the vault). */
+export type SettingKey = "plan.monthlyUt" | "people.rateUsdPerHour";
+
+export interface SettingEntry {
+	/** ISO-8601 UTC: the time from which `value` is in force. */
+	at: string;
+	key: SettingKey;
+	/** null means the setting is unset from `at` on. */
+	value: number | null;
+}
+
+/** GET /api/session: the token this server start requires on every write. */
+export interface SessionPayload {
+	token: string;
+}
+
+/**
+ * GET /api/settings, and the reply to PUT /api/settings. While settings are off (the workspace would sit inside
+ * the vault, or is unsafe), every value is null, `history` is empty and `problem` says why.
+ */
+export interface SettingsPayload {
+	/** The value in force now, per key; null when unset. */
+	values: Record<SettingKey, number | null>;
+	/** Every entry, oldest first. */
+	history: SettingEntry[];
+	/** What is wrong with the workspace, or null. */
+	problem: string | null;
+}
+
+/** The body of PUT /api/settings: exactly these two fields. The server dates the entry. */
+export interface SettingUpdate {
+	key: SettingKey;
+	value: number | null;
+}
