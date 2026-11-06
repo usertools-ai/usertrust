@@ -388,12 +388,24 @@ export function verifyVaultReading(vaultPath: string): VaultReading {
 		}
 	}
 
-	// 6. Order by the persisted global sequence when available (legacy fallback:
-	// file order, for hand-built sequence-less single-segment fixtures).
-	const allHaveSeq = events.every((e) => typeof e.sequence === "number");
-	const ordered = allHaveSeq
-		? [...events].sort((a, b) => (a.sequence as number) - (b.sequence as number))
-		: events;
+	// 6. Order by the persisted global sequence. The file-order walk, with both sequence checks
+	// off, is only for a log in which NO event has a sequence (the legacy shape). A log where only
+	// some events have one is not that log: each event without a numeric sequence is its own error
+	// and is left out of the walk, which runs over the sequenced events in sequence order with
+	// both sequence checks on. Before, one such event switched the whole vault to the file-order
+	// walk, and a leading deletion or a gap among the other events was never named.
+	const sequenced = events.filter((e) => typeof e.sequence === "number");
+	const legacy = sequenced.length === 0;
+	if (!legacy) {
+		for (const e of events) {
+			if (typeof e.sequence !== "number") {
+				errors.push(`event without sequence (${scrubForError(basename(e.sourceFile))}:${e.line})`);
+			}
+		}
+	}
+	const ordered = legacy
+		? events
+		: [...sequenced].sort((a, b) => (a.sequence as number) - (b.sequence as number));
 
 	// 7. One continuous continuity walk.
 	let expectedPrev = GENESIS_HASH;
@@ -409,10 +421,10 @@ export function verifyVaultReading(vaultPath: string): VaultReading {
 			);
 		}
 
-		if (allHaveSeq && i === 0 && e.sequence !== 1) {
+		if (!legacy && i === 0 && e.sequence !== 1) {
 			errors.push(`Sequence starts at ${e.sequence}, expected 1 (leading events deleted)`);
 		}
-		if (allHaveSeq && i > 0) {
+		if (!legacy && i > 0) {
 			const prevSeq = (ordered[i - 1] as ParsedEvent).sequence as number;
 			if (e.sequence !== prevSeq + 1) {
 				errors.push(
@@ -464,7 +476,7 @@ export function verifyVaultReading(vaultPath: string): VaultReading {
 		result: {
 			valid: errors.length === 0,
 			errors,
-			chainLength: events.length,
+			chainLength: ordered.length,
 			validHashes,
 			merkleRoot,
 			firstEvent,

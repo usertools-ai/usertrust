@@ -30,9 +30,12 @@ export interface ChainIntegrity {
 }
 
 /**
- * Every event in the vault's audit log and rotated segments, ordered by `sequence` when every event carries one (else
- * in file order: `events.jsonl` first, then the segments by name). A directory, log or segment that cannot be read is
- * skipped, so the result alone cannot tell a file this process could not read from one that is empty or absent.
+ * Every event in the vault's audit log and rotated segments. The events that carry a `sequence` come first, ordered by
+ * it; when NO event carries one, all of them are in file order (`events.jsonl` first, then the segments by name). In a
+ * log where only some events carry one, the events without it follow the sequenced ones, in file order. They are kept,
+ * not dropped: a reader must not hide an event from whoever reads the log, and failing such a log is verification's
+ * job (`verifyVault` names each one). A directory, log or segment that cannot be read is skipped, so the result alone
+ * cannot tell a file this process could not read from one that is empty or absent.
  *
  * `onReadError`, when given, is called for each existence check, listing or file read that fails with an error OTHER
  * than ENOENT, with the path and the error code (`"unknown"` when the error carries none). ENOENT is absence, which is
@@ -104,10 +107,13 @@ export function readLedgerEvents(
 		}
 	}
 
-	const allHaveSeq = events.every((e) => typeof e.sequence === "number");
-	return allHaveSeq
-		? [...events].sort((a, b) => (a.sequence as number) - (b.sequence as number))
-		: events;
+	const sequenced = events.filter((e) => typeof e.sequence === "number");
+	if (sequenced.length === 0) return events;
+	const unsequenced = events.filter((e) => typeof e.sequence !== "number");
+	return [
+		...[...sequenced].sort((a, b) => (a.sequence as number) - (b.sequence as number)),
+		...unsequenced,
+	];
 }
 
 /**
