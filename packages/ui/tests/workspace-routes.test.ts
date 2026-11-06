@@ -6,6 +6,7 @@ import {
 	chmodSync,
 	existsSync,
 	linkSync,
+	lstatSync,
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
@@ -521,6 +522,94 @@ describe("settings routes", () => {
 			}
 		}
 	});
+
+	it.skipIf(!posix)(
+		"a vault link that does not resolve turns settings off: GET says why, a PUT is 409, the target is not made",
+		async () => {
+			const root = join(tempDir, "dangling");
+			mkdirSync(root);
+			const target = join(wsBase, "vault");
+			symlinkSync(target, join(root, ".usertrust"));
+			const server = await createUiServer(root, { port: 0, workspaceDir: join(target, "ws") });
+			try {
+				const read = await getSettings(server);
+				expect(read.problem).toMatch(/the vault is a link that does not resolve/);
+				const res = await put(server, valid);
+				expect(res.status).toBe(409);
+				expect(JSON.parse(res.body)).toEqual({ error: read.problem });
+				expect(() => lstatSync(target)).toThrow(/ENOENT/);
+			} finally {
+				await server.close();
+			}
+		},
+	);
+
+	it("a vault that is a regular file turns settings off: GET says why, a PUT is 409, nothing is made", async () => {
+		const root = join(tempDir, "file-vault");
+		mkdirSync(root);
+		writeFileSync(join(root, ".usertrust"), "not a directory\n");
+		const before = listTree(root);
+		const server = await createUiServer(root, { port: 0, workspaceDir: wsDir });
+		try {
+			const read = await getSettings(server);
+			expect(read.problem).toMatch(/the vault is not a directory/);
+			const res = await put(server, valid);
+			expect(res.status).toBe(409);
+			expect(listTree(root)).toEqual(before);
+			expect(existsSync(wsDir)).toBe(false);
+		} finally {
+			await server.close();
+		}
+	});
+
+	it.skipIf(!posix)(
+		"a vault link that stops resolving after start turns settings off at the next request; nothing is made",
+		async () => {
+			const root = join(tempDir, "goes-dangling");
+			mkdirSync(root);
+			const target = join(wsBase, "vault");
+			mkdirSync(target);
+			symlinkSync(target, join(root, ".usertrust"));
+			const server = await createUiServer(root, { port: 0, workspaceDir: wsDir });
+			try {
+				// A link to a directory is a vault like any other: settings are on.
+				expect((await getSettings(server)).problem).toBeNull();
+				renameSync(target, join(wsBase, "vault-gone"));
+				const res = await put(server, valid);
+				expect(res.status).toBe(409);
+				expect((JSON.parse(res.body) as { error: string }).error).toMatch(
+					/the vault is a link that does not resolve/,
+				);
+				expect(() => lstatSync(target)).toThrow(/ENOENT/);
+				expect(existsSync(wsDir)).toBe(false);
+				expect((await getSettings(server)).problem).toMatch(
+					/the vault is a link that does not resolve/,
+				);
+			} finally {
+				await server.close();
+			}
+		},
+	);
+
+	it.skipIf(!posix)(
+		"a vault that is a link to a directory allows settings, as a directory vault does",
+		async () => {
+			const root = join(tempDir, "linked-vault");
+			mkdirSync(root);
+			const target = join(wsBase, "real-vault");
+			mkdirSync(target);
+			symlinkSync(target, join(root, ".usertrust"));
+			const server = await createUiServer(root, { port: 0, workspaceDir: wsDir });
+			try {
+				const res = await put(server, valid);
+				expect(res.status).toBe(200);
+				expect((JSON.parse(res.body) as SettingsPayload).values["plan.monthlyUt"]).toBe(500000);
+				expect(readdirSync(target)).toEqual([]);
+			} finally {
+				await server.close();
+			}
+		},
+	);
 
 	it.skipIf(!posix)(
 		"a settings file that is a hard link into the vault: GET reports it, a PUT is 409, the vault file is unchanged",

@@ -21,6 +21,7 @@ import {
 	readSync,
 	realpathSync,
 	type Stats,
+	statSync,
 	writeSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -93,6 +94,45 @@ export function workspaceDir(vaultBase: string, env: NodeJS.ProcessEnv = process
 	return dir;
 }
 
+/**
+ * Where the vault of the project at `root` (a resolved path) is, or a throw when its state rules settings out.
+ * Settings need `<root>/.usertrust` to be absent, a directory, or a link that resolves to a directory. Anything
+ * else (a link that does not resolve, a file, a link to something that is not a directory, an entry that cannot
+ * be checked) leaves nothing that says where the vault is, so settings are off and nothing is created. The vault
+ * path is never taken as written when it is a link.
+ */
+function resolvedVault(root: string): string {
+	const vault = join(root, ".usertrust");
+	const off = (why: string): Error => new Error(`settings are off: the vault ${why} (${vault})`);
+	let entry: Stats;
+	try {
+		entry = lstatSync(vault);
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException).code ?? "error";
+		// Absent: a project before its first governed call. It can only be made where it is named.
+		if (code === "ENOENT") return vault;
+		throw off(`cannot be checked (${code})`);
+	}
+	if (entry.isDirectory()) return realpathSync.native(vault);
+	if (!entry.isSymbolicLink()) throw off("is not a directory");
+	let target: Stats;
+	try {
+		target = statSync(vault);
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException).code ?? "error";
+		if (code === "ENOENT" || code === "ELOOP") throw off("is a link that does not resolve");
+		throw off(`is a link that cannot be followed (${code})`);
+	}
+	if (!target.isDirectory()) throw off("is a link to something that is not a directory");
+	try {
+		return realpathSync.native(vault);
+	} catch (err) {
+		throw off(
+			`is a link that cannot be followed (${(err as NodeJS.ErrnoException).code ?? "error"})`,
+		);
+	}
+}
+
 /** The nearest ancestor of `p` (or `p` itself) that exists, as the OS resolves it. */
 function existingAncestor(p: string): string {
 	let cur = resolve(p);
@@ -111,7 +151,9 @@ function existingAncestor(p: string): string {
  * Throws when `dir` would sit inside the vault of the project rooted at `vaultBase`, or anywhere inside the
  * project. Nothing is created to decide it, and it is decided before anything is.
  *
- * - The vault: `dir` and the vault are resolved as far as they exist. A vault that is a link to a directory
+ * - The vault's own state: it must be absent, a directory, or a link to one (`resolvedVault`), or settings are
+ *   off. This is read again at every call, so a vault link that stops resolving after start is caught too.
+ * - The vault: `dir` is resolved as far as it exists, the vault fully. A vault that is a link to a directory
  *   outside the project is still the vault, so a workspace in that directory is refused.
  * - The project: the nearest ancestor of `dir` that exists, as the OS resolves it, may not be the project root
  *   or lie under it. A path not yet on disk cannot be resolved, and a volume may treat a different spelling as
@@ -120,7 +162,7 @@ function existingAncestor(p: string): string {
  */
 export function assertOutsideProject(vaultBase: string, dir: string): void {
 	const root = realpathSync.native(vaultBase);
-	const vault = canonical(join(root, ".usertrust"));
+	const vault = resolvedVault(root);
 	const why = isInside(canonical(homedir()), root)
 		? "settings are off for a project rooted at or above your home directory"
 		: "set USERTRUST_WORKSPACE_DIR to a directory outside the project";

@@ -6,6 +6,7 @@ import {
 	chownSync,
 	existsSync,
 	linkSync,
+	lstatSync,
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
@@ -373,6 +374,33 @@ describe("workspaceDir", () => {
 		);
 		expect(readdirSync(elsewhere)).toEqual([]);
 	});
+
+	it.skipIf(!posix)(
+		"a vault link that does not resolve turns settings off, and its target is never created",
+		() => {
+			const root = join(tempDir, "dangling");
+			mkdirSync(root);
+			const target = join(tempDir, "ext", "vault");
+			mkdirSync(dirname(target));
+			// The link's target is absent: there is nothing to resolve it to, so nothing says where the vault is.
+			symlinkSync(target, join(root, ".usertrust"));
+			expect(() => workspaceDir(root, { USERTRUST_WORKSPACE_DIR: join(target, "ws") })).toThrow(
+				/the vault is a link that does not resolve/,
+			);
+			const ws = Workspace.open(join(target, "ws"), root);
+			expect(() => ws.append("plan.monthlyUt", 1)).toThrow(WorkspaceRefusal);
+			expect(() => ws.append("plan.monthlyUt", 1)).toThrow(
+				/the vault is a link that does not resolve/,
+			);
+			expect(() => lstatSync(target)).toThrow(/ENOENT/);
+			// A vault that is simply absent (no entry at all) is still fine.
+			const plain = join(tempDir, "no-vault");
+			mkdirSync(plain);
+			expect(workspaceDir(plain, { USERTRUST_WORKSPACE_DIR: join(tempDir, "ws-out") })).toMatch(
+				/ws-out/,
+			);
+		},
+	);
 
 	it("a project rooted above the home directory is refused by default: the default base is inside it", () => {
 		const above = dirname(homedir());
