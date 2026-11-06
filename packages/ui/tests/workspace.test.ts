@@ -5,6 +5,7 @@ import {
 	chmodSync,
 	chownSync,
 	existsSync,
+	linkSync,
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
@@ -17,7 +18,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	type SettingKey,
@@ -27,6 +28,27 @@ import {
 } from "../src/server/workspace.js";
 
 const posix = process.platform !== "win32";
+
+/**
+ * Workspace paths inside a project that has no vault yet: the vault's name in capitals, with a long s (U+017F,
+ * which a case-insensitive APFS volume takes as s), and a plain directory. Each is relative to the project root.
+ */
+const UNDER_ROOT: readonly string[] = [
+	join(".USERTRUST", "ws"),
+	join(".u\u017fertrust", "ws"),
+	join("anything", "ws"),
+];
+
+/** Every path under `dir` (directories included), relative and sorted: what is on disk there. */
+function listTree(dir: string, prefix = ""): string[] {
+	const out: string[] = [];
+	for (const entry of readdirSync(dir, { withFileTypes: true })) {
+		const rel = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+		out.push(rel);
+		if (entry.isDirectory()) out.push(...listTree(join(dir, entry.name), rel));
+	}
+	return out.sort();
+}
 
 describe("Workspace", () => {
 	let tempDir: string;
@@ -216,6 +238,17 @@ describe("Workspace", () => {
 			expectRefused(Workspace.open(dir), /settings\.jsonl has mode 0644/);
 		});
 
+		it("settings.jsonl is a hard link to a file in a vault", () => {
+			const vault = join(tempDir, "project", ".usertrust");
+			mkdirSync(vault, { recursive: true, mode: 0o700 });
+			const vaultFile = join(vault, "receipt.json");
+			writeFileSync(vaultFile, '{"kept":true}\n', { mode: 0o600 });
+			mkdirSync(dir, { recursive: true, mode: 0o700 });
+			linkSync(vaultFile, file);
+			expectRefused(Workspace.open(dir), /settings\.jsonl is a hard link/);
+			expect(readFileSync(vaultFile, "utf-8")).toBe('{"kept":true}\n');
+		});
+
 		// Handing a file to another uid needs root, so this case runs only as root.
 		it.skipIf(process.getuid?.() !== 0)("the file is owned by another uid", () => {
 			mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -292,28 +325,67 @@ describe("workspaceDir", () => {
 		).toBe(true);
 	});
 
-	it("a base naming the vault in another case is inside it, even before the vault exists, on any volume", () => {
-		// No .usertrust yet: the vault's path cannot be resolved on disk, so its spelling is all there is. On a
-		// case-insensitive filesystem (the macOS default) a first write under .USERTRUST would create the vault.
-		// The check folds case on every volume, so this holds on a case-sensitive one too.
+	it("a workspace anywhere inside the project is refused, before anything is made, whatever it is called", () => {
+		// No .usertrust yet, so the vault cannot be resolved on disk, and a volume may take another spelling for
+		// its name. The workspace may not be made anywhere in the project at all.
 		const root = join(tempDir, "fresh");
-		mkdirSync(root);
-		for (const name of [".USERTRUST", ".UserTrust", ".usertrust"]) {
-			expect(
-				() => workspaceDir(root, { USERTRUST_WORKSPACE_DIR: join(root, name, "ws") }),
-				name,
-			).toThrow(/workspace would sit inside the vault/);
+		mkdirSync(join(root, "src"), { recursive: true });
+		const before = listTree(root);
+		for (const rel of UNDER_ROOT) {
+			expect(() => workspaceDir(root, { USERTRUST_WORKSPACE_DIR: join(root, rel) }), rel).toThrow(
+				/workspace would sit inside the project/,
+			);
+			expect(listTree(root), rel).toEqual(before);
 		}
-		expect(readdirSync(root).filter((e) => e.toLowerCase() === ".usertrust")).toEqual([]);
+		// The project root itself is inside the project.
+		expect(() => workspaceDir(root, { USERTRUST_WORKSPACE_DIR: root })).toThrow(
+			/workspace would sit inside the project/,
+		);
+		// Outside the project is fine.
+		expect(workspaceDir(root, { USERTRUST_WORKSPACE_DIR: join(tempDir, "elsewhere") })).toMatch(
+			/elsewhere/,
+		);
 	});
 
-	it("a store opened with its project root refuses, before any mkdir, a write that would create the vault", () => {
+	it("a store opened with its project root refuses, before any mkdir, a write inside the project", () => {
 		const root = join(tempDir, "fresh-store");
 		mkdirSync(root);
-		const ws = Workspace.open(join(root, ".USERTRUST", "ws"), root);
-		expect(() => ws.append("plan.monthlyUt", 1)).toThrow(WorkspaceRefusal);
-		expect(() => ws.append("plan.monthlyUt", 1)).toThrow(/workspace would sit inside the vault/);
-		expect(readdirSync(root)).toEqual([]);
+		const before = listTree(root);
+		for (const rel of UNDER_ROOT) {
+			const ws = Workspace.open(join(root, rel), root);
+			expect(() => ws.append("plan.monthlyUt", 1), rel).toThrow(WorkspaceRefusal);
+			expect(() => ws.append("plan.monthlyUt", 1), rel).toThrow(
+				/workspace would sit inside the project/,
+			);
+			expect(listTree(root), rel).toEqual(before);
+		}
+	});
+
+	it.skipIf(!posix)("a vault that links outside the project is still the vault", () => {
+		const root = join(tempDir, "linked");
+		mkdirSync(root);
+		const elsewhere = join(tempDir, "vault-elsewhere");
+		mkdirSync(elsewhere);
+		symlinkSync(elsewhere, join(root, ".usertrust"));
+		// Not under the project root, but inside its vault.
+		expect(() => workspaceDir(root, { USERTRUST_WORKSPACE_DIR: join(elsewhere, "ws") })).toThrow(
+			/workspace would sit inside the vault/,
+		);
+		expect(readdirSync(elsewhere)).toEqual([]);
+	});
+
+	it("a project rooted above the home directory is refused by default: the default base is inside it", () => {
+		const above = dirname(homedir());
+		let message = "";
+		try {
+			workspaceDir(above, {});
+		} catch (err) {
+			message = err instanceof Error ? err.message : String(err);
+		}
+		expect(message).toMatch(/workspace would sit inside the project/);
+		expect(message).toMatch(
+			/settings are off for a project rooted at or above your home directory/,
+		);
 	});
 
 	it("never inside the vault", () => {
@@ -336,6 +408,8 @@ describe("workspaceDir", () => {
 			message = err instanceof Error ? err.message : String(err);
 		}
 		expect(message).toMatch(/workspace would sit inside the vault/);
-		expect(message).toMatch(/settings are off for a project rooted at your home directory/);
+		expect(message).toMatch(
+			/settings are off for a project rooted at or above your home directory/,
+		);
 	});
 });

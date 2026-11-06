@@ -48,12 +48,13 @@ If `usertrust` (the core CLI) is installed alongside, `usertrust ui` launches th
 
 ## Settings
 
-Dashboard settings (for example a monthly plan) are kept outside the vault, in a private workspace for each project:
+Dashboard settings (for example a monthly plan) are kept outside the project and its vault, in a private workspace for each project:
 
 - **Where:** `~/.usertrust/workspace/<id>/settings.jsonl`, where `<id>` is the first 32 hex digits of the sha256 of the project root's real path. Set `USERTRUST_WORKSPACE_DIR` to keep workspaces under another directory instead. It must be an absolute path; a relative one is refused and settings are off.
+- **Never inside the project.** A workspace that would sit anywhere inside the project root, or inside its vault (wherever the vault points, if it is a link), is refused and settings are off. This is decided before anything is created.
 - **What:** one line per change, each dated from the moment it takes effect, so a view of the past uses the value in force then. Nothing is rewritten or removed. The server dates each change itself; a request cannot backdate one.
-- **When:** nothing is created until the first save. The directory is made mode `0700` and the file `0600`. A workspace that is a symlink, belongs to another user or is open to others is neither read nor written, and the dashboard says why.
-- **Off for a project rooted at your home directory.** That project's vault is `~/.usertrust` itself, so the workspace would sit inside it. The dashboard still runs, with settings off and a note saying so. A workspace pointed into the vault is refused the same way.
+- **When:** nothing is created until the first save. The directory is made mode `0700` and the file `0600`. A workspace that is a symlink, belongs to another user or is open to others, or whose settings file has a second name (a hard link), is neither read nor written, and the dashboard says why.
+- **Off by default for a project rooted at or above your home directory.** The default location, `~/.usertrust/workspace`, is then inside the project (for a project rooted at the home directory, inside its vault, `~/.usertrust`). The dashboard still runs, with settings off and a note saying so. To turn them on, set `USERTRUST_WORKSPACE_DIR` to a directory outside the project.
 
 ## Reaching it from another device (opt-in)
 

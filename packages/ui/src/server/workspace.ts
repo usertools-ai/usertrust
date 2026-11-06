@@ -69,8 +69,9 @@ function isInside(child: string, parent: string): boolean {
 
 /**
  * The workspace directory for the vault of the project rooted at `vaultBase`.
- * Throws when that directory would sit inside the vault itself, which is the
- * case for a project rooted at the home directory: its vault is ~/.usertrust.
+ * Throws when that directory would sit inside the project or its vault, which
+ * is the case by default for a project rooted at or above the home directory:
+ * the default base, ~/.usertrust/workspace, is then inside it.
  */
 export function workspaceDir(vaultBase: string, env: NodeJS.ProcessEnv = process.env): string {
 	const root = realpathSync.native(vaultBase);
@@ -88,47 +89,46 @@ export function workspaceDir(vaultBase: string, env: NodeJS.ProcessEnv = process
 			? override
 			: join(homedir(), ".usertrust", "workspace");
 	const dir = join(resolve(base), id);
-	assertOutsideVault(root, dir);
+	assertOutsideProject(root, dir);
 	return dir;
 }
 
-/**
- * A path with letter case folded, for the containment check only. Folding widens what counts as inside the vault,
- * never what counts as outside, so it is applied on every volume, case-sensitive ones included.
- */
-function fold(p: string): string {
-	return p.normalize("NFC").toLowerCase();
+/** The nearest ancestor of `p` (or `p` itself) that exists, as the OS resolves it. */
+function existingAncestor(p: string): string {
+	let cur = resolve(p);
+	for (;;) {
+		try {
+			return realpathSync.native(cur);
+		} catch {
+			const parent = dirname(cur);
+			if (parent === cur) return cur;
+			cur = parent;
+		}
+	}
 }
 
 /**
- * Whether `target` lies under `root` through a first component that folds to the vault's name. Creating it would
- * create the vault, on a case-insensitive filesystem, whatever case it is spelled in. Both paths are folded.
+ * Throws when `dir` would sit inside the vault of the project rooted at `vaultBase`, or anywhere inside the
+ * project. Nothing is created to decide it, and it is decided before anything is.
+ *
+ * - The vault: `dir` and the vault are resolved as far as they exist. A vault that is a link to a directory
+ *   outside the project is still the vault, so a workspace in that directory is refused.
+ * - The project: the nearest ancestor of `dir` that exists, as the OS resolves it, may not be the project root
+ *   or lie under it. A path not yet on disk cannot be resolved, and a volume may treat a different spelling as
+ *   the same name (case, or letters it takes as others), so a workspace that would be created anywhere in the
+ *   project is refused, whatever it is called. That covers a spelling the volume would make into the vault.
  */
-function namesVault(root: string, target: string): boolean {
-	if (target === root || !isInside(target, root)) return false;
-	const first = target
-		.slice(root.length)
-		.split(sep)
-		.find((part) => part !== "");
-	return first === ".usertrust";
-}
-
-/**
- * Throws when `dir` would sit inside the vault of the project rooted at `vaultBase`, or when making it would
- * create that vault. `canonical` resolves only the part of a path that exists, so a vault that does not exist yet
- * is known only by its spelling: both paths are case-folded, the parts that do not exist included, and a first
- * component under the root that folds to `.usertrust` is refused. Either is checked before anything is created.
- */
-export function assertOutsideVault(vaultBase: string, dir: string): void {
+export function assertOutsideProject(vaultBase: string, dir: string): void {
 	const root = realpathSync.native(vaultBase);
 	const vault = canonical(join(root, ".usertrust"));
-	const target = fold(canonical(dir));
-	if (isInside(target, fold(vault)) || namesVault(fold(root), target)) {
-		const why =
-			root === canonical(homedir())
-				? "settings are off for a project rooted at your home directory"
-				: "set USERTRUST_WORKSPACE_DIR to a directory outside it";
+	const why = isInside(canonical(homedir()), root)
+		? "settings are off for a project rooted at or above your home directory"
+		: "set USERTRUST_WORKSPACE_DIR to a directory outside the project";
+	if (isInside(canonical(dir), vault)) {
 		throw new Error(`workspace would sit inside the vault at ${vault}: ${why}`);
+	}
+	if (isInside(existingAncestor(dir), root)) {
+		throw new Error(`workspace would sit inside the project at ${root}: ${why}`);
 	}
 }
 
@@ -171,6 +171,11 @@ function parseLine(line: string): Parsed | null {
 	}
 }
 
+/** Why the settings file is not its only name (a hard link to another file), or null when it is. */
+function hardLinked(st: Stats): string | null {
+	return st.nlink === 1 ? null : `${SETTINGS_FILE} is a hard link (${st.nlink} names for one file)`;
+}
+
 /** Why this owner/mode is not private to us, or null when it is. */
 function notPrivate(st: Stats, name: string, forbidden: number): string | null {
 	if (!posix) return null;
@@ -198,7 +203,7 @@ export class Workspace {
 	#unsafe: string | null = null;
 	#unreadable: string | null = null;
 
-	/** The project root whose vault this workspace must stay out of, when the opener named one. */
+	/** The project root this workspace must stay out of (and out of its vault), when the opener named one. */
 	readonly #vaultBase: string | undefined;
 
 	private constructor(dir: string, vaultBase?: string) {
@@ -237,12 +242,12 @@ export class Workspace {
 		if (at !== undefined && (!(at instanceof Date) || !Number.isFinite(at.getTime()))) {
 			throw new Error("a setting needs a valid time");
 		}
-		// Containment is checked before the directory is made (making it could make the vault), and again on the
-		// made directory's real path, before anything is written into it.
-		this.#refuseInsideVault(this.#dir);
+		// Containment is checked before the directory is made (making it inside the project could make the vault),
+		// and again on the made directory's real path, before anything is written into it.
+		this.#refuseInsideProject(this.#dir);
 		// Created here, on the first write, and never by a read. A failure here is thrown with its own code.
 		mkdirSync(this.#dir, { recursive: true, mode: 0o700 });
-		this.#refuseInsideVault(realpathSync.native(this.#dir));
+		this.#refuseInsideProject(realpathSync.native(this.#dir));
 		const unsafe = this.#check();
 		if (unsafe !== null) {
 			this.#unsafe = unsafe;
@@ -265,6 +270,10 @@ export class Workspace {
 			if (!st.isFile()) {
 				throw new WorkspaceRefusal(`settings are not saved: ${SETTINGS_FILE} is not a file`);
 			}
+			// O_NOFOLLOW stops a symlink, not a hard link: a second name for one of the user's own files (one in a
+			// vault, say) passes every owner and mode check, so a file with more than one link is refused.
+			const linked = hardLinked(st);
+			if (linked !== null) throw new WorkspaceRefusal(`settings are not saved: ${linked}`);
 			const why = notPrivate(st, SETTINGS_FILE, 0o077);
 			if (why !== null) throw new WorkspaceRefusal(`settings are not saved: ${why}`);
 			// A torn last line stays as it is; the new line starts on a line of its own.
@@ -307,11 +316,11 @@ export class Workspace {
 			.map((p) => ({ ...p.entry }));
 	}
 
-	/** Throws a refusal when `dir` sits inside the vault of `#vaultBase` (or that check cannot be made). */
-	#refuseInsideVault(dir: string): void {
+	/** Throws a refusal when `dir` sits inside the project `#vaultBase` or its vault (or that cannot be checked). */
+	#refuseInsideProject(dir: string): void {
 		if (this.#vaultBase === undefined) return;
 		try {
-			assertOutsideVault(this.#vaultBase, dir);
+			assertOutsideProject(this.#vaultBase, dir);
 		} catch (err) {
 			throw new WorkspaceRefusal(
 				`settings are not saved: ${err instanceof Error ? err.message : String(err)}`,
@@ -349,7 +358,7 @@ export class Workspace {
 		}
 		if (f.isSymbolicLink()) return `${SETTINGS_FILE} is a symlink`;
 		if (!f.isFile()) return `${SETTINGS_FILE} is not a file`;
-		return notPrivate(f, SETTINGS_FILE, 0o077);
+		return hardLinked(f) ?? notPrivate(f, SETTINGS_FILE, 0o077);
 	}
 
 	#lastByte(size: number): number | undefined {

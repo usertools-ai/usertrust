@@ -58,7 +58,7 @@ const BUDGET_POLL_MS = 1000;
 import { serveStatic } from "./static.js";
 import { watchLedger } from "./tail.js";
 import {
-	assertOutsideVault,
+	assertOutsideProject,
 	isSettingKey,
 	isSettingValue,
 	SETTING_KEYS,
@@ -231,13 +231,13 @@ export async function createUiServer(
 ): Promise<UiServer> {
 	const vaultPath = join(rootDir, VAULT_DIR);
 	const token = randomBytes(32).toString("hex");
-	// Settings are off, with this reason, when the workspace would sit inside the vault (a project rooted at the
-	// home directory, whose vault is ~/.usertrust). The rest of the dashboard serves as before.
+	// Settings are off, with this reason, when the workspace would sit inside the project or its vault (by
+	// default, a project rooted at or above the home directory). The rest of the dashboard serves as before.
 	let settingsDir: string | null = null;
 	let settingsOff: string | null = null;
 	try {
 		const dir = opts?.workspaceDir ?? workspaceDir(rootDir);
-		assertOutsideVault(rootDir, dir);
+		assertOutsideProject(rootDir, dir);
 		settingsDir = dir;
 	} catch (err) {
 		settingsOff = err instanceof Error ? err.message : String(err);
@@ -252,7 +252,7 @@ export async function createUiServer(
 	function openWorkspace(): Workspace | string {
 		if (settingsDir === null) return settingsOff ?? "settings are off";
 		try {
-			assertOutsideVault(rootDir, settingsDir);
+			assertOutsideProject(rootDir, settingsDir);
 		} catch (err) {
 			return err instanceof Error ? err.message : String(err);
 		}

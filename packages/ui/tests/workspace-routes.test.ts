@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import {
 	chmodSync,
 	existsSync,
+	linkSync,
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
@@ -78,6 +79,17 @@ function send(
 }
 
 /** Every file under `dir`, by relative path, with its sha256. */
+/** Every path under `dir` (directories included), relative and sorted: what is on disk there. */
+function listTree(dir: string, prefix = ""): string[] {
+	const out: string[] = [];
+	for (const entry of readdirSync(dir, { withFileTypes: true })) {
+		const rel = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+		out.push(rel);
+		if (entry.isDirectory()) out.push(...listTree(join(dir, entry.name), rel));
+	}
+	return out.sort();
+}
+
 function hashTree(dir: string, prefix = ""): Record<string, string> {
 	const out: Record<string, string> = {};
 	for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -91,13 +103,16 @@ function hashTree(dir: string, prefix = ""): Record<string, string> {
 
 describe("settings routes", () => {
 	let tempDir: string;
+	/** Outside the project: a workspace may not sit inside it. */
+	let wsBase: string;
 	let wsDir: string;
 	let ui: UiServer | undefined;
 
 	beforeEach(async () => {
 		tempDir = mkdtempSync(join(tmpdir(), "trust-settings-"));
 		mkdirSync(join(tempDir, ".usertrust", "audit"), { recursive: true });
-		wsDir = join(tempDir, "workspace");
+		wsBase = mkdtempSync(join(tmpdir(), "trust-settings-ws-"));
+		wsDir = join(wsBase, "workspace");
 		const writer = createAuditWriter(tempDir);
 		for (let i = 0; i < 2; i++) {
 			await writer.appendEvent({
@@ -114,6 +129,7 @@ describe("settings routes", () => {
 		await ui?.close();
 		ui = undefined;
 		rmSync(tempDir, { recursive: true, force: true });
+		rmSync(wsBase, { recursive: true, force: true });
 	});
 
 	async function start(dir: string = wsDir): Promise<UiServer> {
@@ -309,9 +325,9 @@ describe("settings routes", () => {
 		async () => {
 			const server = await start();
 			expect((await put(server, valid)).status).toBe(200);
-			// The vault becomes a link to the project root, which holds the workspace.
+			// The vault becomes a link to a directory outside the project that holds the workspace.
 			renameSync(join(tempDir, ".usertrust"), join(tempDir, "vault-moved"));
-			symlinkSync(tempDir, join(tempDir, ".usertrust"));
+			symlinkSync(wsBase, join(tempDir, ".usertrust"));
 			const before = settingsBytes();
 			const read = await getSettings(server);
 			expect(read.problem).toMatch(/workspace would sit inside the vault/);
@@ -482,20 +498,46 @@ describe("settings routes", () => {
 		expect((await send(server.port, { path: "/api/summary" })).status).toBe(200);
 	});
 
-	it("a workspace named into a vault that does not exist yet is refused, and no vault is created", async () => {
-		// A project with no .usertrust yet, and a workspace under .USERTRUST: on a case-insensitive filesystem
-		// the first write's mkdir would create the vault and write into it.
+	it("a workspace anywhere inside the project is refused: GET says why, a PUT is 409 and nothing is made", async () => {
+		// A project with no .usertrust yet. Under .USERTRUST (or a long s for the s) a case-insensitive volume
+		// would make the vault itself; under any other name it is still inside the project.
 		const fresh = join(tempDir, "fresh");
 		mkdirSync(fresh);
-		ui = await createUiServer(fresh, { port: 0, workspaceDir: join(fresh, ".USERTRUST", "ws") });
-		const read = await getSettings(ui);
-		expect(read.problem).toMatch(/workspace would sit inside the vault/);
-		const res = await put(ui, valid);
-		expect(res.status).toBe(409);
-		// No entry that IS the vault on a case-insensitive filesystem, whatever its case.
-		expect(readdirSync(fresh).filter((e) => e.toLowerCase() === ".usertrust")).toEqual([]);
-		expect(readdirSync(fresh)).toEqual([]);
+		const before = listTree(fresh);
+		for (const rel of [
+			join(".USERTRUST", "ws"),
+			join(".u\u017fertrust", "ws"),
+			join("anything", "ws"),
+		]) {
+			const server = await createUiServer(fresh, { port: 0, workspaceDir: join(fresh, rel) });
+			try {
+				const read = await getSettings(server);
+				expect(read.problem, rel).toMatch(/workspace would sit inside the project/);
+				const res = await put(server, valid);
+				expect(res.status, rel).toBe(409);
+				expect(listTree(fresh), rel).toEqual(before);
+			} finally {
+				await server.close();
+			}
+		}
 	});
+
+	it.skipIf(!posix)(
+		"a settings file that is a hard link into the vault: GET reports it, a PUT is 409, the vault file is unchanged",
+		async () => {
+			const vaultFile = join(tempDir, ".usertrust", "receipt.json");
+			writeFileSync(vaultFile, '{"kept":true}\n', { mode: 0o600 });
+			mkdirSync(wsDir, { recursive: true, mode: 0o700 });
+			linkSync(vaultFile, join(wsDir, "settings.jsonl"));
+			const server = await start();
+			const read = await getSettings(server);
+			expect(read.problem).toMatch(/settings\.jsonl is a hard link/);
+			const res = await put(server, valid);
+			expect(res.status).toBe(409);
+			expect((JSON.parse(res.body) as { error: string }).error).toMatch(/hard link/);
+			expect(readFileSync(vaultFile, "utf-8")).toBe('{"kept":true}\n');
+		},
+	);
 
 	it("a torn but complete last record dated ahead: a PUT answers with the new value, history in order", async () => {
 		mkdirSync(wsDir, { recursive: true, mode: 0o700 });
