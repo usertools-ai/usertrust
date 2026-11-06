@@ -439,7 +439,8 @@ function loadPass(
 	const anchor = readAnchor(`${logPath}.meta`);
 	if (anchor.error !== undefined) unread.push(anchor.error);
 	const integrity = deriveChainIntegrity(events);
-	// The verdict, and the list of lines it walked (`orderedHashes`, one per line that parsed, in the order walked).
+	// The verdict, and the events it walked (`orderedHashes`: one stored hash per event, in the order walked). A line
+	// that does not parse, or parses to something other than a JSON object, is not walked: it is its own error.
 	const reading = verifyVaultReading(vaultPath);
 	const vault = reading.result;
 	loadSeam.afterReaders?.();
@@ -620,23 +621,28 @@ function loadPass(
 /**
  * The verifier's errors that name one event, by its 1-based index in the list it walked: "Event N (id): hash mismatch"
  * and "Event N (id): previousHash mismatch". The prefix is the verifier's own text (the id follows it), so a vault cannot
- * make another error read as one of these. Every other error it writes (malformed JSON, an anchor, a sequence gap, a
- * deletion, a file it could not read) names no event.
+ * make another error read as one of these. Every other error it writes (malformed JSON, a non-object line, an anchor, a
+ * sequence gap, a deletion, a file it could not read) names no event.
  */
 const EVENT_ERROR = /^Event (\d+) \(/;
 
 /**
- * Whether the verifier walked exactly the reader's list: the same number of lines, with the same stored hashes in the
+ * Whether the verifier walked exactly the reader's list: the same number of events, with the same stored hashes in the
  * same order. Only then do the event indexes in its errors (`EVENT_ERROR`) name the reader's positions, and only then
  * did it order the vault the way the reader did (by `sequence`, with its sequence checks, or by file without them).
  *
- * Two checks, either of which fails it:
- * - a line the reader skipped as no event, one that parses but is not an object (`42`, `[]`, `"x"`): the verifier
- *   walks it, so it holds more lines than events (`orderedHashes` against its own `events`). Such a line is a failure
- *   that names no event. It also puts a line with no `sequence` in the verifier's list, which then orders by file and
- *   skips the "Sequence starts at" and "Sequence gap" checks while the reader still orders by `sequence`;
- * - the verifier's lines against the reader's events, one by one (a stored hash that is not a string is `""` on both
- *   sides, as the verifier records it). The two read the files separately, so any difference fails closed.
+ * The reader and the verifier both skip a line that does not parse or that parses to something other than a JSON
+ * object (`42`, `[]`, `"x"`, `null`), and both order what is left by `sequence` when every event carries one. The
+ * verifier also reports each such line as an error that names no event ("non-object line", "malformed JSON"), and that
+ * error alone makes `breakIsOnlyFailure` false. These checks are a second line of defence, failing closed whenever the
+ * two lists differ anyway:
+ * - the verifier's walked hashes (`orderedHashes`) against its own `events`. With the verifier as it is, both hold one
+ *   entry per walked event, so this cannot fire; it guards against a verifier that walks a line it does not return as
+ *   an event, whose indexes would then name no position the reader holds, and whose order could differ from the
+ *   reader's (a walked line with no `sequence` would switch it to file order, skipping its sequence checks);
+ * - the verifier's events against the reader's, by number and then one by one (a stored hash that is not a string is
+ *   `""` on both sides, as the verifier records it). The two read the files separately, so any difference fails
+ *   closed.
  */
 function walkedReadersList(
 	events: readonly PersistedAuditEvent[],

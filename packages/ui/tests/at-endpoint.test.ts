@@ -374,9 +374,9 @@ describe("GET /api/at", () => {
 	const SPECS: Spec[] = Array.from({ length: 4 }, () => ({ kind: "llm_call", data: { cost: 10 } }));
 
 	it("a chain re-rooted at sequence 5, tampered at 2, with a 42 line last: invalid at every position", async () => {
-		// Without the 42 line the verifier reports "Sequence starts at 5", which no event marks. The 42 line is no event
-		// the reader keeps, but the verifier walks it: it then orders by file, skips the sequence checks, and its only
-		// errors name events, at indexes into a list the reader does not hold.
+		// The verifier reports "Sequence starts at 5", which no event marks, and the 42 line as a non-object line, which
+		// names no event either. A verifier that walked the 42 line (as one once did) ordered by file, skipped the
+		// sequence checks, and gave only errors that name events, at indexes into a list the reader does not hold.
 		const c = chain(SPECS, 5);
 		writeFileSync(
 			logPath,
