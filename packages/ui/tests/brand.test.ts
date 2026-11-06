@@ -23,14 +23,16 @@ describe("ui source: brand", () => {
 	const sources = files(SRC).map((path) => ({ path, text: readFileSync(path, "utf-8") }));
 
 	// A path is not a name: ".USERTRUST" in a comment is the vault directory, case-folded.
+	// Nor is an environment variable: "USERTRUST_WORKSPACE_DIR" is what a user types in a shell.
 	it("red-first ('USERTRUST · LEDGER'): never a capitalised product name", () => {
 		for (const { path, text } of sources) {
-			expect({ path, hits: text.match(/(?<!\.)(?:USERTRUST|UserTrust|Usertrust)/g) ?? [] }).toEqual(
-				{
-					path,
-					hits: [],
-				},
-			);
+			expect({
+				path,
+				hits: text.match(/(?<!\.)(?:USERTRUST(?!_[A-Z])|UserTrust|Usertrust)/g) ?? [],
+			}).toEqual({
+				path,
+				hits: [],
+			});
 		}
 	});
 
