@@ -9,6 +9,7 @@ import {
 	mkdtempSync,
 	readFileSync,
 	realpathSync,
+	renameSync,
 	rmSync,
 	statSync,
 	symlinkSync,
@@ -17,7 +18,12 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { type SettingKey, Workspace, workspaceDir } from "../src/server/workspace.js";
+import {
+	type SettingKey,
+	Workspace,
+	WorkspaceRefusal,
+	workspaceDir,
+} from "../src/server/workspace.js";
 
 const posix = process.platform !== "win32";
 
@@ -44,12 +50,47 @@ describe("Workspace", () => {
 		return bytes;
 	}
 
-	it.skipIf(!posix)("creates dir 0700 and settings.jsonl 0600", () => {
+	it.skipIf(!posix)(
+		"creates dir 0700 and settings.jsonl 0600 on the first write, never on open",
+		() => {
+			const ws = Workspace.open(dir);
+			// A read creates nothing: a directory that does not exist yet is an empty workspace.
+			expect(existsSync(dir)).toBe(false);
+			expect(ws.problem).toBeNull();
+			expect(ws.valueAt("plan.monthlyUt", null)).toBeNull();
+			expect(ws.history("plan.monthlyUt")).toEqual([]);
+			expect(existsSync(dir)).toBe(false);
+			ws.append("plan.monthlyUt", 1);
+			expect(statSync(dir).mode & 0o777).toBe(0o700);
+			expect(statSync(file).mode & 0o777).toBe(0o600);
+			expect(ws.problem).toBeNull();
+		},
+	);
+
+	it("a workspace moved away after it was opened reads as empty, and the next write recreates it", () => {
 		const ws = Workspace.open(dir);
 		ws.append("plan.monthlyUt", 1);
-		expect(statSync(dir).mode & 0o777).toBe(0o700);
-		expect(statSync(file).mode & 0o777).toBe(0o600);
+		renameSync(dir, `${dir}-gone`);
 		expect(ws.problem).toBeNull();
+		expect(ws.valueAt("plan.monthlyUt", null)).toBeNull();
+		ws.append("plan.monthlyUt", 2);
+		expect(ws.valueAt("plan.monthlyUt", null)).toBe(2);
+		expect(ws.history("plan.monthlyUt")).toHaveLength(1);
+	});
+
+	it("a clock that stepped back cannot hide a new entry: it is dated 1 ms after the latest", () => {
+		const ws = Workspace.open(dir);
+		// An entry written before the clock stepped back an hour reads, now, as one an hour in the future.
+		const ahead = new Date(Date.now() + 3_600_000);
+		ws.append("plan.monthlyUt", 100, ahead);
+		const fresh = ws.append("plan.monthlyUt", 200);
+		expect(Date.parse(fresh.at)).toBe(ahead.getTime() + 1);
+		expect(ws.valueAt("plan.monthlyUt", null)).toBe(200);
+		expect(ws.history("plan.monthlyUt").map((e) => e.value)).toEqual([100, 200]);
+		// The latest entry of ANY key dates the next one.
+		const other = ws.append("people.rateUsdPerHour", 90);
+		expect(Date.parse(other.at)).toBe(ahead.getTime() + 2);
+		expect(ws.valueAt("people.rateUsdPerHour", null)).toBe(90);
 	});
 
 	it("append then valueAt now", () => {
@@ -122,9 +163,10 @@ describe("Workspace", () => {
 	});
 
 	describe.skipIf(!posix)("unsafe dir refuses writes", () => {
-		function expectRefused(ws: Workspace): void {
-			expect(ws.problem).not.toBeNull();
-			expect(() => ws.append("plan.monthlyUt", 1)).toThrow();
+		function expectRefused(ws: Workspace, reason: RegExp): void {
+			expect(ws.problem).toMatch(reason);
+			expect(() => ws.append("plan.monthlyUt", 1)).toThrow(WorkspaceRefusal);
+			expect(() => ws.append("plan.monthlyUt", 1)).toThrow(reason);
 		}
 
 		it("the dir is a symlink", () => {
@@ -132,13 +174,14 @@ describe("Workspace", () => {
 			mkdirSync(real, { mode: 0o700 });
 			mkdirSync(join(tempDir, "ws"));
 			symlinkSync(real, dir);
-			expectRefused(Workspace.open(dir));
+			expectRefused(Workspace.open(dir), /the workspace \S+ is a symlink/);
+			expect(existsSync(join(real, "settings.jsonl"))).toBe(false);
 		});
 
 		it("the dir is group- or world-writable", () => {
 			mkdirSync(dir, { recursive: true });
 			chmodSync(dir, 0o777);
-			expectRefused(Workspace.open(dir));
+			expectRefused(Workspace.open(dir), /the workspace \S+ has mode 0777/);
 		});
 
 		it("settings.jsonl is a symlink", () => {
@@ -146,7 +189,7 @@ describe("Workspace", () => {
 			const target = join(tempDir, "elsewhere.jsonl");
 			writeFileSync(target, "", { mode: 0o600 });
 			symlinkSync(target, file);
-			expectRefused(Workspace.open(dir));
+			expectRefused(Workspace.open(dir), /settings\.jsonl is a symlink/);
 			expect(readFileSync(target, "utf-8")).toBe("");
 		});
 
@@ -154,7 +197,7 @@ describe("Workspace", () => {
 			mkdirSync(dir, { recursive: true, mode: 0o700 });
 			writeFileSync(file, "");
 			chmodSync(file, 0o644);
-			expectRefused(Workspace.open(dir));
+			expectRefused(Workspace.open(dir), /settings\.jsonl has mode 0644/);
 		});
 
 		// Handing a file to another uid needs root, so this case runs only as root.
@@ -162,7 +205,7 @@ describe("Workspace", () => {
 			mkdirSync(dir, { recursive: true, mode: 0o700 });
 			writeFileSync(file, "", { mode: 0o600 });
 			chownSync(file, 1, 1);
-			expectRefused(Workspace.open(dir));
+			expectRefused(Workspace.open(dir), /settings\.jsonl belongs to another user/);
 		});
 	});
 
@@ -219,6 +262,18 @@ describe("workspaceDir", () => {
 		expect(() =>
 			workspaceDir(one, { USERTRUST_WORKSPACE_DIR: join(one, ".usertrust", "ws").toUpperCase() }),
 		).toThrow(/workspace would sit inside the vault/);
+	});
+
+	it("refuses a relative USERTRUST_WORKSPACE_DIR, which would resolve against wherever the server started", () => {
+		const v = project("p");
+		for (const rel of ["ws", "./ws", "../ws", "settings/here"]) {
+			expect(() => workspaceDir(v, { USERTRUST_WORKSPACE_DIR: rel }), rel).toThrow(
+				/USERTRUST_WORKSPACE_DIR must be an absolute path/,
+			);
+		}
+		expect(
+			workspaceDir(v, { USERTRUST_WORKSPACE_DIR: join(tempDir, "abs") }).startsWith(tempDir),
+		).toBe(true);
 	});
 
 	it("never inside the vault", () => {

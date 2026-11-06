@@ -9,7 +9,10 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	renameSync,
 	rmSync,
+	statSync,
+	symlinkSync,
 } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
@@ -196,6 +199,9 @@ describe("settings routes", () => {
 			["DELETE", "/api/settings"],
 			["POST", "/api/session"],
 			["OPTIONS", "/api/settings"],
+			// The page itself takes only GET and HEAD.
+			["POST", "/"],
+			["PUT", "/index.html"],
 		] as const) {
 			const res = await send(server.port, { method, path, headers, body: valid });
 			expect(res.status, `${method} ${path}`).toBe(405);
@@ -278,6 +284,43 @@ describe("settings routes", () => {
 		expect(after.values["plan.monthlyUt"]).toBeNull();
 		expect(after.history).toHaveLength(2);
 	});
+
+	it.skipIf(!posix)(
+		"a GET creates nothing on disk; the first PUT creates the workspace 0700 and its log 0600",
+		async () => {
+			const server = await start();
+			// A cross-site <img src=".../api/settings"> is a GET: it must not be able to create a directory.
+			const read = await getSettings(server);
+			expect(read).toEqual({
+				values: { "plan.monthlyUt": null, "people.rateUsdPerHour": null },
+				history: [],
+				problem: null,
+			});
+			expect(existsSync(wsDir)).toBe(false);
+			expect((await put(server, valid)).status).toBe(200);
+			expect(statSync(wsDir).mode & 0o777).toBe(0o700);
+			expect(statSync(join(wsDir, "settings.jsonl")).mode & 0o777).toBe(0o600);
+		},
+	);
+
+	it.skipIf(!posix)(
+		"containment is checked on every request: a vault relinked around the workspace turns settings off",
+		async () => {
+			const server = await start();
+			expect((await put(server, valid)).status).toBe(200);
+			// The vault becomes a link to the project root, which holds the workspace.
+			renameSync(join(tempDir, ".usertrust"), join(tempDir, "vault-moved"));
+			symlinkSync(tempDir, join(tempDir, ".usertrust"));
+			const before = settingsBytes();
+			const read = await getSettings(server);
+			expect(read.problem).toMatch(/workspace would sit inside the vault/);
+			expect(read.history).toEqual([]);
+			const res = await put(server, JSON.stringify({ key: "plan.monthlyUt", value: 1 }));
+			expect(res.status).toBe(409);
+			expect(JSON.parse(res.body)).toEqual({ error: read.problem });
+			expect(settingsBytes()).toBe(before);
+		},
+	);
 
 	it("PUT bad key / NaN / text body is 400 / 400 / 415", async () => {
 		const server = await start();

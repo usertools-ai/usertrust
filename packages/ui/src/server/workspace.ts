@@ -24,7 +24,7 @@ import {
 	writeSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { SettingEntry, SettingKey } from "../shared/api.js";
 
 // The wire types live with the other shared ones, so the page never imports server code.
@@ -76,6 +76,13 @@ export function workspaceDir(vaultBase: string, env: NodeJS.ProcessEnv = process
 	const root = realpathSync.native(vaultBase);
 	const id = createHash("sha256").update(root).digest("hex").slice(0, 32);
 	const override = env.USERTRUST_WORKSPACE_DIR;
+	// A relative override would resolve against whatever directory the server was started in, which can put
+	// settings inside a repository; only an absolute one is taken.
+	if (override !== undefined && override !== "" && !isAbsolute(override)) {
+		throw new Error(
+			`USERTRUST_WORKSPACE_DIR must be an absolute path, not ${JSON.stringify(override)}`,
+		);
+	}
 	const base =
 		override !== undefined && override !== ""
 			? override
@@ -169,14 +176,12 @@ export class Workspace {
 		this.#file = join(this.#dir, SETTINGS_FILE);
 	}
 
-	/** Opens (creating the directory if needed) without throwing; see `problem`. */
+	/**
+	 * Opens the workspace for reading; see `problem`. Nothing is created: a directory that does not exist yet
+	 * reads as an empty workspace, and the first `append` creates it.
+	 */
 	static open(dir: string): Workspace {
 		const ws = new Workspace(dir);
-		try {
-			mkdirSync(ws.#dir, { recursive: true, mode: 0o700 });
-		} catch {
-			// Reported by the safety check below.
-		}
 		ws.#refresh();
 		return ws;
 	}
@@ -191,18 +196,30 @@ export class Workspace {
 		return this.#unsafe ?? this.#unreadable;
 	}
 
-	append(key: SettingKey, value: number | null, at: Date = new Date()): SettingEntry {
+	/**
+	 * Appends an entry and returns it. Without `at`, the entry is dated now, or 1 ms after the latest entry when
+	 * the clock reads earlier than that (a clock stepped back), so a new entry is always the latest word.
+	 */
+	append(key: SettingKey, value: number | null, at?: Date): SettingEntry {
 		if (!isSettingKey(key)) throw new Error(`unknown setting: ${String(key)}`);
 		if (!isSettingValue(value)) throw new Error(`${key} needs a finite number >= 0, or null`);
-		if (!(at instanceof Date) || !Number.isFinite(at.getTime())) {
+		if (at !== undefined && (!(at instanceof Date) || !Number.isFinite(at.getTime()))) {
 			throw new Error("a setting needs a valid time");
 		}
+		// Created here, on the first write, and never by a read. A failure here is thrown with its own code.
+		mkdirSync(this.#dir, { recursive: true, mode: 0o700 });
 		const unsafe = this.#check();
 		if (unsafe !== null) {
 			this.#unsafe = unsafe;
 			throw new WorkspaceRefusal(`settings are not saved: ${unsafe}`);
 		}
-		const entry: SettingEntry = { at: at.toISOString(), key, value };
+		// The latest entry dates this one, so the log is read first; a log that cannot be read is not written.
+		this.#refresh();
+		if (this.#unsafe !== null) {
+			throw new WorkspaceRefusal(`settings are not saved: ${this.#unsafe}`);
+		}
+		const ms = at !== undefined ? at.getTime() : Math.max(Date.now(), this.#latestMs() + 1);
+		const entry: SettingEntry = { at: new Date(ms).toISOString(), key, value };
 		const fd = openSync(
 			this.#file,
 			constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | NOFOLLOW,
@@ -228,11 +245,15 @@ export class Workspace {
 		return { ...entry };
 	}
 
-	/** The value in force at `t` (null = now), or null when none was set by then. */
+	/**
+	 * The value in force at `t`, or null when none was set by then. `t` null is now, and now is never earlier
+	 * than the latest entry: `append` dates past it when the clock has stepped back.
+	 */
 	valueAt(key: SettingKey, t: string | null): number | null {
 		if (!isSettingKey(key)) throw new Error(`unknown setting: ${String(key)}`);
-		const limit = t === null ? Date.now() : parseTime(t);
+		const asked = t === null ? null : parseTime(t);
 		this.#refresh();
+		const limit = asked ?? Math.max(Date.now(), this.#latestMs());
 		let best: Parsed | null = null;
 		for (const p of this.#entries) {
 			// Ties go to the later line: the last word on a moment wins.
@@ -251,12 +272,21 @@ export class Workspace {
 			.map((p) => ({ ...p.entry }));
 	}
 
+	/** The time of the latest entry, of any key; -Infinity when there is none. */
+	#latestMs(): number {
+		let latest = Number.NEGATIVE_INFINITY;
+		for (const p of this.#entries) if (p.ms > latest) latest = p.ms;
+		return latest;
+	}
+
 	#check(): string | null {
 		let d: Stats;
 		try {
 			d = lstatSync(this.#dir);
 		} catch (err) {
 			const code = (err as NodeJS.ErrnoException).code ?? "error";
+			// Not created yet (no write so far, or removed since): an empty workspace, nothing wrong.
+			if (code === "ENOENT") return null;
 			return `the workspace ${this.#dir} is unavailable (${code})`;
 		}
 		if (d.isSymbolicLink()) return `the workspace ${this.#dir} is a symlink`;

@@ -232,10 +232,20 @@ export async function createUiServer(
 	} catch (err) {
 		settingsOff = err instanceof Error ? err.message : String(err);
 	}
-	/** Opened on the first settings request, so a server that never shows settings creates no directory. */
+	/** Opened on the first settings request. Opening reads only: the first write creates the directory. */
 	let workspace: Workspace | undefined;
-	function openWorkspace(): Workspace | null {
-		if (settingsDir === null) return null;
+	/**
+	 * The workspace, or why settings are off. Containment is checked again on every call, not only at start: the
+	 * project's vault can be moved or relinked while the server runs, and a workspace that has come to sit inside
+	 * it is then neither read nor written.
+	 */
+	function openWorkspace(): Workspace | string {
+		if (settingsDir === null) return settingsOff ?? "settings are off";
+		try {
+			assertOutsideVault(rootDir, settingsDir);
+		} catch (err) {
+			return err instanceof Error ? err.message : String(err);
+		}
 		workspace ??= Workspace.open(settingsDir);
 		return workspace;
 	}
@@ -256,9 +266,9 @@ export async function createUiServer(
 	function settingsPayload(): SettingsPayload {
 		const ws = openWorkspace();
 		const values = Object.fromEntries(
-			SETTING_KEYS.map((k) => [k, ws === null ? null : ws.valueAt(k, null)]),
+			SETTING_KEYS.map((k) => [k, typeof ws === "string" ? null : ws.valueAt(k, null)]),
 		) as Record<SettingKey, number | null>;
-		if (ws === null) return { values, history: [], problem: settingsOff };
+		if (typeof ws === "string") return { values, history: [], problem: ws };
 		const history = SETTING_KEYS.flatMap((k) => ws.history(k)).sort(
 			(a, b) => Date.parse(a.at) - Date.parse(b.at),
 		);
@@ -596,15 +606,15 @@ export async function createUiServer(
 					sendJson(res, 400, { error: `${key} needs a finite number >= 0, or null` });
 					return;
 				}
-				let ws: Workspace | null;
+				let ws: Workspace | string;
 				try {
 					ws = openWorkspace();
 				} catch {
 					sendJson(res, 500, { error: SETTINGS_UNREADABLE });
 					return;
 				}
-				if (ws === null) {
-					sendJson(res, 409, { error: settingsOff });
+				if (typeof ws === "string") {
+					sendJson(res, 409, { error: ws });
 					return;
 				}
 				try {
@@ -637,7 +647,7 @@ export async function createUiServer(
 				refuse(res, 415, { error: "content-type must be application/json" });
 				return;
 			}
-			// Amendment A5: cap the request body.
+			// The body is capped.
 			readBody(req, res, EXPORT_BODY_CAP, (raw) => {
 				try {
 					const body = JSON.parse(raw || "{}") as { outDir?: string };
