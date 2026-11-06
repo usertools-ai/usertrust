@@ -25,7 +25,7 @@
  * GET /api/at answers the vault as recorded at a past position (`AtPayload`).
  */
 
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { realpathSync, statSync, unwatchFile, watchFile } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname, join, resolve, sep } from "node:path";
@@ -36,7 +36,7 @@ import {
 	type PersistedAuditEvent,
 	VAULT_DIR,
 } from "usertrust";
-import { canonicalize, type TransferStatus, verifyTransaction } from "usertrust-verify";
+import { type TransferStatus, verifyTransaction } from "usertrust-verify";
 import { isHeaderSpend } from "../shared/aggregate.js";
 import type { AtPayload, SettingKey, SettingsPayload } from "../shared/api.js";
 import { type RowStatus, statusFor, toLedgerRows } from "../shared/rows.js";
@@ -44,6 +44,7 @@ import { hostAllowed, originAllowed, parseAllowHosts } from "./allow-host.js";
 import { parseZonedTime } from "./position-index.js";
 import {
 	budgetSummary,
+	contentHash,
 	type DeletionCause,
 	type LedgerState,
 	type LogHead,
@@ -434,10 +435,12 @@ export async function createUiServer(
 	let version = 0;
 	/**
 	 * Bumped by a full reload (`handleResync`) that yields other records than the state it replaces: another log
-	 * (`logId`), another number of events, another tip (`lastHash`), or another break index (`fullBreakIndex`: a record
-	 * rewritten in place, the tip kept). A position can then name another record (a log replaced, truncated, rotated)
-	 * or one that reads otherwise. Never by an append, and never by a reload of an unchanged vault (the periodic
-	 * re-verify), which would read to the page as a reload every few minutes. `AtPayload.epoch` carries it.
+	 * (`logId`), another number of events, another tip (`lastHash`), another break index (`fullBreakIndex`), or another
+	 * records digest (`LedgerState.records`: any record whose recomputed content or stored hash differs, or sits
+	 * elsewhere, such as a record rewritten in place after an existing break with every stored hash, the tip, the count
+	 * and the break kept). A position can then name another record (a log replaced, truncated, rotated) or one that
+	 * reads otherwise. Never by an append (which extends the digest), and never by a reload of an unchanged vault (the
+	 * periodic re-verify), which would read to the page as a reload every few minutes. `AtPayload.epoch` carries it.
 	 */
 	let epoch = 0;
 
@@ -495,6 +498,8 @@ export async function createUiServer(
 			const complete = appended.subarray(0, lastNewline + 1).toString("utf-8");
 			const lines = complete.split("\n").filter((l) => l.trim());
 			const fresh: PersistedAuditEvent[] = [];
+			// Each appended record's recomputed content hash, for the state's records digest once every line verified.
+			const freshContent: string[] = [];
 			let lastHash = state.lastHash;
 			let lastSequence = state.lastSequence;
 			for (const line of lines) {
@@ -509,16 +514,17 @@ export async function createUiServer(
 				}
 				// Amendment A4: linkage alone doesn't catch forged payloads —
 				// recompute the hash exactly as usertrust-verify does.
-				const { hash, ...rest } = e;
-				const computed = createHash("sha256").update(canonicalize(rest)).digest("hex");
-				if (computed !== hash) throw new Error("hash mismatch");
+				const computed = contentHash(e);
+				if (computed !== e.hash) throw new Error("hash mismatch");
 				fresh.push(e);
+				freshContent.push(computed);
 				lastHash = e.hash;
 			}
 			// Every appended event was verified onto the chain the last full load verified, so each takes the next position.
 			const firstPos = state.positions.length;
 			const touched = state.transfers.add(fresh, firstPos);
 			for (const e of fresh) state.positions.add(e);
+			for (const [i, e] of fresh.entries()) state.records.add(freshContent[i] as string, e.hash);
 			// A new record can change an EARLIER row's verdict (an ambiguity appended after an optimistic
 			// settlement), so every visible row of a touched transfer is re-classified, and each change is sent.
 			// Each change names its row by event HASH (unique on the chain); the id rides along for display only.
@@ -590,7 +596,8 @@ export async function createUiServer(
 			state.logId !== before.logId ||
 			state.positions.length !== before.positions.length ||
 			state.lastHash !== before.lastHash ||
-			state.fullBreakIndex !== before.fullBreakIndex
+			state.fullBreakIndex !== before.fullBreakIndex ||
+			state.records.value() !== before.records.value()
 		)
 			epoch += 1;
 		auditDirSeen ||= state.auditDirPresent;

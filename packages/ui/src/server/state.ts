@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { createHash } from "node:crypto";
+import { createHash, type Hash } from "node:crypto";
 import {
 	type BigIntStats,
 	closeSync,
@@ -20,9 +20,10 @@ import {
 	describeBudgetSource,
 	isKnownBudget,
 	loadBudgetConfig,
+	type PersistedAuditEvent,
 	readLedgerEvents,
-	verifyVault,
 } from "usertrust";
+import { canonicalize, verifyVaultReading } from "usertrust-verify";
 import { isHeaderSpend } from "../shared/aggregate.js";
 import type { SummaryPayload } from "../shared/api.js";
 import { type RemoteSettings, remoteSettings } from "../shared/kit.js";
@@ -56,6 +57,12 @@ export interface LedgerState {
 	 * torn line, an anchor, a sequence gap, a deletion, a read that failed) or the load cannot tell (`breakIsOnlyFailure`).
 	 */
 	breakIsOnlyFailure: boolean;
+	/**
+	 * A digest of every record in position order, from each one's content hash RECOMPUTED (`contentHash`) and its stored
+	 * `hash` (`RecordsDigest`): two loads with the same digest read the same records in the same order. Taken during the
+	 * load's one pass over the events; the live tail extends it with each appended record.
+	 */
+	records: RecordsDigest;
 	summary: SummaryPayload;
 	lastHash: string;
 	/**
@@ -432,7 +439,9 @@ function loadPass(
 	const anchor = readAnchor(`${logPath}.meta`);
 	if (anchor.error !== undefined) unread.push(anchor.error);
 	const integrity = deriveChainIntegrity(events);
-	const vault = verifyVault(vaultPath);
+	// The verdict, and the list of lines it walked (`orderedHashes`, one per line that parsed, in the order walked).
+	const reading = verifyVaultReading(vaultPath);
+	const vault = reading.result;
 	loadSeam.afterReaders?.();
 	// The readers read by PATH. Only if the path still names the file the descriptor read, with the same size and mtime,
 	// do `lastHash`, `byteOffset` and `logId` all describe one file; otherwise (a rename, an append) the load is redone.
@@ -464,8 +473,10 @@ function loadPass(
 	// again for a confirmation nor latched.
 	const contained = !readSucceeded || holdsHead(events, evidence, head);
 	let spentUt = 0;
+	const records = new RecordsDigest();
 	for (const e of events) {
 		if (isHeaderSpend(e.kind, e.data.cost)) spentUt += e.data.cost;
+		records.add(contentHash(e), e.hash);
 	}
 
 	// A project before its first governed call has no audit directory, and verifyVault reports exactly that, which
@@ -535,7 +546,13 @@ function loadPass(
 		transfers,
 		positions,
 		fullBreakIndex,
-		breakIsOnlyFailure: breakIsOnlyFailure(fullBreakIndex, errors, loadSucceeded),
+		breakIsOnlyFailure: breakIsOnlyFailure(
+			fullBreakIndex,
+			errors,
+			loadSucceeded,
+			walkedReadersList(events, reading),
+		),
+		records,
 		summary: {
 			vaultPath,
 			...budgetSummary(vaultPath, spentUt),
@@ -609,22 +626,76 @@ function loadPass(
 const EVENT_ERROR = /^Event (\d+) \(/;
 
 /**
- * Whether the chain break at `breakIndex` is the vault's only failure: the load read the vault whole, and every error
- * of the verdict names an event at or after the break (which the break already accounts for). Any error that names no
- * event, or an event before the break, means the vault fails for another reason too, and so does a load that did not
- * read the vault whole, or a break the verifier reported nothing for: the answer is then false, never a guess, and
- * no position reads valid.
+ * Whether the verifier walked exactly the reader's list: the same number of lines, with the same stored hashes in the
+ * same order. Only then do the event indexes in its errors (`EVENT_ERROR`) name the reader's positions, and only then
+ * did it order the vault the way the reader did (by `sequence`, with its sequence checks, or by file without them).
+ *
+ * Two checks, either of which fails it:
+ * - a line the reader skipped as no event, one that parses but is not an object (`42`, `[]`, `"x"`): the verifier
+ *   walks it, so it holds more lines than events (`orderedHashes` against its own `events`). Such a line is a failure
+ *   that names no event. It also puts a line with no `sequence` in the verifier's list, which then orders by file and
+ *   skips the "Sequence starts at" and "Sequence gap" checks while the reader still orders by `sequence`;
+ * - the verifier's lines against the reader's events, one by one (a stored hash that is not a string is `""` on both
+ *   sides, as the verifier records it). The two read the files separately, so any difference fails closed.
+ */
+function walkedReadersList(
+	events: readonly PersistedAuditEvent[],
+	reading: { events: readonly unknown[]; orderedHashes: readonly string[] },
+): boolean {
+	const walked = reading.orderedHashes;
+	if (walked.length !== reading.events.length || walked.length !== events.length) return false;
+	return events.every((e, i) => (typeof e.hash === "string" ? e.hash : "") === walked[i]);
+}
+
+/**
+ * Whether the chain break at `breakIndex` is the vault's only failure: the load read the vault whole, the verifier
+ * walked exactly the reader's list (`walkedReadersList`), and every error of the verdict names an event at or after the
+ * break (which the break already accounts for). Any error that names no event, or an event before the break, means the
+ * vault fails for another reason too, and so does a load that did not read the vault whole, a verifier that walked
+ * another list, or a break the verifier reported nothing for: the answer is then false, never a guess, and no position
+ * reads valid.
  */
 function breakIsOnlyFailure(
 	breakIndex: number | null,
 	errors: readonly string[],
 	loadSucceeded: boolean,
+	sameList: boolean,
 ): boolean {
-	if (breakIndex === null || !loadSucceeded || errors.length === 0) return false;
+	if (breakIndex === null || !loadSucceeded || !sameList || errors.length === 0) return false;
 	return errors.every((e) => {
 		const m = EVENT_ERROR.exec(e);
 		return m !== null && Number(m[1]) - 1 >= breakIndex;
 	});
+}
+
+/**
+ * An event's content hash, recomputed: the sha256 of its canonical form without `hash`, as the verifier computes it.
+ * A record rewritten in place keeps whatever `hash` it stores; this moves with its content.
+ */
+export function contentHash(e: PersistedAuditEvent): string {
+	const { hash: _hash, ...rest } = e;
+	return createHash("sha256").update(canonicalize(rest)).digest("hex");
+}
+
+/**
+ * A running digest of a vault's records in position order: each record's recomputed content hash (`contentHash`) and
+ * its stored `hash`, one line per record. Two lists of records give the same digest only if every record has the same
+ * content and the same stored hash in the same place, so a reload compares it to tell whether it read other records,
+ * including a record rewritten in place with its stored hash, the tip, the count and the break all unchanged. It grows
+ * with the records (the live tail adds each appended one), and reading it does not end it.
+ */
+export class RecordsDigest {
+	private readonly hash: Hash = createHash("sha256");
+
+	/** Adds the next record: its recomputed content hash, and its stored `hash` as it is (JSON, so any value is one line). */
+	add(content: string, storedHash: unknown): void {
+		this.hash.update(`${content} ${JSON.stringify(storedHash ?? null)}\n`);
+	}
+
+	/** The digest of every record added so far. */
+	value(): string {
+		return this.hash.copy().digest("hex");
+	}
 }
 
 /**

@@ -32,8 +32,12 @@ const NOTE = "budget history starts with the first budget record; this is today'
 type Spec = { kind: string; data?: Record<string, unknown>; timestamp?: string };
 type SummaryChain = { valid: boolean; breakIndex: number | null; errors: string[] };
 
-/** A hash-linked chain with `sequence`, one event per spec; event i is at 10:00Z plus i minutes unless given. */
-function chain(specs: readonly Spec[]): PersistedAuditEvent[] {
+/**
+ * A hash-linked chain with `sequence`, one event per spec; event i is at 10:00Z plus i minutes unless given. The first
+ * event links from genesis and carries `firstSequence` (1 unless given: a larger one is a chain re-rooted after its
+ * leading events were deleted).
+ */
+function chain(specs: readonly Spec[], firstSequence = 1): PersistedAuditEvent[] {
 	let previousHash = GENESIS;
 	return specs.map((s, i) => {
 		const rest = {
@@ -42,7 +46,7 @@ function chain(specs: readonly Spec[]): PersistedAuditEvent[] {
 			id: `evt-${i}`,
 			kind: s.kind,
 			previousHash,
-			sequence: i + 1,
+			sequence: firstSequence + i,
 			timestamp: s.timestamp ?? new Date(T0 + i * 60_000).toISOString(),
 		};
 		const hash = createHash("sha256").update(canonicalize(rest)).digest("hex");
@@ -346,6 +350,75 @@ describe("GET /api/at", () => {
 		expect((await at("pos=2")).body.chain).toEqual({ valid: false, breakIndex: 5 });
 	});
 
+	/** An event's line with its cost changed and its stored hash kept: the chain breaks AT it. */
+	function tampered(e: PersistedAuditEvent): string {
+		return JSON.stringify({ ...e, data: { ...e.data, cost: 9999 } });
+	}
+
+	/** The verdict at pos 0 and at the head, beside the whole-vault one. */
+	async function verdicts(): Promise<{
+		summary: { valid: boolean; breakIndex: number | null };
+		first: AtPayload["chain"];
+		head: AtPayload["chain"];
+	}> {
+		const s = await summaryChain();
+		const head = (await at("pos=0")).body.head;
+		return {
+			summary: { valid: s.valid, breakIndex: s.breakIndex },
+			first: (await at("pos=0")).body.chain,
+			head: (await at(`pos=${head}`)).body.chain,
+		};
+	}
+
+	const SPECS: Spec[] = Array.from({ length: 4 }, () => ({ kind: "llm_call", data: { cost: 10 } }));
+
+	it("a chain re-rooted at sequence 5, tampered at 2, with a 42 line last: invalid at every position", async () => {
+		// Without the 42 line the verifier reports "Sequence starts at 5", which no event marks. The 42 line is no event
+		// the reader keeps, but the verifier walks it: it then orders by file, skips the sequence checks, and its only
+		// errors name events, at indexes into a list the reader does not hold.
+		const c = chain(SPECS, 5);
+		writeFileSync(
+			logPath,
+			`${[JSON.stringify(c[0]), JSON.stringify(c[1]), tampered(c[2] as PersistedAuditEvent), JSON.stringify(c[3]), "42"].join("\n")}\n`,
+		);
+		await start();
+		expect(await verdicts()).toEqual({
+			summary: { valid: false, breakIndex: 2 },
+			first: { valid: false, breakIndex: 2 },
+			head: { valid: false, breakIndex: 2 },
+		});
+	});
+
+	it("a 42 line just before the tampered record: invalid at every position", async () => {
+		const c = chain(SPECS);
+		writeFileSync(
+			logPath,
+			`${[JSON.stringify(c[0]), JSON.stringify(c[1]), "42", tampered(c[2] as PersistedAuditEvent), JSON.stringify(c[3])].join("\n")}\n`,
+		);
+		await start();
+		expect(await verdicts()).toEqual({
+			summary: { valid: false, breakIndex: 2 },
+			first: { valid: false, breakIndex: 2 },
+			head: { valid: false, breakIndex: 2 },
+		});
+	});
+
+	for (const junk of ["[]", '"x"', "null"]) {
+		it(`a ${junk} line beside a break: invalid at every position`, async () => {
+			const c = chain(SPECS);
+			writeFileSync(
+				logPath,
+				`${[JSON.stringify(c[0]), JSON.stringify(c[1]), tampered(c[2] as PersistedAuditEvent), JSON.stringify(c[3]), junk].join("\n")}\n`,
+			);
+			await start();
+			expect(await verdicts()).toEqual({
+				summary: { valid: false, breakIndex: 2 },
+				first: { valid: false, breakIndex: 2 },
+				head: { valid: false, breakIndex: 2 },
+			});
+		});
+	}
+
 	it("t with mixed precision and no zone", async () => {
 		writeEvents(chain(Array.from({ length: 5 }, () => ({ kind: "llm_call", data: { cost: 1 } }))));
 		await start();
@@ -475,6 +548,29 @@ describe("GET /api/at", () => {
 		const after = await at("pos=5");
 		expect(after.body.chain.breakIndex).toBe(2);
 		expect(after.body.head).toBe(before.body.head);
+		expect(after.body.epoch).toBeGreaterThan(before.body.epoch);
+	});
+
+	it("a rewrite after an existing break that keeps every stored hash bumps epoch", async () => {
+		await seed(6);
+		tamper(2);
+		const s = await start();
+		const before = await at("pos=5");
+		expect(before.body.chain).toEqual({ valid: false, breakIndex: 2 });
+		const lines = readFileSync(logPath, "utf-8").trim().split("\n");
+		const bytes = readFileSync(logPath).length;
+		// Record 4 (after the break) gets another cost of the same width; its stored hash, the tip, the event count, the
+		// break index and the log's size all stay as they were.
+		const four = JSON.parse(lines[4] as string) as { data: { cost: number }; hash: string };
+		expect(four.data.cost).toBe(1);
+		four.data.cost = 2;
+		lines[4] = JSON.stringify(four);
+		writeFileSync(logPath, `${lines.join("\n")}\n`);
+		expect(readFileSync(logPath).length).toBe(bytes);
+		s.reload();
+		const after = await at("pos=5");
+		expect(after.body).toMatchObject({ head: before.body.head, chain: before.body.chain });
+		expect(after.body.spentUt).toBe(before.body.spentUt + 1);
 		expect(after.body.epoch).toBeGreaterThan(before.body.epoch);
 	});
 
