@@ -5,9 +5,10 @@
  * The other consumers of a reading's events, on a MIXED log (some events carry a `sequence`, some
  * do not). The walk leaves a sequence-less event out; the events handed back hold every event.
  *
- *  - COMPLETENESS: a dead letter whose `eventHash` names an event that IS in the log (a
- *    sequence-less one included) is not a missing event. The log still fails, by the
- *    sequence-less event's own error, never by a false "missing" count.
+ *  - EVIDENCE counts only CHECKED events. A dead letter is resolved, and a receipt audited, only by
+ *    an event the walk hash-checked: a sequence-less event never was, so a dead letter naming it
+ *    stays missing and a receipt naming it is unaudited, in `usertrust verify` (plain and anchored)
+ *    and in `usertrust health`. The figures (spend, tables) still count every event on file.
  *  - `--tx` (`verifyTransaction`): a sequence-less event's transfer is FOUND (it is on file) but
  *    reported as outside the checked chain: it has no leaf, so its receipt carries no position, no
  *    inclusion proof and no anchored claim, and the verdict is the failing vault's. A sequenced
@@ -19,11 +20,13 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { verifyTransaction } from "../../../verify/src/index.js";
 import { canonicalize } from "../../src/audit/canonical.js";
 import { verifyVaultComplete } from "../../src/audit/complete.js";
-import { GENESIS_HASH } from "../../src/shared/constants.js";
+import { run as healthRun } from "../../src/cli/health.js";
+import { run as verifyRun } from "../../src/cli/verify.js";
+import { GENESIS_HASH, VAULT_DIR } from "../../src/shared/constants.js";
 import {
 	anchorOnce,
 	cleanupAll,
@@ -44,15 +47,22 @@ interface Spec {
 	data: Record<string, unknown>;
 }
 
+function newDir(): string {
+	const d = mkdtempSync(join(tmpdir(), "trust-mixed-consumers-"));
+	dirs.push(d);
+	return d;
+}
+
 /**
  * A vault directory (the `.usertrust` directory) whose `audit/events.jsonl` holds one `llm_call`
  * per spec, each hashed over its canonical form and linked to the one before it (the first to
  * GENESIS). A `null` sequence writes an event with no `sequence` field. Returns the vault and the
- * events as written (with their hashes).
+ * events as written (with their hashes). `vault` names the directory to use (a new one if absent).
  */
-function vaultOf(specs: readonly Spec[]): { vault: string; events: Record<string, unknown>[] } {
-	const vault = mkdtempSync(join(tmpdir(), "trust-mixed-consumers-"));
-	dirs.push(vault);
+function vaultOf(
+	specs: readonly Spec[],
+	vault: string = newDir(),
+): { vault: string; events: Record<string, unknown>[] } {
 	const auditDir = join(vault, "audit");
 	mkdirSync(auditDir, { recursive: true });
 	let previousHash = GENESIS_HASH;
@@ -109,17 +119,16 @@ const MIXED: readonly Spec[] = [
 ];
 
 describe("completeness on a mixed log: a dead letter naming a logged event", () => {
-	it("D1. a dead letter naming the sequence-less event is on the chain, not missing", () => {
+	it("D1. a dead letter naming the sequence-less event stays missing: that event was never checked", () => {
 		const { vault, events } = vaultOf(MIXED);
 		const unsequenced = events[1] as Record<string, unknown>;
 		writeDeadLetters(vault, [deadLetterFor(unsequenced, unsequenced.hash as string)]);
 		const c = verifyVaultComplete(vault);
-		expect(c.deadLetters).toMatchObject({ missing: 0, onChain: 1 });
-		expect(c.complete).toBe(true);
-		// The log still fails, for the reason that is true: the event has no sequence.
+		expect(c.deadLetters).toMatchObject({ missing: 1, onChain: 0 });
+		expect(c.complete).toBe(false);
 		expect(c.valid).toBe(false);
 		expect(c.errors).toContain("event without sequence (events.jsonl:2)");
-		expect(c.errors.some((e) => e.startsWith("INCOMPLETE"))).toBe(false);
+		expect(c.errors.some((e) => e.startsWith("INCOMPLETE"))).toBe(true);
 	});
 
 	it("D2. positive control: a dead letter naming a sequenced event is on the chain", () => {
@@ -137,6 +146,130 @@ describe("completeness on a mixed log: a dead letter naming a logged event", () 
 		const c = verifyVaultComplete(vault);
 		expect(c.deadLetters).toMatchObject({ missing: 1, onChain: 0 });
 		expect(c.complete).toBe(false);
+	});
+});
+
+describe("usertrust verify and health on a mixed log: only checked events are evidence", () => {
+	let out: string[];
+
+	beforeEach(() => {
+		out = [];
+		process.exitCode = 0;
+		vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+			out.push(args.map(String).join(" "));
+		});
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		process.exitCode = 0;
+	});
+
+	const json = () =>
+		JSON.parse(out.join("\n")) as { success: boolean; data: Record<string, unknown> };
+
+	/** A project directory whose `.usertrust` holds the MIXED log; returns it and the events. */
+	function project(): { root: string; vault: string; events: Record<string, unknown>[] } {
+		const root = newDir();
+		const { vault, events } = vaultOf(MIXED, join(root, VAULT_DIR));
+		return { root, vault, events };
+	}
+
+	/** tx_b by its hash and as a degraded receipt, both naming the sequence-less event; tx_c by hash. */
+	function receiptsFile(root: string, events: readonly Record<string, unknown>[]): string {
+		const file = join(root, "receipts.jsonl");
+		writeFileSync(
+			file,
+			[
+				{ transferId: "tx_b", auditHash: events[1]?.hash },
+				{ transferId: "tx_b", auditHash: "AUDIT_DEGRADED" },
+				{ transferId: "tx_c", auditHash: events[2]?.hash },
+			]
+				.map((r) => JSON.stringify(r))
+				.join("\n"),
+		);
+		return file;
+	}
+
+	/** An empty anchors file: enough to take `usertrust verify` down its anchored path. */
+	function emptyAnchors(root: string): string {
+		const file = join(root, "anchors.jsonl");
+		writeFileSync(file, "");
+		return file;
+	}
+
+	const UNAUDITED_B = [
+		{ transferId: "tx_b", reason: "its auditHash is not on the chain" },
+		{
+			transferId: "tx_b",
+			reason: "its audit write degraded, and its llm_call event is not on the chain",
+		},
+	];
+
+	it("C1. anchored verify: a dead letter naming the sequence-less event stays missing", async () => {
+		const { root, vault, events } = project();
+		const unsequenced = events[1] as Record<string, unknown>;
+		writeDeadLetters(vault, [deadLetterFor(unsequenced, unsequenced.hash as string)]);
+		await verifyRun(root, { json: true }, ["--anchor", emptyAnchors(root)]);
+		const r = json();
+		expect(r.success).toBe(false);
+		expect(r.data.complete).toBe(false);
+		expect(r.data.deadLetters).toMatchObject({ missing: 1, onChain: 0 });
+		expect(r.data.errors).toContain("event without sequence (events.jsonl:2)");
+	});
+
+	it("C2. plain verify: a receipt naming the sequence-less event is unaudited, by hash and as degraded", async () => {
+		const { root, events } = project();
+		await verifyRun(root, { json: true }, ["--receipts", receiptsFile(root, events)]);
+		const r = json();
+		expect(r.success).toBe(false);
+		expect(r.data.complete).toBe(false);
+		expect(r.data.receipts).toEqual({ checked: 3, unreadable: 0, unaudited: UNAUDITED_B });
+	});
+
+	it("C3. anchored verify: the same receipts, the same unaudited list", async () => {
+		const { root, events } = project();
+		await verifyRun(root, { json: true }, [
+			"--anchor",
+			emptyAnchors(root),
+			"--receipts",
+			receiptsFile(root, events),
+		]);
+		const r = json();
+		expect(r.success).toBe(false);
+		expect(r.data.complete).toBe(false);
+		expect(r.data.receipts).toEqual({ checked: 3, unreadable: 0, unaudited: UNAUDITED_B });
+	});
+
+	it("C4. positive control: a receipt naming a sequenced event of the same log is audited", async () => {
+		const { root, events } = project();
+		const file = join(root, "receipts.jsonl");
+		writeFileSync(file, JSON.stringify({ transferId: "tx_c", auditHash: events[2]?.hash }));
+		await verifyRun(root, { json: true }, ["--receipts", file]);
+		expect(json().data.receipts).toEqual({ checked: 1, unreadable: 0, unaudited: [] });
+		out = [];
+		await verifyRun(root, { json: true }, ["--anchor", emptyAnchors(root), "--receipts", file]);
+		expect(json().data.receipts).toEqual({ checked: 1, unreadable: 0, unaudited: [] });
+	});
+
+	it("H1. health: a dead letter naming the sequence-less event counts as a missing event", async () => {
+		const { root, vault, events } = project();
+		const unsequenced = events[1] as Record<string, unknown>;
+		writeDeadLetters(vault, [deadLetterFor(unsequenced, unsequenced.hash as string)]);
+		await healthRun(root, { json: true });
+		const signals = json().data.signals as Record<string, unknown>;
+		expect(signals.missingEvents).toBe(1);
+		expect(signals.chainIntegrity).toBe(false);
+	});
+
+	it("H2. positive control: health resolves a dead letter naming a sequenced event", async () => {
+		const { root, vault, events } = project();
+		const sequenced = events[2] as Record<string, unknown>;
+		writeDeadLetters(vault, [deadLetterFor(sequenced, sequenced.hash as string)]);
+		await healthRun(root, { json: true });
+		const signals = json().data.signals as Record<string, unknown>;
+		expect(signals.missingEvents).toBe(0);
 	});
 });
 
