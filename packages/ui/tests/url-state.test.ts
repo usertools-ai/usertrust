@@ -21,6 +21,7 @@ const H = "a1".repeat(32);
 const FULL: UrlState = {
 	view: "trends",
 	open: H,
+	at: 4182,
 	filters: {
 		search: "gpt 4 & co",
 		kinds: ["llm_call", "tool_use"],
@@ -475,5 +476,38 @@ describe("sameUrlState", () => {
 		// a followed link to the same view the page already shows keeps the page's own state object
 		const same = withFilters({ search: "gpt" });
 		expect(applied(same, "#q=gpt")).toBe(same);
+	});
+});
+
+describe("the at field", () => {
+	it("at round-trips", () => {
+		const s = { ...EMPTY_URL_STATE, at: 4182 };
+		expect(encodeUrlState(s)).toBe("#at=4182");
+		expect(decodeUrlState("#at=4182").at).toBe(4182);
+		expect(decodeUrlState(encodeUrlState(FULL))).toEqual(FULL);
+		expect(decodeUrlState("#at=0").at).toBe(0);
+		expect(sameUrlState(s, EMPTY_URL_STATE)).toBe(false);
+	});
+
+	it("at refuses", () => {
+		for (const v of ["-1", "01", "1.5", "1e3", "9007199254740992", "", "abc", "+5"]) {
+			expect(decodeUrlState(`#at=${encodeURIComponent(v)}`).at, `at=${v}`).toBeNull();
+		}
+		expect(decodeUrlState("#at=9007199254740991").at).toBe(9007199254740991);
+	});
+
+	it("entering and leaving a position pushes", () => {
+		const live = EMPTY_URL_STATE;
+		const at5 = { ...live, at: 5 };
+		expect(planHistory(live, at5, "")).toEqual({ kind: "push", hash: "#at=5" });
+		expect(planHistory(at5, live, "#at=5")).toEqual({ kind: "push", hash: "" });
+	});
+
+	it("scrubbing replaces", () => {
+		const at5 = { ...EMPTY_URL_STATE, at: 5 };
+		expect(planHistory(at5, { ...at5, at: 6 }, "#at=5")).toEqual({
+			kind: "replace",
+			hash: "#at=6",
+		});
 	});
 });
