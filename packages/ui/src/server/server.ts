@@ -25,7 +25,7 @@
  */
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { unwatchFile, watchFile } from "node:fs";
+import { realpathSync, statSync, unwatchFile, watchFile } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -59,6 +59,7 @@ import { serveStatic } from "./static.js";
 import { watchLedger } from "./tail.js";
 import {
 	assertOutsideProject,
+	canonical,
 	isSettingKey,
 	isSettingValue,
 	SETTING_KEYS,
@@ -186,6 +187,8 @@ export interface UiServer {
 	port: number;
 	/** The per-start token PUT /api/settings requires (32 random bytes, hex), as GET /api/session gives it. */
 	token: string;
+	/** The project root this server reads, as the OS opens it (`resolveProjectRoot`). */
+	root: string;
 	close(): Promise<void>;
 	reload(): void;
 }
@@ -219,25 +222,47 @@ function refuse(
 	sendJson(res, status, body, { ...extraHeaders, connection: "close" });
 }
 
+/**
+ * The project root as the OS opens it: the argument resolved once, with `realpathSync.native`, and used for
+ * everything after. `path.join`/`resolve` and the JS `realpathSync` collapse `..` lexically, but the OS applies
+ * `..` after following the link before it, so `work/link/..` (`link -> other/sub`) is `other`, not `work`. A root
+ * that cannot be resolved, or is not a directory, is a start error that names it; it is never taken as written.
+ */
+export function resolveProjectRoot(rootDir: string): string {
+	let root: string;
+	try {
+		root = realpathSync.native(rootDir);
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException).code ?? "error";
+		throw new Error(`the project root ${JSON.stringify(rootDir)} cannot be opened (${code})`);
+	}
+	if (!statSync(root).isDirectory()) {
+		throw new Error(`the project root ${JSON.stringify(root)} is not a directory`);
+	}
+	return root;
+}
+
 export async function createUiServer(
 	rootDir: string,
 	opts?: {
 		port?: number;
 		appDir?: string;
 		allowHosts?: readonly string[];
-		/** Where settings are kept. Default `workspaceDir(rootDir)`; never inside the vault either way. */
+		/** Where settings are kept. Default `workspaceDir(<the resolved root>)`; never inside the project or its vault. */
 		workspaceDir?: string;
 	},
 ): Promise<UiServer> {
-	const vaultPath = join(rootDir, VAULT_DIR);
+	// One root for the whole server: the vault it shows and reads, the export guard and the settings checks.
+	const root = resolveProjectRoot(rootDir);
+	const vaultPath = join(root, VAULT_DIR);
 	const token = randomBytes(32).toString("hex");
 	// Settings are off, with this reason, when the workspace would sit inside the project or its vault (by
 	// default, a project rooted at or above the home directory). The rest of the dashboard serves as before.
 	let settingsDir: string | null = null;
 	let settingsOff: string | null = null;
 	try {
-		const dir = opts?.workspaceDir ?? workspaceDir(rootDir);
-		assertOutsideProject(rootDir, dir);
+		const dir = opts?.workspaceDir ?? workspaceDir(root);
+		assertOutsideProject(root, dir);
 		settingsDir = dir;
 	} catch (err) {
 		settingsOff = err instanceof Error ? err.message : String(err);
@@ -252,11 +277,11 @@ export async function createUiServer(
 	function openWorkspace(): Workspace | string {
 		if (settingsDir === null) return settingsOff ?? "settings are off";
 		try {
-			assertOutsideProject(rootDir, settingsDir);
+			assertOutsideProject(root, settingsDir);
 		} catch (err) {
 			return err instanceof Error ? err.message : String(err);
 		}
-		workspace ??= Workspace.open(settingsDir, rootDir);
+		workspace ??= Workspace.open(settingsDir, root);
 		return workspace;
 	}
 	/**
@@ -675,12 +700,12 @@ export async function createUiServer(
 						sendJson(res, 400, { error: "outDir required" });
 						return;
 					}
-					const outDir = resolve(rootDir, body.outDir);
-					// Amendment A5: containment — the resolved outDir must stay
-					// inside the project root and out of the vault interior.
-					const rootResolved = resolve(rootDir);
-					const vaultResolved = resolve(vaultPath);
-					const insideRoot = outDir === rootResolved || outDir.startsWith(rootResolved + sep);
+					// Amendment A5: containment — the outDir must stay inside the project root and out of the vault
+					// interior. It is judged, and written, where the OS puts it: resolved as far as it exists, links
+					// followed, so a link inside the project cannot lead the export into the vault.
+					const outDir = canonical(resolve(root, body.outDir));
+					const vaultResolved = canonical(vaultPath);
+					const insideRoot = outDir === root || outDir.startsWith(root + sep);
 					// Vault exclusion compares case-insensitively: on case-insensitive
 					// filesystems (darwin/win32) ".USERTRUST" IS the vault. Folding only
 					// the deny-side check widens the deny set, never the allow set.
@@ -797,6 +822,7 @@ export async function createUiServer(
 		server,
 		port,
 		token,
+		root,
 		// A reload is a resync: a new version, and every client told to fetch the new snapshot.
 		reload(): void {
 			handleResync();

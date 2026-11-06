@@ -5,6 +5,7 @@
 import { spawn } from "node:child_process";
 import { allowHostNotice } from "./allow-host.js";
 import { parseUiArgs } from "./args.js";
+import { listenUi } from "./listen.js";
 import { createUiServer } from "./server.js";
 
 const parsed = parseUiArgs(process.argv.slice(2));
@@ -15,28 +16,17 @@ if (!parsed.ok) {
 const { noOpen, port: requestedPort, allowHosts } = parsed.args;
 const rootDir = parsed.args.rootDir ?? process.cwd();
 
-async function tryListen(): Promise<Awaited<ReturnType<typeof createUiServer>>> {
-	if (requestedPort !== undefined) {
-		// Explicit --port fails fast on conflict.
-		return createUiServer(rootDir, { port: requestedPort, allowHosts });
-	}
-	for (let port = 4180; port < 4200; port++) {
-		try {
-			return await createUiServer(rootDir, { port, allowHosts });
-		} catch {
-			// EADDRINUSE — probe upward
-		}
-	}
-	throw new Error("no free port in 4180-4199; pass --port");
-}
-
-const ui = await tryListen().catch((err: unknown) => {
+const ui = await listenUi(
+	(port) => createUiServer(rootDir, { port, allowHosts }),
+	requestedPort,
+).catch((err: unknown) => {
 	console.error(`usertrust-ui: ${err instanceof Error ? err.message : String(err)}`);
 	process.exit(1);
 });
 
 const url = `http://127.0.0.1:${ui.port}`;
-console.log(`usertrust-ui serving ${rootDir} at ${url}`);
+// The root as the OS opens it: the directory whose vault is shown.
+console.log(`usertrust-ui serving ${ui.root} at ${url}`);
 if (allowHosts.length > 0) console.log(allowHostNotice(allowHosts));
 if (!noOpen) {
 	// Amendment A8: Windows has no `start` binary — it is a cmd built-in, and

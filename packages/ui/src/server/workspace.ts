@@ -48,7 +48,7 @@ const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
  * disk. The JS realpathSync keeps the caller's case there, so two spellings
  * of one directory would get two workspaces.
  */
-function canonical(p: string): string {
+export function canonical(p: string): string {
 	const rest: string[] = [];
 	let cur = resolve(p);
 	for (;;) {

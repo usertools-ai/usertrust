@@ -11,6 +11,7 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	renameSync,
 	rmSync,
 	statSync,
@@ -19,12 +20,12 @@ import {
 } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAuditWriter } from "../../core/src/audit/chain.js";
 import { createUiServer, type UiServer } from "../src/server/server.js";
 import { Workspace } from "../src/server/workspace.js";
-import type { SettingsPayload } from "../src/shared/api.js";
+import type { SettingsPayload, SummaryPayload } from "../src/shared/api.js";
 
 const posix = process.platform !== "win32";
 
@@ -658,4 +659,155 @@ describe("settings routes", () => {
 			expect(settingsBytes()).toBeNull();
 		},
 	);
+});
+
+/**
+ * A root spelled `<a>/link/..` with `link -> <b>/sub`. The OS applies `..` after following the link, so the
+ * project it opens is `<b>`; `path.join`/`resolve` collapse the `..` first and name `<a>`. The dashboard and its
+ * settings checks must both use the root the OS opens.
+ */
+describe.skipIf(!posix)("a project root given through a link and `..`", () => {
+	let base: string;
+	let a: string;
+	let b: string;
+	let root: string;
+	let physicalRoot: string;
+	let physicalVault: string;
+	let ui: UiServer | undefined;
+
+	async function seedVault(dir: string, count: number): Promise<void> {
+		mkdirSync(join(dir, ".usertrust", "audit"), { recursive: true });
+		const writer = createAuditWriter(dir);
+		for (let i = 0; i < count; i++) {
+			await writer.appendEvent({
+				kind: "llm_call",
+				actor: "local",
+				data: { model: "claude-sonnet-4-6", cost: 5, settled: true, transferId: `tx_${i}` },
+			});
+		}
+		writer.release();
+	}
+
+	beforeEach(async () => {
+		base = mkdtempSync(join(tmpdir(), "trust-linkroot-"));
+		a = join(base, "a");
+		b = join(base, "b");
+		mkdirSync(a);
+		mkdirSync(join(b, "sub"), { recursive: true });
+		symlinkSync(join(b, "sub"), join(a, "link"));
+		// A second way into the project through a link: `<a>/to-b -> <b>`.
+		symlinkSync(b, join(a, "to-b"));
+		// Built by hand: join() would collapse the `..` before the OS sees it.
+		root = `${join(a, "link")}${sep}..`;
+		// Two vaults, told apart by their event counts: <b>'s, which the OS opens, and <a>'s, which a lexical
+		// `..` would name.
+		await seedVault(b, 2);
+		await seedVault(a, 1);
+		physicalRoot = realpathSync.native(b);
+		physicalVault = join(physicalRoot, ".usertrust");
+	});
+
+	afterEach(async () => {
+		await ui?.close();
+		ui = undefined;
+		rmSync(base, { recursive: true, force: true });
+	});
+
+	function getJson<T>(server: UiServer, path: string): Promise<T> {
+		return send(server.port, { path }).then((res) => {
+			expect(res.status, path).toBe(200);
+			return JSON.parse(res.body) as T;
+		});
+	}
+
+	function putSetting(server: UiServer): Promise<Reply> {
+		return send(server.port, {
+			method: "PUT",
+			path: "/api/settings",
+			headers: { "content-type": "application/json", "x-usertrust-token": server.token },
+			body: JSON.stringify({ key: "plan.monthlyUt", value: 500000 }),
+		});
+	}
+
+	// One row per workspace, each with its own server: <b>'s vault, and anywhere else in the project.
+	it.each([
+		["in the vault the dashboard shows", [".usertrust", "ws"], "vault"],
+		["elsewhere in the project", ["anything", "ws"], "project"],
+	] as const)(
+		"the dashboard shows the vault its settings checks guard, the one the OS opens; a workspace %s is refused and nothing is written",
+		async (_label, rel, refusal) => {
+			const dir = join(b, ...rel);
+			const vaultsBefore = {
+				a: hashTree(join(a, ".usertrust")),
+				b: hashTree(join(b, ".usertrust")),
+			};
+			const bTree = listTree(b);
+			ui = await createUiServer(root, { port: 0, workspaceDir: dir });
+			// Displayed: the summary is <b>'s vault, served from it (its two events, not <a>'s one).
+			const summary = await getJson<SummaryPayload>(ui, "/api/summary");
+			expect(summary.vaultPath).toBe(physicalVault);
+			expect(summary.chain.events).toBe(2);
+			const snapshot = await getJson<{ summary: SummaryPayload }>(ui, "/api/events");
+			expect(snapshot.summary.vaultPath).toBe(physicalVault);
+			expect(snapshot.summary.chain.events).toBe(2);
+			// Checked: the refusal names the same vault, or the same project.
+			const read = await getJson<SettingsPayload>(ui, "/api/settings");
+			const fix = "set USERTRUST_WORKSPACE_DIR to a directory outside the project";
+			expect(read.problem).toBe(
+				refusal === "vault"
+					? `workspace would sit inside the vault at ${physicalVault}: ${fix}`
+					: `workspace would sit inside the project at ${physicalRoot}: ${fix}`,
+			);
+			const res = await putSetting(ui);
+			expect(res.status).toBe(409);
+			expect(JSON.parse(res.body)).toEqual({ error: read.problem });
+			expect(existsSync(dir)).toBe(false);
+			expect(hashTree(join(a, ".usertrust"))).toEqual(vaultsBefore.a);
+			expect(hashTree(join(b, ".usertrust"))).toEqual(vaultsBefore.b);
+			expect(listTree(b)).toEqual(bTree);
+		},
+	);
+
+	it("<a>'s .usertrust is not this project's vault, and lies outside it: a workspace there is allowed", async () => {
+		const dir = join(a, ".usertrust", "ws");
+		ui = await createUiServer(root, { port: 0, workspaceDir: dir });
+		const read = await getJson<SettingsPayload>(ui, "/api/settings");
+		expect(read.problem).toBeNull();
+		// Reading made nothing.
+		expect(existsSync(dir)).toBe(false);
+	});
+
+	it("/api/export guards the vault the OS opens, however the outDir reaches it", async () => {
+		ui = await createUiServer(root, { port: 0 });
+		const vaultBefore = hashTree(join(b, ".usertrust"));
+		const exportTo = (outDir: string): Promise<Reply> =>
+			send((ui as UiServer).port, {
+				method: "POST",
+				path: "/api/export",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ outDir }),
+			});
+		for (const outDir of [
+			// relative to the root the OS opens: <b>/.usertrust/out
+			join(".usertrust", "out"),
+			// <b>'s vault reached through the link <a>/to-b
+			join(a, "to-b", ".usertrust", "out"),
+			// the vault spelled through the root's own link and `..`
+			`${root}${sep}.usertrust${sep}out`,
+			join(physicalVault, "out"),
+		]) {
+			const res = await exportTo(outDir);
+			expect(res.status, outDir).toBe(400);
+			expect(JSON.parse(res.body), outDir).toEqual({
+				error: "outDir must resolve inside the project root, outside the vault",
+			});
+		}
+		expect(hashTree(join(b, ".usertrust"))).toEqual(vaultBefore);
+		expect(existsSync(join(a, ".usertrust", "out"))).toBe(false);
+		// Positive control: a directory in the project, reached through the same link, is exported to, from <b>'s vault.
+		const ok = await exportTo(join(a, "to-b", "exported"));
+		expect(ok.status).toBe(200);
+		expect((JSON.parse(ok.body) as { written: number }).written).toBe(2);
+		expect(existsSync(join(b, "exported", "Receipts.base"))).toBe(true);
+	});
 });
