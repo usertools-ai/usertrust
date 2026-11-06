@@ -18,9 +18,15 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { verifyVaultReading as pkgVerifyVaultReading } from "../../../verify/src/index.js";
 import { canonicalize } from "../../src/audit/canonical.js";
 import { createAuditWriter } from "../../src/audit/chain.js";
-import { verifyVault } from "../../src/audit/verify.js";
+import { readLedgerEvents } from "../../src/audit/read.js";
+import {
+	verifyVault,
+	verifyVaultReading,
+	verifyVaultWithAnchorsReading,
+} from "../../src/audit/verify.js";
 import { GENESIS_HASH, VAULT_DIR } from "../../src/shared/constants.js";
 
 const dirs: string[] = [];
@@ -246,5 +252,149 @@ describe("verifyVault: positive controls for the rows above", () => {
 		const vault = writeVault({ "events.jsonl": buildChain([5, 6, 7]) });
 		const r = verifyVault(vault);
 		expect(r.errors).toEqual([SEQ_START_5]);
+	});
+});
+
+/**
+ * The events a reading hands back are what every figure is built from (the spend, the transaction
+ * table, the report), so they are EVERY event of the log, never only the walked ones: a figure
+ * that drops an event understates the spend. Only the walk (its checks, `chainLength`,
+ * `orderedHashes`) is limited to the sequenced events. In a mixed log the events come in the order
+ * `readLedgerEvents` gives: the sequenced ones by sequence, then the rest in file order.
+ */
+describe("verifyVaultReading: the events handed back are every event of a mixed log", () => {
+	const idsOf = (events: readonly { id?: unknown }[]): unknown[] => events.map((e) => e.id);
+	const hashOf = (line: string): string => (JSON.parse(line) as { hash: string }).hash;
+
+	/**
+	 * Sequences 1, 2, 3 with one sequence-less event in each file. File order is events.jsonl
+	 * first (evt-3, evt-4, evt-5), then events-0001.jsonl (evt-1, evt-2).
+	 */
+	function mixedVault(): { vault: string; chain: string[] } {
+		const chain = buildChain([1, null, 2, null, 3]);
+		const vault = writeVault({
+			"events-0001.jsonl": chain.slice(0, 2),
+			"events.jsonl": chain.slice(2),
+		});
+		return { vault, chain };
+	}
+
+	it("E1. events holds every event: the sequenced ones by sequence, then the rest in file order", () => {
+		const { vault } = mixedVault();
+		const reading = verifyVaultReading(vault);
+		expect(idsOf(reading.events)).toEqual(["evt-1", "evt-3", "evt-5", "evt-4", "evt-2"]);
+	});
+
+	it("E1. the walk is still only the sequenced events", () => {
+		const { vault, chain } = mixedVault();
+		const reading = verifyVaultReading(vault);
+		expect(reading.orderedHashes).toEqual([
+			hashOf(chain[0] as string),
+			hashOf(chain[2] as string),
+			hashOf(chain[4] as string),
+		]);
+		expect(reading.result.chainLength).toBe(3);
+		expect(reading.result.validHashes).toBe(3);
+		expect(reading.result.errors).toContain(noSequence("events.jsonl", 2));
+		expect(reading.result.errors).toContain(noSequence("events-0001.jsonl", 2));
+	});
+
+	it("E2. a mixed log: the reading's events are exactly what readLedgerEvents returns", () => {
+		const { vault } = mixedVault();
+		expect(verifyVaultReading(vault).events).toEqual(readLedgerEvents(vault));
+	});
+
+	it("E3. the anchored reading hands back the same full set", () => {
+		const { vault } = mixedVault();
+		const anchored = verifyVaultWithAnchorsReading(vault);
+		expect(idsOf(anchored.events)).toEqual(["evt-1", "evt-3", "evt-5", "evt-4", "evt-2"]);
+		expect(anchored.events).toEqual(verifyVaultReading(vault).events);
+	});
+
+	it("E4. a non-object line is still not an event: the full set holds objects only", () => {
+		// ev5, sequence-less, ev6, 42, ev7
+		const vault = writeVault({
+			"events.jsonl": insertAt(buildChain([5, null, 6, 7]), 3, "42"),
+		});
+		const reading = verifyVaultReading(vault);
+		expect(idsOf(reading.events)).toEqual(["evt-1", "evt-3", "evt-4", "evt-2"]);
+		expect(reading.result.chainLength).toBe(3);
+	});
+
+	it("E5. positive control: a log with no sequence at all hands back every event in file order", () => {
+		const chain = buildChain([null, null, null, null]);
+		const vault = writeVault({
+			"events.jsonl": chain.slice(0, 2),
+			"events-0001.jsonl": chain.slice(2),
+		});
+		const reading = verifyVaultReading(vault);
+		expect(idsOf(reading.events)).toEqual(["evt-1", "evt-2", "evt-3", "evt-4"]);
+		expect(reading.result.chainLength).toBe(4);
+	});
+
+	it("E6. positive control: a fully sequenced log hands back every event sorted", () => {
+		const chain = buildChain([1, 2, 3, 4]);
+		const vault = writeVault({
+			"events-0001.jsonl": chain.slice(0, 2),
+			"events.jsonl": chain.slice(2),
+		});
+		const reading = verifyVaultReading(vault);
+		expect(idsOf(reading.events)).toEqual(["evt-1", "evt-2", "evt-3", "evt-4"]);
+		expect(reading.result.chainLength).toBe(4);
+		expect(reading.result.valid).toBe(true);
+	});
+});
+
+/**
+ * THE INVARIANT every consumer of a reading relies on: `events` is the walked list (the sequenced
+ * events, sorted) FOLLOWED BY the sequence-less events in file order. So `events[i]` is walked
+ * event `i` (its hash is `orderedHashes[i]`) for every `i < chainLength`, and an index at or past
+ * `chainLength` has no leaf. Held by both packages.
+ */
+describe.each([
+	["core", verifyVaultReading],
+	["package", pkgVerifyVaultReading],
+] as const)("verifyVaultReading (%s): the walked events are the prefix of events", (_n, read) => {
+	/** The reading with its events typed alike for both packages. */
+	const readOf = (vault: string) => {
+		const r = read(vault);
+		return {
+			events: r.events as unknown as readonly Record<string, unknown>[],
+			orderedHashes: r.orderedHashes,
+			chainLength: r.result.chainLength,
+		};
+	};
+	const ids = (events: readonly Record<string, unknown>[]): unknown[] => events.map((e) => e.id);
+
+	function mixedVault(): string {
+		// events-0001.jsonl: evt-1 (1), evt-2 (none); events.jsonl: evt-3 (2), evt-4 (none), evt-5 (3)
+		const chain = buildChain([1, null, 2, null, 3]);
+		return writeVault({
+			"events-0001.jsonl": chain.slice(0, 2),
+			"events.jsonl": chain.slice(2),
+		});
+	}
+
+	it("I1. the first chainLength events are the walked ones, in order, with their own hashes", () => {
+		const r = readOf(mixedVault());
+		expect(r.orderedHashes).toHaveLength(3);
+		expect(r.chainLength).toBe(r.orderedHashes.length);
+		const walked = r.events.slice(0, r.chainLength);
+		expect(ids(walked)).toEqual(["evt-1", "evt-3", "evt-5"]);
+		expect(walked.map((e) => e.hash)).toEqual(r.orderedHashes);
+	});
+
+	it("I2. the events past chainLength are the sequence-less ones, in file order", () => {
+		const r = readOf(mixedVault());
+		const rest = r.events.slice(r.chainLength);
+		expect(ids(rest)).toEqual(["evt-4", "evt-2"]);
+		expect(rest.every((e) => e.sequence === undefined)).toBe(true);
+		expect(rest.some((e) => r.orderedHashes.includes(e.hash as string))).toBe(false);
+	});
+
+	it("I3. positive control: in a log with no sequence at all every event is walked", () => {
+		const r = readOf(writeVault({ "events.jsonl": buildChain([null, null, null]) }));
+		expect(r.events).toHaveLength(r.chainLength);
+		expect(r.events.map((e) => e.hash)).toEqual(r.orderedHashes);
 	});
 });

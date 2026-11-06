@@ -23,7 +23,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 // Zero-dep verify package, imported by relative path across the workspace.
-import { verifyVault as pkgVerifyVault } from "../../../verify/src/index.js";
+import {
+	verifyVault as pkgVerifyVault,
+	verifyVaultReading as pkgVerifyVaultReading,
+	verifyVaultWithAnchorsReading as pkgVerifyVaultWithAnchorsReading,
+} from "../../../verify/src/index.js";
 import {
 	buildMerkleTree as pkgBuildMerkleTree,
 	generateInclusionProof as pkgGenerateInclusionProof,
@@ -38,7 +42,11 @@ import {
 	type MerkleInclusionProof,
 	type MerkleSibling,
 } from "../../src/audit/merkle.js";
-import { verifyVault as coreVerifyVault } from "../../src/audit/verify.js";
+import {
+	verifyVault as coreVerifyVault,
+	verifyVaultReading as coreVerifyVaultReading,
+	verifyVaultWithAnchorsReading as coreVerifyVaultWithAnchorsReading,
+} from "../../src/audit/verify.js";
 import { GENESIS_HASH, VAULT_DIR } from "../../src/shared/constants.js";
 
 const dirs: string[] = [];
@@ -483,6 +491,38 @@ describe("HARDEN: core vs verify pkg agree on a log where some events have no se
 		expect(core.errors).toEqual([]);
 		expect(core.valid).toBe(true);
 		expect(core.chainLength).toBe(4);
+	});
+
+	// The events a reading hands back are what the figures are built from: every event of the log,
+	// the walked ones by sequence and then the rest in file order, and the same in both packages.
+	it("21. both hand back every event of a mixed log, in the same order", () => {
+		const chain = buildMixedChain([1, null, 2, null, 3]);
+		const vault = vaultWithSegments({
+			"events-0001.jsonl": chain.slice(0, 2),
+			"events.jsonl": chain.slice(2),
+		});
+		const core = coreVerifyVaultReading(vault);
+		const pkg = pkgVerifyVaultReading(vault);
+		expect(core.events).toEqual(pkg.events);
+		expect(core.orderedHashes).toEqual(pkg.orderedHashes);
+		expect(core.events.map((e) => e.id)).toEqual(["evt-1", "evt-3", "evt-5", "evt-4", "evt-2"]);
+		expect(core.orderedHashes).toHaveLength(3);
+
+		const coreAnchored = coreVerifyVaultWithAnchorsReading(vault);
+		const pkgAnchored = pkgVerifyVaultWithAnchorsReading(vault);
+		expect(coreAnchored.events).toEqual(pkgAnchored.events);
+		expect(coreAnchored.events).toEqual(core.events);
+	});
+
+	it("22. both hand back every event of a log with no sequence, in file order (positive control)", () => {
+		const chain = buildMixedChain([null, null, null, null]);
+		const vault = vaultWithSegments({
+			"events.jsonl": chain.slice(0, 2),
+			"events-0001.jsonl": chain.slice(2),
+		});
+		const core = coreVerifyVaultReading(vault);
+		expect(core.events).toEqual(pkgVerifyVaultReading(vault).events);
+		expect(core.events.map((e) => e.id)).toEqual(["evt-1", "evt-2", "evt-3", "evt-4"]);
 	});
 });
 
