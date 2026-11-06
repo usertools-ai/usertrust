@@ -256,7 +256,7 @@ export async function createUiServer(
 		} catch (err) {
 			return err instanceof Error ? err.message : String(err);
 		}
-		workspace ??= Workspace.open(settingsDir);
+		workspace ??= Workspace.open(settingsDir, rootDir);
 		return workspace;
 	}
 	/**

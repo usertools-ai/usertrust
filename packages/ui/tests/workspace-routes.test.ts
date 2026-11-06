@@ -13,6 +13,7 @@ import {
 	rmSync,
 	statSync,
 	symlinkSync,
+	writeFileSync,
 } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
@@ -479,6 +480,36 @@ describe("settings routes", () => {
 		expect(hashTree(vault)).toEqual(before);
 		// The rest of the dashboard still serves.
 		expect((await send(server.port, { path: "/api/summary" })).status).toBe(200);
+	});
+
+	it("a workspace named into a vault that does not exist yet is refused, and no vault is created", async () => {
+		// A project with no .usertrust yet, and a workspace under .USERTRUST: on a case-insensitive filesystem
+		// the first write's mkdir would create the vault and write into it.
+		const fresh = join(tempDir, "fresh");
+		mkdirSync(fresh);
+		ui = await createUiServer(fresh, { port: 0, workspaceDir: join(fresh, ".USERTRUST", "ws") });
+		const read = await getSettings(ui);
+		expect(read.problem).toMatch(/workspace would sit inside the vault/);
+		const res = await put(ui, valid);
+		expect(res.status).toBe(409);
+		// No entry that IS the vault on a case-insensitive filesystem, whatever its case.
+		expect(readdirSync(fresh).filter((e) => e.toLowerCase() === ".usertrust")).toEqual([]);
+		expect(readdirSync(fresh)).toEqual([]);
+	});
+
+	it("a torn but complete last record dated ahead: a PUT answers with the new value, history in order", async () => {
+		mkdirSync(wsDir, { recursive: true, mode: 0o700 });
+		const ahead = new Date(Date.now() + 3_600_000);
+		const torn = JSON.stringify({ at: ahead.toISOString(), key: "plan.monthlyUt", value: 100 });
+		writeFileSync(join(wsDir, "settings.jsonl"), torn, { mode: 0o600 });
+		const server = await start();
+		const res = await put(server, valid);
+		expect(res.status).toBe(200);
+		const written = JSON.parse(res.body) as SettingsPayload;
+		expect(written.values["plan.monthlyUt"]).toBe(500000);
+		expect(written.history.map((e) => e.value)).toEqual([100, 500000]);
+		expect(Date.parse(written.history[1]?.at ?? "")).toBe(ahead.getTime() + 1);
+		expect(written.problem).toBeNull();
 	});
 
 	it.skipIf(!posix)(

@@ -92,11 +92,38 @@ export function workspaceDir(vaultBase: string, env: NodeJS.ProcessEnv = process
 	return dir;
 }
 
-/** Throws when `dir` would sit inside the vault of the project rooted at `vaultBase`. */
+/**
+ * A path with letter case folded, for the containment check only. Folding widens what counts as inside the vault,
+ * never what counts as outside, so it is applied on every volume, case-sensitive ones included.
+ */
+function fold(p: string): string {
+	return p.normalize("NFC").toLowerCase();
+}
+
+/**
+ * Whether `target` lies under `root` through a first component that folds to the vault's name. Creating it would
+ * create the vault, on a case-insensitive filesystem, whatever case it is spelled in. Both paths are folded.
+ */
+function namesVault(root: string, target: string): boolean {
+	if (target === root || !isInside(target, root)) return false;
+	const first = target
+		.slice(root.length)
+		.split(sep)
+		.find((part) => part !== "");
+	return first === ".usertrust";
+}
+
+/**
+ * Throws when `dir` would sit inside the vault of the project rooted at `vaultBase`, or when making it would
+ * create that vault. `canonical` resolves only the part of a path that exists, so a vault that does not exist yet
+ * is known only by its spelling: both paths are case-folded, the parts that do not exist included, and a first
+ * component under the root that folds to `.usertrust` is refused. Either is checked before anything is created.
+ */
 export function assertOutsideVault(vaultBase: string, dir: string): void {
 	const root = realpathSync.native(vaultBase);
 	const vault = canonical(join(root, ".usertrust"));
-	if (isInside(canonical(dir), vault)) {
+	const target = fold(canonical(dir));
+	if (isInside(target, fold(vault)) || namesVault(fold(root), target)) {
 		const why =
 			root === canonical(homedir())
 				? "settings are off for a project rooted at your home directory"
@@ -171,7 +198,11 @@ export class Workspace {
 	#unsafe: string | null = null;
 	#unreadable: string | null = null;
 
-	private constructor(dir: string) {
+	/** The project root whose vault this workspace must stay out of, when the opener named one. */
+	readonly #vaultBase: string | undefined;
+
+	private constructor(dir: string, vaultBase?: string) {
+		this.#vaultBase = vaultBase;
 		this.#dir = resolve(dir);
 		this.#file = join(this.#dir, SETTINGS_FILE);
 	}
@@ -180,8 +211,8 @@ export class Workspace {
 	 * Opens the workspace for reading; see `problem`. Nothing is created: a directory that does not exist yet
 	 * reads as an empty workspace, and the first `append` creates it.
 	 */
-	static open(dir: string): Workspace {
-		const ws = new Workspace(dir);
+	static open(dir: string, vaultBase?: string): Workspace {
+		const ws = new Workspace(dir, vaultBase);
 		ws.#refresh();
 		return ws;
 	}
@@ -206,8 +237,12 @@ export class Workspace {
 		if (at !== undefined && (!(at instanceof Date) || !Number.isFinite(at.getTime()))) {
 			throw new Error("a setting needs a valid time");
 		}
+		// Containment is checked before the directory is made (making it could make the vault), and again on the
+		// made directory's real path, before anything is written into it.
+		this.#refuseInsideVault(this.#dir);
 		// Created here, on the first write, and never by a read. A failure here is thrown with its own code.
 		mkdirSync(this.#dir, { recursive: true, mode: 0o700 });
+		this.#refuseInsideVault(realpathSync.native(this.#dir));
 		const unsafe = this.#check();
 		if (unsafe !== null) {
 			this.#unsafe = unsafe;
@@ -270,6 +305,18 @@ export class Workspace {
 			.filter((p) => p.entry.key === key)
 			.sort((a, b) => a.ms - b.ms)
 			.map((p) => ({ ...p.entry }));
+	}
+
+	/** Throws a refusal when `dir` sits inside the vault of `#vaultBase` (or that check cannot be made). */
+	#refuseInsideVault(dir: string): void {
+		if (this.#vaultBase === undefined) return;
+		try {
+			assertOutsideVault(this.#vaultBase, dir);
+		} catch (err) {
+			throw new WorkspaceRefusal(
+				`settings are not saved: ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
 	}
 
 	/** The time of the latest entry, of any key; -Infinity when there is none. */
@@ -370,7 +417,13 @@ export class Workspace {
 			if (parsed === null) skip(i + 1);
 			else entries.push(parsed);
 		});
-		if (tail.trim() !== "") skip(lines.length + 1);
+		if (tail.trim() !== "") {
+			// A whole record whose newline never reached the disk (a crash between the two) is an entry: it dates
+			// the next one, and the next append completes its line. A fragment that does not parse is unreadable.
+			const parsed = parseLine(tail);
+			if (parsed === null) skip(lines.length + 1);
+			else entries.push(parsed);
+		}
 		this.#entries = entries;
 		this.#unreadable =
 			bad === 0

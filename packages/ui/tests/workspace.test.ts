@@ -7,6 +7,7 @@ import {
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
 	realpathSync,
 	renameSync,
@@ -91,6 +92,21 @@ describe("Workspace", () => {
 		const other = ws.append("people.rateUsdPerHour", 90);
 		expect(Date.parse(other.at)).toBe(ahead.getTime() + 2);
 		expect(ws.valueAt("people.rateUsdPerHour", null)).toBe(90);
+	});
+
+	it("a complete last record with no newline (a crash before it) still dates the next entry", () => {
+		mkdirSync(dir, { recursive: true, mode: 0o700 });
+		const ahead = new Date(Date.now() + 3_600_000);
+		const torn = JSON.stringify({ at: ahead.toISOString(), key: "plan.monthlyUt", value: 100 });
+		writeFileSync(file, torn, { mode: 0o600 });
+		const ws = Workspace.open(dir);
+		// The record is whole, so it is an entry, not an unreadable line.
+		expect(ws.valueAt("plan.monthlyUt", null)).toBe(100);
+		expect(ws.problem).toBeNull();
+		const fresh = ws.append("plan.monthlyUt", 200);
+		expect(Date.parse(fresh.at)).toBe(ahead.getTime() + 1);
+		expect(ws.valueAt("plan.monthlyUt", null)).toBe(200);
+		expect(readFileSync(file, "utf-8")).toBe(`${torn}\n${JSON.stringify(fresh)}\n`);
 	});
 
 	it("append then valueAt now", () => {
@@ -274,6 +290,30 @@ describe("workspaceDir", () => {
 		expect(
 			workspaceDir(v, { USERTRUST_WORKSPACE_DIR: join(tempDir, "abs") }).startsWith(tempDir),
 		).toBe(true);
+	});
+
+	it("a base naming the vault in another case is inside it, even before the vault exists, on any volume", () => {
+		// No .usertrust yet: the vault's path cannot be resolved on disk, so its spelling is all there is. On a
+		// case-insensitive filesystem (the macOS default) a first write under .USERTRUST would create the vault.
+		// The check folds case on every volume, so this holds on a case-sensitive one too.
+		const root = join(tempDir, "fresh");
+		mkdirSync(root);
+		for (const name of [".USERTRUST", ".UserTrust", ".usertrust"]) {
+			expect(
+				() => workspaceDir(root, { USERTRUST_WORKSPACE_DIR: join(root, name, "ws") }),
+				name,
+			).toThrow(/workspace would sit inside the vault/);
+		}
+		expect(readdirSync(root).filter((e) => e.toLowerCase() === ".usertrust")).toEqual([]);
+	});
+
+	it("a store opened with its project root refuses, before any mkdir, a write that would create the vault", () => {
+		const root = join(tempDir, "fresh-store");
+		mkdirSync(root);
+		const ws = Workspace.open(join(root, ".USERTRUST", "ws"), root);
+		expect(() => ws.append("plan.monthlyUt", 1)).toThrow(WorkspaceRefusal);
+		expect(() => ws.append("plan.monthlyUt", 1)).toThrow(/workspace would sit inside the vault/);
+		expect(readdirSync(root)).toEqual([]);
 	});
 
 	it("never inside the vault", () => {
