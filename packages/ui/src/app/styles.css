@@ -1,12 +1,13 @@
 @import "tailwindcss";
 
 /*
- * Violet accent on black, dark only: there is no light theme. usertrust gold marks the brand and the budget: the logo,
- * the rule beside the title and a healthy budget bar. The bar turns orange past 80% used and red past 95%.
- * Green (--approve, aliased --verify) is kept for the chain's integrity and an anchored check: the integrity pills, the
- * Verify button and the anchored verdict. An unanchored pass is neutral. The accent marks selection, the active tab,
- * progress fills, chart marks and the live pill; blue (--words) is the focus ring. Fonts are named, never shipped or fetched: a family is used only where it is
- * already installed, else the system stack after it.
+ * Gold accent on near-black, dark only: there is no light theme. usertrust gold (--accent, the brand colour) is the one
+ * accent: the logo, the rule beside the title, a healthy budget bar, selection, the active tab, progress fills, the live
+ * pill and a figure while it counts. The budget bar turns orange past 80% used and red past 95%. Amber (--info) is kept
+ * for held and in-flight states, never the accent. Green (--approve, aliased --verify) is kept for the chain's integrity
+ * and an anchored check: the integrity pills, the Verify button and the anchored verdict. An unanchored pass is neutral.
+ * Chart marks keep their own colour (--chart); blue (--words) is the focus ring. Fonts are named, never shipped or
+ * fetched: a family is used only where it is already installed, else the system stack after it.
  */
 
 :root {
@@ -25,11 +26,12 @@
 	   the decorative tier (panel edges, row rules, separators), which carries no meaning of its own. */
 	--control-line: rgba(255, 255, 255, 0.36);
 	--approve: #30d158;
-	--info: #ffb020;
+	--info: #ffb020; /* amber: held and in-flight states only, never the accent */
 	--words: #4da3ff;
 	--stakes: #ff5b5b;
 	--alert: #ff7a2f;
 	--gold: #e8b54b; /* the usertrust brand colour */
+	--accent: var(--gold); /* the one accent: 11.1:1 on --page, 10.1:1 on --surface */
 	--plan: #4fd1c5;
 	--intel: #9b7bff;
 	--sans: "Usertools Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -76,7 +78,7 @@ body {
 }
 
 ::selection {
-	background: rgba(155, 123, 255, 0.35);
+	background: rgba(232, 181, 75, 0.35);
 }
 
 :focus-visible {
@@ -115,7 +117,7 @@ body {
 
 @keyframes ut-glow {
 	from {
-		background: rgba(155, 123, 255, 0.24);
+		background: rgba(232, 181, 75, 0.24);
 	}
 	to {
 		background: transparent;
@@ -236,9 +238,9 @@ body {
 		text-transform: uppercase;
 		padding: 5px 9px;
 		border-radius: 999px;
-		border: 1px solid rgba(155, 123, 255, 0.45);
-		color: var(--intel);
-		background: rgba(155, 123, 255, 0.08);
+		border: 1px solid rgba(232, 181, 75, 0.45);
+		color: var(--accent);
+		background: rgba(232, 181, 75, 0.08);
 	}
 	.ut-live i {
 		width: 7px;
@@ -400,7 +402,7 @@ body {
 		display: block;
 		height: 100%;
 		border-radius: 2px;
-		background: var(--intel);
+		background: var(--accent);
 	}
 	.ut-mark {
 		font: 500 10.5px/1 var(--sans);
@@ -481,7 +483,7 @@ body {
 	.ut-info-btn:hover,
 	.ut-info-btn[aria-expanded="true"] {
 		color: var(--ink);
-		border-color: var(--intel);
+		border-color: var(--accent);
 	}
 	.ut-pop {
 		position: absolute;
@@ -575,7 +577,7 @@ body {
 	}
 	.ut-seg button[aria-selected="true"],
 	.ut-seg button[aria-pressed="true"] {
-		background: rgba(155, 123, 255, 0.22);
+		background: rgba(232, 181, 75, 0.22);
 		color: #fff;
 		box-shadow: 0 1px 0 rgba(255, 255, 255, 0.06) inset;
 	}
@@ -598,7 +600,7 @@ body {
 	}
 	.ut-search:focus {
 		outline: none;
-		border-color: var(--intel);
+		border-color: var(--accent);
 	}
 	.ut-btn {
 		border: 1px solid var(--control-line);
@@ -612,7 +614,7 @@ body {
 		flex: 0 0 auto;
 	}
 	.ut-btn:hover:not(:disabled) {
-		border-color: var(--intel);
+		border-color: var(--accent);
 	}
 	.ut-btn:disabled {
 		opacity: 0.4;
@@ -632,7 +634,7 @@ body {
 	}
 	.ut-ghost:hover {
 		color: var(--ink);
-		border-color: var(--intel);
+		border-color: var(--accent);
 	}
 
 	/* ── Filter bar ── */
@@ -665,11 +667,11 @@ body {
 		max-width: 260px;
 	}
 	.ut-chip:hover {
-		border-color: var(--intel);
+		border-color: var(--accent);
 	}
 	.ut-chip.on {
-		background: rgba(155, 123, 255, 0.22);
-		border-color: rgba(155, 123, 255, 0.65);
+		background: rgba(232, 181, 75, 0.22);
+		border-color: rgba(232, 181, 75, 0.65);
 		color: var(--ink);
 	}
 	.ut-chip .n {
@@ -703,10 +705,10 @@ body {
 		cursor: pointer;
 	}
 	.ut-opt:hover {
-		background: rgba(155, 123, 255, 0.1);
+		background: rgba(232, 181, 75, 0.1);
 	}
 	.ut-opt input {
-		accent-color: var(--intel);
+		accent-color: var(--accent);
 	}
 	.ut-opt .t {
 		overflow: hidden;
@@ -750,7 +752,7 @@ body {
 	.ut-field input:focus,
 	.ut-field-bare:focus {
 		outline: none;
-		border-color: var(--intel);
+		border-color: var(--accent);
 	}
 	.ut-active {
 		display: flex;
@@ -817,7 +819,7 @@ body {
 	}
 	.ut-cap button[aria-pressed="true"] {
 		color: var(--ink);
-		background: rgba(155, 123, 255, 0.16);
+		background: rgba(232, 181, 75, 0.16);
 	}
 	.ut-cap .lead {
 		margin-right: 4px;
@@ -856,8 +858,8 @@ body {
 		background: rgba(255, 255, 255, 0.03);
 	}
 	.ut-row.sel {
-		border-color: rgba(155, 123, 255, 0.75);
-		background: rgba(155, 123, 255, 0.14);
+		border-color: rgba(232, 181, 75, 0.75);
+		background: rgba(232, 181, 75, 0.14);
 	}
 	.ut-row.fresh {
 		animation: ut-glow 2.6s ease-out both;
@@ -1125,7 +1127,7 @@ body {
 	}
 	.ut-x:hover {
 		color: var(--ink);
-		border-color: var(--intel);
+		border-color: var(--accent);
 	}
 	.ut-pills {
 		display: flex;
@@ -1191,7 +1193,7 @@ body {
 		text-underline-offset: 3px;
 	}
 	.ut-copy:hover {
-		text-decoration-color: var(--intel);
+		text-decoration-color: var(--accent);
 	}
 	.ut-copy .done {
 		color: var(--body);
@@ -1372,6 +1374,17 @@ body {
 	}
 	.ut-chart-table thead th {
 		color: var(--body);
+	}
+	/* A figure that counts to a new value: tabular digits, and a width (set inline, in ch) held for the whole count, so
+	   nothing beside it moves. It reads gold while it counts and settles back to the figure's own colour. */
+	.ut-tick {
+		display: inline-block;
+		font-variant-numeric: tabular-nums;
+		transition: color 600ms var(--ease-enter);
+	}
+	.ut-tick[data-ticking="true"] {
+		color: var(--accent);
+		transition: none;
 	}
 	/* Text for a screen reader only: out of the layout, still in the accessibility tree. */
 	.ut-sr-only {
@@ -1782,7 +1795,12 @@ body {
 	}
 	/* A new row keeps its signal with motion off: a static accent edge instead of the glow. */
 	.ut-row.fresh {
-		box-shadow: inset 2px 0 0 var(--intel);
-		background: rgba(155, 123, 255, 0.12);
+		box-shadow: inset 2px 0 0 var(--accent);
+		background: rgba(232, 181, 75, 0.12);
+	}
+	/* A changed figure shows its final value at once (the component skips the count), in its own colour. */
+	.ut-tick,
+	.ut-tick[data-ticking="true"] {
+		color: inherit;
 	}
 }

@@ -83,10 +83,10 @@ function contrast(a: Rgba, b: Rgba): number {
 	return (hi + 0.05) / (lo + 0.05);
 }
 
-/** Resolve one level of `var(--x)` against the :root tokens. */
+/** Resolve `var(--x)` against the :root tokens, through every level of aliasing (`--accent` is `var(--gold)`). */
 function resolve(value: string): string {
 	const m = /^var\((--[\w-]+)\)$/.exec(value);
-	return m ? token(m[1] ?? "") : value;
+	return m ? resolve(token(m[1] ?? "")) : value;
 }
 
 const SURFACES = ["--page", "--surface", "--raised"] as const;
@@ -191,4 +191,15 @@ describe("control borders meet WCAG 1.4.11 non-text contrast", () => {
 			expect(luminance(over(focus, bg)), selector).toBeGreaterThan(rest);
 		}
 	});
+});
+
+describe("the gold accent meets WCAG AA as text", () => {
+	// The accent colours text (the live pill, a counting figure), so it is held to the 4.5:1 of small text.
+	for (const name of ["--page", "--surface"] as const) {
+		it(`--accent on ${name} is at least 4.5:1`, () => {
+			const bg = parseColour(token(name));
+			expect(resolve("var(--accent)")).toBe(token("--gold"));
+			expect(contrast(parseColour(resolve("var(--accent)")), bg)).toBeGreaterThanOrEqual(4.5);
+		});
+	}
 });
