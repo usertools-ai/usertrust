@@ -300,7 +300,7 @@ interface ReceiptCheck {
 
 /**
  * The INDEPENDENT count: the caller's own receipts (`--receipts`: JSON Lines, or one JSON array),
- * each checked against `events`, the events the verification just walked (never the log read again,
+ * each checked against `events`, the verification's own reading (never the log read again,
  * where an event that was never hash-checked could audit a receipt). A receipt is audited only if its `auditHash` is its OWN event on
  * the chain: one whose `data.transferId` is its `transferId` and whose kind is the event that
  * records its spend (`llm_call`, or an action's `actionKind`). Another event of the same transfer (a

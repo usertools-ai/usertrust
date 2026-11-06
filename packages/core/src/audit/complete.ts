@@ -5,14 +5,16 @@
  * The vault verdict that `usertrust verify` and `usertrust report` BOTH print: integrity AND completeness, on the live vault.
  *
  * Integrity (`verifyVaultReading`) walks the chain link by link; completeness reads the writer's dead-letter queue against the
- * events it just walked, because a chain with an event missing still verifies link by link. They are one function so that no
+ * events of that same reading, because a chain with an event missing still verifies link by link. They are one function so that no
  * second reader can hold less than the verifier reads: the weekly report once copied the vault into a snapshot and judged the
  * copy, and the copy diverged from `verify` five times (a missing dead letter, a failed copy, a directory where a sidecar
  * belongs, a dangling segment, a queue drained between two reads). The report now prints this verdict verbatim and makes no
  * integrity claim of its own.
  *
- * ONE READ PER VERDICT: the events returned are the ones the verifier walked, and the dead letters are judged against THOSE,
- * never against the log read again.
+ * ONE READ PER VERDICT: the events returned are the verifier's own reading (every event on file:
+ * the walked ones, then any left out of the walk), and the dead letters are judged against THOSE,
+ * never against the log read again. A dead letter whose event is on file but left out of the walk
+ * is present; the vault fails on that event's own error.
  */
 
 import {
@@ -24,7 +26,7 @@ import {
 import type { PersistedAuditEvent } from "./read.js";
 import { type VaultReading, verifyVaultReading } from "./verify.js";
 
-/** The dead-letter queue read against `events`, the events a verification just walked. */
+/** The dead-letter queue read against `events`, the events of a verification's own reading. */
 export function deadLettersAgainst(
 	vaultDir: string,
 	events: readonly PersistedAuditEvent[],
@@ -37,7 +39,7 @@ export function deadLettersAgainst(
 }
 
 export interface CompleteVerification {
-	/** The verifier's own reading: its verdict and the events it walked. */
+	/** The verifier's own reading: its verdict and every event it read. */
 	reading: VaultReading;
 	/** The dead-letter queue, judged against those events. */
 	deadLetters: ChainDeadLetters | ChainDeadLettersUnreadable;

@@ -69,7 +69,12 @@ export interface VaultVerificationResult {
 /** A vault's verdict, and the events it was reached on: what every later check must read. */
 export interface VaultReading {
 	result: VaultVerificationResult;
-	/** The events walked, in chain order, as parsed from their lines (JSON objects only). */
+	/**
+	 * Every event on file, as parsed from its line (JSON objects only): the walked events in chain
+	 * order, then the events left out of the walk (in a log where only some events have a sequence,
+	 * the ones without), in file order. The first `result.chainLength` are the walked ones, and
+	 * `orderedHashes[i]` is the hash of `events[i]`; an event past them has no leaf.
+	 */
 	events: readonly PersistedAuditEvent[];
 	/** Every walked line's stored hash, in chain order (`""` where it is not a string). */
 	orderedHashes: readonly string[];
@@ -396,12 +401,10 @@ export function verifyVaultReading(vaultPath: string): VaultReading {
 	// walk, and a leading deletion or a gap among the other events was never named.
 	const sequenced = events.filter((e) => typeof e.sequence === "number");
 	const legacy = sequenced.length === 0;
-	if (!legacy) {
-		for (const e of events) {
-			if (typeof e.sequence !== "number") {
-				errors.push(`event without sequence (${scrubForError(basename(e.sourceFile))}:${e.line})`);
-			}
-		}
+	// The events left out of the walk, in file order: none in a legacy log.
+	const unwalked = legacy ? [] : events.filter((e) => typeof e.sequence !== "number");
+	for (const e of unwalked) {
+		errors.push(`event without sequence (${scrubForError(basename(e.sourceFile))}:${e.line})`);
 	}
 	const ordered = legacy
 		? events
@@ -482,9 +485,15 @@ export function verifyVaultReading(vaultPath: string): VaultReading {
 			firstEvent,
 			lastEvent,
 		},
-		// Every walked line is a JSON object (step 5 refuses the rest, as its own error), so this
-		// filter only narrows the type; it is kept so no later check can ever be handed a non-object.
-		events: ordered
+		// THE INVARIANT every reader of `events` relies on: the walked events (`ordered`) FOLLOWED BY
+		// the events left out of the walk, in file order. So `events[i]` is walked event `i`, whose
+		// hash is `orderedHashes[i]`, for every `i < chainLength`, and an index at or past
+		// `chainLength` has no leaf. A figure (a spend, a transaction list) is built from every event
+		// on file; a check on the chain reads the first `chainLength`. Every parsed line is a JSON
+		// object (step 5 refuses the rest, as its own error), so the filter only narrows the type and
+		// removes nothing, which the invariant needs; it is kept so no later check can ever be handed a
+		// non-object.
+		events: [...ordered, ...unwalked]
 			.map((e) => e.parsed as unknown)
 			.filter(
 				(p): p is PersistedAuditEvent => p !== null && typeof p === "object" && !Array.isArray(p),
@@ -531,7 +540,10 @@ export interface AnchoredVaultVerificationResult extends VaultVerificationResult
 /** {@link VaultReading} for the anchored verdict. */
 export interface AnchoredVaultReading {
 	result: AnchoredVaultVerificationResult;
-	/** The events walked, in chain order: the ones the anchors were checked against. */
+	/**
+	 * The reading's events, as in {@link VaultReading}: the walked events in chain order (the ones
+	 * the anchors were checked against), then any left out of the walk, in file order.
+	 */
 	events: readonly PersistedAuditEvent[];
 }
 

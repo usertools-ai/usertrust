@@ -70,6 +70,12 @@ export interface ReceiptData {
 	 * so the correlated detection message rides alongside rather than being lost.
 	 */
 	readonly detectionReason?: string | undefined;
+	/**
+	 * The event is on file but outside the checked chain: it has no sequence in a log where other
+	 * events have one, so the walk left it out and it has no leaf. The Position row says so instead
+	 * of printing `Event N of M`, which would name a place in the chain the event does not hold.
+	 */
+	readonly outsideCheckedChain?: true | undefined;
 }
 
 // ── Formatting helpers ──
@@ -477,9 +483,15 @@ export function renderReceipt(data: ReceiptData): string {
 	// ── Chain verification ──
 	lines.push(row(pad("  CHAIN VERIFICATION")));
 	lines.push(divider());
-	lines.push(
-		row(`${dotted("  Position", `Event ${event.sequence ?? "?"} of ${chainLength}`, WIDTH - 1)} `),
-	);
+	const outside = data.outsideCheckedChain === true;
+	const position = outside
+		? "outside the checked chain"
+		: `Event ${event.sequence ?? "?"} of ${chainLength}`;
+	lines.push(row(`${dotted("  Position", position, WIDTH - 1)} `));
+	if (outside) {
+		lines.push(row(pad("  It has no sequence, so it has no leaf.")));
+		lines.push(row(pad("  Its status is what the record says, not a checked fact.")));
+	}
 	lines.push(row(`${dotted("  Hash", forDisplay(truncHash(event.hash)), WIDTH - 1)} `));
 	lines.push(row(`${dotted("  Prev", forDisplay(truncHash(event.previousHash)), WIDTH - 1)} `));
 

@@ -420,6 +420,44 @@ describe("GET /api/at", () => {
 		});
 	}
 
+	it("a mixed log (one event without a sequence): invalid at every position, and the event is still listed", async () => {
+		// Sequences 1, none, 2, 3. The reader lists the sequenced events by sequence and then the one without, so it sits
+		// at the last position; its successor in the file no longer links to the event before it, so the break is at 1.
+		// The verifier names the event as its own error, which names no position: no position reads valid.
+		let previousHash = GENESIS;
+		const events = [1, null, 2, 3].map((sequence, i) => {
+			const rest = {
+				actor: "local",
+				data: { cost: 10 * (i + 1) },
+				id: `evt-${i}`,
+				kind: "llm_call",
+				previousHash,
+				...(sequence !== null ? { sequence } : {}),
+				timestamp: new Date(T0 + i * 60_000).toISOString(),
+			};
+			const hash = createHash("sha256").update(canonicalize(rest)).digest("hex");
+			previousHash = hash;
+			return { ...rest, hash } as PersistedAuditEvent;
+		});
+		writeEvents(events);
+		await start();
+		const summary = await summaryChain();
+		expect(summary).toMatchObject({ valid: false, breakIndex: 1 });
+		expect(summary.errors).toContain("event without sequence (events.jsonl:2)");
+		expect(await verdicts()).toEqual({
+			summary: { valid: false, breakIndex: 1 },
+			first: { valid: false, breakIndex: 1 },
+			head: { valid: false, breakIndex: 1 },
+		});
+		// Nothing is hidden: four positions, the last is the event without a sequence, and the spend counts it.
+		const head = (await at("pos=3")).body;
+		expect(head).toMatchObject({ pos: 3, head: 3, clamped: false });
+		expect(head.ts).toBe(events[1]?.timestamp);
+		expect(head.spentUt).toBe(100);
+		expect(head.counts).toMatchObject({ llm_call: 4 });
+		expect((await at("pos=0")).body.spentUt).toBe(10);
+	});
+
 	it("t with mixed precision and no zone", async () => {
 		writeEvents(chain(Array.from({ length: 5 }, () => ({ kind: "llm_call", data: { cost: 1 } }))));
 		await start();

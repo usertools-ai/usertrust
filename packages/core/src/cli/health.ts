@@ -352,9 +352,10 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	// dead-lettered; one that is not on the chain is an integrity failure here, exactly as a broken
 	// link is (a vault with half its events dead-lettered read "verified [ok]"). A dead-letter
 	// queue that cannot be read is one too: whether events are missing is unknown, not "none".
-	// The dead letters are matched against the events the verification walked, never `events`
-	// above: that is an earlier read, and a log changed between the two had the integrity line
-	// describe one chain and the completeness line another.
+	// The dead letters are matched against the events of the verification's own reading (every
+	// event on file, the ones left out of the walk included), never `events` above: that is an
+	// earlier read, and a log changed between the two had the integrity line describe one chain and
+	// the completeness line another.
 	const eventsByHash = new Map(verifiedEvents.map((e) => [e.hash, e]));
 	const deadLetters = readChainDeadLetters(vaultPath, (hash) => eventsByHash.get(hash));
 	const completenessErrors =
