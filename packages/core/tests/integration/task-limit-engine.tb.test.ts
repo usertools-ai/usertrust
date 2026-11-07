@@ -102,7 +102,8 @@ afterEach(async () => {
 /** Polls `done` every 250 ms; throws when the ledger has not got there within the bound. */
 async function until(what: string, done: () => Promise<boolean>): Promise<void> {
 	// timing: 15 s budget for the ledger to expire a 2 s hold (removal is best-effort, with no
-	// documented bound); NOT YET MEASURED for this file: the gate records the slowest of 20 runs.
+	// documented bound); the slowest whole row over 20 runs on a quiet 14-core machine took 3.1 s,
+	// so the wait itself is under that (about 5x headroom).
 	const deadline = Date.now() + 15_000;
 	while (!(await done())) {
 		// timing: the same 15 s budget as the deadline above; the poll interval is 250 ms.
@@ -203,7 +204,7 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle: the engine's task-limit legs", (
 		}
 		const [after] = await first.lookupAccounts([t.task]);
 		expect(after?.debits_pending).toBe(0n);
-	}, 30_000); // timing: 30 s test budget for 20 pairs on four clients; NOT YET MEASURED on CI.
+	}, 30_000); // timing: 30 s test budget for 20 pairs on four clients; slowest of 20 runs on a quiet 14-core machine: 1.3 s (about 23x headroom).
 
 	it("task legs stay off the usertoken ledger", async () => {
 		const engine = await newEngine(1_000_000);
@@ -287,7 +288,7 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle: the engine's task-limit legs", (
 		await expect(engine.lookupTaskLimit(key)).resolves.toEqual({ limit: 1_000, spent: 0, held: 0 });
 		// A void of the expired hold is success and clears the entry.
 		await expect(engine.voidPendingSpend("c1")).resolves.toBeUndefined();
-	}, 30_000); // timing: 30 s test budget over the 15 s expiry poll above; NOT YET MEASURED on CI.
+	}, 30_000); // timing: 30 s test budget over the 15 s expiry poll above; slowest of 20 runs on a quiet 14-core machine: 3.1 s (about 10x headroom).
 
 	it("a lost reply of a pair refused by its limit leg is re-sent under new ids and refused on its merits", async () => {
 		const tb = newClient();
