@@ -73,7 +73,7 @@ export interface ReceiptData {
 	/**
 	 * The event is on file but outside the checked chain: it has no sequence in a log where other
 	 * events have one, so the walk left it out and it has no leaf. The Position row says so instead
-	 * of printing `Event N of M`, which would name a place in the chain the event does not hold.
+	 * of printing a position, which would name a place in the chain the event does not hold.
 	 */
 	readonly outsideCheckedChain?: true | undefined;
 }
@@ -484,9 +484,18 @@ export function renderReceipt(data: ReceiptData): string {
 	lines.push(row(pad("  CHAIN VERIFICATION")));
 	lines.push(divider());
 	const outside = data.outsideCheckedChain === true;
+	// `Event N of M` claims place N in a chain of M. That holds only when the chain checked out, because
+	// then its sequences run 1..M. On a vault that fails, M counts the events the walk checked and N is the
+	// sequence the record carries, so they can disagree (`Event 5 of 4` after a deleted start). There the
+	// row names the sequence and the count apart and claims no place.
+	const checked = `${chainLength} ${chainLength === 1 ? "event" : "events"} checked`;
 	const position = outside
 		? "outside the checked chain"
-		: `Event ${event.sequence ?? "?"} of ${chainLength}`;
+		: chainVerified
+			? `Event ${event.sequence ?? "?"} of ${chainLength}`
+			: event.sequence === undefined
+				? `no sequence (${checked})`
+				: `sequence ${event.sequence} (${checked})`;
 	lines.push(row(`${dotted("  Position", position, WIDTH - 1)} `));
 	if (outside) {
 		lines.push(row(pad("  It has no sequence, so it has no leaf.")));
