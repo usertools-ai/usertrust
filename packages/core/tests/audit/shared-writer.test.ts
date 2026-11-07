@@ -143,7 +143,7 @@ describe("openSharedAuditWriter: one writer per vault per process", () => {
 		expect(a.getWriteFailures() + b.getWriteFailures()).toBe(0);
 		expect(a.isDegraded() || b.isDegraded()).toBe(false);
 		expect(verifyVault(join(tempDir, VAULT_DIR))).toMatchObject({ valid: true, chainLength: 60 });
-	});
+	}, 60_000); // timing: 60 s test budget for 60 fsynced appends; under 8-way load on a 14-core host they took 4.9 to 5.5 s, p50 5.2 s, max 5.5 s over 56 runs (11x headroom on the max). The default 5 s timed out.
 
 	it("CONTROL: two writers of their own (the old shape) — the second's every append fails on the lock", async () => {
 		const { createAuditWriter } = await import("../../src/audit/chain.js");
