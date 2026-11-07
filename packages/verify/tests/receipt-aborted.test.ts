@@ -482,8 +482,10 @@ describe("verifyTransaction — absences the normalizer must not invent", () => 
 			]);
 			const result = verifyTransaction(dir, "tx_l");
 			expect(result.found).toBe(true);
-			// Rendered as unknown rather than as event 0 of N.
-			expect(result.receipt).toMatch(/Event \? of/);
+			// Rendered as unknown rather than as event 0 of N. INTENDED CHANGE: this vault's hashes are made up, so
+			// its chain does not check out and the row is `no sequence (N events checked)`, not `Event ? of N`.
+			expect(result.receipt).toContain("no sequence (1 event checked)");
+			expect(result.receipt).not.toMatch(/Event \S+ of/);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
