@@ -42,6 +42,7 @@ import {
 	TASK_ACCOUNT_SCHEMA,
 	TaskLimitLegError,
 	TBTransferError,
+	TransferIdRetiredError,
 	TransferReplayMismatchError,
 	TrustTBClient,
 	XFER_SPEND,
@@ -611,6 +612,19 @@ describe("postLinkedPair and voidLinkedPair", () => {
 		expect(balance(TASK)).toMatchObject({ debits_pending: 0n, debits_posted: 250n });
 	});
 
+	it("a full post sends the held amount, never amount_max", async () => {
+		// The replay compare for a post rests on this: a concrete amount is stored as sent, so a
+		// replay compares it exactly. amount_max would be stored as the pending's amount
+		// (state_machine.zig@0.17.9:4119) and could only be checked against the pending record.
+		const { payerId, limitId } = await heldPair(400);
+		await client.postLinkedPair(payerId, limitId, 400);
+		const sent = sentBatch(0);
+		expect(sent.map((t) => t.amount)).toEqual([400n, 400n]);
+		for (const t of sent) expect(t.amount).not.toBe(fixture.AMOUNT_MAX);
+		expect(sent.map((t) => fake.transfers.get(t.id)?.amount)).toEqual([400n, 400n]);
+		expect(balance(TASK)).toMatchObject({ debits_pending: 0n, debits_posted: 400n });
+	});
+
 	it("a post above the pending amount is the payer leg's code, as a plain TBTransferError", async () => {
 		const { payerId, limitId } = await heldPair(400);
 		const err = await settle(client.postLinkedPair(payerId, limitId, 401));
@@ -737,6 +751,30 @@ describe("immediateTransfer on the task-limit ledger", () => {
 		const err = await settle(client.immediateTransfer({ ...grant, amount: 700 }));
 		expect(err).toBeInstanceOf(TBTransferError);
 		expect((err as TBTransferError).code).toBe(S.exists_with_different_amount);
+	});
+
+	it("a grant sent before its task account exists retires the derived grant id", async () => {
+		// Why ensure must be strictly sequential (operator, then account, then grant): the first
+		// attempt fails with credit_account_not_found, a transient code, and TigerBeetle then
+		// answers id_already_failed to that id for good.
+		const operator = await client.createTaskLimitOperator("local");
+		const key = TrustTBClient.deriveTaskLimitAccountId("local", "early");
+		const grant = {
+			ledger: LEDGER_TASK_LIMITS,
+			transferId: TrustTBClient.deriveTransferId(key.toString(16).padStart(32, "0"), "limit"),
+			debitAccountId: operator,
+			creditAccountId: key,
+			amount: 500,
+			code: XFER_TASK_LIMIT_GRANT,
+			userData128: key,
+		};
+		const early = await settle(client.immediateTransfer(grant));
+		expect(early).toBeInstanceOf(TBTransferError);
+		expect((early as TBTransferError).code).toBe(S.credit_account_not_found);
+		await client.createTaskLimitAccount("local", "early");
+		const retired = await settle(client.immediateTransfer(grant));
+		expect(retired).toBeInstanceOf(TransferIdRetiredError);
+		expect(balance(key).credits_posted).toBe(0n);
 	});
 
 	it("immediateTransfer without a ledger stays on the usertoken ledger", async () => {

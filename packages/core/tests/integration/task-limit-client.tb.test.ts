@@ -76,6 +76,7 @@ import {
 	LEDGER_USERTOKENS,
 	TaskLimitLegError,
 	TBTransferError,
+	TransferIdRetiredError,
 	TrustTBClient,
 	XFER_PURCHASE,
 	XFER_SPEND,
@@ -354,6 +355,23 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle: task-limit ledger primitives", (
 			}),
 		];
 		const legsOf = (batch: T[]) => ({ a: batch[0]?.id ?? 0n, b: batch[1]?.id ?? 0n });
+		/**
+		 * What each ledger STORED for `batch`, every field but the timestamp. A post or void stores
+		 * the pending's accounts, ledger and code, and the pending's user data where 0 was sent
+		 * (state_machine.zig@0.17.9:4195-4209): the fake must store the same, or a replay compare
+		 * that passes on it could fail on the cluster.
+		 */
+		const storedAgree = async (name: string, batch: T[]) => {
+			const strip = (list: T[]) =>
+				Object.fromEntries(
+					list.map(({ timestamp: _t, ...rest }) => [rest.id.toString(16), rest]),
+				);
+			const ids = batch.map((t) => t.id);
+			const real = await raw.lookupTransfers(ids);
+			const faked = await fake.client.lookupTransfers(ids);
+			expect({ step: name, found: real.length }).toEqual({ step: name, found: ids.length });
+			expect({ step: name, stored: strip(faked) }).toEqual({ step: name, stored: strip(real) });
+		};
 		const resolve = (legs: { a: bigint; b: bigint }, flag: number, amount: bigint): T[] => [
 			transferOf({ id: freshId(), pending_id: legs.a, amount, flags: flag | TF.linked }),
 			transferOf({ id: freshId(), pending_id: legs.b, amount, flags: flag }),
@@ -385,11 +403,10 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle: task-limit ledger primitives", (
 			pair(ids.payer, ids.task, 601n, LONG_S, legsOf(first)),
 			["exists_with_different_amount", "linked_event_failed"],
 		);
-		await step(
-			"post part of a pair",
-			resolve(legsOf(first), TF.post_pending_transfer, 250n),
-			["created", "created"],
-		);
+		const partial = resolve(legsOf(first), TF.post_pending_transfer, 250n);
+		await step("post part of a pair", partial, ["created", "created"]);
+		await storedAgree("the stored post pair", partial);
+		await step("a replayed post pair", partial, ["exists", "linked_event_failed"]);
 		const second = pair(ids.payer, ids.task, 100n);
 		await step("a second pair", second, ["created", "created"]);
 		await step(
@@ -397,10 +414,10 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle: task-limit ledger primitives", (
 			resolve(legsOf(second), TF.post_pending_transfer, 150n),
 			["exceeds_pending_transfer_amount", "linked_event_failed"],
 		);
-		await step("void a pair", resolve(legsOf(second), TF.void_pending_transfer, 0n), [
-			"created",
-			"created",
-		]);
+		const voided = resolve(legsOf(second), TF.void_pending_transfer, 0n);
+		await step("void a pair", voided, ["created", "created"]);
+		await storedAgree("the stored void pair", voided);
+		await step("a replayed void pair", voided, ["exists", "linked_event_failed"]);
 		const [payerLeg] = pair(ids.payer, ids.task, 1n);
 		if (!payerLeg) throw new Error("pair() builds two transfers");
 		await step(
@@ -497,6 +514,49 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle: task-limit ledger primitives", (
 		]);
 		const [task] = await tb.lookupAccounts([t.task]);
 		expect(task).toMatchObject({ debits_pending: 0n, debits_posted: 300n });
+
+		// And a replayed void: the cluster answers the resend [exists, linked_event_failed], and
+		// the client's compare by TigerBeetle's own rule (state_machine.zig@0.17.9:4301-4381)
+		// accepts the stored void, which carries the pending's accounts, ledger, code and amount.
+		const released = await tb.createLinkedPendingPair(t.pair(200));
+		flow.loseNextPairReply = { beforeError: async () => {} };
+		await tb.voidLinkedPair(released.payerId, released.limitId);
+		expect(flow.pairAnswers.slice(4)).toEqual([
+			["created", "created"],
+			["created", "created"],
+			["exists", "linked_event_failed"],
+		]);
+		expect(await t.pending()).toEqual({ task: 0n, payer: 0n });
+		const [after] = await tb.lookupAccounts([t.task]);
+		expect(after).toMatchObject({ debits_posted: 300n, credits_posted: 1_000n });
+	});
+
+	it("a grant sent before its task account exists retires the derived grant id", async () => {
+		// Why ensure is strictly sequential: credit_account_not_found is a transient code, and a
+		// transfer id whose first attempt failed with one is refused for good (id_already_failed,
+		// create_transfers.md). This task id can never get its limit under the derived grant id.
+		const tb = newClient();
+		const namespace = `tl-${randomUUID()}`;
+		const taskId = `task-${randomUUID().slice(0, 8)}`;
+		const operator = await tb.createTaskLimitOperator(namespace);
+		const key = TrustTBClient.deriveTaskLimitAccountId(namespace, taskId);
+		const grant = {
+			ledger: LEDGER_TASK_LIMITS,
+			transferId: TrustTBClient.deriveTransferId(key.toString(16).padStart(32, "0"), "limit"),
+			debitAccountId: operator,
+			creditAccountId: key,
+			amount: 500,
+			code: XFER_TASK_LIMIT_GRANT,
+			userData128: key,
+		};
+		const early = await tb.immediateTransfer(grant).catch((e: unknown) => e);
+		expect(early).toBeInstanceOf(TBTransferError);
+		expect((early as TBTransferError).code).toBe(FAKE_STATUS.credit_account_not_found);
+		await tb.createTaskLimitAccount(namespace, taskId);
+		const retired = await tb.immediateTransfer(grant).catch((e: unknown) => e);
+		expect(retired).toBeInstanceOf(TransferIdRetiredError);
+		expect((retired as TBTransferError).code).toBe(FAKE_STATUS.id_already_failed);
+		expect((await tb.lookupAccounts([key]))[0]?.credits_posted).toBe(0n);
 	});
 
 	it("a pair replayed after it expired is not a live hold", async () => {
@@ -525,7 +585,11 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle: task-limit ledger primitives", (
 		expect(err).toBeInstanceOf(TBTransferError);
 		expect(err).not.toBeInstanceOf(TaskLimitLegError);
 		expect((err as TBTransferError).code).toBe(FAKE_STATUS.pending_transfer_expired);
+		// The task's spent EXCLUDES the call whose settle did not complete (disclosed, not charged):
+		// nothing is posted on the task, nothing is held, and its limit is untouched.
 		const [task] = await tb.lookupAccounts([t.task]);
-		expect(task).toMatchObject({ debits_pending: 0n, debits_posted: 0n });
+		expect(task?.debits_posted).toBe(0n);
+		expect(task?.debits_pending).toBe(0n);
+		expect(task?.credits_posted).toBe(1_000n);
 	}, 60_000); // timing: 60 s test budget over the 30 s expiry poll above; NOT YET MEASURED on CI.
 });
