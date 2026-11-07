@@ -133,8 +133,8 @@ describe("readTailText: files it reads only the end of", () => {
 	});
 
 	it("a last line longer than the window: the window grows back past its start", () => {
-		const big = `{"sequence":51,"pad":"${"x".repeat(1000)}"}`;
-		const path = fileWith(terminated([...shortLines(50), big]));
+		const big = `{"sequence":501,"pad":"${"x".repeat(1000)}"}`;
+		const path = fileWith(terminated([...shortLines(500), big]));
 		for (const window of [16, 32]) {
 			const r = readTailText(path, window);
 			expect(r.whole).toBe(false);
