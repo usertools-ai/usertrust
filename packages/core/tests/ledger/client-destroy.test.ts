@@ -200,7 +200,10 @@ const ledgerAnswers = (replay: boolean): Respond => {
 	return async (_client, op, batch) => {
 		if (op === "createTransfers") {
 			for (const transfer of batch as Array<{ id: bigint }>) stored.set(transfer.id, transfer);
-			if (!replay) return [];
+			// A linked pair must be answered one result per transfer (0.17.9 answers every event), or
+			// the client refuses the answer; a single transfer keeps the empty "all created" answer.
+			const created = { status: 4294967295 };
+			if (!replay) return batch.length === 2 ? [created, created] : [];
 			// A caller-supplied id replayed: `exists`, and the lookup finds the same transfer. A
 			// linked pair replayed: `exists` breaks the chain, so its second leg answers
 			// linked_event_failed (1), and the lookup finds both.

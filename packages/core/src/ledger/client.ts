@@ -24,6 +24,7 @@ import {
 	parentUserIdRefusal,
 	tbId,
 } from "../shared/ids.js";
+import { PRINCIPAL_FIELD_PATTERN } from "../shared/principal.js";
 
 /** Typed error carrying the numeric TB error code for structured matching. */
 export class TBTransferError extends Error {
@@ -100,6 +101,19 @@ export class TransferIdRetiredError extends TBTransferError {
 			`Transfer id ${transferId} is retired: its first attempt failed, and the same id can never succeed`,
 		);
 		this.name = "TransferIdRetiredError";
+	}
+}
+
+/**
+ * The task-limit leg of a linked pair was refused: the payer leg answered `linked_event_failed`
+ * and this leg carries the real code (`exceeds_credits` when the task is at its limit). Kept apart
+ * from a plain TBTransferError so a payer-leg refusal reads exactly as it does without a task,
+ * and a task's refusal is never reported as the budget's. `code` is the limit leg's status.
+ */
+export class TaskLimitLegError extends TBTransferError {
+	constructor(code: number, message: string) {
+		super(code, message);
+		this.name = "TaskLimitLegError";
 	}
 }
 
@@ -211,6 +225,39 @@ export const XFER_BUDGET_RECLAIM = 8;
  */
 export const XFER_BUDGET_GRANT = 9;
 
+/**
+ * Task limits live on their own ledger. They are counters, not usertokens: kept off ledger 1, no
+ * usertoken sum or XFER_SPEND reconciliation ever counts a limit or a limit hold.
+ */
+export const LEDGER_TASK_LIMITS = 2;
+/** A task's limit account: `debits_must_not_exceed_credits | history`, on LEDGER_TASK_LIMITS. */
+export const CODE_TASK_LIMIT = 4;
+/** The per-namespace source a task's limit is credited from: `history` only, unconstrained. */
+export const CODE_TASK_LIMIT_OPERATOR = 5;
+/** The one immediate credit of a task's limit into its account. */
+export const XFER_TASK_LIMIT_GRANT = 10;
+/** The task-limit leg of a hold made inside a task (pending, linked to the payer leg). */
+export const XFER_TASK_LIMIT_HOLD = 11;
+/**
+ * `user_data_32` of every task-limit account this version creates: the account's schema. An
+ * account's fields cannot change once created, so a later format writes another value and readers
+ * branch on it.
+ */
+export const TASK_ACCOUNT_SCHEMA = 1;
+
+/**
+ * The `process.emitWarning` code under which a linked pair's replay that did not match is
+ * reported: TigerBeetle answered `exists` for an id this client minted, and the stored transfer is
+ * missing or is not the one sent.
+ */
+export const LINKED_PAIR_MISMATCH_WARNING = "USERTRUST_LEDGER_PAIR_MISMATCH";
+
+/** The `field` of a TransferReplayMismatchError whose transfer was not found at all. */
+const NO_RECORD = "record (none found)";
+
+// A pending transfer's `timeout` is a u32 count of seconds in TigerBeetle.
+const MAX_TIMEOUT_SECONDS = 0xffff_ffff;
+
 // Domain tag for cost-center account derivation. Versioned so a future encoding change can
 // coexist; deliberately NOT "wallet:"-prefixed — prefix disjointness from deriveAccountId's
 // preimages is the entire separation mechanism (flags cannot distinguish cost-center wallets).
@@ -222,6 +269,14 @@ const COST_CENTER_DOMAIN_TAG = Buffer.from("usertrust:cost-center:v1", "utf8");
 // "wallet:" and "usertrust:cost-center:v1" under the same policy as above, although transfer
 // and account ids already live in separate TigerBeetle namespaces. The KAT suite pins it.
 const TRANSFER_ID_DOMAIN_TAG = Buffer.from("usertrust:transfer:v1", "utf8");
+
+// Domain tags for task-limit derivations, under the same policy: versioned, and prefix-free
+// against every tag above and each other ("usertrust:task-limit:" and "usertrust:task-limit-"
+// part at their 21st byte). The namespace tag is domain-separated too, rather than a bare hash of
+// the namespace, so it cannot equal any other derivation's preimage. The KAT suite pins all three.
+const TASK_LIMIT_DOMAIN_TAG = Buffer.from("usertrust:task-limit:v1", "utf8");
+const TASK_LIMIT_OPERATOR_DOMAIN_TAG = Buffer.from("usertrust:task-limit-operator:v1", "utf8");
+const TASK_NAMESPACE_DOMAIN_TAG = Buffer.from("usertrust:task-namespace:v1", "utf8");
 
 // TigerBeetle reserves 0 and 2^128 - 1; a transfer may use neither as its id.
 const MAX_TRANSFER_ID = (1n << 128n) - 1n;
@@ -238,6 +293,95 @@ function transferIdOrFresh(transferId: bigint | undefined): bigint {
 		throw new RangeError(`Transfer id must be in (0, 2^128 - 1): ${transferId}`);
 	}
 	return transferId;
+}
+
+/**
+ * sha256 of `tag`, then each part as a big-endian u32 UTF-8 byte length and its bytes; the first
+ * 16 bytes, big-endian. The encoding of deriveCostCenterAccountId and deriveTransferId, for the
+ * task-limit derivations.
+ */
+function taggedTupleId(tag: Buffer, parts: string[]): bigint {
+	const chunks: Buffer[] = [tag];
+	for (const part of parts) {
+		const bytes = Buffer.from(part, "utf8");
+		const len = Buffer.alloc(4);
+		len.writeUInt32BE(bytes.length);
+		chunks.push(len, bytes);
+	}
+	const digest = createHash("sha256").update(Buffer.concat(chunks)).digest("hex");
+	return BigInt(`0x${digest.slice(0, 32)}`);
+}
+
+/** The first field of a replayed create transfer that differs from what was sent, or null. */
+function createMismatch(sent: Transfer, stored: Transfer): string | null {
+	const checks: Array<[string, bigint | number, bigint | number]> = [
+		["flags", sent.flags, stored.flags],
+		["pending_id", sent.pending_id, stored.pending_id],
+		["debit_account_id", sent.debit_account_id, stored.debit_account_id],
+		["credit_account_id", sent.credit_account_id, stored.credit_account_id],
+		["amount", sent.amount, stored.amount],
+		["ledger", sent.ledger, stored.ledger],
+		["code", sent.code, stored.code],
+		["timeout", sent.timeout, stored.timeout],
+		["user_data_128", sent.user_data_128, stored.user_data_128],
+		["user_data_64", sent.user_data_64, stored.user_data_64],
+		["user_data_32", sent.user_data_32, stored.user_data_32],
+	];
+	for (const [field, want, got] of checks) if (want !== got) return field;
+	return null;
+}
+
+/**
+ * The first field of a replayed post or void that differs from what was sent, by TigerBeetle's own
+ * exists rule for posts and voids (tigerbeetle 0.17.9, `post_or_void_pending_transfer_exists`).
+ * A post or void STORES fields it was not sent: the pending transfer's accounts, ledger and code,
+ * its user data where 0 was sent, and for a void sent at 0 the pending's whole amount. So a field
+ * sent as 0 is a wildcard and every other field must match. A full-field compare would read every
+ * genuine replay as a mismatch, and a settled call as a failed one. The wildcards are exact here:
+ * what a stored post or void inherits is fixed by its `pending_id`, which must match, and a void
+ * must release the whole pending amount (a smaller one is refused).
+ */
+function postOrVoidMismatch(sent: Transfer, stored: Transfer): string | null {
+	const exact: Array<[string, bigint | number, bigint | number]> = [
+		["flags", sent.flags, stored.flags],
+		["pending_id", sent.pending_id, stored.pending_id],
+		["timeout", sent.timeout, stored.timeout],
+	];
+	for (const [field, want, got] of exact) if (want !== got) return field;
+	// A void sent at 0 stores the pending's amount; any other amount, a post's 0 included, is
+	// stored as sent. The pair methods never send amount_max, so that branch of the rule is not
+	// reachable from here.
+	const voidAtZero =
+		(sent.flags & TransferFlags.void_pending_transfer) !== 0 && sent.amount === 0n;
+	if (!voidAtZero && sent.amount !== stored.amount) return "amount";
+	const unlessZero: Array<[string, bigint | number, bigint | number]> = [
+		["debit_account_id", sent.debit_account_id, stored.debit_account_id],
+		["credit_account_id", sent.credit_account_id, stored.credit_account_id],
+		["user_data_128", sent.user_data_128, stored.user_data_128],
+		["user_data_64", sent.user_data_64, stored.user_data_64],
+		["user_data_32", sent.user_data_32, stored.user_data_32],
+		["ledger", sent.ledger, stored.ledger],
+		["code", sent.code, stored.code],
+	];
+	for (const [field, want, got] of unlessZero) {
+		if (want === 0n || want === 0) continue;
+		if (want !== got) return field;
+	}
+	return null;
+}
+
+/**
+ * Report a linked pair's replay that did not match, beside the error the caller throws: an id this
+ * client minted answered `exists` for a transfer it did not send, or for none at all. That is an
+ * integrity fault, not a retryable failure, so it is said on `console.warn` and as a process
+ * warning with the stable code {@link LINKED_PAIR_MISMATCH_WARNING}. It names the transfer id and
+ * the field, nothing else.
+ */
+function reportPairMismatch(transferId: bigint, field: string): void {
+	const what = field === NO_RECORD ? "no stored record was found" : `its stored ${field} differs`;
+	const message = `linked pair replay did not match: transfer ${transferId} answered exists, but ${what}`;
+	console.warn(`[TB] ${message}`);
+	process.emitWarning(message, { code: LINKED_PAIR_MISMATCH_WARNING });
 }
 
 /**
@@ -603,6 +747,29 @@ export class TrustTBClient {
 	}
 
 	/**
+	 * A task's limit account id, which is also the task's key: derived from the `(namespace,
+	 * taskId)` tuple, never looked up, so every process on one cluster reaches the same account for
+	 * the same task. Same encoding discipline as {@link deriveCostCenterAccountId}; pure and total,
+	 * validation lives at the doors.
+	 */
+	static deriveTaskLimitAccountId(namespace: string, taskId: string): bigint {
+		return taggedTupleId(TASK_LIMIT_DOMAIN_TAG, [namespace, taskId]);
+	}
+
+	/** The per-namespace account task limits are credited from. Derived, never looked up. */
+	static deriveTaskLimitOperatorId(namespace: string): bigint {
+		return taggedTupleId(TASK_LIMIT_OPERATOR_DOMAIN_TAG, [namespace]);
+	}
+
+	/**
+	 * The namespace tag a task-limit account carries in `user_data_128`, so the accounts of one
+	 * namespace can be listed by a ledger query. Not an id: a value in its own domain.
+	 */
+	static taskNamespaceTag(namespace: string): bigint {
+		return taggedTupleId(TASK_NAMESPACE_DOMAIN_TAG, [namespace]);
+	}
+
+	/**
 	 * Create (or return) the balance-enforced wallet for a user id.
 	 *
 	 * `::` IS QUARANTINED — see {@link LEGACY_COST_CENTER_SEPARATOR}. Not as the
@@ -747,6 +914,93 @@ export class TrustTBClient {
 		}
 
 		return accountId;
+	}
+
+	/**
+	 * Create (or return) the account a namespace's task limits are credited from, on
+	 * LEDGER_TASK_LIMITS. Unconstrained (`history` only), like the treasury: it is the source the
+	 * limits are counted out of, and nothing spends from it. Derived, so `exists` is this same
+	 * account and is success; every `exists_with_different_*` stays a hard failure.
+	 *
+	 * @throws Error when the namespace is outside the parent-id charset (or in the quarantined `::`
+	 * form), before any request, or when TigerBeetle refuses.
+	 */
+	async createTaskLimitOperator(namespace: string): Promise<bigint> {
+		this.assertOpen();
+		const refusal = parentUserIdRefusal(namespace);
+		if (refusal !== null) throw new Error(`Invalid task-limit namespace: ${refusal}`);
+		const accountId = TrustTBClient.deriveTaskLimitOperatorId(namespace);
+		const account: Account = {
+			id: accountId,
+			debits_pending: 0n,
+			debits_posted: 0n,
+			credits_pending: 0n,
+			credits_posted: 0n,
+			user_data_128: 0n,
+			user_data_64: 0n,
+			user_data_32: 0,
+			reserved: 0,
+			ledger: LEDGER_TASK_LIMITS,
+			code: CODE_TASK_LIMIT_OPERATOR,
+			flags: AccountFlags.history,
+			timestamp: 0n,
+		};
+		await this.createDerivedAccount(account, "task-limit operator");
+		return accountId;
+	}
+
+	/**
+	 * Create (or return) a task's limit account, on LEDGER_TASK_LIMITS. Its
+	 * `debits_must_not_exceed_credits` flag bounds what the task's holds and charges may add up to
+	 * by what its limit credited. Derived from
+	 * `(namespace, taskId)`, so a second process, or a restart, reaches this same account, and
+	 * `exists` is success. Every `exists_with_different_*` is a hard failure: an account without the
+	 * flag, or of another schema, is not a task limit this version can trust.
+	 *
+	 * Its fields are fixed at creation and reserved for later versions: `user_data_128` is the
+	 * namespace tag, `user_data_64` is 0, and `user_data_32` is TASK_ACCOUNT_SCHEMA.
+	 *
+	 * @throws Error when the namespace or the task id is outside its charset, before any request,
+	 * or when TigerBeetle refuses.
+	 */
+	async createTaskLimitAccount(namespace: string, taskId: string): Promise<bigint> {
+		this.assertOpen();
+		const refusal = parentUserIdRefusal(namespace);
+		if (refusal !== null) throw new Error(`Invalid task-limit namespace: ${refusal}`);
+		if (typeof taskId !== "string" || !PRINCIPAL_FIELD_PATTERN.test(taskId)) {
+			throw new Error(`Invalid task id: must match ${PRINCIPAL_FIELD_PATTERN.source}`);
+		}
+		const accountId = TrustTBClient.deriveTaskLimitAccountId(namespace, taskId);
+		const account: Account = {
+			id: accountId,
+			debits_pending: 0n,
+			debits_posted: 0n,
+			credits_pending: 0n,
+			credits_posted: 0n,
+			user_data_128: TrustTBClient.taskNamespaceTag(namespace),
+			user_data_64: 0n,
+			user_data_32: TASK_ACCOUNT_SCHEMA,
+			reserved: 0,
+			ledger: LEDGER_TASK_LIMITS,
+			code: CODE_TASK_LIMIT,
+			flags: AccountFlags.debits_must_not_exceed_credits | AccountFlags.history,
+			timestamp: 0n,
+		};
+		await this.createDerivedAccount(account, "task-limit account");
+		return accountId;
+	}
+
+	/** One derived account: `created` and `exists` are success, every other status throws. */
+	private async createDerivedAccount(account: Account, what: string): Promise<void> {
+		const results = await this.withReconnect((native) => native.createAccounts([account]));
+		if (results.length > 0) {
+			const res = results[0];
+			if (!res) throw new Error("Unknown account/transfer error");
+			if (res.status !== CreateAccountStatus.created && res.status !== CreateAccountStatus.exists) {
+				const status = CreateAccountStatus[res.status] ?? res.status;
+				throw new Error(`Failed to create ${what}: ${status}`);
+			}
+		}
 	}
 
 	setTreasuryId(id: bigint): void {
@@ -1161,6 +1415,8 @@ export class TrustTBClient {
 		userData128?: bigint;
 		userData64?: bigint;
 		userData32?: number;
+		/** The ledger both accounts are on: LEDGER_USERTOKENS when omitted. */
+		ledger?: number;
 	}): Promise<bigint> {
 		this.assertOpen();
 		// Decided ONCE, synchronously, before any await (as on the other transfer paths).
@@ -1178,7 +1434,7 @@ export class TrustTBClient {
 			user_data_64: p.userData64 ?? 0n,
 			user_data_32: p.userData32 ?? 0,
 			timeout: 0,
-			ledger: LEDGER_USERTOKENS,
+			ledger: p.ledger ?? LEDGER_USERTOKENS,
 			code: p.code,
 			flags: 0,
 			timestamp: 0n,
@@ -1211,6 +1467,230 @@ export class TrustTBClient {
 			}
 		}
 		return transferId;
+	}
+
+	/**
+	 * Hold `amount` on a payer and on a task's limit at once: two pending transfers in ONE request,
+	 * the payer leg first and linked, so TigerBeetle creates both or neither. The payer leg is the
+	 * ordinary hold (ledger 1, its own code and user data); the limit leg debits the task's account
+	 * on LEDGER_TASK_LIMITS with XFER_TASK_LIMIT_HOLD and the same amount and timeout. Equal timeouts
+	 * and the later timestamp of the second leg mean the limit leg never expires before the payer's.
+	 *
+	 * Which leg refused decides the error: the payer leg's refusal is a plain TBTransferError with
+	 * its code, as for a hold made outside a task, so every existing catch reads it unchanged; the
+	 * limit leg's is a TaskLimitLegError. See `submitPair` for the replay rule.
+	 *
+	 * `timeoutSeconds` must be a whole number of seconds from 1 to the u32 maximum: a pair with no
+	 * timeout would never expire, and a process that stopped before settling it would hold the
+	 * task's capacity until someone voided it by hand.
+	 *
+	 * @throws RangeError for a timeout outside that range, or an amount BigInt refuses, before any
+	 * request.
+	 */
+	async createLinkedPendingPair(p: {
+		amount: number;
+		timeoutSeconds: number;
+		payer: {
+			debitAccountId: bigint;
+			creditAccountId: bigint;
+			code: number;
+			userData128?: bigint;
+			userData64?: bigint;
+			userData32?: number;
+		};
+		limit: { debitAccountId: bigint; creditAccountId: bigint; userData128: bigint };
+	}): Promise<{ payerId: bigint; limitId: bigint }> {
+		this.assertOpen();
+		const timeout = p.timeoutSeconds;
+		if (!Number.isInteger(timeout) || timeout < 1 || timeout > MAX_TIMEOUT_SECONDS) {
+			throw new RangeError(
+				`A linked pair's timeout must be a whole number of seconds from 1 to ${MAX_TIMEOUT_SECONDS}: ${timeout}`,
+			);
+		}
+		const amount = BigInt(p.amount);
+		// Minted here, OUTSIDE withReconnect: a retry resubmits these same two ids, which is what
+		// makes a lost reply a replay rather than a second hold.
+		const payerId = tbId();
+		const limitId = tbId();
+		const batch: [Transfer, Transfer] = [
+			{
+				id: payerId,
+				debit_account_id: p.payer.debitAccountId,
+				credit_account_id: p.payer.creditAccountId,
+				amount,
+				pending_id: 0n,
+				user_data_128: p.payer.userData128 ?? 0n,
+				user_data_64: p.payer.userData64 ?? 0n,
+				user_data_32: p.payer.userData32 ?? 0,
+				timeout,
+				ledger: LEDGER_USERTOKENS,
+				code: p.payer.code,
+				flags: TransferFlags.pending | TransferFlags.linked,
+				timestamp: 0n,
+			},
+			{
+				id: limitId,
+				debit_account_id: p.limit.debitAccountId,
+				credit_account_id: p.limit.creditAccountId,
+				amount,
+				pending_id: 0n,
+				user_data_128: p.limit.userData128,
+				user_data_64: 0n,
+				user_data_32: 0,
+				timeout,
+				ledger: LEDGER_TASK_LIMITS,
+				code: XFER_TASK_LIMIT_HOLD,
+				flags: TransferFlags.pending,
+				timestamp: 0n,
+			},
+		];
+		await this.submitPair(batch, "Pending transfer", false);
+		return { payerId, limitId };
+	}
+
+	/**
+	 * Post both legs of a pair at `amount`, linked: both or neither. `amount` is required and
+	 * concrete, never amount_max: a post stores the amount it is sent, so a replay compares it
+	 * exactly, where amount_max would be stored as the pending's amount and could only be checked
+	 * against the pending record. Every other field is sent as 0, which TigerBeetle fills in from
+	 * the pending transfer.
+	 */
+	async postLinkedPair(payerId: bigint, limitId: bigint, amount: number): Promise<void> {
+		this.assertOpen();
+		const posted = BigInt(amount);
+		await this.submitPair(
+			[
+				this.resolvingTransfer(payerId, posted, TransferFlags.post_pending_transfer, true),
+				this.resolvingTransfer(limitId, posted, TransferFlags.post_pending_transfer, false),
+			],
+			"Post transfer",
+			true,
+		);
+	}
+
+	/**
+	 * Void both legs of a pair, linked. `pending_transfer_expired` is not turned into success here:
+	 * it is the payer leg's code on a plain TBTransferError, for the caller to read.
+	 */
+	async voidLinkedPair(payerId: bigint, limitId: bigint): Promise<void> {
+		this.assertOpen();
+		await this.submitPair(
+			[
+				this.resolvingTransfer(payerId, 0n, TransferFlags.void_pending_transfer, true),
+				this.resolvingTransfer(limitId, 0n, TransferFlags.void_pending_transfer, false),
+			],
+			"Void transfer",
+			true,
+		);
+	}
+
+	/** A post or void of `pendingId` under a freshly minted id, inheriting every other field. */
+	private resolvingTransfer(
+		pendingId: bigint,
+		amount: bigint,
+		flag: number,
+		linked: boolean,
+	): Transfer {
+		return {
+			id: tbId(),
+			debit_account_id: 0n,
+			credit_account_id: 0n,
+			amount,
+			pending_id: pendingId,
+			user_data_128: 0n,
+			user_data_64: 0n,
+			user_data_32: 0,
+			timeout: 0,
+			ledger: 0,
+			code: 0,
+			flags: linked ? flag | TransferFlags.linked : flag,
+			timestamp: 0n,
+		};
+	}
+
+	/**
+	 * Submit a linked pair and read its two answers. TigerBeetle 0.17.9 answers one result per
+	 * event, so anything but exactly two is a hard failure: reading an empty answer as "both
+	 * created" would report a hold the ledger may never have made.
+	 *  - `created`, `created`: success.
+	 *  - a payer-leg failure, then `linked_event_failed`: a plain TBTransferError with the payer's
+	 *    code (an `exists_with_different_*` on the payer leg included: a hard conflict).
+	 *  - `linked_event_failed`, then a limit-leg failure: TaskLimitLegError with the limit's code.
+	 *  - `exists`, then `linked_event_failed`: possibly a replay. An `exists` breaks a linked chain
+	 *    like any other status but `created` (tigerbeetle 0.17.9 `execute_create`), so a pair resent
+	 *    after its reply was lost answers this, and its second leg is never evaluated. One lookup
+	 *    of the two ids this call minted settles it (`verifyReplayedPair`).
+	 *  - anything else, `[exists, exists]` included, cannot come from one linked chain: a hard
+	 *    failure, fail closed.
+	 * The batch is fixed before withReconnect, so a reconnect's retry resubmits these same ids.
+	 */
+	private async submitPair(
+		batch: [Transfer, Transfer],
+		what: string,
+		resolvesPending: boolean,
+	): Promise<void> {
+		const results = await this.withReconnect((native) => native.createTransfers(batch));
+		if (results.length !== 2) {
+			throw new Error(`Linked pair answered ${results.length} results for 2 transfers`);
+		}
+		const payer = results[0]?.status;
+		const limit = results[1]?.status;
+		if (payer === undefined || limit === undefined) {
+			throw new Error("Unknown account/transfer error");
+		}
+		const S = CreateTransferStatus;
+		const name = (status: number) => CreateTransferStatus[status] ?? String(status);
+		const fails = (status: number) =>
+			status !== S.created && status !== S.exists && status !== S.linked_event_failed;
+		if (payer === S.created && limit === S.created) return;
+		if (payer === S.exists && limit === S.linked_event_failed) {
+			await this.verifyReplayedPair(batch, resolvesPending);
+			return;
+		}
+		if (limit === S.linked_event_failed && fails(payer)) {
+			throw new TBTransferError(payer, `${what} failed: ${name(payer)}`);
+		}
+		if (payer === S.linked_event_failed && fails(limit)) {
+			throw new TaskLimitLegError(limit, `${what} failed on the task-limit leg: ${name(limit)}`);
+		}
+		const first = payer !== S.created ? payer : limit;
+		throw new TBTransferError(
+			first,
+			`Linked pair answered inconsistently: ${name(payer)}, ${name(limit)}`,
+		);
+	}
+
+	/**
+	 * A pair answered `[exists, linked_event_failed]`: look up the two transfers this call minted
+	 * and sent, in ONE request, and match the results by id (a lookup returns only what it finds,
+	 * not one answer per id). Success only if both are stored and each matches what was sent:
+	 * exactly for a create, by TigerBeetle's own exists rule for a post or void
+	 * ({@link postOrVoidMismatch}). A pending pair's ids are looked up for a create; a post's or
+	 * void's own ids for those, never the pending ids, which are always stored and so show
+	 * nothing. Anything else throws TransferReplayMismatchError and is reported as an integrity
+	 * warning.
+	 */
+	private async verifyReplayedPair(
+		batch: [Transfer, Transfer],
+		resolvesPending: boolean,
+	): Promise<void> {
+		const ids = batch.map((t) => t.id);
+		const found = await this.withReconnect((native) => native.lookupTransfers(ids));
+		const byId = new Map<bigint, Transfer>();
+		for (const t of found as Transfer[]) byId.set(t.id, t);
+		for (const sent of batch) {
+			const stored = byId.get(sent.id);
+			const field =
+				stored === undefined
+					? NO_RECORD
+					: resolvesPending
+						? postOrVoidMismatch(sent, stored)
+						: createMismatch(sent, stored);
+			if (field !== null) {
+				reportPairMismatch(sent.id, field);
+				throw new TransferReplayMismatchError(sent.id, field);
+			}
+		}
 	}
 
 	async lookupTransfer(transferId: bigint): Promise<Transfer | null> {
