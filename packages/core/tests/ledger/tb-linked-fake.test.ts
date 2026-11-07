@@ -347,19 +347,80 @@ describe("balances, pending transfers and expiry", () => {
 		expect(await send(pair(1_000n))).toEqual(["created", "created"]);
 	});
 
-	it("a post above the pending amount is exceeds_pending_transfer_amount; a partial post releases the rest", async () => {
+	// state_machine.zig@0.17.9:4115-4124: amount_actual is the amount sent (or the pending's for
+	// amount_max), and one above the pending amount is refused before anything is stored.
+	it("a post above the pending amount is refused, with no partial effect", async () => {
 		await ledgers(1_000n, 1_000n);
 		const ids = { a: id(), b: id() };
 		await fake.client.createTransfers(pair(400n, LONG_S, ids));
-		expect(await send(resolvePair(ids, TF.post_pending_transfer, 401n))).toEqual(
-			["exceeds_pending_transfer_amount", "linked_event_failed"],
-		);
-		expect(await send(resolvePair(ids, TF.post_pending_transfer, 150n))).toEqual(
-			["created", "created"],
-		);
+		const before = [WALLET_A, SOURCE_A, LIMIT_B, SOURCE_B].map(balances);
+		const above = resolvePair(ids, TF.post_pending_transfer, 401n);
+		expect(await send(above)).toEqual(["exceeds_pending_transfer_amount", "linked_event_failed"]);
+		expect([WALLET_A, SOURCE_A, LIMIT_B, SOURCE_B].map(balances)).toEqual(before);
+		expect(fake.transfers.has(above[0]?.id ?? 0n)).toBe(false);
+		expect(fake.transfers.has(above[1]?.id ?? 0n)).toBe(false);
+		expect(fake.pendingState.get(ids.a)).toBe("pending");
+		expect(fake.pendingState.get(ids.b)).toBe("pending");
+		// Nothing was consumed: the whole amount can still be posted.
+		expect(await send(resolvePair(ids, TF.post_pending_transfer, 400n))).toEqual([
+			"created",
+			"created",
+		]);
+	});
+
+	// state_machine.zig@0.17.9:4242-4250: the whole pending amount leaves debits_pending and
+	// credits_pending, and only amount_actual is added to the posted balances; :4135 refuses a
+	// second post of a pending transfer already posted.
+	it("a post below the pending amount posts it, releases the rest, and cannot be posted again", async () => {
+		await ledgers(1_000n, 1_000n);
+		const ids = { a: id(), b: id() };
+		await fake.client.createTransfers(pair(400n, LONG_S, ids));
+		expect(await send(resolvePair(ids, TF.post_pending_transfer, 150n))).toEqual([
+			"created",
+			"created",
+		]);
+		// The debit side of each leg.
 		expect(balances(WALLET_A)).toMatchObject({ debits_pending: 0n, debits_posted: 150n });
 		expect(balances(LIMIT_B)).toMatchObject({ debits_pending: 0n, debits_posted: 150n });
-		expect(balances(SOURCE_B)).toMatchObject({ credits_pending: 0n, credits_posted: 1_150n });
+		// The credit side of each leg. Each source was DEBITED 1,000 by the funding, so its
+		// credits are the posted 150 alone.
+		expect(balances(SOURCE_A)).toMatchObject({
+			debits_posted: 1_000n,
+			credits_pending: 0n,
+			credits_posted: 150n,
+		});
+		expect(balances(SOURCE_B)).toMatchObject({
+			debits_posted: 1_000n,
+			credits_pending: 0n,
+			credits_posted: 150n,
+		});
+		expect(await send(resolvePair(ids, TF.post_pending_transfer, 100n))).toEqual([
+			"pending_transfer_already_posted",
+			"linked_event_failed",
+		]);
+	});
+
+	// state_machine.zig@0.17.9:4119: amount_max posts the pending's whole amount; any other amount,
+	// 0 included (:4122 allows it), is posted as sent. postLinkedPair sends a concrete amount and
+	// never amount_max, so the client's full post is the held amount itself.
+	it("the full-amount sentinel is AMOUNT_MAX; a post of 0 posts nothing and releases the hold", async () => {
+		await ledgers(1_000n, 1_000n);
+		const full = { a: id(), b: id() };
+		await fake.client.createTransfers(pair(400n, LONG_S, full));
+		const post = resolvePair(full, TF.post_pending_transfer, AMOUNT_MAX);
+		expect(await send(post)).toEqual(["created", "created"]);
+		expect(fake.transfers.get(post[0]?.id ?? 0n)?.amount).toBe(400n);
+		expect(fake.transfers.get(post[1]?.id ?? 0n)?.amount).toBe(400n);
+		expect(balances(LIMIT_B)).toMatchObject({ debits_pending: 0n, debits_posted: 400n });
+
+		const zero = { a: id(), b: id() };
+		await fake.client.createTransfers(pair(300n, LONG_S, zero));
+		expect(await send(resolvePair(zero, TF.post_pending_transfer, 0n))).toEqual([
+			"created",
+			"created",
+		]);
+		expect(balances(WALLET_A)).toMatchObject({ debits_pending: 0n, debits_posted: 400n });
+		expect(balances(LIMIT_B)).toMatchObject({ debits_pending: 0n, debits_posted: 400n });
 	});
 
 	it("a post stores the pending transfer's accounts, ledger, code and user data", async () => {
