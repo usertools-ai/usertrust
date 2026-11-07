@@ -116,6 +116,31 @@ export class AuditTornTailError extends Error {
 	}
 }
 
+/**
+ * The log's last line is not an event the writer can continue from: an event without a
+ * `sequence`, one whose `sequence` is not a whole number from 1 up to `Number.MAX_SAFE_INTEGER - 1`
+ * (`2.5`, `0`, `-1`, `1e20`, or the largest safe integer, whose successor is not safe), or a line
+ * that parses as some other JSON value (`42`, `[]`, `null`). Every release writes a sequence of 1,
+ * 2, 3 and so on, so such a tail comes from a hand-built or foreign log. Continuing it would put
+ * sequenced events after it (or count on from a number that is not a whole one), a log
+ * `usertrust verify` reports as failed for good, so the writer refuses: when it is created, if the
+ * log is already there, and at every read of the tail by an append. Nothing is written. `line` is
+ * the 1-based number of the tail among the log's non-blank lines, as `usertrust verify` numbers
+ * lines.
+ */
+export class AuditSequencelessTailError extends Error {
+	readonly logPath: string;
+	readonly line: number;
+	constructor(logPath: string, line: number) {
+		super(
+			`Audit log ${logPath} ends in a line that is not an event with a sequence (line ${line}): the writer continues only from an event whose sequence is a whole number from 1 up to ${Number.MAX_SAFE_INTEGER - 1}. Refusing to append: sequenced events after it would make a log that \`usertrust verify\` reports as failed for good. Nothing was written. Start a new vault for new events, or keep this one read-only.`,
+		);
+		this.name = "AuditSequencelessTailError";
+		this.logPath = logPath;
+		this.line = line;
+	}
+}
+
 // ── Types ──
 
 export interface AppendEventInput {
@@ -1541,59 +1566,120 @@ interface CachedTail {
 	sequence: number;
 }
 
+/**
+ * What a log's text says about continuing it, decided from its last line alone. ONE reading, used
+ * by the open-time check ({@link refuseSequencelessTail}) and every append ({@link getLastEvent}):
+ *  - `torn`: the last byte is not a newline (bytes after it: `torn`, their UTF-8 length);
+ *  - `empty`: nothing but whitespace;
+ *  - `unparseable`: the last non-blank line is not JSON (the `.meta` anchor is the tail then);
+ *  - `unsequenced`: it parses, but not as an object whose `sequence` the writer can count on from
+ *    ({@link isContinuableSequence}: a whole number from 1 up to `Number.MAX_SAFE_INTEGER - 1`)
+ *    (`line`: its 1-based number among the non-blank lines, as `usertrust verify` numbers them);
+ *  - `sequenced`: an event the log can be continued from.
+ */
+type TailVerdict =
+	| { kind: "torn"; bytes: number }
+	| { kind: "empty" }
+	| { kind: "unparseable" }
+	| { kind: "unsequenced"; line: number }
+	| { kind: "sequenced"; hash: string; sequence: number };
+
+function tailVerdict(raw: string): TailVerdict {
+	if (raw.length > 0 && !raw.endsWith("\n")) {
+		return { kind: "torn", bytes: Buffer.byteLength(raw.slice(raw.lastIndexOf("\n") + 1)) };
+	}
+	const content = raw.trim();
+	if (!content) return { kind: "empty" };
+	const lines = content.split("\n");
+	const lastLine = lines[lines.length - 1] as string;
+	let value: unknown;
+	try {
+		value = JSON.parse(lastLine);
+	} catch {
+		return { kind: "unparseable" };
+	}
+	const event = value as { hash?: unknown; sequence?: unknown } | null;
+	if (
+		event === null ||
+		typeof event !== "object" ||
+		Array.isArray(event) ||
+		!isContinuableSequence(event.sequence)
+	) {
+		return { kind: "unsequenced", line: lines.filter((l) => l.trim()).length };
+	}
+	return { kind: "sequenced", hash: event.hash as string, sequence: event.sequence };
+}
+
+/**
+ * A sequence the writer can count on from: a safe integer of at least 1 whose successor is a safe
+ * integer too (so `Number.MAX_SAFE_INTEGER` is not one). The WRITER's rule only: the verifier walks
+ * any number as a sequence, and names a non-integer or a gap there as a gap.
+ */
+function isContinuableSequence(s: unknown): s is number {
+	return typeof s === "number" && Number.isSafeInteger(s) && s >= 1 && Number.isSafeInteger(s + 1);
+}
+
+/**
+ * The open-time check: a writer is never created on a log it would refuse to continue
+ * ({@link AuditSequencelessTailError}), so the refusal reaches whoever creates it, before anything
+ * is written or locked. Only that verdict throws here. An absent or unreadable log, one that is not
+ * a regular file (never read here: a FIFO would block), and a torn tail are left to the first
+ * append, as before (the torn-tail repair creates a writer on a torn log).
+ */
+function refuseSequencelessTail(logPath: string): void {
+	let raw: string;
+	try {
+		if (!statSync(logPath).isFile()) return;
+		raw = readFileSync(logPath, "utf-8");
+	} catch {
+		return;
+	}
+	const verdict = tailVerdict(raw);
+	if (verdict.kind === "unsequenced") {
+		throw new AuditSequencelessTailError(logPath, verdict.line);
+	}
+}
+
+/** The `.meta` anchor's head, or null when it is absent or does not parse. */
+function readMetaTail(logPath: string): CachedTail | null {
+	const metaPath = `${logPath}.meta`;
+	if (existsSync(metaPath)) {
+		try {
+			const meta = JSON.parse(readFileSync(metaPath, "utf-8")) as {
+				lastHash: string;
+				sequence: number;
+			};
+			return { hash: meta.lastHash, sequence: meta.sequence };
+		} catch {
+			/* ignore corrupt meta */
+		}
+	}
+	return null;
+}
+
 function getLastEvent(logPath: string, cache: Map<string, CachedTail>): CachedTail | null {
 	const cached = cache.get(logPath);
 	if (cached) return cached;
 
 	if (!existsSync(logPath)) return null;
 
-	const raw = readFileSync(logPath, "utf-8");
-	// A log whose last byte is not a newline ends in a TORN line (#194). Appending would
-	// concatenate onto it; refuse, and let the operator quarantine it (recorded on the chain).
-	if (raw.length > 0 && !raw.endsWith("\n")) {
-		throw new AuditTornTailError(logPath, Buffer.byteLength(raw.slice(raw.lastIndexOf("\n") + 1)));
-	}
-	const content = raw.trim();
-	if (!content) {
-		const metaPath = `${logPath}.meta`;
-		if (existsSync(metaPath)) {
-			try {
-				const meta = JSON.parse(readFileSync(metaPath, "utf-8")) as {
-					lastHash: string;
-					sequence: number;
-				};
-				return { hash: meta.lastHash, sequence: meta.sequence };
-			} catch {
-				/* ignore corrupt meta */
-			}
+	const verdict = tailVerdict(readFileSync(logPath, "utf-8"));
+	switch (verdict.kind) {
+		// A log whose last byte is not a newline ends in a TORN line (#194). Appending would
+		// concatenate onto it; refuse, and let the operator quarantine it (recorded on the chain).
+		case "torn":
+			throw new AuditTornTailError(logPath, verdict.bytes);
+		// Sequenced events after it would make a mixed log that never passes `usertrust verify`.
+		case "unsequenced":
+			throw new AuditSequencelessTailError(logPath, verdict.line);
+		case "empty":
+		case "unparseable":
+			return readMetaTail(logPath);
+		case "sequenced": {
+			const tail: CachedTail = { hash: verdict.hash, sequence: verdict.sequence };
+			cache.set(logPath, tail);
+			return tail;
 		}
-		return null;
-	}
-
-	const lines = content.split("\n");
-	const lastLine = lines[lines.length - 1];
-	if (!lastLine) return null;
-
-	try {
-		const event = JSON.parse(lastLine) as AuditEvent & { sequence?: number };
-		const sequence = typeof event.sequence === "number" ? event.sequence : lines.length;
-		const tail: CachedTail = { hash: event.hash, sequence };
-		cache.set(logPath, tail);
-		return tail;
-	} catch {
-		const metaPath = `${logPath}.meta`;
-		if (existsSync(metaPath)) {
-			try {
-				const meta = JSON.parse(readFileSync(metaPath, "utf-8")) as {
-					lastHash: string;
-					sequence: number;
-				};
-				return { hash: meta.lastHash, sequence: meta.sequence };
-			} catch {
-				/* ignore corrupt meta */
-			}
-		}
-		return null;
 	}
 }
 
@@ -1680,12 +1766,17 @@ function writeDeadLetter(
  * The writer appends events to `<vaultPath>/.usertrust/audit/events.jsonl`.
  * Each event's SHA-256 hash covers the previous event's hash, creating a
  * tamper-evident chain. The first event chains from GENESIS_HASH.
+ *
+ * Throws {@link AuditSequencelessTailError}, with nothing made, written or locked, when the log
+ * already ends in a line that is not an event with a sequence (a hand-built or foreign log).
  */
 export function createAuditWriter(
 	vaultPath: string,
 	options: CreateAuditWriterOptions = {},
 ): AuditWriter {
 	const auditDir = join(vaultPath, VAULT_DIR, "audit");
+	// Before anything is made or locked: a log this writer would refuse to continue is refused here.
+	refuseSequencelessTail(join(auditDir, "events.jsonl"));
 	if (!existsSync(auditDir)) {
 		mkdirPrivate(auditDir);
 	}
@@ -1702,6 +1793,8 @@ export function createUnleasedAuditWriter(
 	options: CreateAuditWriterOptions = {},
 ): AuditWriter {
 	const auditDir = join(vaultPath, VAULT_DIR, "audit");
+	// As in createAuditWriter: before the directory is made and before `lockAtCreate` takes the lock.
+	refuseSequencelessTail(join(auditDir, "events.jsonl"));
 	if (!existsSync(auditDir)) {
 		mkdirPrivate(auditDir);
 	}
@@ -1935,12 +2028,19 @@ const sharedWriters = new Map<string, SharedVaultWriter>();
  * the receipt `auditDegraded`), the writer still dead-letters the event and warns on the console,
  * and the handle emits {@link AUDIT_DEGRADED_WARNING} at its first failure and, with the count, at
  * its release.
+ *
+ * Opening a handle on a vault whose log ends in a line that is not an event with a sequence throws
+ * {@link AuditSequencelessTailError}, with nothing written or locked.
  */
 export function openSharedAuditWriter(
 	vaultPath: string,
 	options: SharedAuditWriterOptions = {},
 ): AuditWriter {
 	const vault = resolveSharedVault(vaultPath);
+	// At open, so `trust()` and `createGovernor()` reject before any call. Never in the shared writer
+	// itself: that is made at a handle's first append, where a throw would skip the append's own
+	// failure report and dead letter (the append's re-read of the tail refuses there instead).
+	refuseSequencelessTail(join(vault.auditDir, "events.jsonl"));
 	let joined: SharedLease | undefined;
 	let released = false;
 	// What the governor reads (`isDegraded()`, `getWriteFailures()`): every failed append of this

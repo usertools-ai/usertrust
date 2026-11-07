@@ -9,7 +9,7 @@
 
 import { join } from "node:path";
 import pc from "picocolors";
-import { type AuditWriter, createAuditWriter } from "../audit/chain.js";
+import { AuditSequencelessTailError, type AuditWriter, createAuditWriter } from "../audit/chain.js";
 import { loadConfig } from "../config.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { ActionKind } from "../shared/types.js";
@@ -19,6 +19,13 @@ import { scrubForTerminal, toSafeJson, warnIfVaultLoose } from "./target.js";
 
 const SUBCOMMANDS = ["add", "rm", "ls", "get", "rotate"] as const;
 type Sub = (typeof SUBCOMMANDS)[number];
+
+/**
+ * The subcommands whose store call appends an audit event (`emitAudit` in vault/store.ts: add,
+ * remove, rotate, and get for a credential it finds). `ls` (`list()`) never appends, so it opens
+ * no audit writer.
+ */
+const APPENDING: ReadonlySet<Sub> = new Set<Sub>(["add", "rm", "rotate", "get"]);
 
 export async function run(_unused?: unknown, opts?: { json?: boolean }): Promise<void> {
 	const { json, positional } = parseFlags();
@@ -52,8 +59,29 @@ Subcommands:
 	const cwd = process.cwd();
 	warnIfVaultLoose(join(cwd, VAULT_DIR));
 	const config = await loadConfig(undefined, cwd);
-	const audit = createAuditWriter(cwd);
-	const vault = await createVaultStore({ vaultBase: cwd, config, audit });
+	// Only the subcommands that append to the audit log open its writer: `ls` only reads the store,
+	// so it works on a vault whose log the writer refuses to continue. For the others such a vault
+	// is refused here, before the credential store is opened: nothing is persisted.
+	let audit: AuditWriter | undefined;
+	try {
+		if (APPENDING.has(sub)) audit = createAuditWriter(cwd);
+	} catch (err) {
+		if (!(err instanceof AuditSequencelessTailError)) throw err;
+		if (jsonOut) {
+			console.log(
+				toSafeJson({ command: `secret ${sub}`, success: false, data: { error: err.message } }),
+			);
+		} else {
+			console.error(pc.red(scrubForTerminal(err.message)));
+		}
+		process.exitCode = 1;
+		return;
+	}
+	const vault = await createVaultStore({
+		vaultBase: cwd,
+		config,
+		...(audit !== undefined ? { audit } : {}),
+	});
 
 	let commandFailed = false;
 	try {
@@ -190,7 +218,8 @@ Subcommands:
 /**
  * Destroy the vault and release the audit writer — BOTH, whichever throws — and report a failure of
  * either without ever hiding the command's own outcome. Nothing here throws: a throw from a
- * `finally` replaces the error the command is propagating.
+ * `finally` replaces the error the command is propagating. A subcommand that never appends (`ls`)
+ * opened no writer, so there is none to release.
  *  - The command failed: its error is what the CLI reports; a cleanup failure is a warning.
  *  - The command succeeded: a cleanup failure — an audit lock left behind keeps other processes
  *    off the vault until this one exits — is an error: a message on stderr (stdout keeps the
@@ -198,7 +227,11 @@ Subcommands:
  * Both messages carry paths (a lock file's, from the vault directory's name), so they are scrubbed
  * for the terminal like every other untrusted string this command prints.
  */
-function closeAfterCommand(vault: VaultStore, audit: AuditWriter, commandFailed: boolean): void {
+function closeAfterCommand(
+	vault: VaultStore,
+	audit: AuditWriter | undefined,
+	commandFailed: boolean,
+): void {
 	const failures: string[] = [];
 	try {
 		vault.destroy();
@@ -206,7 +239,7 @@ function closeAfterCommand(vault: VaultStore, audit: AuditWriter, commandFailed:
 		failures.push(`vault: ${err instanceof Error ? err.message : String(err)}`);
 	}
 	try {
-		audit.release();
+		audit?.release();
 	} catch (err) {
 		failures.push(`audit lock: ${err instanceof Error ? err.message : String(err)}`);
 	}

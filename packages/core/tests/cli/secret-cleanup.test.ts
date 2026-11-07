@@ -10,7 +10,7 @@
  *  - each cleanup step runs even when the other throws.
  *
  * The real vault store and audit writer are used, each wrapped so one call can be made to fail:
- * `ls` (the command), `vault.destroy()` and `audit.release()`.
+ * `get` (the command), `vault.destroy()` and `audit.release()`.
  */
 
 import { randomUUID } from "node:crypto";
@@ -53,9 +53,9 @@ vi.mock("../../src/vault/store.js", async (importOriginal) => {
 			const vault = await store.createVaultStore(...args);
 			return {
 				...vault,
-				async list() {
+				async get(...a: Parameters<typeof vault.get>) {
 					if (faults.command !== undefined) throw faults.command;
-					return vault.list();
+					return vault.get(...a);
 				},
 				destroy() {
 					faults.destroyed++;
@@ -162,7 +162,7 @@ describe("usertrust secret — cleanup never hides the command's outcome", () =>
 		origCwd = process.cwd();
 		process.chdir(tmpDir);
 		origArgv = process.argv;
-		process.argv = ["node", "usertrust", "secret", "ls"];
+		process.argv = ["node", "usertrust", "secret", "get", "CLEANUP_KEY"];
 		origVaultKey = process.env.USERTRUST_VAULT_KEY;
 		process.env.USERTRUST_VAULT_KEY = "test-cli-vault-key-2026";
 		process.exitCode = undefined;
@@ -199,7 +199,7 @@ describe("usertrust secret — cleanup never hides the command's outcome", () =>
 	});
 
 	it("the command fails AND release fails: the COMMAND's error is what surfaces; the release failure is a warning", async () => {
-		const commandErr = new Error("vault list failed");
+		const commandErr = new Error("vault get failed");
 		faults.command = commandErr;
 		faults.release = new Error("lock left: /v/.audit-writer.lock (EIO)");
 
@@ -209,7 +209,7 @@ describe("usertrust secret — cleanup never hides the command's outcome", () =>
 	});
 
 	it("the command fails AND vault.destroy() fails: the command's error surfaces, and the audit writer is still released", async () => {
-		const commandErr = new Error("vault list failed");
+		const commandErr = new Error("vault get failed");
 		faults.command = commandErr;
 		faults.destroy = new Error("vault destroy failed");
 
@@ -256,10 +256,10 @@ describe("usertrust secret — cleanup never hides the command's outcome", () =>
 		["off", false],
 	] as const)("colours %s: …and in the warning after a FAILED command", async (_mode, on) => {
 		colour.on = on;
-		faults.command = new Error("vault list failed");
+		faults.command = new Error("vault get failed");
 		faults.release = hostileLockLeft();
 
-		await expect(run()).rejects.toThrow("vault list failed");
+		await expect(run()).rejects.toThrow("vault get failed");
 		expectScrubbed(warnOutput.join("\n"));
 	});
 

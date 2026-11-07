@@ -9,7 +9,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -390,5 +390,131 @@ describe("usertrust secret", () => {
 
 		const combined = logOutput.join("\n");
 		expect(combined).toContain("Usage: usertrust secret get");
+	});
+
+	// -----------------------------------------------------------------
+	// 14. an audit log whose last event has no sequence is refused
+	// -----------------------------------------------------------------
+
+	describe("an audit log whose last line is not an event with a sequence", () => {
+		const logPath = () => join(tmpDir, ".usertrust", "audit", "events.jsonl");
+		const credPath = () => join(tmpDir, ".usertrust", "credentials.enc");
+		let before: Buffer;
+
+		beforeEach(() => {
+			mkdirSync(join(tmpDir, ".usertrust", "audit"), { recursive: true });
+			writeFileSync(logPath(), '{"id":"a","hash":"h1"}\n{"id":"b","hash":"h2"}\n');
+			before = readFileSync(logPath());
+		});
+
+		it("secret add exits 1 with the reason, and nothing is stored", async () => {
+			setArgv("secret", "add", "REFUSED_KEY", "never-stored");
+			await run();
+
+			expect(process.exitCode).toBe(1);
+			const combined = [...logOutput, ...errorOutput].join("\n");
+			expect(combined).toContain("not an event with a sequence (line 2)");
+			expect(combined).toContain("events.jsonl");
+			expect(combined).not.toContain("stored.");
+			expect(existsSync(credPath())).toBe(false);
+			expect(readFileSync(logPath()).equals(before)).toBe(true);
+		});
+
+		it("secret add --json reports success: false with the reason", async () => {
+			setArgv("secret", "add", "REFUSED_KEY", "never-stored", "--json");
+			await run(undefined, { json: true });
+
+			expect(process.exitCode).toBe(1);
+			const parsed = JSON.parse(logOutput.join("\n")) as {
+				command: string;
+				success: boolean;
+				data: { error?: unknown };
+			};
+			expect(parsed.command).toBe("secret add");
+			expect(parsed.success).toBe(false);
+			expect(String(parsed.data.error)).toContain("not an event with a sequence (line 2)");
+			expect(existsSync(credPath())).toBe(false);
+			expect(readFileSync(logPath()).equals(before)).toBe(true);
+		});
+
+		/** A credential put in the store directly, with no audit writer. */
+		async function storeDirectly(name: string, value: string): Promise<void> {
+			const { loadConfig } = await import("../../src/config.js");
+			const { createVaultStore } = await import("../../src/vault/store.js");
+			const config = await loadConfig(undefined, tmpDir);
+			const vault = await createVaultStore({ vaultBase: tmpDir, config });
+			await vault.add(name, value);
+			vault.destroy();
+		}
+
+		/** The value the store holds for `name`, read directly, with no audit writer. */
+		async function storedValue(name: string): Promise<string | undefined> {
+			const { loadConfig } = await import("../../src/config.js");
+			const { createVaultStore } = await import("../../src/vault/store.js");
+			const config = await loadConfig(undefined, tmpDir);
+			const vault = await createVaultStore({ vaultBase: tmpDir, config });
+			const result = await vault.get(name, { agent: "cli", action: "tool_use" });
+			vault.destroy();
+			return result.granted ? result.value : undefined;
+		}
+
+		it("secret ls lists the credentials and exits 0: listing never appends to the audit log", async () => {
+			await storeDirectly("LISTED_KEY", "listed-value");
+
+			setArgv("secret", "ls");
+			await run();
+
+			expect(process.exitCode).toBeUndefined();
+			const combined = [...logOutput, ...errorOutput].join("\n");
+			expect(combined).toContain("LISTED_KEY");
+			expect(combined).not.toContain("not an event with a sequence");
+			expect(readFileSync(logPath()).equals(before)).toBe(true);
+			expect(existsSync(join(tmpDir, ".usertrust", "audit", ".audit-writer.lock"))).toBe(false);
+		});
+
+		it("secret ls --json lists the credentials with success: true", async () => {
+			await storeDirectly("LISTED_KEY", "listed-value");
+
+			setArgv("secret", "ls", "--json");
+			await run(undefined, { json: true });
+
+			expect(process.exitCode).toBeUndefined();
+			const parsed = JSON.parse(logOutput.join("\n")) as {
+				command: string;
+				success: boolean;
+				data: Array<{ name?: unknown }>;
+			};
+			expect(parsed.command).toBe("secret ls");
+			expect(parsed.success).toBe(true);
+			expect(parsed.data.map((e) => e.name)).toEqual(["LISTED_KEY"]);
+			expect(readFileSync(logPath()).equals(before)).toBe(true);
+		});
+
+		for (const [sub, args] of [
+			["rm", ["KEPT_KEY"]],
+			["rotate", ["KEPT_KEY", "new-value"]],
+			["get", ["KEPT_KEY"]],
+		] as const) {
+			it(`secret ${sub} still refuses, exits 1, and the stored credential is unchanged`, async () => {
+				await storeDirectly("KEPT_KEY", "kept-value");
+				const stdoutChunks: string[] = [];
+				vi.spyOn(process.stdout, "write").mockImplementation(
+					(...a: Parameters<typeof process.stdout.write>): boolean => {
+						stdoutChunks.push(String(a[0]));
+						return true;
+					},
+				);
+
+				setArgv("secret", sub, ...args);
+				await run();
+
+				expect(process.exitCode).toBe(1);
+				const combined = [...logOutput, ...errorOutput].join("\n");
+				expect(combined).toContain("not an event with a sequence (line 2)");
+				expect(stdoutChunks.join("")).not.toContain("kept-value");
+				expect(await storedValue("KEPT_KEY")).toBe("kept-value");
+				expect(readFileSync(logPath()).equals(before)).toBe(true);
+			});
+		}
 	});
 });

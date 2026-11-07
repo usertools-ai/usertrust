@@ -9,7 +9,7 @@
 
 import { join } from "node:path";
 import pc from "picocolors";
-import { AuditWriterLockHeldError } from "../audit/chain.js";
+import { AuditSequencelessTailError, AuditWriterLockHeldError } from "../audit/chain.js";
 import {
 	AuditQuarantineInterruptedError,
 	AuditQuarantineRefusedError,
@@ -76,7 +76,8 @@ export async function run(
 		const refused =
 			err instanceof AuditQuarantineRefusedError ||
 			err instanceof AuditQuarantineInterruptedError ||
-			err instanceof AuditWriterLockHeldError;
+			err instanceof AuditWriterLockHeldError ||
+			err instanceof AuditSequencelessTailError;
 		// Scrubbed for the TERMINAL only; the JSON output carries the exact text (C1 escaped).
 		const message = err instanceof Error ? err.message : String(err);
 		const shown = scrubForTerminal(message);

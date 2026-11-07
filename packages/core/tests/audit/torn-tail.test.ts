@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+	AuditSequencelessTailError,
 	AuditTornTailError,
 	AuditWriterLockHeldError,
 	createAuditWriter,
@@ -426,5 +427,56 @@ describe("quarantine refuses what it cannot cut or verify safely", () => {
 		expect(message).toMatch(/not a torn write/);
 		expect(message).toMatch(/newline/);
 		expect(message).toMatch(/backup/);
+	});
+});
+
+describe("quarantine-tail on a log whose last line is an event with no sequence", () => {
+	/** Two events from the writer, then a complete line: an event with no sequence (line 3). */
+	async function sequencelessTail(): Promise<string> {
+		const v = await vault(2, null);
+		appendFileSync(logOf(v), '{"id":"foreign","hash":"h"}\n');
+		return v;
+	}
+	const lockOf = (v: string) => join(auditDirOf(v), ".audit-writer.lock");
+
+	it("the repair refuses with the writer's error and the line; nothing is changed", async () => {
+		const v = await sequencelessTail();
+		const before = readFileSync(logOf(v));
+		const err = await quarantineTornTail(v).catch((e: unknown) => e);
+		expect(err).toBeInstanceOf(AuditSequencelessTailError);
+		expect(err).toMatchObject({ line: 3 });
+		expect(readFileSync(logOf(v)).equals(before)).toBe(true);
+		expect(existsSync(lockOf(v))).toBe(false);
+		expect(existsSync(join(auditDirOf(v), "quarantine"))).toBe(false);
+	});
+
+	it("CLI --json: exits 1 with the reason", async () => {
+		const v = await sequencelessTail();
+		const before = readFileSync(logOf(v));
+		const out: string[] = [];
+		vi.spyOn(console, "log").mockImplementation((m: unknown) => {
+			out.push(String(m));
+		});
+		await cli(v, { json: true }, ["quarantine-tail"]);
+		const parsed = JSON.parse(out[0] as string) as {
+			success: boolean;
+			data: { message?: unknown };
+		};
+		expect(parsed.success).toBe(false);
+		expect(String(parsed.data.message)).toContain("not an event with a sequence (line 3)");
+		expect(process.exitCode).toBe(1);
+		expect(readFileSync(logOf(v)).equals(before)).toBe(true);
+		expect(existsSync(lockOf(v))).toBe(false);
+	});
+
+	it("CLI: prints the reason and exits 1", async () => {
+		const v = await sequencelessTail();
+		const out: string[] = [];
+		vi.spyOn(console, "log").mockImplementation((m: unknown) => {
+			out.push(String(m));
+		});
+		await cli(v, {}, ["quarantine-tail"]);
+		expect(out.join("\n")).toContain("not an event with a sequence (line 3)");
+		expect(process.exitCode).toBe(1);
 	});
 });
