@@ -52,11 +52,13 @@ import {
 	recordWatchEvent,
 	sanitize,
 	serverCapabilities,
+	serverHealthFacts,
 	stateRoot,
 	TYPE_SOURCES,
 	withoutJobType,
 	writeFileAtomic,
 } from "./lib.mjs";
+import { driftLine, missingCapabilities, plainVersion } from "./server-drift.mjs";
 
 export { JOB_TYPES, TYPE_SOURCES };
 
@@ -410,55 +412,103 @@ export const JOB_TYPE_INSTRUCTION = [
 ].join(" ");
 
 /**
- * What the probe child (session-probe.mjs) writes to stdout, as one line, after it has verified a
- * well-formed capability list holding `job-type`; the launcher takes ONLY this line together with
- * exit 0 as "listed". An exit code could not carry it: several are node's own (10 is an
- * internal bootstrap failure), so a child that died before it ran could have read as an answer.
+ * What the probe child (session-probe.mjs) writes to stdout, after it has verified a
+ * well-formed capability list: up to two fixed lines, each only when it is true. The launcher
+ * takes ONLY these lines (`decodeProbe`) together with exit 0. An exit code could not carry
+ * them: several are node's own (10 is an internal bootstrap failure), so a child that died before
+ * it ran could have read as an answer.
+ *  - `PROBE_TOKEN`: the list holds `job-type`.
+ *  - `ut-drift <missing> [<version>]`: the list lacks a capability this plugin uses
+ *    (server-drift.mjs); `<missing>` is `hold-ttl`, `release` or `hold-ttl,release`, and
+ *    `<version>` a plain version, left out when the server stated none.
+ * Nothing else the server said can reach the parent: the grammar below is the whole of it.
  */
 export const PROBE_TOKEN = "ut-job-type-listed";
-/** The longest the launcher reads from the probe child's stdout: far more than the token. */
+const DRIFT_PREFIX = "ut-drift";
+/** The longest the launcher reads from the probe child's stdout: far more than the two lines. */
 export const PROBE_READ_MAX = 256;
 
 /** How long SessionStart waits for the server's capabilities: well under the hook's 5 s. */
 export const TYPE_PROBE_MS = 1_500;
 
+/** The answer when nothing was learned: not listed, no drift. */
+export const NO_ANSWER = Object.freeze({ listed: false, drift: null });
+
 /**
- * Whether the server lists `job-type` in `/v1/health` `capabilities`, asked in THIS process:
- * one health request of at most `TYPE_PROBE_MS`. False for everything else, never a thrown
- * error: the breaker open, a probe that times out or fails (neither counts toward the breaker:
- * `serverCapabilities` `count: false`), a refused configuration, and health output whose
- * capability list is not a list of strings (a half-readable list is not trusted for this one
- * decision, even when the literal is in it).
+ * One health request of at most `TYPE_PROBE_MS`, asked in THIS process, and what it says:
+ * `{ listed, drift }`. `listed`: the server lists `job-type`. `drift`: `{ missing, version }`
+ * when it states a capability list that lacks one this plugin uses, else null. Everything else
+ * is `NO_ANSWER`, never a thrown error: the breaker open, a probe that times out or fails (neither
+ * counts toward the breaker: `serverCapabilities` `count: false`), a refused configuration, a
+ * health answer that states no list, and one whose list is not a list of strings (a
+ * half-readable list is not trusted for either decision, even when the literal is in it).
  */
-export async function probeJobType() {
+export async function probeServer() {
 	try {
 		// The breaker's own open-check, as every hook makes it: while the host's breaker for this
 		// server is open nothing is sent, and the session just gets its banner. (A hook past the
 		// breaker's minute is its half-open prober, as any other hook would be.) Made HERE, in the
 		// process that sends: a configured session's child, so a parent that inherits the
 		// environment never asks the server anything.
-		if (await breakerOpen()) return false;
+		if (await breakerOpen()) return NO_ANSWER;
 		// `count: false`: this probe's timeout or failure never strikes the breaker.
 		const capabilities = await serverCapabilities({ maxMs: TYPE_PROBE_MS, count: false });
-		return (
-			capabilities !== null &&
-			!capabilityListMalformed(capabilities) &&
-			capabilities.has("job-type")
-		);
+		if (capabilities === null || capabilityListMalformed(capabilities)) return NO_ANSWER;
+		const { version, listed } = serverHealthFacts();
+		const missing = listed ? missingCapabilities(capabilities) : [];
+		return {
+			listed: capabilities.has("job-type"),
+			drift: missing.length === 0 ? null : { missing, version: plainVersion(version) },
+		};
 	} catch {
-		return false;
+		return NO_ANSWER;
 	}
+}
+
+/** The child's stdout for an answer: the lines `decodeProbe` accepts. */
+export function encodeProbe({ listed, drift }) {
+	const token = listed ? `${PROBE_TOKEN}\n` : "";
+	if (drift === null) return token;
+	const version = drift.version === null ? "" : ` ${drift.version}`;
+	return `${token}${DRIFT_PREFIX} ${drift.missing.join(",")}${version}\n`;
+}
+
+/**
+ * The launcher's reading of the child's stdout: the answer, or `NO_ANSWER` for anything that is
+ * not exactly the grammar of `encodeProbe`. The server's words are never relayed: a version is
+ * re-checked here, and `missing` is one of three fixed spellings.
+ */
+export function decodeProbe(output) {
+	const match =
+		/^(ut-job-type-listed\n)?(?:ut-drift (hold-ttl|release|hold-ttl,release)(?: (\S{1,64}))?\n)?$/.exec(
+			output,
+		);
+	if (match === null) return NO_ANSWER;
+	const version = match[3] === undefined ? null : plainVersion(match[3]);
+	if (match[3] !== undefined && version === null) return NO_ANSWER;
+	return {
+		listed: match[1] !== undefined,
+		drift: match[2] === undefined ? null : { missing: match[2].split(","), version },
+	};
 }
 
 /**
  * The launcher's answer for a CONFIGURED session, whose request is made from its isolated child
  * (launch.mjs `probeInChild`), not from the parent that runs SessionStart: undefined until the
- * launcher sets it, then true or false. A parent that asked for itself would send under the
+ * launcher sets it, then an answer. A parent that asked for itself would send under the
  * environment the child exists to keep out (a CA store, a proxy).
  */
 let childProbe;
 export function setChildProbe(answer) {
-	childProbe = answer === true;
+	childProbe = answer;
+}
+
+/** SessionStart's one answer: the launcher's for a configured session, else one request here. */
+let environmentProbe;
+function sessionProbe() {
+	if (childProbe !== undefined) return childProbe;
+	environmentProbe ??= probeServer();
+	return environmentProbe;
 }
 
 /**
@@ -468,10 +518,20 @@ export function setChildProbe(answer) {
  * announces its banner exactly once.
  */
 export async function jobTypeInstruction() {
-	const listed = childProbe !== undefined ? childProbe : await probeJobType();
+	const listed = (await sessionProbe()).listed;
 	// OPT-IN (`jobTypeInstruction`, off by default): an agent is not asked to run a command at
 	// each task unless the user said so. The probe above is made either way.
 	return listed && settings().jobTypeInstruction === true ? JOB_TYPE_INSTRUCTION : null;
+}
+
+/**
+ * The one line to tell the user when the server lacks a capability this plugin uses
+ * (server-drift.mjs), or null: nothing missing, or nothing known. The same probe as
+ * `jobTypeInstruction`, so it makes no second request.
+ */
+export async function serverDriftWarning() {
+	const { drift } = await sessionProbe();
+	return drift === null ? null : driftLine(drift);
 }
 
 // ── Writing: ONE append of ONE complete line, no lock ──

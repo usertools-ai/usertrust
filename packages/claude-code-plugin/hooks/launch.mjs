@@ -6,7 +6,7 @@
 // - An `environment` session and a refused one run the hook here, in this process. So does
 //   SessionStart, which makes no governed request itself: its one probe (does the server list
 //   `job-type`?) is made, for a configured session, by a child of the kind below
-//   (`probeInChild`, session-probe.mjs), and the answer is a token the child writes to a pipe.
+//   (`probeInChild`, session-probe.mjs), and the answer is the fixed lines the child writes to a pipe.
 // - A `configured` session's other hooks, all of which can send, run as a CHILD that
 //   sends: `node launch.mjs <hook> --ut-child ...`, with no node options, the
 //   working directory `/`, and nothing of the environment but the host variables a
@@ -52,7 +52,7 @@ import {
 	settings as resolvedSettings,
 	useSession,
 } from "./config.mjs";
-import { PROBE_READ_MAX, PROBE_TOKEN, setChildProbe } from "./job-log.mjs";
+import { decodeProbe, NO_ANSWER, PROBE_READ_MAX, setChildProbe } from "./job-log.mjs";
 import { launch, readStdin, recordWatchEvent, say } from "./lib.mjs";
 import {
 	alsoEnabledWarning,
@@ -259,9 +259,9 @@ async function warnOfPeer(input) {
  * SessionStart's one request, for a configured session, from the same isolated child its other
  * hooks send from: no node options, cwd `/`, nothing of the environment. Resolves to whether the
  * server lists `job-type`. A child that cannot run, fails, is refused or outlives the bound is
- * `false` (no instruction), and the banner is the parent's, announced once either way. Its
+ * `NO_ANSWER` (no instruction, no warning), and the banner is the parent's, announced once either way. Its
  * stdout is not the parent's (SessionStart prints one JSON object, from here), and the answer
- * is the token it writes to a pipe (session-probe.mjs), read here with exit 0, never relayed.
+ * is the fixed lines it writes to a pipe (session-probe.mjs), read here with exit 0, never relayed.
  */
 export function probeInChild(session, home) {
 	return new Promise((resolve) => {
@@ -309,7 +309,7 @@ export function probeInChild(session, home) {
 			);
 		} catch {
 			cleanup();
-			resolve(false);
+			resolve(NO_ANSWER);
 			return;
 		}
 		timer = setTimeout(() => child.kill("SIGKILL"), PROBE_KILL_MS);
@@ -326,12 +326,12 @@ export function probeInChild(session, home) {
 		child.stdout.on("error", () => {});
 		child.on("error", () => {
 			cleanup();
-			resolve(false);
+			resolve(NO_ANSWER);
 		});
 		child.on("close", (code, signal) => {
 			cleanup();
-			// ONLY a clean exit 0 together with exactly the token line is "listed".
-			resolve(code === 0 && signal === null && !over && output === `${PROBE_TOKEN}\n`);
+			// ONLY a clean exit 0 together with exactly the lines `encodeProbe` writes is an answer.
+			resolve(code === 0 && signal === null && !over ? decodeProbe(output) : NO_ANSWER);
 		});
 	});
 }
@@ -352,7 +352,7 @@ async function parent(hook) {
 	const configured = session.kind === "configured" && session.settings.refused === null;
 	if (hook === "session-start" && configured) {
 		// The parent prints SessionStart's banner; only the request leaves, and from the child.
-		setChildProbe(childUnsupported() === null ? await probeInChild(session, home) : false);
+		setChildProbe(childUnsupported() === null ? await probeInChild(session, home) : NO_ANSWER);
 	}
 	// Neither sends anything: each only records, locally.
 	const sends = hook !== "session-start" && hook !== "post-model-switch";

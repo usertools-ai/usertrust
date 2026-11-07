@@ -1,5 +1,5 @@
 // SessionStart's one request, made from a configured session's isolated child (launch.mjs
-// `probeInChild`): does the server list `job-type`? It is not a hook of hooks.json; the launcher
+// `probeInChild`): does the server list `job-type`, and does it lack a capability the plugin uses? It is not a hook of hooks.json; the launcher
 // starts it only as that child, so the request is made under the child's sanitized environment
 // and never the parent's. Its stdout is the launcher's to read and never SessionStart's: the
 // answer is one fixed token line, written only after a well-formed list holding `job-type` was
@@ -9,15 +9,16 @@
 // not close every socket (a server that accepts the connection and stalls the TLS handshake
 // keeps connection work alive), and a probe left running would hold the inherited stderr, with
 // no parent if its launcher was killed.
-import { PROBE_TOKEN, probeJobType } from "./job-log.mjs";
+import { encodeProbe, probeServer } from "./job-log.mjs";
 import { requireLaunch } from "./lib.mjs";
 
 requireLaunch();
 
-/** The one thing this module writes to stdout: a fixed token, nothing from the server. */
-function acknowledge() {
-	return new Promise((resolve) => process.stdout.write(`${PROBE_TOKEN}\n`, () => resolve()));
+/** The one thing this module writes to stdout: fixed lines (`encodeProbe`), no free text from the server. */
+function acknowledge(text) {
+	return new Promise((resolve) => process.stdout.write(text, () => resolve()));
 }
 
-if (await probeJobType()) await acknowledge();
+const answer = encodeProbe(await probeServer());
+if (answer !== "") await acknowledge(answer);
 process.exit(0);
