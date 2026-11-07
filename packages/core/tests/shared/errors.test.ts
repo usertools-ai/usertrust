@@ -209,6 +209,8 @@ describe("task-limit errors", () => {
 	it("TaskLimitConflictError without the existing limit says another value", () => {
 		const err = new TaskLimitConflictError("t", 10);
 		expect(err.existingLimit).toBeUndefined();
-		expect(err.message).toContain("Task t already has a limit of another value; this call asked for 10");
+		expect(err.message).toContain(
+			"Task t already has a limit of another value; this call asked for 10",
+		);
 	});
 });

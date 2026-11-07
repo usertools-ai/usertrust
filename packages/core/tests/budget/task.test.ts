@@ -292,7 +292,13 @@ describe("withTaskLimit: the scope record", () => {
 		expect(scope).toBeDefined();
 		if (!scope) return;
 		expect(Object.isFrozen(scope)).toBe(true);
-		expect(Object.keys(scope).sort()).toEqual(["attempt", "id", "limit", "registry", "startedAtMs"]);
+		expect(Object.keys(scope).sort()).toEqual([
+			"attempt",
+			"id",
+			"limit",
+			"registry",
+			"startedAtMs",
+		]);
 		expect(Object.values(scope)).not.toContain(fn);
 		expect(() => {
 			// @ts-expect-error: exercising the runtime freeze against a caller ignoring `readonly`
