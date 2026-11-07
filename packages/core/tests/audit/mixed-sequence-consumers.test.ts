@@ -296,7 +296,7 @@ describe("verifyTransaction (--tx) on a mixed log, unanchored", () => {
 		const r = verifyTransaction(vault, "tx_c");
 		expect(r.found).toBe(true);
 		expect(r.valid).toBe(false);
-		expect(r.receipt).toContain("Event 2 of 2");
+		expect(r.receipt).toContain("sequence 2 (2 events checked)"); // INTENDED CHANGE: the vault fails, so no `Event N of M`
 		expect(r.receipt).not.toContain("outside the checked chain");
 	});
 
@@ -313,8 +313,8 @@ describe("verifyTransaction (--tx) on a mixed log, unanchored", () => {
 		const r = verifyTransaction(vault, "tx_p");
 		expect(r.found).toBe(true);
 		expect(r.status).toBe("PENDING");
-		expect(r.receipt).toContain("Event 2 of 2");
-		expect(r.receipt).not.toContain("Event ? of");
+		expect(r.receipt).toContain("sequence 2 (2 events checked)"); // INTENDED CHANGE: the vault fails, so no `Event N of M`
+		expect(r.receipt).not.toMatch(/Event \S+ of/);
 		expect(r.receipt).not.toContain("outside the checked chain");
 		expect(r.valid).toBe(false);
 	});
@@ -379,7 +379,8 @@ describe("verifyTransaction (--tx) on a mixed log, anchored", () => {
 		const { s, params } = await anchoredMixed();
 		const r = verifyTransaction(s.vaultPath, "tr_2", params);
 		expect(r.found).toBe(true);
-		expect(r.receipt).toContain("Event 2 of 3");
+		// INTENDED CHANGE: the vault fails, so the row is `sequence N (M events checked)`, not `Event N of M`.
+		expect(r.receipt).toContain("sequence 2 (3 events checked)");
 		expect(r.receipt).toContain("INCLUSION VERIFIED (anchor #");
 		// The vault fails (the sequence-less event), so the transfer's verdict is not a pass.
 		expect(r.valid).toBe(false);
