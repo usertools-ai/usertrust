@@ -429,6 +429,13 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   publishes `principal` and `authorize-cache-tiers`, but not `idempotency-key`:**
   until one publishes it, the plugin runs the at-most-once path above — it never
   posts usage twice, and a settle lost to an outage can go unrecorded.
+- **A server older than the plugin says so, once.** When the server states its capabilities and
+  lacks `hold-ttl` (every hold then expires after 300 s) or `release` (a hold that was not needed is
+  given back as a failure, which counts toward its circuit breaker), SessionStart adds ONE plain line
+  to the banner: the server's version, what is lost, and the first server release that has it
+  (`hold-ttl` 5.2.0, `release` 4.0.0). It comes from the one health request SessionStart already
+  makes, so there is no extra request. When the list cannot be read (the server is down, the breaker
+  is open, or the answer is not a list of strings) the banner is as before.
 - **Denied usage.** If the remainder's authorize is refused (402 budget, 403
   policy, 429 anomaly), those responses are marked `denied` and never retried, and
   a stderr note gives the token counts that could not be recorded.
@@ -1155,7 +1162,8 @@ that honours `hold-ttl` (it lists it in `/v1/health` `capabilities` and states i
 | A background command, any other tool | Nothing: the default |
 
 Never more than the server's ceiling, and nothing at all to a server that does not list `hold-ttl`
-(an older one would strip the key). The hold records what it asked for, so a crashed hook's
+(an older one would strip the key; SessionStart says so, see *A server older than the plugin says
+so, once*). The hold records what it asked for, so a crashed hook's
 `.settling` record of it is read as abandoned only once that life has passed too. A hold whose
 call never reports back keeps its budget reserved for up to that life, until the ledger voids it.
 

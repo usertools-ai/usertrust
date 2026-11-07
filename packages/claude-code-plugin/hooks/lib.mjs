@@ -1780,6 +1780,16 @@ export function jobTypeCapable(capabilities) {
 }
 
 /**
+ * What the last `/v1/health` answer said besides the list: the server's `version` as sent (free
+ * text: callers keep only a plain version, server-drift.mjs `plainVersion`), and whether it
+ * stated `capabilities` as a list at all. Unset until an answer is read.
+ */
+let healthFacts = { version: undefined, listed: false };
+export function serverHealthFacts() {
+	return healthFacts;
+}
+
+/**
  * What the server honours (`/v1/health` `capabilities`), read once per hook
  * process. The answer is never READ from disk: a cache could still claim keys after
  * the server was downgraded to one that strips them. (One that answered is
@@ -1828,6 +1838,7 @@ export function serverCapabilities({ maxMs = 2_000, count = true } = {}) {
 			) {
 				MALFORMED_LISTS.add(capabilities);
 			}
+			healthFacts = { version: json?.version, listed: Array.isArray(json?.capabilities) };
 			const max = json?.maxHoldTtlMs;
 			healthMaxHoldTtlMs = Number.isSafeInteger(max) && max > 0 ? max : null;
 			principalCachedAt = null;

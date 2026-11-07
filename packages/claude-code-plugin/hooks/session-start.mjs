@@ -24,7 +24,7 @@
 // omit): what a hold names before any response of its agent says one (transcript.mjs
 // `holdModelFor`). And it says so when a model is still configured: that is ignored.
 import { ignoredModelNote } from "./config.mjs";
-import { jobTypeInstruction, writeSessionStart } from "./job-log.mjs";
+import { jobTypeInstruction, serverDriftWarning, writeSessionStart } from "./job-log.mjs";
 import { rejectedSinceLastStart, warningText } from "./key-rejected.mjs";
 import {
 	announce,
@@ -86,6 +86,10 @@ try {
 // same reason as the rejected-key warning.
 const peerWarning = takePeerWarning();
 if (peerWarning !== null) warning = warning === null ? peerWarning : `${peerWarning} ${warning}`;
+// A server that lacks a capability this plugin uses (the same probe as the instruction below, so
+// no second request): what the user loses and the fix, in one line. Null for everything else.
+const driftNote = await serverDriftWarning();
+if (driftNote !== null) warning = warning === null ? driftNote : `${warning} ${driftNote}`;
 // A model still configured is ignored, and said; after the warnings, which matter more.
 const modelNote = ignoredModelNote();
 if (modelNote !== null) warning = warning === null ? modelNote : `${warning} ${modelNote}`;

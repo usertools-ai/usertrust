@@ -20,6 +20,13 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ### Added
 
+- **SessionStart says, in one line, when the server lacks a capability the plugin uses.** A server
+  that states its capabilities but not `hold-ttl` kept every hold at 300 s without a word, and one
+  without `release` counted every unneeded hold as a failure on its circuit breaker. The banner now
+  carries one plain line naming the server's version, what is lost, and the release to upgrade to
+  (`hold-ttl` 5.2.0, `release` 4.0.0). No extra request: it reads the health answer SessionStart
+  already asks for (a configured session's isolated child passes it back as two fixed lines), and
+  an unreadable answer, an open breaker or an unreachable server leave the banner as it was.
 - **Say what KIND of work a job is: `usertrust-job.mjs start --type <type> [--source agent|explicit] <job-id>`.**
   The type is one of a closed list, `feature`, `bugfix`, `review`, `test`, `docs`, `ops`, `research`,
   `other`, and rides every record of the job (`jobType`, `typeSource`) beside the job itself, so cost by
