@@ -1344,13 +1344,19 @@ subdirectory and `.torn` is not `.jsonl`, so no segment gatherer ever reads evid
 
 **Nothing is appended after a last line that is not an event with a sequence.** One reading of the
 log's text, `tailVerdict` in `audit/chain.ts`, decides it for both places that ask: a last line
-that parses but is not a JSON object with a numeric `sequence` (an event without one, or `42`,
-`[]`, `"x"`, `true`, `null`) is refused with `AuditSequencelessTailError` (`logPath`, and `line`
-numbered among the non-blank lines as `verify.ts` numbers them), and nothing is written. The check
+that parses but is not a JSON object whose `sequence` the writer can count on from
+(`isContinuableSequence`: a safe integer of at least 1 whose successor is a safe integer too) is
+refused with `AuditSequencelessTailError` (`logPath`, and `line` numbered among the non-blank lines
+as `verify.ts` numbers them), and nothing is written. That covers an event without a sequence, one
+with `2.5`, `0`, `-1`, `1e20` or `Number.MAX_SAFE_INTEGER`, and `42`, `[]`, `"x"`, `true`, `null`.
+The rule is the WRITER's: `verify.ts` (and `packages/verify`) keep `typeof sequence === "number"`,
+and walk such a number as a sequence (a non-integer or a gap is named there as a gap); do not
+tighten the verifier to match without a decision of its own. The check
 runs at OPEN in the three public entry points, `createAuditWriter`, `createUnleasedAuditWriter` and
 `openSharedAuditWriter` (after `resolveSharedVault`), before any directory is made or lock taken,
-so `trust()`, `createGovernor()`, `usertrust secret` and `quarantine-tail` refuse where a person
-sees it; and again in `getLastEvent` at every read of the tail by an append, for a log that changed
+so `trust()`, `createGovernor()`, the `usertrust secret` subcommands that append (`add`, `rm`,
+`rotate`, `get`) and `quarantine-tail` refuse where a person sees it (`secret ls` never appends,
+opens no writer, and keeps working); and again in `getLastEvent` at every read of the tail by an append, for a log that changed
 after the open (that refusal takes the ordinary degraded path: counted, dead-lettered, rethrown).
 Never put the open check in `createAuditWriterAt` or `joinSharedWriter`: the shared writer is made
 inside a handle's append before its `try`, so a throw there skips the handle's failure report and
@@ -1360,7 +1366,8 @@ on a torn log, and reading a FIFO would block the open. Out of scope, and pinned
 sequenced last line after an earlier sequence-less one (refusing it needs a full check at open).
 *Prevents:* a log in which no event has a sequence (the legacy shape `verify.ts` walks in file
 order) turned into a mixed log that never passes again, by sequenced events counted on from its
-line count; and a non-object last line continued with its next event linked to GENESIS.
+line count; a non-object last line continued with its next event linked to GENESIS; and a last
+sequence such as `2.5` counted on from (`3.5`).
 
 **Readers and verifiers never write to the vault.** `packages/verify/src`,
 `packages/core/src/audit/read.ts`, `packages/core/src/audit/effective-budget.ts`, `packages/core/src/audit/dead-letters.ts`, and
