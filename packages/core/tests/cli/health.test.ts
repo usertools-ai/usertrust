@@ -436,8 +436,9 @@ describe("usertrust health — policy line", () => {
  * silent — these are `verify.ts` ordering defects, not health defects, and they
  * are preconditions for shipping `rotateSegment` (which has no definition
  * anywhere in the repo today, so none of them is reachable):
- *   - mixed `sequence` presence across segments falls back to file order, which
- *     sorts the LIVE segment first and fails an intact chain;
+ *   - mixed `sequence` presence: each event without a sequence is now reported by
+ *     `verify.ts` and left out of the walk (a log with no sequence at all is still
+ *     walked in file order, which can sort the LIVE segment first);
  *   - a stray non-chain `*.jsonl` in `audit/` is swept in as a segment;
  *   - an unreadable archived segment is skipped silently.
  */

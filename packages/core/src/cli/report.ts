@@ -496,7 +496,9 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 		const readAtIso = new Date().toISOString();
 		const complete = verifyVaultComplete(vaultPath);
 		const { result } = complete.reading;
-		// The figures come from the events the verifier walked, never from a second read of the log.
+		// The figures come from the verifier's own reading, never from a second read of the log:
+		// every event on file, the ones left out of the chain walk included, so no call drops out
+		// of the spend.
 		const events = complete.reading.events;
 		const verified = complete.valid;
 		// A config that cannot be read makes the budget UNKNOWN, not the chain unverified: the verifier does not read it.

@@ -632,14 +632,16 @@ const EVENT_ERROR = /^Event (\d+) \(/;
  * did it order the vault the way the reader did (by `sequence`, with its sequence checks, or by file without them).
  *
  * The reader and the verifier both skip a line that does not parse or that parses to something other than a JSON
- * object (`42`, `[]`, `"x"`, `null`), and both order what is left by `sequence` when every event carries one. The
- * verifier also reports each such line as an error that names no event ("non-object line", "malformed JSON"), and that
- * error alone makes `breakIsOnlyFailure` false. These checks are a second line of defence, failing closed whenever the
- * two lists differ anyway:
- * - the verifier's walked hashes (`orderedHashes`) against its own `events`. With the verifier as it is, both hold one
- *   entry per walked event, so this cannot fire; it guards against a verifier that walks a line it does not return as
- *   an event, whose indexes would then name no position the reader holds, and whose order could differ from the
- *   reader's (a walked line with no `sequence` would switch it to file order, skipping its sequence checks);
+ * object (`42`, `[]`, `"x"`, `null`), and both list what is left the same way: by `sequence`, then (in a log where only
+ * some events carry one) the events without it, in file order. The verifier also reports each such line, and each
+ * event without a sequence in such a log, as an error that names no event ("non-object line", "malformed JSON", "event
+ * without sequence"), and that error alone makes `breakIsOnlyFailure` false. These checks are a second line of
+ * defence, failing closed whenever the two lists differ anyway:
+ * - the verifier's walked hashes (`orderedHashes`) against its own `events`. The verifier walks only the sequenced
+ *   events of a log where only some events carry a sequence, and returns the others after them, so there
+ *   `orderedHashes` is SHORTER than `events` and this fires: the vault reads invalid at every position, and no event is
+ *   hidden (the reader still lists each one). It also guards against a verifier that walks a line it does not return as
+ *   an event, whose indexes would then name no position the reader holds;
  * - the verifier's events against the reader's, by number and then one by one (a stored hash that is not a string is
  *   `""` on both sides, as the verifier records it). The two read the files separately, so any difference fails
  *   closed.

@@ -118,7 +118,12 @@ export interface VaultVerificationResult {
 /** A vault's verdict, and the events it was reached on: what every later check must read. */
 export interface VaultReading {
 	result: VaultVerificationResult;
-	/** The events walked, in chain order, as parsed from their lines (JSON objects only). */
+	/**
+	 * Every event on file, as parsed from its line (JSON objects only): the walked events in chain
+	 * order, then the events left out of the walk (in a log where only some events have a sequence,
+	 * the ones without), in file order. The first `result.chainLength` are the walked ones, and
+	 * `orderedHashes[i]` is the hash of `events[i]`; an event past them has no leaf.
+	 */
 	events: readonly Record<string, unknown>[];
 	/** Every walked line's stored hash, in chain order (`""` where it is not a string). */
 	orderedHashes: readonly string[];
@@ -304,12 +309,22 @@ export function verifyVaultReading(vaultPath: string): VaultReading {
 		}
 	}
 
-	// 6. Order by the persisted global sequence when available (legacy fallback:
-	// file order, for hand-built sequence-less single-segment fixtures).
-	const allHaveSeq = events.every((e) => typeof e.sequence === "number");
-	const ordered = allHaveSeq
-		? [...events].sort((a, b) => (a.sequence as number) - (b.sequence as number))
-		: events;
+	// 6. Order by the persisted global sequence. The file-order walk, with both sequence checks
+	// off, is only for a log in which NO event has a sequence (the legacy shape). A log where only
+	// some events have one is not that log: each event without a numeric sequence is its own error
+	// and is left out of the walk, which runs over the sequenced events in sequence order with
+	// both sequence checks on. Before, one such event switched the whole vault to the file-order
+	// walk, and a leading deletion or a gap among the other events was never named.
+	const sequenced = events.filter((e) => typeof e.sequence === "number");
+	const legacy = sequenced.length === 0;
+	// The events left out of the walk, in file order: none in a legacy log.
+	const unwalked = legacy ? [] : events.filter((e) => typeof e.sequence !== "number");
+	for (const e of unwalked) {
+		errors.push(`event without sequence (${scrubForError(basename(e.sourceFile))}:${e.line})`);
+	}
+	const ordered = legacy
+		? events
+		: [...sequenced].sort((a, b) => (a.sequence as number) - (b.sequence as number));
 
 	// 7. One continuous continuity walk.
 	let expectedPrev = GENESIS_HASH;
@@ -325,10 +340,10 @@ export function verifyVaultReading(vaultPath: string): VaultReading {
 			);
 		}
 
-		if (allHaveSeq && i === 0 && e.sequence !== 1) {
+		if (!legacy && i === 0 && e.sequence !== 1) {
 			errors.push(`Sequence starts at ${e.sequence}, expected 1 (leading events deleted)`);
 		}
-		if (allHaveSeq && i > 0) {
+		if (!legacy && i > 0) {
 			const prevSeq = (ordered[i - 1] as ParsedEvent).sequence as number;
 			if (e.sequence !== prevSeq + 1) {
 				errors.push(
@@ -380,15 +395,21 @@ export function verifyVaultReading(vaultPath: string): VaultReading {
 		result: {
 			valid: errors.length === 0,
 			errors,
-			chainLength: events.length,
+			chainLength: ordered.length,
 			validHashes,
 			merkleRoot,
 			firstEvent,
 			lastEvent,
 		},
-		// Every walked line is a JSON object (step 5 refuses the rest, as its own error), so this
-		// filter only narrows the type; it is kept so no later check can ever be handed a non-object.
-		events: ordered
+		// THE INVARIANT every reader of `events` relies on: the walked events (`ordered`) FOLLOWED BY
+		// the events left out of the walk, in file order. So `events[i]` is walked event `i`, whose
+		// hash is `orderedHashes[i]`, for every `i < chainLength`, and an index at or past
+		// `chainLength` has no leaf. A figure (a spend, a transaction list) is built from every event
+		// on file; a check on the chain reads the first `chainLength`. Every parsed line is a JSON
+		// object (step 5 refuses the rest, as its own error), so the filter only narrows the type and
+		// removes nothing, which the invariant needs; it is kept so no later check can ever be handed a
+		// non-object.
+		events: [...ordered, ...unwalked]
 			.map((e) => e.parsed as unknown)
 			.filter(
 				(p): p is Record<string, unknown> =>
@@ -444,7 +465,10 @@ export interface AnchoredVaultVerificationResult extends VaultVerificationResult
 /** {@link VaultReading} for the anchored verdict. */
 export interface AnchoredVaultReading {
 	result: AnchoredVaultVerificationResult;
-	/** The events walked, in chain order: the ones the anchors were checked against. */
+	/**
+	 * The reading's events, as in {@link VaultReading}: the walked events in chain order (the ones
+	 * the anchors were checked against), then any left out of the walk, in file order.
+	 */
 	events: readonly Record<string, unknown>[];
 }
 
@@ -583,6 +607,14 @@ export interface TransactionVerificationResult {
 	 * receipt also prints fields the vault under audit wrote.
 	 */
 	readonly inclusionVerified?: boolean | undefined;
+	/**
+	 * Present (and true) only when the transfer's records are on file but none is in the checked
+	 * chain: each is an event without a sequence in a log where other events have one, so the walk
+	 * left it out. Such a transfer is found, has no leaf, no inclusion proof and no anchored claim,
+	 * and its result is never valid (the vault fails on those events' own errors). A transfer with a
+	 * record in the checked chain is judged on those records alone.
+	 */
+	readonly outsideCheckedChain?: true | undefined;
 }
 
 /**
@@ -810,13 +842,26 @@ export function verifyTransaction(
 
 	// The events AND the verdict come from one vault reading, in the chain verifier's order.
 	const reading = verifyVaultReading(vaultPath);
-	const events = reading.events.map(normalizeEvent);
+	const all = reading.events.map(normalizeEvent);
+	// The reading's events are the walked ones (one per leaf, in chain order) followed by the events
+	// left out of the walk. The transfer is matched over the WALKED events: they alone decide its
+	// status, its terminal and its leaf. A record left out of the walk is not part of the checked
+	// chain, so it never changes a transfer that has a walked record. Only a transfer with NO walked
+	// record is matched over the rest, and is then reported as outside the checked chain: found
+	// (it is on file), with no leaf, no proof and no anchored claim.
+	const events = all.slice(0, reading.orderedHashes.length);
 	// No per-use shape guard needed: `normalizeEvent` already guarantees `kind`
 	// is a string, `data` is an object, and `transferId` is a string.
 	// `settlement_unrecoverable` stores only the SHA-256 of its transferId, so that kind matches on the
 	// hash of the queried id (`matchesTransfer`).
 	const txHash = transferIdHash(txId);
-	const matching = events.filter((e) => matchesTransfer(e, txId, txHash));
+	const walkedMatching = events.filter((e) => matchesTransfer(e, txId, txHash));
+	const outsideMatching =
+		walkedMatching.length === 0
+			? all.slice(events.length).filter((e) => matchesTransfer(e, txId, txHash))
+			: [];
+	const outsideCheckedChain = outsideMatching.length > 0;
+	const matching = outsideCheckedChain ? outsideMatching : walkedMatching;
 	const firstTerminal = firstTerminalOf(matching);
 	const targetEvent = selectTransferEvent(matching);
 
@@ -866,7 +911,8 @@ export function verifyTransaction(
 		anchoring = vaultResult.anchoring;
 		anchorErrors.push(...vaultResult.anchoring.reasons.map((r) => `anchor: ${r}`));
 		const state = vaultResult.anchorState;
-		if (state === "ANCHORED_VERIFIED" || state === "ANCHOR_STALE") {
+		// A target outside the checked chain has no leaf: no proof is ever built for it.
+		if (!outsideCheckedChain && (state === "ANCHORED_VERIFIED" || state === "ANCHOR_STALE")) {
 			const orderedHashes = gatherOrderedEventHashes(vaultPath);
 			const pos = typeof targetEvent.sequence === "number" ? targetEvent.sequence : leafIndex + 1;
 			const candidates: AnchorRecord[] = [];
@@ -935,6 +981,12 @@ export function verifyTransaction(
 			merkleLabel = "INCLUSION UNVERIFIABLE";
 		}
 	}
+	// Outside the checked chain: no leaf, so no Merkle claim of any kind, consistent or anchored.
+	if (outsideCheckedChain) {
+		merkleVerified = false;
+		merkleLabel = "NO LEAF (NOT IN THE CHAIN)";
+		inclusionVerified = false;
+	}
 
 	// Carry the DETECTOR's reason across terminal selection. Ranking a terminal
 	// above the detection is right for status and wrong for reason: a successful
@@ -967,6 +1019,7 @@ export function verifyTransaction(
 		chainVerified,
 		verifiedAt: new Date(),
 		merkleLabel,
+		...(outsideCheckedChain ? { outsideCheckedChain: true as const } : {}),
 	};
 
 	const allErrors = [...vaultErrors, ...anchorErrors].map(scrubForError);
@@ -978,6 +1031,7 @@ export function verifyTransaction(
 		status: eventStatus(targetEvent),
 		errors: allErrors,
 		inclusionVerified: inclusionVerified && chainVerified && anchorsValid,
+		...(outsideCheckedChain ? { outsideCheckedChain: true as const } : {}),
 		...(anchorState !== undefined ? { anchorState } : {}),
 		...(anchoring !== undefined ? { anchoring } : {}),
 	};

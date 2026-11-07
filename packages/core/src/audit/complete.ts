@@ -5,14 +5,20 @@
  * The vault verdict that `usertrust verify` and `usertrust report` BOTH print: integrity AND completeness, on the live vault.
  *
  * Integrity (`verifyVaultReading`) walks the chain link by link; completeness reads the writer's dead-letter queue against the
- * events it just walked, because a chain with an event missing still verifies link by link. They are one function so that no
+ * events of that same reading, because a chain with an event missing still verifies link by link. They are one function so that no
  * second reader can hold less than the verifier reads: the weekly report once copied the vault into a snapshot and judged the
  * copy, and the copy diverged from `verify` five times (a missing dead letter, a failed copy, a directory where a sidecar
  * belongs, a dangling segment, a queue drained between two reads). The report now prints this verdict verbatim and makes no
  * integrity claim of its own.
  *
- * ONE READ PER VERDICT: the events returned are the ones the verifier walked, and the dead letters are judged against THOSE,
- * never against the log read again.
+ * ONE READ PER VERDICT: the events returned are the verifier's own reading, and the dead letters
+ * are judged against IT, never against the log read again.
+ *
+ * FIGURES COUNT EVERY EVENT, EVIDENCE ONLY THE CHECKED ONES. The reading's events are every event
+ * on file (the walked ones, then any left out of the walk), and a figure built from them (a spend,
+ * a table) drops none. A dead letter is resolved only by an event the walk hash-checked
+ * (`checkedEvents`): an event left out of the walk (one without a sequence, in a log where others
+ * have one) was never checked, so a dead letter naming it stays missing.
  */
 
 import {
@@ -24,7 +30,22 @@ import {
 import type { PersistedAuditEvent } from "./read.js";
 import { type VaultReading, verifyVaultReading } from "./verify.js";
 
-/** The dead-letter queue read against `events`, the events a verification just walked. */
+/**
+ * The events a reading hash-checked: the first `result.chainLength` of its events, which are
+ * exactly the walked ones (`VaultReading.events`). Evidence (a dead letter resolved, a receipt
+ * audited) is matched against these alone; in a log the walk took whole, they are every event.
+ */
+export function checkedEvents(reading: {
+	readonly result: { readonly chainLength: number };
+	readonly events: readonly PersistedAuditEvent[];
+}): readonly PersistedAuditEvent[] {
+	return reading.events.slice(0, reading.result.chainLength);
+}
+
+/**
+ * The dead-letter queue read against `events`: the CHECKED events of a verification's own reading
+ * (`checkedEvents`), never every event on file.
+ */
 export function deadLettersAgainst(
 	vaultDir: string,
 	events: readonly PersistedAuditEvent[],
@@ -37,9 +58,9 @@ export function deadLettersAgainst(
 }
 
 export interface CompleteVerification {
-	/** The verifier's own reading: its verdict and the events it walked. */
+	/** The verifier's own reading: its verdict and every event it read (the figures' events). */
 	reading: VaultReading;
-	/** The dead-letter queue, judged against those events. */
+	/** The dead-letter queue, judged against the reading's CHECKED events (`checkedEvents`). */
 	deadLetters: ChainDeadLetters | ChainDeadLettersUnreadable;
 	/** No chain event is missing from the chain, and the queue could be read. */
 	complete: boolean;
@@ -62,7 +83,7 @@ export function incompletenessErrors(d: ChainDeadLetters | ChainDeadLettersUnrea
 /** Verify the vault (the `.usertrust` directory) for integrity and completeness. Reads only; writes nothing. */
 export function verifyVaultComplete(vaultDir: string): CompleteVerification {
 	const reading = verifyVaultReading(vaultDir);
-	const deadLetters = deadLettersAgainst(vaultDir, reading.events);
+	const deadLetters = deadLettersAgainst(vaultDir, checkedEvents(reading));
 	const extra = incompletenessErrors(deadLetters);
 	const complete = extra.length === 0;
 	return {

@@ -713,10 +713,13 @@ export function verifyAnchorChain(
 /**
  * Gather the globally sequence-ordered stored event hashes of a vault, using
  * the exact segment-gathering and ordering semantics of verifyVault
- * (events.jsonl first, then every other *.jsonl sorted; order by persisted
- * global `sequence` when every event has one, else file order). Malformed
- * lines are skipped here — chain-level errors are verifyVault's job, not the
- * anchor evaluator's.
+ * (events.jsonl first, then every other *.jsonl sorted; the events that carry
+ * a persisted global `sequence`, in sequence order, or file order when NO
+ * event carries one). An event without a sequence in a log where others have
+ * one is left out, as verifyVault leaves it out of its walk: these are the
+ * positions the anchors count, so the two lists must be the same list.
+ * Malformed lines are skipped here: chain-level errors are verifyVault's job,
+ * not the anchor evaluator's.
  */
 export function gatherOrderedEventHashes(vaultPath: string): string[] {
 	const auditDir = join(vaultPath, "audit");
@@ -762,10 +765,11 @@ export function gatherOrderedEventHashes(vaultPath: string): string[] {
 			});
 		}
 	}
-	const allHaveSeq = events.every((e) => typeof e.sequence === "number");
-	const ordered = allHaveSeq
-		? [...events].sort((a, b) => (a.sequence as number) - (b.sequence as number))
-		: events;
+	const sequenced = events.filter((e) => typeof e.sequence === "number");
+	const legacy = sequenced.length === 0;
+	const ordered = legacy
+		? events
+		: [...sequenced].sort((a, b) => (a.sequence as number) - (b.sequence as number));
 	return ordered.map((e) => e.hash);
 }
 

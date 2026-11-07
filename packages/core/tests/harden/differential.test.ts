@@ -23,7 +23,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 // Zero-dep verify package, imported by relative path across the workspace.
-import { verifyVault as pkgVerifyVault } from "../../../verify/src/index.js";
+import {
+	verifyVault as pkgVerifyVault,
+	verifyVaultReading as pkgVerifyVaultReading,
+	verifyVaultWithAnchorsReading as pkgVerifyVaultWithAnchorsReading,
+} from "../../../verify/src/index.js";
 import {
 	buildMerkleTree as pkgBuildMerkleTree,
 	generateInclusionProof as pkgGenerateInclusionProof,
@@ -38,7 +42,11 @@ import {
 	type MerkleInclusionProof,
 	type MerkleSibling,
 } from "../../src/audit/merkle.js";
-import { verifyVault as coreVerifyVault } from "../../src/audit/verify.js";
+import {
+	verifyVault as coreVerifyVault,
+	verifyVaultReading as coreVerifyVaultReading,
+	verifyVaultWithAnchorsReading as coreVerifyVaultWithAnchorsReading,
+} from "../../src/audit/verify.js";
 import { GENESIS_HASH, VAULT_DIR } from "../../src/shared/constants.js";
 
 const dirs: string[] = [];
@@ -300,6 +308,23 @@ function buildSequencedChain(sequences: readonly number[]): string[] {
 	return lines;
 }
 
+/** Every field of the two verdicts, compared whole. Returns core's verdict for further checks. */
+function assertFullAgree(vaultPath: string): ReturnType<typeof coreVerifyVault> {
+	const core = coreVerifyVault(vaultPath);
+	const pkg = pkgVerifyVault(vaultPath);
+	const pick = (r: typeof core) => ({
+		valid: r.valid,
+		errors: r.errors,
+		chainLength: r.chainLength,
+		validHashes: r.validHashes,
+		merkleRoot: r.merkleRoot,
+		firstEvent: r.firstEvent,
+		lastEvent: r.lastEvent,
+	});
+	expect(pick(core)).toEqual(pick(pkg));
+	return core;
+}
+
 describe("HARDEN: core vs verify pkg agree on a log holding a non-object line", () => {
 	/**
 	 * A line that parses as JSON but is not an object (`42`, `[]`) is not an event. Both verifiers
@@ -313,23 +338,6 @@ describe("HARDEN: core vs verify pkg agree on a log holding a non-object line", 
 			rmSync(d, { recursive: true, force: true });
 		}
 	});
-
-	/** Every field of the two verdicts, compared whole. */
-	function assertFullAgree(vaultPath: string): ReturnType<typeof coreVerifyVault> {
-		const core = coreVerifyVault(vaultPath);
-		const pkg = pkgVerifyVault(vaultPath);
-		const pick = (r: typeof core) => ({
-			valid: r.valid,
-			errors: r.errors,
-			chainLength: r.chainLength,
-			validHashes: r.validHashes,
-			merkleRoot: r.merkleRoot,
-			firstEvent: r.firstEvent,
-			lastEvent: r.lastEvent,
-		});
-		expect(pick(core)).toEqual(pick(pkg));
-		return core;
-	}
 
 	function vaultWith(lines: readonly string[]): string {
 		const root = makeRoot("harden-diff-nonobject-");
@@ -377,6 +385,144 @@ describe("HARDEN: core vs verify pkg agree on a log holding a non-object line", 
 		expect(core.valid).toBe(false);
 		expect(core.errors).toEqual(["non-object line (events.jsonl:3)"]);
 		expect(core.chainLength).toBe(4);
+	});
+});
+
+/** One line per event, linked and hashed. `null` in `sequences` builds one with no sequence. */
+function buildMixedChain(sequences: readonly (number | null)[]): string[] {
+	let previousHash = GENESIS_HASH;
+	const lines: string[] = [];
+	for (let i = 0; i < sequences.length; i++) {
+		const seq = sequences[i];
+		const event: Record<string, unknown> = {
+			id: `evt-${i + 1}`,
+			kind: "test.event",
+			timestamp: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(),
+			previousHash,
+			data: { n: i + 1 },
+		};
+		if (typeof seq === "number") event.sequence = seq;
+		const hash = createHash("sha256").update(canonicalize(event)).digest("hex");
+		lines.push(JSON.stringify({ ...event, hash }));
+		previousHash = hash;
+	}
+	return lines;
+}
+
+describe("HARDEN: core vs verify pkg agree on a log where some events have no sequence", () => {
+	/**
+	 * A mixed log: some events carry a `sequence`, some do not. Both verifiers must name every
+	 * event without one as its own error and keep the sequence checks running over the events that
+	 * carry one, in the same words. As with the non-object rows, agreement alone is not enough: the
+	 * two agreed on a clean verdict that named neither the event nor the deletion beside it, so
+	 * each row also pins what core says.
+	 */
+	afterEach(() => {
+		for (const d of dirs.splice(0)) {
+			rmSync(d, { recursive: true, force: true });
+		}
+	});
+
+	function vaultWithSegments(segments: Record<string, readonly string[]>): string {
+		const root = makeRoot("harden-diff-mixed-");
+		const auditDir = join(root, VAULT_DIR, "audit");
+		mkdirSync(auditDir, { recursive: true });
+		for (const [name, lines] of Object.entries(segments)) {
+			writeFileSync(join(auditDir, name), `${lines.join("\n")}\n`);
+		}
+		return join(root, VAULT_DIR);
+	}
+
+	const rotated = buildMixedChain([1, null, 2, 3]);
+
+	const rows: {
+		name: string;
+		segments: Record<string, readonly string[]>;
+		expected: readonly string[];
+	}[] = [
+		{
+			name: "a sequence-less event after sequenced ones",
+			segments: { "events.jsonl": buildMixedChain([1, 2, null, 4]) },
+			expected: ["event without sequence (events.jsonl:3)"],
+		},
+		{
+			name: "a sequence-less event in a rotated segment",
+			segments: { "events-0001.jsonl": rotated.slice(0, 2), "events.jsonl": rotated.slice(2) },
+			expected: ["event without sequence (events-0001.jsonl:2)"],
+		},
+		{
+			name: "a gap among the sequenced events",
+			segments: { "events.jsonl": buildMixedChain([null, 1, 2, 4, 5]) },
+			expected: ["event without sequence (events.jsonl:1)", "Sequence gap: event 4 follows 2"],
+		},
+		{
+			name: "a leading deletion",
+			segments: { "events.jsonl": buildMixedChain([5, 6, null, 7]) },
+			expected: [
+				"event without sequence (events.jsonl:3)",
+				"Sequence starts at 5, expected 1 (leading events deleted)",
+			],
+		},
+		{
+			name: "a first sequence of 0",
+			segments: { "events.jsonl": buildMixedChain([0, 1, 2, null]) },
+			expected: ["event without sequence (events.jsonl:4)", "Sequence starts at 0, expected 1"],
+		},
+		{
+			name: "a sequence of 2.5",
+			segments: { "events.jsonl": buildMixedChain([1, 2.5, 3, null]) },
+			expected: ["event without sequence (events.jsonl:4)", "Sequence gap: event 2.5 follows 1"],
+		},
+	];
+
+	it.each(rows)("19. $name: both name the same faults", ({ segments, expected }) => {
+		const core = assertFullAgree(vaultWithSegments(segments));
+		expect(core.valid).toBe(false);
+		// One error per line, so a missing message fails with every error the verdict did give.
+		for (const fragment of expected) {
+			expect(core.errors.join("\n")).toContain(fragment);
+		}
+	});
+
+	it("20. a log with no sequence at all: both pass it in file order (positive control)", () => {
+		const core = assertFullAgree(
+			vaultWithSegments({ "events.jsonl": buildMixedChain([null, null, null, null]) }),
+		);
+		expect(core.errors).toEqual([]);
+		expect(core.valid).toBe(true);
+		expect(core.chainLength).toBe(4);
+	});
+
+	// The events a reading hands back are what the figures are built from: every event of the log,
+	// the walked ones by sequence and then the rest in file order, and the same in both packages.
+	it("21. both hand back every event of a mixed log, in the same order", () => {
+		const chain = buildMixedChain([1, null, 2, null, 3]);
+		const vault = vaultWithSegments({
+			"events-0001.jsonl": chain.slice(0, 2),
+			"events.jsonl": chain.slice(2),
+		});
+		const core = coreVerifyVaultReading(vault);
+		const pkg = pkgVerifyVaultReading(vault);
+		expect(core.events).toEqual(pkg.events);
+		expect(core.orderedHashes).toEqual(pkg.orderedHashes);
+		expect(core.events.map((e) => e.id)).toEqual(["evt-1", "evt-3", "evt-5", "evt-4", "evt-2"]);
+		expect(core.orderedHashes).toHaveLength(3);
+
+		const coreAnchored = coreVerifyVaultWithAnchorsReading(vault);
+		const pkgAnchored = pkgVerifyVaultWithAnchorsReading(vault);
+		expect(coreAnchored.events).toEqual(pkgAnchored.events);
+		expect(coreAnchored.events).toEqual(core.events);
+	});
+
+	it("22. both hand back every event of a log with no sequence, in file order (positive control)", () => {
+		const chain = buildMixedChain([null, null, null, null]);
+		const vault = vaultWithSegments({
+			"events.jsonl": chain.slice(0, 2),
+			"events-0001.jsonl": chain.slice(2),
+		});
+		const core = coreVerifyVaultReading(vault);
+		expect(core.events).toEqual(pkgVerifyVaultReading(vault).events);
+		expect(core.events.map((e) => e.id)).toEqual(["evt-1", "evt-2", "evt-3", "evt-4"]);
 	});
 });
 

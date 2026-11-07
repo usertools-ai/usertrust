@@ -72,9 +72,11 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	const config = loadBudgetConfig(vaultPath);
 	// ONE READING for the verdict, the count, the latest hash, the Merkle root, the spend and the table:
 	// every audit segment, ordered by `sequence`, walked as one chain, exactly as `usertrust verify`
-	// reads it. Verifying the live log alone failed every rotated vault (its first event links to the
-	// previous segment, not to GENESIS, and the `.meta` anchor counts every event), and listing events
-	// from a second read let the table and the root describe a log the verdict never judged.
+	// reads it. The count, the latest hash and the root are the walk's; the spend and the table hold
+	// every event on file, so an event left out of the walk still counts. Verifying the live log
+	// alone failed every rotated vault (its first event links to the previous segment, not to
+	// GENESIS, and the `.meta` anchor counts every event), and listing events from a second read let
+	// the table and the root describe a log the verdict never judged.
 	const reading = verifyVaultReading(vaultPath);
 	const verification = reading.result;
 	const events = reading.events;

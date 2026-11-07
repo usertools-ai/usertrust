@@ -11,6 +11,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import pc from "picocolors";
+import { checkedEvents } from "../audit/complete.js";
 import { describeMissingEvents, readChainDeadLetters } from "../audit/dead-letters.js";
 import {
 	computeEntropyScore,
@@ -345,17 +346,19 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	// arguments — a log path versus the `.usertrust` directory — which is the
 	// distinction AGENTS.md flags as easy to get wrong, and I got it wrong by
 	// reaching for the one already in hand.
-	const { result: verification, events: verifiedEvents } = verifyVaultReading(vaultPath);
+	const reading = verifyVaultReading(vaultPath);
+	const verification = reading.result;
 
 	// COMPLETENESS is the other half of chain integrity, and the hash walk cannot see it: a chain
 	// with an event missing verifies link by link. Every event that failed to reach the chain is
 	// dead-lettered; one that is not on the chain is an integrity failure here, exactly as a broken
 	// link is (a vault with half its events dead-lettered read "verified [ok]"). A dead-letter
 	// queue that cannot be read is one too: whether events are missing is unknown, not "none".
-	// The dead letters are matched against the events the verification walked, never `events`
-	// above: that is an earlier read, and a log changed between the two had the integrity line
-	// describe one chain and the completeness line another.
-	const eventsByHash = new Map(verifiedEvents.map((e) => [e.hash, e]));
+	// The dead letters are matched against the events the verification hash-checked
+	// (`checkedEvents`: evidence counts only checked events, so an event left out of the walk never
+	// resolves one), never `events` above: that is an earlier read, and a log changed between the
+	// two had the integrity line describe one chain and the completeness line another.
+	const eventsByHash = new Map(checkedEvents(reading).map((e) => [e.hash, e]));
 	const deadLetters = readChainDeadLetters(vaultPath, (hash) => eventsByHash.get(hash));
 	const completenessErrors =
 		"unreadable" in deadLetters
