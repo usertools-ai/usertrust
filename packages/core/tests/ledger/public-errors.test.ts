@@ -37,4 +37,18 @@ describe("the audit writer is exported from the package entry (1c-core)", () => 
 		expect(pkg.AuditWriterLockHeldError).toBe(chain.AuditWriterLockHeldError);
 		expect(new pkg.AuditWriterLockHeldError("x")).toBeInstanceOf(Error);
 	});
+	it("AuditSequencelessTailError is the module's class, an Error carrying the log and the line", async () => {
+		const chain = await import("../../src/audit/chain.js");
+		expect(typeof pkg.AuditSequencelessTailError).toBe("function");
+		expect(pkg.AuditSequencelessTailError).toBe(chain.AuditSequencelessTailError);
+		const err = new pkg.AuditSequencelessTailError("/vault/.usertrust/audit/events.jsonl", 3);
+		expect(err).toBeInstanceOf(Error);
+		expect(err).toMatchObject({
+			name: "AuditSequencelessTailError",
+			logPath: "/vault/.usertrust/audit/events.jsonl",
+			line: 3,
+		});
+		expect(err.message).toContain("/vault/.usertrust/audit/events.jsonl");
+		expect(err.message).toContain("(line 3)");
+	});
 });

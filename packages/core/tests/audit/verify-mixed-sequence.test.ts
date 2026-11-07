@@ -14,13 +14,13 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { verifyVaultReading as pkgVerifyVaultReading } from "../../../verify/src/index.js";
 import { canonicalize } from "../../src/audit/canonical.js";
-import { createAuditWriter } from "../../src/audit/chain.js";
+import { AuditSequencelessTailError, createAuditWriter } from "../../src/audit/chain.js";
 import { readLedgerEvents } from "../../src/audit/read.js";
 import {
 	verifyVault,
@@ -184,36 +184,89 @@ describe("verifyVault: an event without a sequence in a log of sequenced events"
 	});
 });
 
-describe("verifyVault: a legacy log continued by the writer", () => {
-	it("R2. the writer continues a legacy log at 4, and verify names all of it", async () => {
+/**
+ * INTENDED CHANGE. The writer used to count a sequence-less log's lines and continue after them
+ * (at 4 here), which turned a sequence-less log that passes the file-order walk into a mixed log
+ * that fails for good. It now refuses to continue a log whose last event has no sequence: at open
+ * when the log is already there, and at the first append when the log appears after the writer
+ * was made. The log keeps its bytes either way.
+ */
+describe("verifyVault: a legacy log the writer refuses to continue (INTENDED CHANGE)", () => {
+	const legacy = () => `${buildChain([null, null, null]).join("\n")}\n`;
+
+	it("R2. INTENDED CHANGE: the writer refuses at open to continue a legacy log; nothing is written", () => {
+		const root = mkdtempSync(join(tmpdir(), "trust-verify-mixed-writer-"));
+		dirs.push(root);
+		const auditDir = join(root, VAULT_DIR, "audit");
+		mkdirSync(auditDir, { recursive: true });
+		const logPath = join(auditDir, "events.jsonl");
+		writeFileSync(logPath, legacy());
+		const before = readFileSync(logPath);
+
+		let thrown: unknown;
+		try {
+			writers.push(createAuditWriter(root));
+		} catch (err) {
+			thrown = err;
+		}
+		expect(thrown).toBeInstanceOf(AuditSequencelessTailError);
+		expect(thrown).toMatchObject({ logPath, line: 3 });
+
+		// Nothing was written: the log's bytes, no dead-letter directory, no lock, no anchor.
+		expect(readFileSync(logPath).equals(before)).toBe(true);
+		expect(existsSync(join(root, VAULT_DIR, "dlq"))).toBe(false);
+		expect(existsSync(join(auditDir, ".audit-writer.lock"))).toBe(false);
+		expect(existsSync(`${logPath}.meta`)).toBe(false);
+
+		// The legacy log is still the legacy shape the file-order walk accepts.
+		const r = verifyVault(join(root, VAULT_DIR));
+		expect(r.errors).toEqual([]);
+		expect(r.valid).toBe(true);
+		expect(r.chainLength).toBe(3);
+	});
+
+	it("R2. INTENDED CHANGE: a legacy log that appears after the writer opened is refused at the first append", async () => {
 		const root = mkdtempSync(join(tmpdir(), "trust-verify-mixed-writer-"));
 		dirs.push(root);
 		const writer = createAuditWriter(root);
 		writers.push(writer);
 		// The writer created the audit directory; the legacy lines are on disk before its first append.
 		const logPath = join(root, VAULT_DIR, "audit", "events.jsonl");
-		writeFileSync(logPath, `${buildChain([null, null, null]).join("\n")}\n`);
+		writeFileSync(logPath, legacy());
+		const before = readFileSync(logPath);
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-		await writer.appendEvent({ kind: "test.a", actor: "sys", data: { n: 1 } });
-		await writer.appendEvent({ kind: "test.a", actor: "sys", data: { n: 1 } });
+		const first = await writer
+			.appendEvent({ kind: "test.a", actor: "sys", data: { n: 1 } })
+			.catch((e: unknown) => e);
+		expect(first).toBeInstanceOf(AuditSequencelessTailError);
+		expect(first).toMatchObject({ logPath, line: 3 });
+		// Every later append refuses the same way: the tail is read again each time.
+		const second = await writer
+			.appendEvent({ kind: "test.a", actor: "sys", data: { n: 2 } })
+			.catch((e: unknown) => e);
+		expect(second).toBeInstanceOf(AuditSequencelessTailError);
+		warn.mockRestore();
 
-		// The writer counts the legacy lines and continues after them. Pinned here as the
-		// behaviour that produces a mixed log in the first place.
-		const written = readFileSync(logPath, "utf-8")
+		// The degraded path, as for any failed append: counted, and each event dead-lettered.
+		expect(writer.isDegraded()).toBe(true);
+		expect(writer.getWriteFailures()).toBe(2);
+		const letters = readFileSync(join(root, VAULT_DIR, "dlq", "dead-letters.jsonl"), "utf-8")
 			.trim()
 			.split("\n")
-			.map((l) => JSON.parse(l) as { sequence?: unknown });
-		expect(written).toHaveLength(5);
-		expect(written.slice(0, 3).every((e) => e.sequence === undefined)).toBe(true);
-		expect(written[3]?.sequence).toBe(4);
-		expect(written[4]?.sequence).toBe(5);
+			.map((l) => JSON.parse(l) as { source?: unknown; error?: unknown; eventHash?: unknown });
+		expect(letters).toHaveLength(2);
+		for (const letter of letters) {
+			expect(letter.source).toBe("audit.chain.appendEvent");
+			expect(String(letter.error)).toContain("not an event with a sequence (line 3)");
+			expect(letter.eventHash).toBeUndefined();
+		}
 
+		// The log keeps its bytes, and still reads as the legacy shape.
+		expect(readFileSync(logPath).equals(before)).toBe(true);
 		const r = verifyVault(join(root, VAULT_DIR));
-		expect(r.valid).toBe(false);
-		expect(r.errors).toContain(noSequence("events.jsonl", 1));
-		expect(r.errors).toContain(noSequence("events.jsonl", 2));
-		expect(r.errors).toContain(noSequence("events.jsonl", 3));
-		expect(r.errors).toContain("Sequence starts at 4, expected 1 (leading events deleted)");
+		expect(r.valid).toBe(true);
+		expect(r.chainLength).toBe(3);
 	});
 });
 

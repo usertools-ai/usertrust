@@ -28,6 +28,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	AUDIT_DEGRADED_WARNING,
+	AuditSequencelessTailError,
 	type AuditWriter,
 	AuditWriterLockHeldError,
 	openSharedAuditWriter,
@@ -579,5 +580,51 @@ describe("a failed append is loud, and each handle's degraded state is its own",
 			missing: 0,
 			onChain: 1,
 		});
+	});
+});
+
+describe("a log whose last line is not an event with a sequence is never continued", () => {
+	// Two events with no sequence: the tail is line 2.
+	const sequenceless = '{"id":"a","hash":"h1"}\n{"id":"b","hash":"h2"}\n';
+	const logPath = () => join(auditDir(), "events.jsonl");
+
+	it("a handle refuses at open, naming the log and the line; nothing is written", () => {
+		mkdirSync(auditDir(), { recursive: true });
+		writeFileSync(logPath(), sequenceless);
+		const before = readFileSync(logPath());
+		let thrown: unknown;
+		try {
+			open();
+		} catch (err) {
+			thrown = err;
+		}
+		expect(thrown).toBeInstanceOf(AuditSequencelessTailError);
+		expect(thrown).toMatchObject({ line: 2 });
+		const named = (thrown as { logPath: string }).logPath;
+		expect(realpathSync.native(named)).toBe(realpathSync.native(logPath()));
+		expect(readFileSync(logPath()).equals(before)).toBe(true);
+		expect(existsSync(lockPath())).toBe(false);
+		expect(existsSync(join(tempDir, VAULT_DIR, "dlq"))).toBe(false);
+		// A refusal at open is not a failed append: no degraded warning.
+		expect(degradedWarnings()).toHaveLength(0);
+	});
+
+	it("a log that gains such a tail after the handle opened: its first append is refused, loudly and dead-lettered", async () => {
+		const h = open();
+		writeFileSync(logPath(), sequenceless);
+		const before = readFileSync(logPath());
+		await expect(
+			h.appendEvent({ kind: "llm_call", actor: "local", data: { transferId: "tx_seqless" } }),
+		).rejects.toBeInstanceOf(AuditSequencelessTailError);
+		await new Promise((r) => setImmediate(r)); // warnings are emitted on the next tick
+		expect(h.isDegraded()).toBe(true);
+		expect(h.getWriteFailures()).toBe(1);
+		expect(degradedWarnings()).toHaveLength(1);
+		expect(degradedWarnings()[0]?.message).toMatch(
+			/are degraded .+ failing: AuditSequencelessTailError/,
+		);
+		expect(readFileSync(logPath()).equals(before)).toBe(true);
+		const dl = readChainDeadLetters(join(tempDir, VAULT_DIR), () => undefined);
+		expect(dl).toMatchObject({ missing: 1, missingTransferIds: ["tx_seqless"] });
 	});
 });

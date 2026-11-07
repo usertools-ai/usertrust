@@ -9,7 +9,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -390,5 +390,62 @@ describe("usertrust secret", () => {
 
 		const combined = logOutput.join("\n");
 		expect(combined).toContain("Usage: usertrust secret get");
+	});
+
+	// -----------------------------------------------------------------
+	// 14. an audit log whose last event has no sequence is refused
+	// -----------------------------------------------------------------
+
+	describe("an audit log whose last line is not an event with a sequence", () => {
+		const logPath = () => join(tmpDir, ".usertrust", "audit", "events.jsonl");
+		const credPath = () => join(tmpDir, ".usertrust", "credentials.enc");
+		let before: Buffer;
+
+		beforeEach(() => {
+			mkdirSync(join(tmpDir, ".usertrust", "audit"), { recursive: true });
+			writeFileSync(logPath(), '{"id":"a","hash":"h1"}\n{"id":"b","hash":"h2"}\n');
+			before = readFileSync(logPath());
+		});
+
+		it("secret add exits 1 with the reason, and nothing is stored", async () => {
+			setArgv("secret", "add", "REFUSED_KEY", "never-stored");
+			await run();
+
+			expect(process.exitCode).toBe(1);
+			const combined = [...logOutput, ...errorOutput].join("\n");
+			expect(combined).toContain("not an event with a sequence (line 2)");
+			expect(combined).toContain("events.jsonl");
+			expect(combined).not.toContain("stored.");
+			expect(existsSync(credPath())).toBe(false);
+			expect(readFileSync(logPath()).equals(before)).toBe(true);
+		});
+
+		it("secret add --json reports success: false with the reason", async () => {
+			setArgv("secret", "add", "REFUSED_KEY", "never-stored", "--json");
+			await run(undefined, { json: true });
+
+			expect(process.exitCode).toBe(1);
+			const parsed = JSON.parse(logOutput.join("\n")) as {
+				command: string;
+				success: boolean;
+				data: { error?: unknown };
+			};
+			expect(parsed.command).toBe("secret add");
+			expect(parsed.success).toBe(false);
+			expect(String(parsed.data.error)).toContain("not an event with a sequence (line 2)");
+			expect(existsSync(credPath())).toBe(false);
+			expect(readFileSync(logPath()).equals(before)).toBe(true);
+		});
+
+		it("secret ls is refused the same way: every subcommand opens the audit writer", async () => {
+			setArgv("secret", "ls");
+			await run();
+
+			expect(process.exitCode).toBe(1);
+			const combined = [...logOutput, ...errorOutput].join("\n");
+			expect(combined).toContain("not an event with a sequence (line 2)");
+			expect(combined).not.toContain("No credentials stored");
+			expect(readFileSync(logPath()).equals(before)).toBe(true);
+		});
 	});
 });
