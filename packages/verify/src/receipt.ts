@@ -487,16 +487,20 @@ export function renderReceipt(data: ReceiptData): string {
 	// `Event N of M` claims place N in a chain of M. That holds only when the chain checked out, because
 	// then its sequences run 1..M. On a vault that fails, M counts the events the walk checked and N is the
 	// sequence the record carries, so they can disagree (`Event 5 of 4` after a deleted start). There the
-	// row names the sequence and the count apart and claims no place.
-	const checked = `${chainLength} ${chainLength === 1 ? "event" : "events"} checked`;
+	// Position row names only the sequence, and the count gets its own row: both in one row ran past the
+	// row's 34 columns from about a thousand events and were cut mid-word.
+	const failed = !outside && !chainVerified;
 	const position = outside
 		? "outside the checked chain"
 		: chainVerified
 			? `Event ${event.sequence ?? "?"} of ${chainLength}`
 			: event.sequence === undefined
-				? `no sequence (${checked})`
-				: `sequence ${event.sequence} (${checked})`;
+				? "no sequence"
+				: `sequence ${event.sequence}`;
 	lines.push(row(`${dotted("  Position", position, WIDTH - 1)} `));
+	if (failed) {
+		lines.push(row(`${dotted("  Events checked", String(chainLength), WIDTH - 1)} `));
+	}
 	if (outside) {
 		lines.push(row(pad("  It has no sequence, so it has no leaf.")));
 		lines.push(row(pad("  Its status is what the record says, not a checked fact.")));
