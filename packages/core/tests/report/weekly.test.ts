@@ -1624,3 +1624,286 @@ describe("ungoverned call attempts (allowUngoverned) are counted by method, neve
 		expect(m.ungoverned.byMethod["(more methods)"]).toBe(30);
 	});
 });
+
+/**
+ * EVIDENCE COUNTS ONLY CHECKED RECORDS. A figure keeps every record on file, but a record the
+ * chain walk did not check may only WITHHOLD (contradict a call, leave a transfer uncertain); it
+ * never PROVES a post, a release or a definite budget debit. `checkedCount` names how many leading
+ * events the walk checked. When the chain itself fails its check, the walk does not say which
+ * records passed, so no record proves a release or a definite debit; when only completeness
+ * fails, every walked record is good. On any vault that fails, the proof figures are withheld.
+ */
+describe("evidence counts only the checked records: an unchecked one may withhold, never prove", () => {
+	const T = "2026-10-08T01:00:00Z";
+	const hash = (t: string) => createHash("sha256").update(t).digest("hex");
+	const unrecoverable = (t: string) =>
+		ev("settlement_unrecoverable", "2026-10-08T02:00:00Z", {
+			transferIdHash: hash(t),
+			usage: { inputTokens: 1, outputTokens: 1 },
+		});
+	const shortfall = (t: string, posted: number, actual = 100) =>
+		ev("settlement_shortfall", T, { transferId: t, actual, posted, shortfall: actual - posted });
+	/** The first `checkedCount` events are the ones the walk checked; the rest it left out. */
+	const checkedFirst = (events: PersistedAuditEvent[], checkedCount: number, over = {}) =>
+		build(events, { checkedCount, ...over });
+	const CHAIN_BROKEN: IntegrityInfo = {
+		...OK,
+		verified: false,
+		chainIntact: false,
+		errors: ["Event 2 (id-x): hash mismatch"],
+	};
+	const INCOMPLETE_ONLY: IntegrityInfo = {
+		...OK,
+		verified: false,
+		chainIntact: true,
+		errors: ["INCOMPLETE: 1 audit event never reached the chain"],
+	};
+	const WITHHELD = {
+		postProvenUt: 0,
+		postProvenCalls: 0,
+		postProvenUpperUt: 0,
+		postProvenUpperCalls: 0,
+		postProvenDeadLetterUt: 0,
+		postProvenDeadLetterCalls: 0,
+	};
+
+	it("an unchecked hold_released cannot release a checked call: it stays unconfirmed, in the spend figures", () => {
+		const events = [
+			call(T, 700, { transferId: "t-rel" }),
+			ev("hold_released", T, { transferId: "t-rel" }),
+		];
+		const m = checkedFirst(events, 1);
+		expect(m.totals.releasedCalls).toBe(0);
+		expect(m.totals.unconfirmedCalls).toBe(1);
+		expect(m.totals.contradictedCalls).toBe(1);
+		expect(m.totals.unconfirmedUt).toBe(700);
+		// control: the same release, checked, releases the call
+		const control = checkedFirst(events, 2);
+		expect(control.totals.releasedCalls).toBe(1);
+		expect(control.totals.unconfirmedCalls).toBe(0);
+	});
+
+	it("an unchecked shortfall or ledgerPosted record shows no post", () => {
+		const capped = [call(T, 100, { transferId: "t-cap" }), shortfall("t-cap", 60)];
+		const m = checkedFirst(capped, 1);
+		expect(m.totals.confirmedUt).toBe(100);
+		expect(m.totals.postProvenUt).toBe(0);
+		expect(m.totals.postProvenCalls).toBe(0);
+		expect(m.totals.postProvenUpperCalls).toBe(0);
+		const answered = [
+			call(T, 45, { transferId: "t-sdk" }),
+			call(T, 55, { transferId: "t-head", source: "headless", ledgerPosted: true }),
+		];
+		const h = checkedFirst(answered, 1);
+		expect(h.totals.confirmedUt).toBe(100);
+		expect(h.totals.postProvenUpperUt).toBe(0);
+		expect(h.totals.postProvenUpperCalls).toBe(0);
+		// control: the same records, checked
+		expect(checkedFirst(capped, 2).totals.postProvenUt).toBe(60);
+		expect(checkedFirst(answered, 2).totals.postProvenUpperUt).toBe(55);
+	});
+
+	it("an unchecked shortfall cannot set the exact amount of a checked headless post", () => {
+		const events = [
+			call(T, 100, { transferId: "t", source: "headless", ledgerPosted: true }),
+			shortfall("t", 1),
+		];
+		const m = checkedFirst(events, 1);
+		expect(m.totals.postProvenUt).toBe(0);
+		expect(m.totals.postProvenUpperUt).toBe(100);
+		expect(m.totals.postProvenUpperCalls).toBe(1);
+		// control: the shortfall, checked, gives the exact posted amount
+		const control = checkedFirst(events, 2);
+		expect(control.totals.postProvenUt).toBe(1);
+		expect(control.totals.postProvenUpperCalls).toBe(0);
+	});
+
+	it("an unchecked shortfall cannot outrank a checked failure marker", () => {
+		const events = [
+			call(T, 100, { transferId: "t" }),
+			ev("llm_call_failed", T, { transferId: "t", error: "audit degraded" }),
+			shortfall("t", 60),
+		];
+		const m = checkedFirst(events, 2);
+		expect(m.totals.confirmedUt).toBe(0);
+		expect(m.totals.contradictedCalls).toBe(1);
+		expect(m.totals.unconfirmedUt).toBe(100);
+		expect(m.totals.postProvenUt).toBe(0);
+		// control: the shortfall, checked, outranks the marker as before
+		const control = checkedFirst(events, 3);
+		expect(control.totals.confirmedUt).toBe(100);
+		expect(control.totals.postProvenUt).toBe(60);
+	});
+
+	it("a checked release beside an unchecked shortfall does not read as released: an unchecked record still withholds", () => {
+		const release = [
+			call(T, 100, { transferId: "t" }),
+			ev("hold_released", T, { transferId: "t" }),
+		];
+		const m = checkedFirst([...release, shortfall("t", 60)], 2);
+		expect(m.totals.releasedCalls).toBe(0);
+		expect(m.totals.unconfirmedCalls).toBe(1);
+		expect(m.totals.postProvenUt).toBe(0);
+		// control: without the shortfall, the checked release releases the call
+		expect(checkedFirst(release, 2).totals.releasedCalls).toBe(1);
+	});
+
+	it("budget: unchecked post evidence leaves a transfer uncertain (upper bound only), never definite", () => {
+		const failed = () => ev("llm_call_failed", T, { transferId: "t", error: "x" });
+		const cases: [string, PersistedAuditEvent[], number][] = [
+			["shortfall", [call(T, 100, { transferId: "t" }), failed(), shortfall("t", 60)], 2],
+			[
+				"ambiguity",
+				[
+					call(T, 100, { transferId: "t" }),
+					failed(),
+					ev("settlement_ambiguous", T, { transferId: "t" }),
+				],
+				2,
+			],
+			[
+				"ledgerPosted",
+				[failed(), call(T, 100, { transferId: "t", source: "headless", ledgerPosted: true })],
+				1,
+			],
+		];
+		for (const [name, events, checkedCount] of cases) {
+			const b = checkedFirst(events, checkedCount, { budget: 1000 }).budget;
+			expect(b.recordedSessionWallet, name).toBe(0);
+			expect(b.recordedSessionUncertain, name).toBe(100);
+			// control: every record checked, the evidence makes the debit definite
+			const control = checkedFirst(events, events.length, { budget: 1000 }).budget;
+			expect(control.recordedSessionWallet, name).toBe(100);
+			expect(control.recordedSessionUncertain, name).toBe(0);
+		}
+	});
+
+	it("budget: a standalone unchecked shortfall beside a void stays in the upper bound, never dropped", () => {
+		const events = [
+			ev("llm_call_failed", T, { transferId: "t", error: "x" }),
+			shortfall("t", 60, 90),
+		];
+		const b = checkedFirst(events, 1, { budget: 1000 }).budget;
+		expect(b.recordedSessionWallet).toBe(0);
+		expect(b.recordedSessionUncertain).toBe(90);
+		expect(b.uncertainTransfers).toBe(1);
+		// control: the shortfall, checked, is a definite debit of undenominated units
+		const control = checkedFirst(events, 2, { budget: 1000 }).budget;
+		expect(control.recordedSessionWallet).toBe(90);
+		expect(control.recordedSessionUncertain).toBe(0);
+	});
+
+	it("prior-charge-known ignores charge evidence the walk did not check", () => {
+		const events = [
+			call(T, 80, { transferId: "b" }),
+			unrecoverable("a"),
+			unrecoverable("b"),
+			call(T, 80, { transferId: "a", source: "headless", ledgerPosted: true }),
+			shortfall("b", 50, 80),
+		];
+		const m = checkedFirst(events, 3);
+		expect(m.unrecoverable.records).toBe(2);
+		expect(m.unrecoverable.priorChargeKnown).toBe(0);
+		// control: the same evidence, checked
+		expect(checkedFirst(events, 5).unrecoverable.priorChargeKnown).toBe(2);
+	});
+
+	it("on a chain that fails its own check no record releases a call: it stays unconfirmed, in the spend figures", () => {
+		// The walk does not say which records passed, so where the release sits does not matter.
+		const events = [
+			call(T, 700, { transferId: "t-rel" }),
+			ev("hold_released", T, { transferId: "t-rel" }),
+		];
+		const m = build(events, {}, CHAIN_BROKEN);
+		expect(m.totals.releasedCalls).toBe(0);
+		expect(m.totals.unconfirmedCalls).toBe(1);
+		expect(m.totals.unconfirmedUt).toBe(700);
+		// with no chainIntact given, a failed vault is read as a failed chain
+		const unstated = build(events, {}, { ...OK, verified: false, errors: ["x"] });
+		expect(unstated.totals.releasedCalls).toBe(0);
+		// control: the same events on an intact chain release the call
+		expect(build(events, {}, INCOMPLETE_ONLY).totals.releasedCalls).toBe(1);
+		expect(build(events, {}, OK).totals.releasedCalls).toBe(1);
+	});
+
+	it("on a chain that fails its own check post evidence leaves a transfer uncertain, never definite", () => {
+		const events = [
+			call(T, 100, { transferId: "t" }),
+			shortfall("t", 60),
+			ev("llm_call_failed", T, { transferId: "t", error: "audit degraded" }),
+			ev("settlement_ambiguous", T, { transferId: "t-solo", cost: 32 }),
+		];
+		const broken = build(events, { budget: 1000 }, CHAIN_BROKEN);
+		expect(broken.budget.recordedSessionWallet).toBe(0);
+		expect(broken.budget.recordedSessionUncertain).toBe(132);
+		expect(broken.budget.uncertainTransfers).toBe(2);
+		expect(broken.totals.confirmedUt).toBe(0);
+		expect(broken.totals.unconfirmedUt).toBe(100);
+		// control: the same events on an intact chain, as before
+		const intact = build(events, { budget: 1000 }, INCOMPLETE_ONLY);
+		expect(intact.budget.recordedSessionWallet).toBe(132);
+		expect(intact.budget.recordedSessionUncertain).toBe(0);
+		expect(intact.totals.confirmedUt).toBe(100);
+	});
+
+	it("on a vault that is only incomplete, releases and definite bounds work over the checked records, and the proof figures are withheld", () => {
+		const events = [
+			call(T, 700, { transferId: "t-rel" }),
+			ev("hold_released", T, { transferId: "t-rel" }),
+			call(T, 100, { transferId: "t" }),
+			shortfall("t", 60),
+			ev("llm_call_failed", T, { transferId: "t", error: "audit degraded" }),
+		];
+		const m = build(events, { budget: 1000 }, INCOMPLETE_ONLY);
+		expect(m.totals.releasedCalls).toBe(1);
+		expect(m.totals.confirmedUt).toBe(100);
+		expect(m.budget.recordedSessionWallet).toBe(100);
+		expect(m.budget.recordedSessionUncertain).toBe(700);
+		expect(m.proofStatus).toBe("withheld");
+		expect(m.totals).toMatchObject(WITHHELD);
+		// control: the same events on a vault that passes
+		const ok = build(events, { budget: 1000 });
+		expect(ok.proofStatus).toBe("shown");
+		expect(ok.totals.postProvenUt).toBe(60);
+		expect(ok.totals.releasedCalls).toBe(1);
+		expect(ok.budget.recordedSessionWallet).toBe(100);
+	});
+
+	it("a vault that fails its check withholds every proof figure and leaves the spend figures as they are", () => {
+		const events = [
+			call(T, 100, { transferId: "t-cap" }),
+			shortfall("t-cap", 60),
+			call(T, 55, { transferId: "t-upper", source: "headless", ledgerPosted: true }),
+			call(T, 70, { transferId: "t-dead", source: "headless", ledgerPosted: true }),
+			unrecoverable("t-cap"),
+		];
+		const opts = { budget: 1000, deadLetters: { shortfalls: new Map([["t-dead", 40]]) } };
+		// control: the vault passes, so every proof figure is shown
+		const ok = build(events, opts);
+		expect(ok.proofStatus).toBe("shown");
+		expect(ok.totals).toMatchObject({
+			postProvenUt: 100,
+			postProvenCalls: 2,
+			postProvenUpperUt: 55,
+			postProvenUpperCalls: 1,
+			postProvenDeadLetterUt: 40,
+			postProvenDeadLetterCalls: 1,
+		});
+		expect(ok.unrecoverable.priorChargeKnown).toBe(1);
+		const failing: [string, IntegrityInfo][] = [
+			["incomplete only", INCOMPLETE_ONLY],
+			["chain broken", CHAIN_BROKEN],
+		];
+		for (const [name, integrity] of failing) {
+			const m = build(events, opts, integrity);
+			expect(m.proofStatus, name).toBe("withheld");
+			expect(m.totals, name).toMatchObject(WITHHELD);
+			expect(m.unrecoverable.priorChargeKnown, name).toBe(0);
+			expect(m.unrecoverable.records, name).toBe(1);
+			// every other figure is the one the passing vault shows
+			expect({ ...m.totals, ...WITHHELD }, name).toEqual({ ...ok.totals, ...WITHHELD });
+			expect(m.budget, name).toEqual(ok.budget);
+			expect(m.byAgent, name).toEqual(ok.byAgent);
+		}
+	});
+});

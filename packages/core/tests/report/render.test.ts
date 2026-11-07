@@ -575,3 +575,98 @@ describe("ungoverned call attempts are disclosed in every format, by method", ()
 		expect(json.ungoverned.byMethod).toEqual({ [label]: 1 });
 	});
 });
+
+/**
+ * On a vault that fails its check, no figure is shown as proven: the ledger-proven line is ONE
+ * label, and the lines that state a ledger fact from record content say that is all they rest on.
+ */
+describe("a vault that fails its check shows no proof figure, in every format", () => {
+	const LABEL = "not proven: the vault failed verification.";
+	const QUALIFIER = "as the records say; the vault did not verify";
+	const passing = { verified: true, errors: [], chainLength: 3, firstEvent: "a", lastEvent: "c" };
+	const failing = {
+		verified: false,
+		errors: ["Event 2 (b): hash mismatch"],
+		chainLength: 3,
+		firstEvent: "a",
+		lastEvent: "c",
+	};
+	const mk = (kind: string, data: Record<string, unknown>): PersistedAuditEvent =>
+		({
+			id: "i",
+			kind,
+			timestamp: "2026-10-11T00:00:00Z",
+			actor: "local",
+			hash: "h",
+			data,
+		}) as unknown as PersistedAuditEvent;
+	// A capped call (its shortfall gives the posted amount) and a standalone capped settlement.
+	const events = [
+		mk("llm_call", {
+			model: "m",
+			cost: 100,
+			settled: true,
+			transferId: "t-cap",
+			costBasis: "usd-proxy",
+		}),
+		mk("settlement_shortfall", { transferId: "t-cap", actual: 100, posted: 60, shortfall: 40 }),
+		mk("settlement_shortfall", { transferId: "t-x", actual: 100, posted: 60, shortfall: 40 }),
+	];
+	const count = (text: string, needle: string): number => text.split(needle).length - 1;
+	/** The ledger-proven headline of a rendering: its md line, or its html span. */
+	const provenPart = (out: string, format: "md" | "html"): string => {
+		if (format === "md") {
+			return out.split("\n").find((l) => l.startsWith("- **Of which ledger-proven:**")) ?? "";
+		}
+		const at = out.indexOf("of which ledger-proven");
+		return at === -1 ? "" : out.slice(at, out.indexOf("</span>", at));
+	};
+	/** The text from `start` to the first `end` after it, or "" when `start` is absent. */
+	const between = (out: string, start: string, end: string): string => {
+		const at = out.indexOf(start);
+		return at === -1 ? "" : out.slice(at, out.indexOf(end, at));
+	};
+
+	it("md and html show the withheld label exactly once and no proof amount; json carries proofStatus", () => {
+		const m = buildWeeklyReport(events, failing, { endMs: END });
+		for (const f of ["md", "html"] as const) {
+			const out = render(m, f);
+			expect(count(out, LABEL), f).toBe(1);
+			expect(provenPart(out, f), f).toContain(LABEL);
+			expect(provenPart(out, f), f).not.toContain("across");
+		}
+		expect((JSON.parse(render(m, "json")) as { proofStatus: string }).proofStatus).toBe("withheld");
+		// control: the same records on a vault that passes show the amount and no label
+		const ok = buildWeeklyReport(events, passing, { endMs: END });
+		for (const f of ["md", "html"] as const) {
+			const out = render(ok, f);
+			expect(count(out, LABEL), f).toBe(0);
+			expect(provenPart(out, f), f).toContain("across 1 call(s)");
+		}
+		expect((JSON.parse(render(ok, "json")) as { proofStatus: string }).proofStatus).toBe("shown");
+	});
+
+	it("the shortfall and charged-but-unrecorded lines carry the records-only qualifier on a failing vault, and only there", () => {
+		const m = buildWeeklyReport(events, failing, { endMs: END });
+		expect(m.shortfall.events).toBe(1);
+		expect(m.chargedUnrecorded.records).toBe(1);
+		const mdOut = render(m, "md");
+		const mdLines = mdOut.split("\n");
+		expect(mdLines.find((l) => l.startsWith("- **Posted below metered:**"))).toContain(QUALIFIER);
+		expect(mdLines.find((l) => l.includes("**Charged but unrecorded:**"))).toContain(QUALIFIER);
+		expect(count(mdOut, QUALIFIER)).toBe(2);
+		const html = render(m, "html");
+		expect(between(html, "metered above what the ledger could post", "</div>")).toContain(
+			QUALIFIER,
+		);
+		expect(between(html, "<strong>Charged but unrecorded:</strong>", "</p>")).toContain(QUALIFIER);
+		expect(count(html, QUALIFIER)).toBe(2);
+		// control: a vault that passes shows the same lines with no qualifier
+		const ok = buildWeeklyReport(events, passing, { endMs: END });
+		for (const f of ["md", "html"] as const) {
+			const out = render(ok, f);
+			expect(out, f).toMatch(/Charged but unrecorded/);
+			expect(count(out, QUALIFIER), f).toBe(0);
+		}
+	});
+});

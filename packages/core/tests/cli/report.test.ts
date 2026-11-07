@@ -852,7 +852,11 @@ describe("usertrust report --week", () => {
 		});
 	});
 
-	it("the dead-letter queue is read ONCE, with the completeness check: a dead-lettered shortfall makes a headless post exact at the posted amount, an unreadable queue an upper bound", async () => {
+	// INTENDED CHANGE: this row used to read the dead-lettered shortfall as the exact posted amount.
+	// A shortfall that never reached the chain makes the vault INCOMPLETE, and on a vault that fails
+	// its check no figure is shown as proven, so the amount read from the queue is withheld with the
+	// rest. With no queue file the vault passes, and the headless post is an upper bound, as before.
+	it("the dead-letter queue is read ONCE, with the completeness check: a shortfall missing from the chain makes the vault incomplete and withholds the proof figures; with no queue the headless post is an upper bound", async () => {
 		await vault([
 			{
 				cost: 100,
@@ -874,33 +878,88 @@ describe("usertrust report --week", () => {
 		const checksum = createHash("sha256").update(canonicalize(entry)).digest("hex");
 		const dlq = join(dlqDir, "dead-letters.jsonl");
 		writeFileSync(dlq, `${JSON.stringify({ ...entry, checksum, checksumAlg: "sha256" })}\n`);
-		type Totals = {
-			postProvenUt: number;
-			postProvenDeadLetterUt: number;
-			postProvenUpperUt: number;
+		type Report = {
+			totals: {
+				postProvenUt: number;
+				postProvenDeadLetterUt: number;
+				postProvenUpperUt: number;
+			};
+			proofStatus: string;
+			integrity: { verified: boolean };
 		};
-		stdout = "";
-		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
-		let totals = (JSON.parse(stdout) as { totals: Totals }).totals;
-		expect(totals).toMatchObject({
-			postProvenUt: 60,
-			postProvenDeadLetterUt: 60,
+		const readJson = async (): Promise<Report> => {
+			stdout = "";
+			await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+			return JSON.parse(stdout) as Report;
+		};
+		const incomplete = await readJson();
+		expect(incomplete.integrity.verified).toBe(false);
+		expect(incomplete.proofStatus).toBe("withheld");
+		expect(incomplete.totals).toMatchObject({
+			postProvenUt: 0,
+			postProvenDeadLetterUt: 0,
 			postProvenUpperUt: 0,
 		});
-		// no queue file at all proves nothing: the shortfall may not have been appended yet, so only an upper bound
+		// no queue file at all shows no capped post: the shortfall may not have been appended yet, so
+		// only an upper bound
 		rmSync(dlq);
-		stdout = "";
-		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
-		totals = (JSON.parse(stdout) as { totals: Totals }).totals;
-		expect(totals).toMatchObject({ postProvenUt: 0, postProvenUpperUt: 100 });
-		// a corrupt queue: only an upper bound, and completeness is unknown
+		const noQueue = await readJson();
+		expect(noQueue.integrity.verified).toBe(true);
+		expect(noQueue.proofStatus).toBe("shown");
+		expect(noQueue.totals).toMatchObject({ postProvenUt: 0, postProvenUpperUt: 100 });
+		// a corrupt queue: completeness is unknown, so the vault fails its check and the proof figures
+		// are withheld
 		writeFileSync(dlq, "{corrupt\n");
-		stdout = "";
-		await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
-		const parsed = JSON.parse(stdout) as { totals: Totals; integrity: { verified: boolean } };
-		expect(parsed.totals).toMatchObject({ postProvenUt: 0, postProvenUpperUt: 100 });
-		// an unreadable queue means completeness is unknown: the chain is not VERIFIED
-		expect(parsed.integrity.verified).toBe(false);
+		const corrupt = await readJson();
+		expect(corrupt.integrity.verified).toBe(false);
+		expect(corrupt.proofStatus).toBe("withheld");
+		expect(corrupt.totals).toMatchObject({ postProvenUt: 0, postProvenUpperUt: 0 });
+		write.mockRestore();
+	});
+
+	it("an incomplete vault whose chain is intact still releases a call: the chain check, not completeness, decides what a record can release", async () => {
+		await vault(
+			[{ cost: 700, data: { transferId: "t-rel", costBasis: "usd-proxy" } }],
+			[{ kind: "hold_released", data: { transferId: "t-rel" } }],
+		);
+		const dlqDir = join(dir, ".usertrust", "dlq");
+		mkdirSync(dlqDir, { recursive: true });
+		// a call record that never reached the chain: the vault is INCOMPLETE, its chain intact
+		const entry = {
+			source: "audit.chain.appendEvent",
+			payload: {
+				kind: "llm_call",
+				actor: "local",
+				data: { transferId: "t-lost", cost: 5, settled: true },
+			},
+			error: "disk full",
+			timestamp: "2026-10-08T01:00:00.000Z",
+		};
+		const checksum = createHash("sha256").update(canonicalize(entry)).digest("hex");
+		const dlq = join(dlqDir, "dead-letters.jsonl");
+		writeFileSync(dlq, `${JSON.stringify({ ...entry, checksum, checksumAlg: "sha256" })}\n`);
+		type Report = {
+			proofStatus: string;
+			integrity: { verified: boolean; errors: string[] };
+			totals: { releasedCalls: number; unconfirmedCalls: number };
+		};
+		const readJson = async (): Promise<Report> => {
+			stdout = "";
+			await run(dir, {}, ["--week", "--end", endIso(), "--format", "json"]);
+			return JSON.parse(stdout) as Report;
+		};
+		const incomplete = await readJson();
+		expect(incomplete.integrity.verified).toBe(false);
+		expect(incomplete.integrity.errors.join(" ")).toMatch(/INCOMPLETE/);
+		expect(incomplete.totals.releasedCalls).toBe(1);
+		expect(incomplete.totals.unconfirmedCalls).toBe(0);
+		expect(incomplete.proofStatus).toBe("withheld");
+		// control: without the dead letter the vault passes, the call is released and proof is shown
+		rmSync(dlq);
+		const passing = await readJson();
+		expect(passing.integrity.verified).toBe(true);
+		expect(passing.totals.releasedCalls).toBe(1);
+		expect(passing.proofStatus).toBe("shown");
 		write.mockRestore();
 	});
 

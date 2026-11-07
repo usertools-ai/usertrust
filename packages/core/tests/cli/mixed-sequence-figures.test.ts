@@ -212,3 +212,132 @@ describe("usertrust report: a sequence-less llm_call in a mixed log is in the sp
 		expect(out.integrity.verified).toBe(false);
 	});
 });
+
+/**
+ * EVIDENCE ON A MIXED LOG. A sequence-less record is in every figure, but it was never checked,
+ * and the log fails its chain check, so no record of it may prove anything: not a release, not a
+ * post. Each row compares the mixed vault with the same records all sequenced.
+ */
+interface LogRecord {
+	sequence: number | null;
+	kind: string;
+	data: Record<string, unknown>;
+}
+
+/** An `llm_call` record's data, denominated in dollars. */
+function callData(cost: number, transferId: string, extra: Record<string, unknown> = {}) {
+	return {
+		model: "claude-sonnet-5-5",
+		cost,
+		settled: true,
+		transferId,
+		costBasis: "usd-proxy",
+		usageSource: "provider",
+		usage: { inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 },
+		appliedRates: RATES,
+		...extra,
+	};
+}
+
+/** `project`, for records of any kind: hashed over the canonical form and linked in file order. */
+function projectOf(records: readonly LogRecord[]): string {
+	const root = mkdtempSync(join(tempDir, "project-"));
+	const auditDir = join(root, VAULT_DIR, "audit");
+	mkdirSync(auditDir, { recursive: true });
+	writeFileSync(join(root, VAULT_DIR, "usertrust.config.json"), JSON.stringify({ budget: 1000 }));
+	let previousHash = GENESIS_HASH;
+	const lines: string[] = [];
+	const start = Date.now() - 60_000;
+	for (let i = 0; i < records.length; i++) {
+		const r = records[i] as LogRecord;
+		const event: Record<string, unknown> = {
+			id: `evt-${i + 1}`,
+			timestamp: new Date(start + i * 1000).toISOString(),
+			previousHash,
+			kind: r.kind,
+			actor: "local",
+			data: r.data,
+		};
+		if (r.sequence !== null) event.sequence = r.sequence;
+		const hash = createHash("sha256").update(canonicalize(event)).digest("hex");
+		lines.push(JSON.stringify({ ...event, hash }));
+		previousHash = hash;
+	}
+	writeFileSync(join(auditDir, "events.jsonl"), `${lines.join("\n")}\n`);
+	return root;
+}
+
+/** Every record with its place in the file as its sequence. */
+function allSequenced(records: readonly LogRecord[]): LogRecord[] {
+	return records.map((r, i) => ({ ...r, sequence: i + 1 }));
+}
+
+interface ReportJson {
+	proofStatus: string;
+	integrity: { verified: boolean };
+	totals: Record<string, number>;
+}
+
+async function reportJson(root: string): Promise<ReportJson> {
+	stdout = "";
+	process.exitCode = undefined;
+	const end = new Date(Date.now() + 3_600_000).toISOString();
+	await reportRun(root, {}, ["--week", "--end", end, "--format", "json"]);
+	return JSON.parse(stdout) as ReportJson;
+}
+
+describe("usertrust report: a sequence-less record on a mixed log proves nothing", () => {
+	const RELEASE: readonly LogRecord[] = [
+		{ sequence: 1, kind: "llm_call", data: callData(100, "tx_one") },
+		{ sequence: 2, kind: "llm_call", data: callData(700, "tx_rel") },
+		{ sequence: null, kind: "hold_released", data: { transferId: "tx_rel" } },
+	];
+	const ANSWERED: readonly LogRecord[] = [
+		{ sequence: 1, kind: "llm_call", data: callData(100, "tx_one") },
+		{
+			sequence: null,
+			kind: "llm_call",
+			data: callData(50, "tx_head", { source: "headless", ledgerPosted: true }),
+		},
+		{ sequence: 2, kind: "llm_call", data: callData(25, "tx_three") },
+	];
+
+	it("a sequence-less hold_released cannot release a sequenced call: the call stays unconfirmed, in the spend", async () => {
+		const mixed = await reportJson(projectOf(RELEASE));
+		expect(mixed.integrity.verified).toBe(false);
+		expect(mixed.totals).toMatchObject({
+			releasedCalls: 0,
+			unconfirmedCalls: 1,
+			unconfirmedUt: 700,
+			confirmedUt: 100,
+		});
+		// control: the same release, sequenced, releases the call
+		const sequenced = await reportJson(projectOf(allSequenced(RELEASE)));
+		expect(sequenced.integrity.verified).toBe(true);
+		expect(sequenced.totals).toMatchObject({
+			releasedCalls: 1,
+			unconfirmedCalls: 0,
+			confirmedUt: 100,
+		});
+	});
+
+	it("a sequence-less headless call the ledger answered is in the confirmed spend, and no figure is shown as proven", async () => {
+		const mixed = await reportJson(projectOf(ANSWERED));
+		expect(mixed.proofStatus).toBe("withheld");
+		expect(mixed.totals).toMatchObject({
+			confirmedUt: 175,
+			postProvenUt: 0,
+			postProvenCalls: 0,
+			postProvenUpperUt: 0,
+			postProvenUpperCalls: 0,
+		});
+		// control: the same calls, sequenced: the headless post is an upper bound, shown
+		const sequenced = await reportJson(projectOf(allSequenced(ANSWERED)));
+		expect(sequenced.proofStatus).toBe("shown");
+		expect(sequenced.totals).toMatchObject({
+			confirmedUt: 175,
+			postProvenUpperUt: 50,
+			postProvenUpperCalls: 1,
+		});
+	});
+});
