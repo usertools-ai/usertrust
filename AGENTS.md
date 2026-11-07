@@ -1358,6 +1358,11 @@ so `trust()`, `createGovernor()`, the `usertrust secret` subcommands that append
 `rotate`, `get`) and `quarantine-tail` refuse where a person sees it (`secret ls` never appends,
 opens no writer, and keeps working); and again in `getLastEvent` at every read of the tail by an append, for a log that changed
 after the open (that refusal takes the ordinary degraded path: counted, dead-lettered, rethrown).
+Both read only the END of the log (`readTailText`: the last 8 KiB, the window doubled back until
+the text holds the last non-blank line, blank as `trim()` reads it, with non-blank text before it,
+so trimming never reaches into that line; decoded only from offset 0 or just after a 0x0A byte,
+never inside a character), and read the whole log only to number the line of a refusal, judged
+again on that whole text (`readTailVerdict`), so an open on a large log is not a full read of it.
 Never put the open check in `createAuditWriterAt` or `joinSharedWriter`: the shared writer is made
 inside a handle's append before its `try`, so a throw there skips the handle's failure report and
 the dead letter. The open check leaves a torn tail, an unparseable last line, an absent or
