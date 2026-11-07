@@ -94,6 +94,68 @@ export class InsufficientBalanceError extends Error {
 	}
 }
 
+/**
+ * A task's limit refused the call's hold (`withTaskLimit`): the task's held and spent amounts plus
+ * this hold would pass its limit. It IS an InsufficientBalanceError, so every catch site and the
+ * denial boundary read it as a budget refusal (recorded as `ledger_rejected`), with its own
+ * message, hint and docs page so it is never mistaken for the client's budget running out.
+ * `userId` is `task:<id>`, the task standing where a user would.
+ */
+export class TaskLimitExceededError extends InsufficientBalanceError {
+	public readonly taskId: string;
+	/** The task's limit, in usertokens. */
+	public readonly limit: number;
+	// Redeclared with an initializer: the parent assigns its own docs page, and a field
+	// initializer runs right after super() returns, before the body below reads it.
+	public override readonly docsUrl: string = "https://usertrust.ai/docs/errors/task-limit-exceeded";
+
+	constructor(taskId: string, limit: number, required: number, available: number) {
+		super(
+			`task:${taskId}`,
+			required,
+			available,
+			"The task's limit is spent or held by calls still in flight. Wait for those calls to settle, or run the work under a new task id, which has its own limit.",
+		);
+		this.name = "TaskLimitExceededError";
+		this.taskId = taskId;
+		this.limit = limit;
+		// The parent wrote the budget's wording; this refusal is the task's. The stack is taken
+		// again so its first line carries this name and message, not the parent's.
+		this.message = `Task ${taskId} is at its limit: need ${required}, have ${available} of ${limit}\n\n  Hint: ${this.hint}\n  Docs: ${this.docsUrl}`;
+		Error.captureStackTrace?.(this, TaskLimitExceededError);
+	}
+}
+
+/**
+ * A task id already names a different limit. A task id is one limit on a cluster and namespace:
+ * running it again continues against what is left, and asking for another limit is refused before
+ * any hold. Not a governance denial: nothing was refused by policy or the ledger's balance, the
+ * call asked for a limit the task does not have.
+ */
+export class TaskLimitConflictError extends Error {
+	public readonly taskId: string;
+	/** The limit the task already has, when it could be read. */
+	public readonly existingLimit: number | undefined;
+	public readonly requestedLimit: number;
+	public readonly hint: string;
+	public readonly docsUrl: string;
+
+	constructor(taskId: string, requestedLimit: number, existingLimit?: number) {
+		const hint =
+			"A task id names one limit. Use the limit it was created with, or a new task id for a new limit.";
+		const docsUrl = "https://usertrust.ai/docs/errors/task-limit-conflict";
+		super(
+			`Task ${taskId} already has a limit of ${existingLimit ?? "another value"}; this call asked for ${requestedLimit}\n\n  Hint: ${hint}\n  Docs: ${docsUrl}`,
+		);
+		this.name = "TaskLimitConflictError";
+		this.taskId = taskId;
+		this.existingLimit = existingLimit;
+		this.requestedLimit = requestedLimit;
+		this.hint = hint;
+		this.docsUrl = docsUrl;
+	}
+}
+
 export class PolicyDeniedError extends Error {
 	public readonly reason: string;
 	public readonly hint: string;
