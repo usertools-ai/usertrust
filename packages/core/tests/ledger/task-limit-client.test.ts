@@ -441,19 +441,13 @@ describe("createLinkedPendingPair", () => {
 		expect(requestsOf("lookupTransfers")).toEqual([]);
 	});
 
-	it("an empty answer is both legs created, as on the other transfer paths", async () => {
-		await ledgers(1_000n, 1_000n);
-		fake.onRequest = (op, _batch, apply) => (op === "createTransfers" ? [] : apply());
-		await expect(client.createLinkedPendingPair(pairFor(10))).resolves.toMatchObject({
-			payerId: expect.any(BigInt),
-			limitId: expect.any(BigInt),
-		});
-	});
 
 	it.each<[string, number]>([
 		["zero", 0],
 		["negative", -1],
 		["fractional", 1.5],
+		// TigerBeetle's timeout is a u32 count of seconds.
+		["above the u32 maximum", 2 ** 32],
 	])("refuses a %s timeout before any request: a pair must expire if nobody settles it", async (_n, t) => {
 		await ledgers(1_000n, 1_000n);
 		await expect(client.createLinkedPendingPair(pairFor(10, t))).rejects.toThrow();
@@ -563,13 +557,30 @@ describe("a replayed pair", () => {
 		expect(requestsOf("lookupTransfers")).toEqual([]);
 	});
 
+	// In 0.17.9 create_transfers answers exactly one result per event (state_machine.zig:3167-3183),
+	// so a pair is answered with two. Anything else, an empty answer included, is not read as
+	// "both created": that would report a hold the ledger may never have made.
 	it.each<[string, number[]]>([
+		["no result", []],
 		["one result", [S.created]],
 		["three results", [S.created, S.created, S.created]],
 	])("an answer with %s for two transfers is a hard failure", async (_name, statuses) => {
 		await ledgers(1_000n, 1_000n);
 		answer(...statuses);
 		await expect(client.createLinkedPendingPair(pairFor(10))).rejects.toThrow();
+		expect(requestsOf("lookupTransfers")).toEqual([]);
+	});
+
+	it.each<[string, number[]]>([
+		["no result", []],
+		["one result", [S.created]],
+		["three results", [S.created, S.created, S.created]],
+	])("a post or void pair answered with %s is a hard failure", async (_name, statuses) => {
+		await ledgers(1_000n, 1_000n);
+		const { payerId, limitId } = await client.createLinkedPendingPair(pairFor(10));
+		answer(...statuses);
+		await expect(client.postLinkedPair(payerId, limitId, 10)).rejects.toThrow();
+		await expect(client.voidLinkedPair(payerId, limitId)).rejects.toThrow();
 		expect(requestsOf("lookupTransfers")).toEqual([]);
 	});
 
@@ -588,6 +599,20 @@ describe("a replayed pair", () => {
 		expect(balance(TASK).debits_posted).toBe(0n);
 	});
 });
+
+/**
+ * A post or void pair sends 0 for every field TigerBeetle takes from the pending transfer, so the
+ * replay compare's wildcards are exact: the stored values are the pending's (state_machine.zig
+ * :4195-4209), fixed by `pending_id`.
+ */
+function expectInheritedFieldsSentAsZero(batch: SentTransfer[]): void {
+	expect(batch).toHaveLength(2);
+	for (const t of batch) {
+		expect([t.debit_account_id, t.credit_account_id, t.ledger, t.code]).toEqual([0n, 0n, 0, 0]);
+		expect([t.user_data_128, t.user_data_64, t.user_data_32]).toEqual([0n, 0n, 0]);
+		expect(t.timeout).toBe(0);
+	}
+}
 
 describe("postLinkedPair and voidLinkedPair", () => {
 	async function heldPair(amount: number, timeoutSeconds = HOLD_S) {
@@ -608,6 +633,7 @@ describe("postLinkedPair and voidLinkedPair", () => {
 			flags: TF.post_pending_transfer | TF.linked,
 		});
 		expect(b).toMatchObject({ pending_id: limitId, amount: 250n, flags: TF.post_pending_transfer });
+		expectInheritedFieldsSentAsZero(sentBatch(0));
 		expect(balance(WALLET)).toMatchObject({ debits_pending: 0n, debits_posted: 250n });
 		expect(balance(TASK)).toMatchObject({ debits_pending: 0n, debits_posted: 250n });
 	});
@@ -694,6 +720,7 @@ describe("postLinkedPair and voidLinkedPair", () => {
 			flags: TF.void_pending_transfer | TF.linked,
 		});
 		expect(b).toMatchObject({ pending_id: limitId, amount: 0n, flags: TF.void_pending_transfer });
+		expectInheritedFieldsSentAsZero(sentBatch(0));
 		expect(balance(WALLET)).toMatchObject({ debits_pending: 0n, debits_posted: 0n });
 		expect(balance(TASK)).toMatchObject({ debits_pending: 0n, debits_posted: 0n });
 		expect(fake.pendingState.get(limitId)).toBe("voided");
@@ -718,7 +745,51 @@ describe("postLinkedPair and voidLinkedPair", () => {
 			"lookupTransfers",
 		]);
 		expect(fake.pendingState.get(payerId)).toBe("voided");
+		// The stored voids carry the pending's accounts, ledger, code and amount, not the zeros
+		// sent: the compare accepts them by TigerBeetle's own rule.
+		const stored = sentBatch(0).map((t) => fake.transfers.get(t.id));
+		expect(stored.map((t) => t?.amount)).toEqual([400n, 400n]);
+		expect(stored.map((t) => t?.ledger)).toEqual([LEDGER_USERTOKENS, LEDGER_TASK_LIMITS]);
 	});
+
+	for (const leg of [0, 1] as const) {
+		it.each<[string, (t: SentTransfer) => SentTransfer]>([
+			["flags", (t: SentTransfer) => ({ ...t, flags: t.flags ^ TF.linked })],
+			["pending_id", (t: SentTransfer) => ({ ...t, pending_id: 77n })],
+			["timeout", (t: SentTransfer) => ({ ...t, timeout: t.timeout + 9 })],
+		])(
+			`a replayed void pair with a mismatched %s is a hard failure: the ${leg === 0 ? "payer" : "limit"} leg`,
+			async (field, change) => {
+				const { payerId, limitId } = await heldPair(400);
+				const emit = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
+				replayAnswer((sent) => sent.map((t, i) => (i === leg ? change(t) : t)));
+				const err = await settle(client.voidLinkedPair(payerId, limitId));
+				expect(err).toBeInstanceOf(TransferReplayMismatchError);
+				expect((err as TransferReplayMismatchError).field).toBe(field);
+				expect((err as TransferReplayMismatchError).transferId).toBe(sentBatch(0)[leg]?.id);
+				expect(emit).toHaveBeenCalledWith(expect.any(String), {
+					code: LINKED_PAIR_MISMATCH_WARNING,
+				});
+			},
+		);
+	}
+
+	it.each([
+		["payer", 0],
+		["limit", 1],
+	] as const)(
+		"a replayed void pair with only one leg stored is a hard failure and an integrity warning: the %s leg missing",
+		async (_name, missing) => {
+			const { payerId, limitId } = await heldPair(400);
+			const emit = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
+			replayAnswer((sent) => sent.filter((_t, i) => i !== missing));
+			const err = await settle(client.voidLinkedPair(payerId, limitId));
+			expect(err).toBeInstanceOf(TransferReplayMismatchError);
+			expect((err as TransferReplayMismatchError).transferId).toBe(sentBatch(0)[missing]?.id);
+			expect((err as TransferReplayMismatchError).field).toBe("record (none found)");
+			expect(emit).toHaveBeenCalledTimes(1);
+		},
+	);
 });
 
 describe("immediateTransfer on the task-limit ledger", () => {

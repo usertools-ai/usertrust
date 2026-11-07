@@ -26,6 +26,11 @@
  * Balancing, closing and imported transfers are not modelled: a request that uses one throws,
  * so a test cannot pass on behaviour the fake does not have.
  *
+ * One difference from a real cluster, on purpose: `advanceSeconds` releases an expired transfer's
+ * balances at once, while TigerBeetle removes expired holds on a best-effort schedule, so a real
+ * client can still see the pending amount for a while after the timeout. Rows that depend on the
+ * real lag run against a cluster (`task-limit-client.tb.test.ts`, the abandoned-pair row).
+ *
  * The numeric values below are tigerbeetle-node 0.17.9's. `tb-linked-fake.test.ts` pins them
  * against the binding's own enums, and `task-limit-client.tb.test.ts` runs one script of chains
  * on this fake and on a real cluster and requires the same answers.
@@ -540,8 +545,14 @@ export function createLinkedFake(): LinkedFake {
 	const execute = <E extends { id: bigint; flags: number }>(
 		events: readonly E[],
 		one: (event: E, ts: bigint) => number,
-		codes: { created: number; linked_event_failed: number; linked_event_chain_open: number },
+		codes: {
+			created: number;
+			exists: number;
+			linked_event_failed: number;
+			linked_event_chain_open: number;
+		},
 		transient: (status: number) => boolean,
+		stored: (id: bigint) => bigint | undefined,
 	): FakeResult[] => {
 		const results: FakeResult[] = [];
 		let chainStart: number | null = null;
@@ -569,7 +580,10 @@ export function createLinkedFake(): LinkedFake {
 				}
 				if (transient(status)) orphaned.add(event.id);
 			}
-			results.push({ timestamp: ts, status });
+			// `exists` answers with the STORED record's timestamp, as the server does
+			// (state_machine.zig@0.17.9:3101); every other status with the event's own.
+			const timestamp = status === codes.exists ? (stored(event.id) ?? ts) : ts;
+			results.push({ timestamp, status });
 			if (chainStart !== null && (!linked || status === codes.linked_event_chain_open)) {
 				chainStart = null;
 				broken = false;
@@ -620,11 +634,23 @@ export function createLinkedFake(): LinkedFake {
 	fake.client = {
 		createAccounts: (batch) =>
 			request("createAccounts", batch, () =>
-				execute(batch, createAccount, FAKE_ACCOUNT_STATUS, () => false),
+				execute(
+					batch,
+					createAccount,
+					FAKE_ACCOUNT_STATUS,
+					() => false,
+					(id) => accounts.get(id)?.timestamp,
+				),
 			),
 		createTransfers: (batch) =>
 			request("createTransfers", batch, () =>
-				execute(batch, createTransfer, FAKE_STATUS, (s) => TRANSIENT.has(s)),
+				execute(
+					batch,
+					createTransfer,
+					FAKE_STATUS,
+					(s) => TRANSIENT.has(s),
+					(id) => transfers.get(id)?.timestamp,
+				),
 			),
 		lookupAccounts: (ids) =>
 			request("lookupAccounts", ids, () =>

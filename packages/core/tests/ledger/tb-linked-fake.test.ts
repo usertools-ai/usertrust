@@ -229,10 +229,10 @@ describe("linked chains", () => {
 		const batch = pair(400n);
 		expect(await send(batch)).toEqual(["created", "created"]);
 		const after = { wallet: balances(WALLET_A), limit: balances(LIMIT_B) };
-		expect(await send(batch)).toEqual([
-			"exists",
-			"linked_event_failed",
-		]);
+		const replay = await fake.client.createTransfers(batch);
+		expect(names(replay)).toEqual(["exists", "linked_event_failed"]);
+		// `exists` answers with the stored record's timestamp (state_machine.zig@0.17.9:3101).
+		expect(replay[0]?.timestamp).toBe(fake.transfers.get(batch[0]?.id ?? 0n)?.timestamp);
 		expect({ wallet: balances(WALLET_A), limit: balances(LIMIT_B) }).toEqual(after);
 	});
 
