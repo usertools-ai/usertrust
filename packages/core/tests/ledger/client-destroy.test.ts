@@ -71,7 +71,11 @@ const native = vi.hoisted(() => ({
 	aborts: [] as number[],
 }));
 
-vi.mock("tigerbeetle-node", () => {
+vi.mock("tigerbeetle-node", async () => {
+	// The binding's own enums (its dist/bindings.js holds only them and loads no native code), so
+	// the flags and statuses here cannot drift from the real ones: a hand-written copy here once
+	// gave `pending` the value of the real `linked`.
+	const real = await import("tigerbeetle-node/dist/bindings.js");
 	const closedError = (): Error =>
 		Object.assign(new Error("Client was closed."), { code: "ERR_CLIENT_CLOSED" });
 	return {
@@ -127,10 +131,10 @@ vi.mock("tigerbeetle-node", () => {
 			native.onCreate?.();
 			return built;
 		},
-		AccountFlags: { debits_must_not_exceed_credits: 1 << 2, history: 1 << 5 },
-		TransferFlags: { pending: 1, post_pending_transfer: 2, void_pending_transfer: 4 },
-		CreateAccountStatus: { created: 4294967295, exists: 1 },
-		CreateTransferStatus: { created: 4294967295, exists: 46, 46: "exists" },
+		AccountFlags: real.AccountFlags,
+		TransferFlags: real.TransferFlags,
+		CreateAccountStatus: real.CreateAccountStatus,
+		CreateTransferStatus: real.CreateTransferStatus,
 		amount_max: (1n << 128n) - 1n,
 	};
 });
@@ -146,6 +150,14 @@ const never = (): Promise<unknown[]> => new Promise(() => {});
 const tick = () => new Promise((r) => setImmediate(r));
 /** Clients built and never destroyed: each one keeps a process alive. */
 const alive = () => native.created - native.destroyed.size;
+
+/** A linked pending pair: a payer leg, and a limit leg on its own accounts. */
+const PAIR = {
+	amount: 10,
+	timeoutSeconds: 300,
+	payer: { debitAccountId: 1n, creditAccountId: 2n, code: 2 },
+	limit: { debitAccountId: 3n, creditAccountId: 4n, userData128: 3n },
+};
 
 /** Every public ledger operation, with in-memory state a shortcut could answer from set. */
 const OPERATIONS: Array<[string, (c: TrustTBClient) => Promise<unknown>]> = [
@@ -171,6 +183,11 @@ const OPERATIONS: Array<[string, (c: TrustTBClient) => Promise<unknown>]> = [
 	["lookupBalance", (c) => c.lookupBalance(1n)],
 	["lookupBalances", (c) => c.lookupBalances([1n])],
 	["lookupBalances, no ids", (c) => c.lookupBalances([])],
+	["createTaskLimitOperator", (c) => c.createTaskLimitOperator("local")],
+	["createTaskLimitAccount", (c) => c.createTaskLimitAccount("local", "task-1")],
+	["createLinkedPendingPair", (c) => c.createLinkedPendingPair(PAIR)],
+	["postLinkedPair", (c) => c.postLinkedPair(1n, 2n, 10)],
+	["voidLinkedPair", (c) => c.voidLinkedPair(1n, 2n)],
 ];
 
 /** The one account the fake ledger holds. */
@@ -182,10 +199,15 @@ const ledgerAnswers = (replay: boolean): Respond => {
 	const stored = new Map<bigint, unknown>();
 	return async (_client, op, batch) => {
 		if (op === "createTransfers") {
-			const transfer = batch[0] as { id: bigint };
-			stored.set(transfer.id, transfer);
-			// A caller-supplied id replayed: `exists`, and the lookup finds the same transfer.
-			return replay ? [{ index: 0, status: 46 }] : [];
+			for (const transfer of batch as Array<{ id: bigint }>) stored.set(transfer.id, transfer);
+			// A linked pair must be answered one result per transfer (0.17.9 answers every event), or
+			// the client refuses the answer; a single transfer keeps the empty "all created" answer.
+			const created = { status: 4294967295 };
+			if (!replay) return batch.length === 2 ? [created, created] : [];
+			// A caller-supplied id replayed: `exists`, and the lookup finds the same transfer. A
+			// linked pair replayed: `exists` breaks the chain, so its second leg answers
+			// linked_event_failed (1), and the lookup finds both.
+			return batch.length === 2 ? [{ status: 46 }, { status: 1 }] : [{ index: 0, status: 46 }];
 		}
 		if (op === "lookupTransfers") {
 			return (batch as bigint[]).flatMap((id) => (stored.has(id) ? [stored.get(id)] : []));
@@ -290,6 +312,45 @@ const SCENARIOS: Scenario[] = [
 		name: "lookupBalances",
 		op: (c) => c.lookupBalances([KNOWN_ACCOUNT]),
 		requests: ["lookupAccounts"],
+	},
+	{
+		name: "createTaskLimitOperator",
+		op: (c) => c.createTaskLimitOperator("local"),
+		requests: ["createAccounts"],
+	},
+	{
+		name: "createTaskLimitAccount",
+		op: (c) => c.createTaskLimitAccount("local", "task-1"),
+		requests: ["createAccounts"],
+	},
+	{
+		name: "createLinkedPendingPair",
+		op: (c) => c.createLinkedPendingPair(PAIR),
+		requests: ["createTransfers"],
+	},
+	{
+		name: "createLinkedPendingPair, a replayed pair",
+		replay: true,
+		op: (c) => c.createLinkedPendingPair(PAIR),
+		requests: ["createTransfers", "lookupTransfers"],
+	},
+	{
+		name: "postLinkedPair",
+		op: (c) => c.postLinkedPair(1n, 2n, 10),
+		requests: ["createTransfers"],
+	},
+	{
+		name: "postLinkedPair, a replayed pair",
+		replay: true,
+		op: (c) => c.postLinkedPair(1n, 2n, 10),
+		requests: ["createTransfers", "lookupTransfers"],
+	},
+	{ name: "voidLinkedPair", op: (c) => c.voidLinkedPair(1n, 2n), requests: ["createTransfers"] },
+	{
+		name: "voidLinkedPair, a replayed pair",
+		replay: true,
+		op: (c) => c.voidLinkedPair(1n, 2n),
+		requests: ["createTransfers", "lookupTransfers"],
 	},
 ];
 
@@ -711,6 +772,17 @@ describe("after destroy(), an operation is refused before its own input checks",
 			"immediateTransfer, a fractional amount",
 			(c) => c.immediateTransfer({ ...TRANSFER, amount: 1.5 }),
 		],
+		["createTaskLimitOperator, an invalid namespace", (c) => c.createTaskLimitOperator("a b")],
+		["createTaskLimitAccount, an invalid task id", (c) => c.createTaskLimitAccount("local", "a/b")],
+		[
+			"createLinkedPendingPair, a fractional amount",
+			(c) => c.createLinkedPendingPair({ ...PAIR, amount: 1.5 }),
+		],
+		[
+			"createLinkedPendingPair, no timeout",
+			(c) => c.createLinkedPendingPair({ ...PAIR, timeoutSeconds: 0 }),
+		],
+		["postLinkedPair, a fractional amount", (c) => c.postLinkedPair(1n, 2n, 1.5)],
 	];
 	for (const [name, op] of REFUSED_INPUTS) {
 		it(`${name}: LedgerClientClosedError, not the input's own error`, async () => {
