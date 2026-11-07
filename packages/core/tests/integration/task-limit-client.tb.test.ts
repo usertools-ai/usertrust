@@ -117,7 +117,7 @@ async function until(what: string, done: () => Promise<boolean>): Promise<void> 
 	const deadline = Date.now() + 15_000;
 	while (!(await done())) {
 		// timing: the same 15 s budget as the deadline above; the poll interval is 250 ms.
-		if (Date.now() > deadline) throw new Error(`the ledger did not ${what} within 30 s`);
+		if (Date.now() > deadline) throw new Error(`the ledger did not ${what} within 15 s`);
 		// timing: a 250 ms poll interval inside the 15 s budget above.
 		await new Promise((resolve) => setTimeout(resolve, 250));
 	}
