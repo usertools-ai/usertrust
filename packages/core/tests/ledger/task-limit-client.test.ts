@@ -171,7 +171,8 @@ function loseFirstReply(afterCommit?: () => void): void {
 function replayAnswer(stored: (sent: SentTransfer[]) => SentTransfer[]): void {
 	fake.onRequest = (op, batch, apply) => {
 		if (op !== "createTransfers") return apply();
-		for (const t of stored(batch as SentTransfer[])) fake.transfers.set(t.id, { ...t, timestamp: 5n });
+		for (const t of stored(batch as SentTransfer[]))
+			fake.transfers.set(t.id, { ...t, timestamp: 5n });
 		return [
 			{ timestamp: 0n, status: S.exists },
 			{ timestamp: 0n, status: S.linked_event_failed },
@@ -220,7 +221,9 @@ describe("derived ids", () => {
 			len.writeUInt32BE(bytes.length);
 			chunks.push(len, bytes);
 		}
-		return BigInt(`0x${createHash("sha256").update(Buffer.concat(chunks)).digest("hex").slice(0, 32)}`);
+		return BigInt(
+			`0x${createHash("sha256").update(Buffer.concat(chunks)).digest("hex").slice(0, 32)}`,
+		);
 	};
 
 	// Known answers computed outside the implementation (sha256 of the domain tag, then each part
@@ -276,7 +279,9 @@ describe("derived ids", () => {
 			expect(v).not.toBe(TrustTBClient.deriveTransferId("x", "y"));
 		}
 		// The bare hash of the namespace, which a tag without a domain would collide with.
-		expect(tag).not.toBe(BigInt(`0x${createHash("sha256").update("x").digest("hex").slice(0, 32)}`));
+		expect(tag).not.toBe(
+			BigInt(`0x${createHash("sha256").update("x").digest("hex").slice(0, 32)}`),
+		);
 	});
 });
 
@@ -441,18 +446,20 @@ describe("createLinkedPendingPair", () => {
 		expect(requestsOf("lookupTransfers")).toEqual([]);
 	});
 
-
 	it.each<[string, number]>([
 		["zero", 0],
 		["negative", -1],
 		["fractional", 1.5],
 		// TigerBeetle's timeout is a u32 count of seconds.
 		["above the u32 maximum", 2 ** 32],
-	])("refuses a %s timeout before any request: a pair must expire if nobody settles it", async (_n, t) => {
-		await ledgers(1_000n, 1_000n);
-		await expect(client.createLinkedPendingPair(pairFor(10, t))).rejects.toThrow();
-		expect(fake.requests).toEqual([]);
-	});
+	])(
+		"refuses a %s timeout before any request: a pair must expire if nobody settles it",
+		async (_n, t) => {
+			await ledgers(1_000n, 1_000n);
+			await expect(client.createLinkedPendingPair(pairFor(10, t))).rejects.toThrow();
+			expect(fake.requests).toEqual([]);
+		},
+	);
 });
 
 describe("a replayed pair", () => {
@@ -499,10 +506,9 @@ describe("a replayed pair", () => {
 				expect((err as TransferReplayMismatchError).field).toBe(field);
 				expect((err as TransferReplayMismatchError).transferId).toBe(sentBatch(0)[leg]?.id);
 				expect(requestsOf("lookupTransfers")).toHaveLength(1);
-				expect(emit).toHaveBeenCalledWith(
-					expect.stringContaining(String(sentBatch(0)[leg]?.id)),
-					{ code: LINKED_PAIR_MISMATCH_WARNING },
-				);
+				expect(emit).toHaveBeenCalledWith(expect.stringContaining(String(sentBatch(0)[leg]?.id)), {
+					code: LINKED_PAIR_MISMATCH_WARNING,
+				});
 			},
 		);
 	}

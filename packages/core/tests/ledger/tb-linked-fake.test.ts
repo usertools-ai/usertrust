@@ -185,10 +185,7 @@ describe("linked chains", () => {
 
 	it("the first failure in a chain gets its own code", async () => {
 		await ledgers(100n, 1_000n);
-		expect(await send(pair(500n))).toEqual([
-			"exceeds_credits",
-			"linked_event_failed",
-		]);
+		expect(await send(pair(500n))).toEqual(["exceeds_credits", "linked_event_failed"]);
 		// A three-event chain failing in the middle: the events before and after it both answer
 		// linked_event_failed, and the one that failed keeps its own code.
 		const [a, b] = pair(50n);
@@ -217,9 +214,10 @@ describe("linked chains", () => {
 		expect(await send([a])).toEqual(["linked_event_chain_open"]);
 		const [c, d] = pair(10n);
 		if (!c || !d) throw new Error("pair() builds two transfers");
-		expect(await send([c, { ...d, flags: d.flags | TF.linked }])).toEqual(
-			["linked_event_failed", "linked_event_chain_open"],
-		);
+		expect(await send([c, { ...d, flags: d.flags | TF.linked }])).toEqual([
+			"linked_event_failed",
+			"linked_event_chain_open",
+		]);
 		expect(balances(WALLET_A).debits_pending).toBe(0n);
 		expect(balances(LIMIT_B).debits_pending).toBe(0n);
 	});
@@ -252,10 +250,7 @@ describe("linked chains", () => {
 		await fake.client.createTransfers(pair(400n, LONG_S, ids));
 		const post = resolvePair(ids, TF.post_pending_transfer, 300n);
 		expect(await send(post)).toEqual(["created", "created"]);
-		expect(await send(post)).toEqual([
-			"exists",
-			"linked_event_failed",
-		]);
+		expect(await send(post)).toEqual(["exists", "linked_event_failed"]);
 	});
 
 	it("a chain that spans two ledgers applies both legs", async () => {
@@ -285,10 +280,7 @@ describe("linked chains", () => {
 			ledger: LEDGER_A,
 			code: CODE,
 		});
-		expect(await send([ok, refused])).toEqual([
-			"created",
-			"exceeds_credits",
-		]);
+		expect(await send([ok, refused])).toEqual(["created", "exceeds_credits"]);
 		expect(balances(WALLET_A).credits_posted).toBe(105n);
 	});
 });
@@ -335,12 +327,14 @@ describe("balances, pending transfers and expiry", () => {
 		expect(balances(SOURCE_B).credits_pending).toBe(0n);
 		expect(fake.pendingState.get(ids.a)).toBe("expired");
 		expect(fake.pendingState.get(ids.b)).toBe("expired");
-		expect(await send(resolvePair(ids, TF.post_pending_transfer, 600n))).toEqual(
-			["pending_transfer_expired", "linked_event_failed"],
-		);
-		expect(await send(resolvePair(ids, TF.void_pending_transfer, 0n))).toEqual(
-			["pending_transfer_expired", "linked_event_failed"],
-		);
+		expect(await send(resolvePair(ids, TF.post_pending_transfer, 600n))).toEqual([
+			"pending_transfer_expired",
+			"linked_event_failed",
+		]);
+		expect(await send(resolvePair(ids, TF.void_pending_transfer, 0n))).toEqual([
+			"pending_transfer_expired",
+			"linked_event_failed",
+		]);
 		// The stored records do not change when a hold expires.
 		expect((fake.transfers.get(ids.a)?.flags ?? 0) & TF.pending).toBe(TF.pending);
 		// The capacity is back: a pair for the whole limit is accepted.
@@ -448,14 +442,16 @@ describe("balances, pending transfers and expiry", () => {
 		await ledgers(1_000n, 1_000n);
 		const ids = { a: id(), b: id() };
 		await fake.client.createTransfers(pair(400n, LONG_S, ids));
-		expect(await send(resolvePair(ids, TF.void_pending_transfer, 0n))).toEqual(
-			["created", "created"],
-		);
+		expect(await send(resolvePair(ids, TF.void_pending_transfer, 0n))).toEqual([
+			"created",
+			"created",
+		]);
 		expect(balances(WALLET_A)).toMatchObject({ debits_pending: 0n, debits_posted: 0n });
 		expect(balances(LIMIT_B)).toMatchObject({ debits_pending: 0n, debits_posted: 0n });
-		expect(await send(resolvePair(ids, TF.void_pending_transfer, 0n))).toEqual(
-			["pending_transfer_already_voided", "linked_event_failed"],
-		);
+		expect(await send(resolvePair(ids, TF.void_pending_transfer, 0n))).toEqual([
+			"pending_transfer_already_voided",
+			"linked_event_failed",
+		]);
 	});
 });
 
@@ -472,12 +468,8 @@ describe("ids", () => {
 		});
 		expect(await send([t])).toEqual(["created"]);
 		expect(await send([t])).toEqual(["exists"]);
-		expect(await send([{ ...t, amount: 700n }])).toEqual([
-			"exists_with_different_amount",
-		]);
-		expect(await send([{ ...t, flags: TF.pending }])).toEqual([
-			"exists_with_different_flags",
-		]);
+		expect(await send([{ ...t, amount: 700n }])).toEqual(["exists_with_different_amount"]);
+		expect(await send([{ ...t, flags: TF.pending }])).toEqual(["exists_with_different_flags"]);
 		expect(balances(LIMIT_B).credits_posted).toBe(1_500n);
 	});
 
@@ -509,20 +501,13 @@ describe("ids", () => {
 	it("in a refused chain only the leg that failed transiently is retired", async () => {
 		await ledgers(1_000n, 100n);
 		const ids = { a: id(), b: id() };
-		expect(await send(pair(500n, LONG_S, ids))).toEqual([
-			"linked_event_failed",
-			"exceeds_credits",
-		]);
+		expect(await send(pair(500n, LONG_S, ids))).toEqual(["linked_event_failed", "exceeds_credits"]);
 		// The payer leg was rolled back, not failed: its id can still be used. The limit leg's
 		// id is retired.
 		const [a, b] = pair(500n, LONG_S, ids);
 		if (!a || !b) throw new Error("pair() builds two transfers");
-		expect(await send([{ ...a, flags: TF.pending }])).toEqual([
-			"created",
-		]);
-		expect(await send([{ ...b, amount: 10n }])).toEqual([
-			"id_already_failed",
-		]);
+		expect(await send([{ ...a, flags: TF.pending }])).toEqual(["created"]);
+		expect(await send([{ ...b, amount: 10n }])).toEqual(["id_already_failed"]);
 	});
 
 	it("a transfer whose accounts are on another ledger is refused", async () => {
@@ -535,9 +520,7 @@ describe("ids", () => {
 			ledger: LEDGER_B,
 			code: CODE,
 		});
-		expect(await send([across])).toEqual([
-			"accounts_must_have_the_same_ledger",
-		]);
+		expect(await send([across])).toEqual(["accounts_must_have_the_same_ledger"]);
 		const wrongLedger = transferOf({
 			id: id(),
 			debit_account_id: LIMIT_B,
@@ -546,9 +529,7 @@ describe("ids", () => {
 			ledger: LEDGER_A,
 			code: CODE,
 		});
-		expect(await send([wrongLedger])).toEqual([
-			"transfer_must_have_the_same_ledger_as_accounts",
-		]);
+		expect(await send([wrongLedger])).toEqual(["transfer_must_have_the_same_ledger_as_accounts"]);
 	});
 });
 
@@ -600,10 +581,7 @@ describe("the request hook", () => {
 		await expect(fake.client.createTransfers(batch)).rejects.toThrow("connection refused");
 		// Committed although the caller saw an error: the retry is a replay.
 		fake.onRequest = null;
-		expect(await send(batch)).toEqual([
-			"exists",
-			"linked_event_failed",
-		]);
+		expect(await send(batch)).toEqual(["exists", "linked_event_failed"]);
 		const ops = fake.requests.map((r) => r.op);
 		expect(ops.slice(-2)).toEqual(["createTransfers", "createTransfers"]);
 	});
@@ -631,4 +609,3 @@ describe("the request hook", () => {
 		await expect(fake.client.createTransfers([balancing])).rejects.toThrow("not modelled");
 	});
 });
-

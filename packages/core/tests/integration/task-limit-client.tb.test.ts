@@ -179,7 +179,9 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle: task-limit ledger primitives", (
 
 		// The task has 400 left: a second 600 is the limit leg's refusal, and the payer leg is
 		// rolled back with it.
-		const refused = await tb.createLinkedPendingPair(t.pair(600, EXPIRY_S)).catch((e: unknown) => e);
+		const refused = await tb
+			.createLinkedPendingPair(t.pair(600, EXPIRY_S))
+			.catch((e: unknown) => e);
 		expect(refused).toBeInstanceOf(TaskLimitLegError);
 		expect((refused as TaskLimitLegError).code).toBe(FAKE_STATUS.exceeds_credits);
 		expect(await t.pending()).toEqual({ task: 600n, payer: 600n });
@@ -254,7 +256,9 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle: task-limit ledger primitives", (
 			user_data_64: 0n,
 			user_data_32: 1,
 		});
-		const [operator] = await first.lookupAccounts([TrustTBClient.deriveTaskLimitOperatorId(namespace)]);
+		const [operator] = await first.lookupAccounts([
+			TrustTBClient.deriveTaskLimitOperatorId(namespace),
+		]);
 		expect(operator?.code).toBe(CODE_TASK_LIMIT_OPERATOR);
 
 		// A third ensure is a replay: `exists`, verified, and nothing moves.
@@ -363,9 +367,7 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle: task-limit ledger primitives", (
 		 */
 		const storedAgree = async (name: string, batch: T[]) => {
 			const strip = (list: T[]) =>
-				Object.fromEntries(
-					list.map(({ timestamp: _t, ...rest }) => [rest.id.toString(16), rest]),
-				);
+				Object.fromEntries(list.map(({ timestamp: _t, ...rest }) => [rest.id.toString(16), rest]));
 			const ids = batch.map((t) => t.id);
 			const real = await raw.lookupTransfers(ids);
 			const faked = await fake.client.lookupTransfers(ids);
@@ -437,9 +439,11 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle: task-limit ledger primitives", (
 			],
 			["linked_event_failed", "accounts_must_have_the_same_ledger"],
 		);
-		await step("a trailing linked flag on one event", [{ ...payerLeg, id: freshId() }], [
-			"linked_event_chain_open",
-		]);
+		await step(
+			"a trailing linked flag on one event",
+			[{ ...payerLeg, id: freshId() }],
+			["linked_event_chain_open"],
+		);
 		const open = pair(ids.payer, ids.task, 1n);
 		await step(
 			"a trailing linked flag closing a chain",
@@ -453,11 +457,10 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle: task-limit ledger primitives", (
 			const found = await raw.lookupAccounts([ids.payer, ids.task]);
 			return found.length === 2 && found.every((a) => a.debits_pending === 0n);
 		});
-		await step(
-			"void after expiry",
-			resolve(legsOf(expiring), TF.void_pending_transfer, 0n),
-			["pending_transfer_expired", "linked_event_failed"],
-		);
+		await step("void after expiry", resolve(legsOf(expiring), TF.void_pending_transfer, 0n), [
+			"pending_transfer_expired",
+			"linked_event_failed",
+		]);
 		const rest = pair(ids.rich, ids.task, 750n);
 		await step("the whole remaining limit after expiry", rest, ["created", "created"]);
 		await step("one more usertoken than the limit allows", pair(ids.rich, ids.task, 1n), [

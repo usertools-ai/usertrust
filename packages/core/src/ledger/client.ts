@@ -351,8 +351,7 @@ function postOrVoidMismatch(sent: Transfer, stored: Transfer): string | null {
 	// A void sent at 0 stores the pending's amount; any other amount, a post's 0 included, is
 	// stored as sent. The pair methods never send amount_max, so that branch of the rule is not
 	// reachable from here.
-	const voidAtZero =
-		(sent.flags & TransferFlags.void_pending_transfer) !== 0 && sent.amount === 0n;
+	const voidAtZero = (sent.flags & TransferFlags.void_pending_transfer) !== 0 && sent.amount === 0n;
 	if (!voidAtZero && sent.amount !== stored.amount) return "amount";
 	const unlessZero: Array<[string, bigint | number, bigint | number]> = [
 		["debit_account_id", sent.debit_account_id, stored.debit_account_id],

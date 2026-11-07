@@ -461,9 +461,7 @@ export function createLinkedFake(): LinkedFake {
 
 	const createTransfer = (t: Transfer, ts: bigint): number => {
 		if (has(t.flags, UNMODELLED_TRANSFER_FLAGS)) {
-			throw new Error(
-				"tb-linked-fake: balancing, closing and imported transfers are not modelled",
-			);
+			throw new Error("tb-linked-fake: balancing, closing and imported transfers are not modelled");
 		}
 		if (t.id === 0n) return S.id_must_not_be_zero;
 		const e = transfers.get(t.id);

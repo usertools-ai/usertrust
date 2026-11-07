@@ -334,7 +334,11 @@ const SCENARIOS: Scenario[] = [
 		op: (c) => c.createLinkedPendingPair(PAIR),
 		requests: ["createTransfers", "lookupTransfers"],
 	},
-	{ name: "postLinkedPair", op: (c) => c.postLinkedPair(1n, 2n, 10), requests: ["createTransfers"] },
+	{
+		name: "postLinkedPair",
+		op: (c) => c.postLinkedPair(1n, 2n, 10),
+		requests: ["createTransfers"],
+	},
 	{
 		name: "postLinkedPair, a replayed pair",
 		replay: true,
@@ -769,10 +773,7 @@ describe("after destroy(), an operation is refused before its own input checks",
 			(c) => c.immediateTransfer({ ...TRANSFER, amount: 1.5 }),
 		],
 		["createTaskLimitOperator, an invalid namespace", (c) => c.createTaskLimitOperator("a b")],
-		[
-			"createTaskLimitAccount, an invalid task id",
-			(c) => c.createTaskLimitAccount("local", "a/b"),
-		],
+		["createTaskLimitAccount, an invalid task id", (c) => c.createTaskLimitAccount("local", "a/b")],
 		[
 			"createLinkedPendingPair, a fractional amount",
 			(c) => c.createLinkedPendingPair({ ...PAIR, amount: 1.5 }),
