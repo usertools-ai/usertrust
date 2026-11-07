@@ -129,8 +129,11 @@ else
 fi
 
 echo "-- (d): a throwaway local registry, installed by name"
-registry_up() { # registry_up <name>: a fresh verdaccio on 127.0.0.1:4873 whose storage only holds what we publish
+REG_PORT=4873
+registry_up() { # registry_up <name>: a fresh verdaccio, on a port of its own, whose storage only holds what we publish
 	local n=$1 r="$work/registry-$1"
+	REG_PORT=$((REG_PORT + 1))
+	REG="http://127.0.0.1:$REG_PORT/"
 	mkdir -p "$r/storage"
 	cat >"$r/config.yaml" <<EOF
 storage: $r/storage
@@ -149,19 +152,24 @@ packages:
     proxy: npmjs
 log: { type: file, path: $r/verdaccio.log, level: warn }
 EOF
-	npx --yes "$VERDACCIO" --config "$r/config.yaml" --listen 127.0.0.1:4873 >"$r/out.log" 2>&1 &
+	npx --yes "$VERDACCIO" --config "$r/config.yaml" --listen "127.0.0.1:$REG_PORT" >"$r/out.log" 2>&1 &
 	echo $! >"$r/pid"
 	local i
 	for i in $(seq 1 60); do
-		curl -sf http://127.0.0.1:4873/-/ping >/dev/null && return 0
+		curl -sf "${REG}-/ping" >/dev/null && return 0
 		sleep 1
 	done
 	fail "the local registry did not start: $(tail -c 1000 "$r/out.log")"
 }
-registry_down() { kill "$(cat "$work/registry-$1/pid")" 2>/dev/null || true; sleep 1; }
+kill_tree() { # kill_tree <pid>: npx and the verdaccio it started, and their children
+	local c
+	for c in $(pgrep -P "$1" 2>/dev/null); do kill_tree "$c"; done
+	kill "$1" 2>/dev/null || true
+}
+registry_down() { kill_tree "$(cat "$work/registry-$1/pid")"; sleep 1; }
 publish_local() { # publish_local <tarball>
-	printf '//127.0.0.1:4873/:_authToken=acceptance\n' >"$work/npmrc"
-	npm publish "$1" --registry http://127.0.0.1:4873/ --userconfig "$work/npmrc" --ignore-scripts >"$work/publish.log" 2>&1 ||
+	printf '//127.0.0.1:%s/:_authToken=acceptance\n' "$REG_PORT" >"$work/npmrc"
+	npm publish "$1" --registry "$REG" --userconfig "$work/npmrc" --ignore-scripts >"$work/publish.log" 2>&1 ||
 		fail "publish to the local registry failed: $(tail -c 1500 "$work/publish.log")"
 }
 d_variant() { # d_variant <name> <server tarball> <ui tarball> <server shrinkwrap> <ui shrinkwrap>
@@ -172,10 +180,10 @@ d_variant() { # d_variant <name> <server tarball> <ui tarball> <server shrinkwra
 	publish_local "$3"
 	for d in server ui; do
 		pkg=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).name)' "packages/$d/package.json")
-		flag=$(npm view "$pkg@$version" _hasShrinkwrap --registry http://127.0.0.1:4873/ 2>/dev/null || true)
+		flag=$(npm view "$pkg@$version" _hasShrinkwrap --registry "$REG" 2>/dev/null || true)
 		echo "local registry ($1): $pkg@$version _hasShrinkwrap=${flag:-absent}"
 		echo "${flag:-absent}" >"$work/d-$1-$d.flag"
-		install_into "$work/d-$1-$d" "$pkg@$version" --registry http://127.0.0.1:4873/
+		install_into "$work/d-$1-$d" "$pkg@$version" --registry "$REG"
 	done
 	row "(d)registry-$1" "$work/d-$1-server" server "$4"
 	row "(d)registry-$1" "$work/d-$1-ui" ui "$5"
