@@ -95,6 +95,7 @@ Either way, a session reads its settings once, at its first hook: see
 | `UT_CC_STATE_DIR`    | `~/.claude/usertrust-cc` | Pending holds, and what was already posted (keep it; see below) |
 | `UT_CC_HOLD_GRACE_MS` | `60000`                 | How much longer than a Bash call's timeout its hold is asked to live, in ms, 0 to 3 600 000 (see [Long tool calls](#long-tool-calls)) |
 | `UT_CC_SEND_CONTENT` | `1`                      | `0` sends `{"redacted":true}` instead of content |
+| `UT_CC_JOB_TYPE_INSTRUCTION` | unset           | `1` asks the agent to type its jobs at SessionStart (off by default; see [job types](#job-tagging-what-did-each-job-cost)) |
 | `UT_FAIL_OPEN`       | unset                    | Enforce mode only: `1` lets tool calls through when governance is down |
 
 > **Caution:** `UT_SERVER_URL` and `UT_SERVER_KEY` are read from the environment,
@@ -136,6 +137,7 @@ The path is built from your account's home directory (`os.userInfo().homedir`), 
 | `unit`        | no       | unset               | The principal's `unit` (`UT_CC_UNIT`)                     |
 | `role`        | no       | unset               | The principal's `role` (`UT_CC_ROLE`)                     |
 | `holdGraceMs` | no       | `60000`             | A Bash call's hold life past its timeout, in ms, 0 to 3 600 000 (`UT_CC_HOLD_GRACE_MS`) |
+| `jobTypeInstruction` | no | `false`            | `true` asks the agent to type its jobs at SessionStart (`UT_CC_JOB_TYPE_INSTRUCTION=1`) |
 
 **With `UT_CC_CONFIG` set, even to an empty string, the session is configured:**
 every setting comes from the file, and no `UT_*` variable is read, nor
@@ -165,7 +167,7 @@ directory `/`, and with nothing of the environment but Claude Code's own
 - The child also checks its own environment: holding anything else, it refuses to
   run and sends nothing.
 - SessionStart's one request, the check for `"job-type"` that decides whether the agent is
-  asked to type its jobs, is made from that same kind of child (the banner and everything else
+  asked to type its jobs (when `jobTypeInstruction` is on), is made from that same kind of child (the banner and everything else
   SessionStart prints stay with the parent). A child that cannot run or fails means no
   instruction, and the banner as before. An environment-configured session makes the request
   from the process itself, as it always sent.
@@ -633,11 +635,15 @@ are opaque: 1-128 characters of `[A-Za-z0-9._:-]`.
     leaves the job untyped (reported as untyped, never guessed). *A stale type:* the open job persists until
     the next `start` or `stop`, so an agent that types task A and then ignores the instruction for task B
     keeps billing B to A's job, with A's type.
-  - **The agent is asked to type its own jobs.** For a server that lists `"job-type"`, SessionStart adds a
-    fixed instruction (under 1,000 characters, nothing of yours interpolated) to the agent's context: at
-    the start of each distinct task run `usertrust-job.mjs start --type <type> --source agent <short-id>`,
-    run it again when the task changes, do not ask you, and after a resume or compact keep a job already
-    open for the same work. It is added on every start, resume, `/clear`, compact and fork. Claude Code
+  - **The agent can be asked to type its own jobs. This is OFF by default.** Set `"jobTypeInstruction": true`
+    in the configuration file (or `UT_CC_JOB_TYPE_INSTRUCTION=1`) and, for a server that lists `"job-type"`,
+    SessionStart adds a fixed instruction (under 1,000 characters, nothing of yours interpolated) to the
+    agent's context: at the start of each distinct task run
+    `usertrust-job.mjs start --type <type> --source agent <short-id>`, run it again when the task changes
+    (it says what the call does, that it only records a label for usertrust's cost reports, and says
+    nothing about what the agent tells or asks you), and after a resume or compact keep a job already
+    open for the same work. Without the option nothing is added, and a type is still recorded when you
+    run `usertrust-job.mjs start --type` yourself. With it, the instruction is added on every start, resume, `/clear`, compact and fork. Claude Code
     saves what a hook injects in the session transcript, so it is not hidden: it is simply not shown as a
     chat message. The check for `"job-type"` is one health request of up to 1.5 s at session start. It never
     counts toward the circuit breaker (a slow or failing answer there is not a strike, so session starts

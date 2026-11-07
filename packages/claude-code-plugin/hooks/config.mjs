@@ -59,6 +59,7 @@ const VARIABLES = {
 	unit: "UT_CC_UNIT",
 	role: "UT_CC_ROLE",
 	holdGraceMs: "UT_CC_HOLD_GRACE_MS",
+	jobTypeInstruction: "UT_CC_JOB_TYPE_INSTRUCTION",
 };
 
 /**
@@ -127,6 +128,8 @@ function fromEnvironment(env) {
 		unit: env.UT_CC_UNIT,
 		role: env.UT_CC_ROLE,
 		holdGraceMs: graceFromVariable(env.UT_CC_HOLD_GRACE_MS),
+		// Opt-in: only the exact spelling `1` (job-log.mjs `JOB_TYPE_INSTRUCTION`).
+		jobTypeInstruction: env.UT_CC_JOB_TYPE_INSTRUCTION === "1",
 	};
 }
 
@@ -162,6 +165,7 @@ export function refusedSettings(
 		unit: undefined,
 		role: undefined,
 		holdGraceMs: DEFAULT_HOLD_GRACE_MS,
+		jobTypeInstruction: false,
 	};
 }
 
@@ -192,7 +196,8 @@ function isHttpUrl(value) {
  * it is refused. Required: `url` (http or https), `key`, `mode` (`watch` or
  * `enforce`) and an absolute `stateDir`. Optional: `failOpen` and `sendContent`
  * (booleans), `usage` (`transcript` or `estimate`), `unit` and `role` (strings), and
- * `holdGraceMs` (ms, 0 to an hour). Fields it does not know are ignored, `model` among them
+ * `holdGraceMs` (ms, 0 to an hour), and `jobTypeInstruction` (boolean, default false: whether
+ * SessionStart asks the agent to type its jobs). Fields it does not know are ignored, `model` among them
  * (`MODEL_FIELD`), which only makes SessionStart say it is ignored.
  */
 export function parseConfig(text) {
@@ -227,6 +232,7 @@ export function parseConfig(text) {
 		unit: [undefined, (v) => typeof v === "string"],
 		role: [undefined, (v) => typeof v === "string"],
 		holdGraceMs: [DEFAULT_HOLD_GRACE_MS, isHoldGrace],
+		jobTypeInstruction: [false, (v) => typeof v === "boolean"],
 	};
 	const settings = {
 		configured: true,

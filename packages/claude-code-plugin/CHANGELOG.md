@@ -7,6 +7,17 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ## [Unreleased]
 
+### Changed
+
+- **Behaviour change: the job-type instruction is now off by default.** SessionStart no longer asks
+  the agent to type its jobs unless you say so. To keep job-type labels, set `"jobTypeInstruction": true`
+  in the configuration file (or `UT_CC_JOB_TYPE_INSTRUCTION=1`). Only the exact value `1` turns it on in
+  the environment, and a configuration value that is not a boolean refuses the file like every other
+  optional key. The instruction itself no longer says "Do not ask the user first": it says only what the call
+  does ("This call only records a label for usertrust's cost reports; it changes nothing else.") and
+  nothing about the conversation. Typing a job yourself (`usertrust-job.mjs start --type`) is
+  unaffected, and the health request SessionStart makes is unchanged.
+
 ### Added
 
 - **Say what KIND of work a job is: `usertrust-job.mjs start --type <type> [--source agent|explicit] <job-id>`.**
@@ -20,10 +31,11 @@ npm, and its version is its own: the `usertrust` packages and their
   job and no type, and a hold's settle names exactly the type its authorize was sent. A type is a
   declaration, not evidence: with `--source agent` it is the model's own label, and an open job's type
   stays until the next `start` or `stop`.
-- **SessionStart asks the agent to type its jobs.** For a server that lists `"job-type"`, the one
-  SessionStart message now also carries a fixed instruction for the agent (the banner is unchanged and
+- **SessionStart can ask the agent to type its jobs (opt-in; see Changed above).** With
+  `jobTypeInstruction` on and a server that lists `"job-type"`, the one
+  SessionStart message also carries a fixed instruction for the agent (the banner is unchanged and
   still shown once): run `usertrust-job.mjs start --type <type> --source agent <short-id>` at the start
-  of each distinct task and again when the task changes, without asking. It is added on every start,
+  of each distinct task and again when the task changes. It is added on every start,
   resume, clear, compact and fork, after one health request of at most 1.5 s; if that fails or times out,
   only the banner is shown. The request never counts toward the circuit breaker and is not made while it
   is open. Claude Code saves injected context in the session transcript.

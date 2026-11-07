@@ -526,7 +526,9 @@ async function sessionStart(env: Record<string, string>, source = "startup") {
 	const result = await runHook(
 		join(HOOKS, "session-start.mjs"),
 		{ hook_event_name: "SessionStart", source, session_id: SESSION },
-		{ UT_CC_STATE_DIR: state, UT_SERVER_KEY: "k", ...env },
+		// The instruction is opt-in (jobTypeInstruction): these tests are about it, so they opt in;
+		// tests/job-type-opt-in.test.ts covers the default.
+		{ UT_CC_STATE_DIR: state, UT_SERVER_KEY: "k", UT_CC_JOB_TYPE_INSTRUCTION: "1", ...env },
 	);
 	return { ...result, ms: Date.now() - began }; // timing: bound 4.5 s asserted; slowest run 1.6 s, 3 runs on a loaded runner
 }
@@ -566,7 +568,8 @@ describe("SessionStart: ONE JSON object, the agent's instruction only for a serv
 		expect(context).not.toMatch(/usertrust-job(?!\.mjs)/);
 		for (const t of TYPES) expect(context).toContain(t);
 		expect(context).toMatch(/task changes/);
-		expect(context).toMatch(/Do not ask the user/);
+		// the old "Do not ask the user first" is gone (tests/job-type-opt-in.test.ts pins the wording)
+		expect(context).toContain("only records a label for usertrust's cost reports");
 		expect(context).toMatch(/resumed or compacted/);
 		expect(context).toMatch(/keep it/);
 	});

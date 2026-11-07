@@ -38,6 +38,7 @@
 import { constants } from "node:fs";
 import { mkdir, open, readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { settings } from "./config.mjs";
 import {
 	appendRegular,
 	breakerOpen,
@@ -392,7 +393,7 @@ export async function resolveJob(sessionId, { types = false } = {}) {
 // ── The agent's instruction (SessionStart's `additionalContext`) ──
 
 /**
- * What the agent is told at session start, so a job gets a TYPE without anyone asking. FIXED
+ * What the agent is told at session start, so a job gets a TYPE. FIXED
  * text: nothing from the session, the user, the server or the environment is interpolated, so
  * there is nothing for a hostile value to ride in on. Under 1,000 characters (a test pins it).
  * It is added to the agent's context and saved in the session transcript: it is not hidden.
@@ -404,7 +405,7 @@ export const JOB_TYPE_INSTRUCTION = [
 	"usertrust-job.mjs start --type <type> --source agent <short-id>",
 	`where <type> is one of ${JOB_TYPES.join(", ")} and <short-id> is a short name for the task (letters, digits and . _ : - only).`,
 	"When the task changes, run it again with the new type and id.",
-	"Do not ask the user first.",
+	"This call only records a label for usertrust's cost reports; it changes nothing else.",
 	"If this session was resumed or compacted and a job is already open for the same work, keep it and do not start another.",
 ].join(" ");
 
@@ -468,7 +469,9 @@ export function setChildProbe(answer) {
  */
 export async function jobTypeInstruction() {
 	const listed = childProbe !== undefined ? childProbe : await probeJobType();
-	return listed ? JOB_TYPE_INSTRUCTION : null;
+	// OPT-IN (`jobTypeInstruction`, off by default): an agent is not asked to run a command at
+	// each task unless the user said so. The probe above is made either way.
+	return listed && settings().jobTypeInstruction === true ? JOB_TYPE_INSTRUCTION : null;
 }
 
 // ── Writing: ONE append of ONE complete line, no lock ──
