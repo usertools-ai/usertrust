@@ -5,10 +5,10 @@
 // lockfile. Fixture lockfiles pin each rule; the real tree is checked at HEAD.
 // Run with `node --test scripts/shrinkwrap.test.mjs`.
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-import { Refused, render, shrinkwrap } from "./shrinkwrap.mjs";
+import { commitOf, Refused, render, shrinkwrap } from "./shrinkwrap.mjs";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const third = (version, extra = {}) => ({
@@ -158,6 +158,22 @@ describe("shrinkwrap", () => {
 			() => shrinkwrap({ lockfileVersion: 1, dependencies: {} }, manifestOf, "server", "2.0.0"),
 			Refused,
 		);
+	});
+});
+
+describe("the commit it reads", () => {
+	it("is resolved to a 40-hex sha; an option-like or unknown revision is refused before any blob is read", () => {
+		assert.match(commitOf("HEAD"), /^[0-9a-f]{40}$/);
+		for (const bad of ["--output=/tmp/x", "-p", "", "no-such-revision-at-all"]) {
+			assert.throws(() => commitOf(bad), Refused, bad);
+		}
+		const r = spawnSync(
+			"node",
+			[`${ROOT}scripts/shrinkwrap.mjs`, "--output=/tmp/x", "server", "1.0.0"],
+			{ cwd: ROOT, encoding: "utf8" },
+		);
+		assert.equal(r.status, 1);
+		assert.match(r.stderr, /refused: not a revision: --output=\/tmp\/x/);
 	});
 });
 

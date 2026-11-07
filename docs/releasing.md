@@ -471,13 +471,17 @@ of every project that depends on it.
   ```
 
 - **CI checks it** on every change (the `shrinkwrap` job, `scripts/shrinkwrap-acceptance.sh`):
-  1. it assembles server and ui as the release does, and requires each shipped shrinkwrap to be
-     byte-identical to `release.sh shrinkwrap` at the commit;
-  2. it installs both tarballs into an empty directory with `--ignore-scripts`, and requires every
-     third-party package installed to be a version the root lockfile holds;
-  3. as a control, it moves one entry of server's shrinkwrap to another published version its
-     requirer accepts, and requires check 2 to fail on exactly that package. That proves npm
-     installs a dependency's shrinkwrap as written.
+  1. it assembles core, verify, server and ui as the release does, and requires each shipped
+     shrinkwrap to be byte-identical to `release.sh shrinkwrap` at the commit;
+  2. it records, for each way the tarballs can be installed, whether npm installed the package's
+     tree exactly as its shrinkwrap writes it, place by place and both ways, for the tarball as
+     built and for a control whose shrinkwrap moves one entry: from a file (server alone, ui alone,
+     both), from a throwaway local registry by name, and, from the public registry, a published
+     package that ships a shrinkwrap. npm honours a dependency's shrinkwrap only when the package's
+     `_hasShrinkwrap` flag is set, which a file tarball never carries, so the file rows are
+     recorded, not required;
+  3. it requires the public-registry row, and the local-registry rows with their controls when that
+     registry reports `_hasShrinkwrap`.
 
   `scripts/shrinkwrap.test.mjs` pins the generator's rules on fixture lockfiles and on the real
   tree. The release requires the `shrinkwrap` job (`REQUIRED_CI_JOBS`).

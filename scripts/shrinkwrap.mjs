@@ -177,6 +177,29 @@ export function shrinkwrap(lock, manifestOf, dir, version) {
 /** The file's bytes: npm's own lockfile format (two-space JSON and a final newline). */
 export const render = (sw) => `${JSON.stringify(sw, null, 2)}\n`;
 
+/**
+ * The commit a revision names, as a 40-hex sha: a revision that begins with "-" (which git would read as an
+ * option) or names no commit is refused before any blob is read.
+ */
+export function commitOf(rev) {
+	if (typeof rev !== "string" || rev === "" || rev.startsWith("-"))
+		throw new Refused(`not a revision: ${rev}`);
+	let sha;
+	try {
+		sha = execFileSync(
+			"git",
+			["rev-parse", "--verify", "--quiet", "--end-of-options", `${rev}^{commit}`],
+			{
+				encoding: "utf8",
+			},
+		).trim();
+	} catch {
+		throw new Refused(`${rev} names no commit`);
+	}
+	if (!/^[0-9a-f]{40}$/.test(sha)) throw new Refused(`${rev} did not resolve to a commit sha`);
+	return sha;
+}
+
 function blob(commit, path) {
 	return execFileSync("git", ["show", `${commit}:${path}`], {
 		encoding: "utf8",
@@ -203,8 +226,9 @@ if (runAsCommand) {
 		process.exit(2);
 	}
 	try {
-		const lock = JSON.parse(blob(commit, "package-lock.json"));
-		const manifestOf = (path) => JSON.parse(blob(commit, `${path}/package.json`));
+		const sha = commitOf(commit);
+		const lock = JSON.parse(blob(sha, "package-lock.json"));
+		const manifestOf = (path) => JSON.parse(blob(sha, `${path}/package.json`));
 		process.stdout.write(render(shrinkwrap(lock, manifestOf, dir, version)));
 	} catch (e) {
 		process.stderr.write(

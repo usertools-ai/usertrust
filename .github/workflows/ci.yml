@@ -502,7 +502,8 @@ jobs:
           (cd packages/verify && npx tsc)
           (cd packages/server && npx tsc -b)
           (cd packages/ui && npm run build)
-      - name: The shipped tree is reproduced, installed as tested, and honoured by npm
+      - name: The shipped tree is reproduced, and the install matrix shows how npm installs it
+        timeout-minutes: 30
         run: bash scripts/shrinkwrap-acceptance.sh
 
   # The stamp. A STABLE name, so a re-run supersedes a failure for anything that reads it by name. When every

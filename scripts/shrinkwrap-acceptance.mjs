@@ -4,13 +4,16 @@
 //
 // Helpers for scripts/shrinkwrap-acceptance.sh (CI only; see that file).
 //
-//   installed <root package-lock.json> <install dir>
-//       every third-party package npm installed into <install dir> (its node_modules/.package-lock.json)
-//       must be a name@version the root lockfile holds as a run-time package; prints each one that is not,
-//       and exits 1 when there is any
+//   placed <install dir> <package name> <npm-shrinkwrap.json>
+//       did npm install <package name>'s dependency tree EXACTLY as that shrinkwrap writes it? Each
+//       entry at place P must be installed at node_modules/<package name>/P with its version, and
+//       nothing else may be installed under node_modules/<package name>/node_modules (both ways,
+//       place by place). Prints HONOURED or NOT-HONOURED with each difference; exit 0 / 1.
+//   where <install dir> <name>
+//       prints every place <name> is installed at, with its version (for the log)
 //   candidate <npm-shrinkwrap.json>
-//       prints "<place> <name> <range>" for each third-party entry, with the range its requirer asks for
-//       (the control picks one it can move to another published version)
+//       prints "<place> <name> <range>" for each third-party entry, with the range its requirer asks
+//       for (a control picks one it can move to another published version)
 //   mutate <npm-shrinkwrap.json> <place> <version> <resolved> <integrity>
 //       rewrites that one entry in place
 import { readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -19,28 +22,43 @@ import { pathToFileURL } from "node:url";
 const ours = (name) => name === "usertrust" || name.startsWith("usertrust-");
 const nameOf = (place) => place.slice(place.lastIndexOf("node_modules/") + "node_modules/".length);
 const read = (f) => JSON.parse(readFileSync(f, "utf8"));
+const installedTree = (dir) => read(`${dir}/node_modules/.package-lock.json`).packages;
 
-function installed(rootLock, dir) {
-	const lock = read(rootLock).packages;
-	const have = new Set();
-	for (const [k, m] of Object.entries(lock))
-		if (k && !m.link && !m.dev && m.version) have.add(`${nameOf(k)}@${m.version}`);
-	const got = read(`${dir}/node_modules/.package-lock.json`).packages;
-	const bad = [];
-	let checked = 0;
-	for (const [k, m] of Object.entries(got)) {
-		const name = nameOf(k);
-		if (!k || ours(name)) continue;
-		checked++;
-		if (!have.has(`${name}@${m.version}`)) bad.push(`${k}@${m.version}`);
+function placed(dir, pkg, file) {
+	const want = read(file).packages;
+	const got = installedTree(dir);
+	const base = `node_modules/${pkg}`;
+	const diffs = [];
+	let n = 0;
+	for (const [place, entry] of Object.entries(want)) {
+		if (!place) continue;
+		n++;
+		const at = `${base}/${place}`;
+		const have = got[at]?.version;
+		if (have !== entry.version)
+			diffs.push(`${at}: want ${entry.version}, installed ${have ?? "nothing"}`);
 	}
-	if (checked === 0) {
-		console.log("no third-party package was installed: nothing was compared");
-		return 1;
+	for (const [at, entry] of Object.entries(got)) {
+		if (!at.startsWith(`${base}/node_modules/`)) continue;
+		if (!want[at.slice(base.length + 1)])
+			diffs.push(`${at}@${entry.version}: installed, not in the shrinkwrap`);
 	}
-	for (const b of bad) console.log(`not the tested tree: ${b}`);
-	console.log(`${checked} third-party packages compared, ${bad.length} not the root lockfile's`);
-	return bad.length ? 1 : 0;
+	if (n === 0) diffs.push("the shrinkwrap has no entries: nothing was compared");
+	if (diffs.length === 0) {
+		console.log(`HONOURED ${pkg}: all ${n} entries at their places, nothing else beneath it`);
+		return 0;
+	}
+	console.log(`NOT-HONOURED ${pkg}: ${diffs.length} of ${n} entries differ`);
+	for (const d of diffs.slice(0, 40)) console.log(`  ${d}`);
+	return 1;
+}
+
+function where(dir, name) {
+	const got = installedTree(dir);
+	const at = Object.entries(got).filter(([k]) => k && nameOf(k) === name);
+	if (at.length === 0) console.log(`${name}: not installed`);
+	for (const [k, e] of at) console.log(`${name}: ${k} @ ${e.version}`);
+	return 0;
 }
 
 function candidate(file) {
@@ -80,10 +98,10 @@ const runAsCommand = (() => {
 })();
 if (runAsCommand) {
 	const [cmd, ...a] = process.argv.slice(2);
-	const fn = { installed, candidate, mutate }[cmd];
+	const fn = { placed, where, candidate, mutate }[cmd];
 	if (!fn) {
 		console.error(
-			"usage: shrinkwrap-acceptance.mjs installed <lock> <dir> | candidate <shrinkwrap> | mutate <shrinkwrap> <place> <version> <resolved> <integrity>",
+			"usage: shrinkwrap-acceptance.mjs placed <dir> <pkg> <shrinkwrap> | where <dir> <name> | candidate <shrinkwrap> | mutate <shrinkwrap> <place> <version> <resolved> <integrity>",
 		);
 		process.exit(2);
 	}
