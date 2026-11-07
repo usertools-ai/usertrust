@@ -234,7 +234,7 @@ function runInChild(hook, text, input, session, home) {
 const known = { input: null, settings: null };
 
 /**
- * SessionStart only: look for `usertrust-claude-code` in the settings files and, when it looks
+ * SessionStart only: look for an older copy of this plugin (`usertrust-claude-code`, `usertools`) in the settings files and, when it looks
  * enabled or cannot be told, leave a warning for SessionStart's line (peer-meter.mjs). It
  * NEVER stops this plugin metering: settings files are only evidence of what Claude Code
  * loaded (--settings and --setting-sources, a mid-session change and a different home all

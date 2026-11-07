@@ -5,9 +5,9 @@
 	"version": "3.1.0",
 	"plugins": [
 		{
-			"name": "usertools",
+			"name": "usertrust",
 			"source": "./packages/claude-code-plugin",
-			"description": "Ledger-backed governance for Claude Code: two-phase spend authorization on every tool call, watch-only by default with opt-in enforcement, settlement on completion",
+			"description": "Spend governance for Claude Code: a spend hold on every tool call, settled at the real usage from Claude Code's transcripts. Watch-only by default: nothing is blocked unless you opt in to enforcement.",
 			"version": "3.1.0",
 			"license": "Apache-2.0",
 			"category": "security",

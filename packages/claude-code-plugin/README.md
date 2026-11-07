@@ -1,6 +1,6 @@
-# usertools
+# usertrust
 
-Ledger-backed governance for Claude Code: every tool call gets a two-phase spend
+Spend governance for Claude Code: every tool call gets a two-phase spend
 authorization against a [usertrust-server](../server) you host, and the session's
 REAL token usage — per model, per subagent — is settled from Claude Code's own
 transcripts. PreToolUse reserves a hold that covers the usage recorded since the
@@ -21,23 +21,37 @@ call it lets through, exactly as they would without it.
 ## Install
 
 ```
+/plugin install usertrust --marketplace usertools-ai/usertrust
+```
+
+This needs Claude Code v2.1.275 or later. If the marketplace is not added yet, Claude Code shows the
+source and asks you to confirm before adding it; it then opens the plugin's details so you choose a
+scope (user, project or local). It does not install silently. From a shell, the same line is
+`claude plugin install usertrust --marketplace usertools-ai/usertrust` (v2.1.292 or later, with no
+confirmation step). On an older Claude Code, add the marketplace first:
+
+```
 /plugin marketplace add usertools-ai/usertrust
-/plugin install usertools@usertrust
+/plugin install usertrust@usertrust
 ```
 
-**Upgrading from `usertrust-claude-code`?** This plugin was renamed to `usertools`
-in 3.0.0. If `usertrust-claude-code` is installed, uninstall it BEFORE installing
-`usertools`:
+**Upgrading from `usertools` or `usertrust-claude-code`?** This plugin was renamed to `usertrust`
+(it was `usertools` from 3.0.0, and `usertrust-claude-code` before). Claude Code treats a
+renamed plugin as a new one, so **an existing install does not update itself to the new name**.
+Uninstall the old one, then install the new one:
 
 ```
-/plugin uninstall usertrust-claude-code@usertrust
-/plugin install usertools@usertrust
+/plugin uninstall usertools@usertrust
+/plugin install usertrust --marketplace usertools-ai/usertrust
 ```
 
-With both installed, every tool call reserves budget twice, and some versions of the old plugin
-can charge twice. `usertools` always meters, and when `usertrust-claude-code` looks ENABLED in your
-settings (or it cannot tell), SessionStart opens with a warning naming the settings file. Your
-configuration file, state directory and server settings are unchanged by the rename.
+(`/plugin uninstall usertrust-claude-code@usertrust` if that is the name you have.) With both
+installed, every tool call reserves budget twice, and some versions of `usertrust-claude-code` can
+charge twice, until you remove the old one. `usertrust` always meters, and when an older copy looks
+ENABLED in your settings (or it cannot tell), SessionStart opens with a warning naming the settings
+file. Your configuration file, state directory (`~/.claude/usertrust-cc`, or `UT_CC_STATE_DIR`) and
+server settings are unchanged by the rename: none of them is keyed by the plugin's name, so pending
+holds and cursors stay where they are.
 
 ## Quickstart (against usertrust-server)
 

@@ -1,6 +1,6 @@
 {
-	"name": "usertools",
-	"description": "Ledger-backed governance for Claude Code: PreToolUse authorization, watch-only by default (UT_CC_MODE=enforce blocks over-budget calls), real per-model and per-subagent usage settled from Claude Code transcripts, a remainder scan at Stop, SubagentStop and SessionEnd",
+	"name": "usertrust",
+	"description": "Spend governance for Claude Code: a spend hold on every tool call, and real per-model and per-subagent usage settled from Claude Code transcripts, with a remainder scan at Stop, SubagentStop and SessionEnd. Watch-only by default: nothing is blocked unless you opt in to enforcement (UT_CC_MODE=enforce).",
 	"version": "3.1.0",
 	"author": { "name": "usertrust" },
 	"repository": "https://github.com/usertools-ai/usertrust",
