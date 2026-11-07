@@ -17,6 +17,7 @@ import {
 	createClient,
 	TransferFlags,
 } from "tigerbeetle-node";
+import * as derive from "../shared/derive.js";
 import { LedgerUnavailableError } from "../shared/errors.js";
 import {
 	COST_CENTER_PATTERN,
@@ -270,14 +271,6 @@ const COST_CENTER_DOMAIN_TAG = Buffer.from("usertrust:cost-center:v1", "utf8");
 // and account ids already live in separate TigerBeetle namespaces. The KAT suite pins it.
 const TRANSFER_ID_DOMAIN_TAG = Buffer.from("usertrust:transfer:v1", "utf8");
 
-// Domain tags for task-limit derivations, under the same policy: versioned, and prefix-free
-// against every tag above and each other ("usertrust:task-limit:" and "usertrust:task-limit-"
-// part at their 21st byte). The namespace tag is domain-separated too, rather than a bare hash of
-// the namespace, so it cannot equal any other derivation's preimage. The KAT suite pins all three.
-const TASK_LIMIT_DOMAIN_TAG = Buffer.from("usertrust:task-limit:v1", "utf8");
-const TASK_LIMIT_OPERATOR_DOMAIN_TAG = Buffer.from("usertrust:task-limit-operator:v1", "utf8");
-const TASK_NAMESPACE_DOMAIN_TAG = Buffer.from("usertrust:task-namespace:v1", "utf8");
-
 // TigerBeetle reserves 0 and 2^128 - 1; a transfer may use neither as its id.
 const MAX_TRANSFER_ID = (1n << 128n) - 1n;
 
@@ -293,23 +286,6 @@ function transferIdOrFresh(transferId: bigint | undefined): bigint {
 		throw new RangeError(`Transfer id must be in (0, 2^128 - 1): ${transferId}`);
 	}
 	return transferId;
-}
-
-/**
- * sha256 of `tag`, then each part as a big-endian u32 UTF-8 byte length and its bytes; the first
- * 16 bytes, big-endian. The encoding of deriveCostCenterAccountId and deriveTransferId, for the
- * task-limit derivations.
- */
-function taggedTupleId(tag: Buffer, parts: string[]): bigint {
-	const chunks: Buffer[] = [tag];
-	for (const part of parts) {
-		const bytes = Buffer.from(part, "utf8");
-		const len = Buffer.alloc(4);
-		len.writeUInt32BE(bytes.length);
-		chunks.push(len, bytes);
-	}
-	const digest = createHash("sha256").update(Buffer.concat(chunks)).digest("hex");
-	return BigInt(`0x${digest.slice(0, 32)}`);
 }
 
 /** The first field of a replayed create transfer that differs from what was sent, or null. */
@@ -752,12 +728,12 @@ export class TrustTBClient {
 	 * validation lives at the doors.
 	 */
 	static deriveTaskLimitAccountId(namespace: string, taskId: string): bigint {
-		return taggedTupleId(TASK_LIMIT_DOMAIN_TAG, [namespace, taskId]);
+		return derive.deriveTaskLimitAccountId(namespace, taskId);
 	}
 
 	/** The per-namespace account task limits are credited from. Derived, never looked up. */
 	static deriveTaskLimitOperatorId(namespace: string): bigint {
-		return taggedTupleId(TASK_LIMIT_OPERATOR_DOMAIN_TAG, [namespace]);
+		return derive.deriveTaskLimitOperatorId(namespace);
 	}
 
 	/**
@@ -765,7 +741,7 @@ export class TrustTBClient {
 	 * namespace can be listed by a ledger query. Not an id: a value in its own domain.
 	 */
 	static taskNamespaceTag(namespace: string): bigint {
-		return taggedTupleId(TASK_NAMESPACE_DOMAIN_TAG, [namespace]);
+		return derive.taskNamespaceTag(namespace);
 	}
 
 	/**

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { isGovernanceDenial } from "../../src/audit/denial-events.js";
 import {
 	AccountNotFoundError,
 	AuditDegradedError,
@@ -6,6 +7,8 @@ import {
 	InsufficientBalanceError,
 	LedgerUnavailableError,
 	PolicyDeniedError,
+	TaskLimitConflictError,
+	TaskLimitExceededError,
 	VaultNotInitializedError,
 } from "../../src/shared/errors.js";
 
@@ -136,6 +139,8 @@ describe("domain errors", () => {
 			new LedgerUnavailableError("reason"),
 			new AuditDegradedError("reason"),
 			new VaultNotInitializedError("/path"),
+			new TaskLimitExceededError("t", 10, 4, 1),
+			new TaskLimitConflictError("t", 10, 5),
 		];
 		for (const err of errors) {
 			expect(typeof err.hint).toBe("string");
@@ -143,5 +148,69 @@ describe("domain errors", () => {
 			expect(typeof err.docsUrl).toBe("string");
 			expect(err.docsUrl).toMatch(/^https:\/\/usertrust\.ai\/docs\/errors\//);
 		}
+	});
+});
+
+describe("task-limit errors", () => {
+	const EXCEEDED_HINT =
+		"The task's limit is spent or held by calls still in flight. Wait for those calls to settle, or run the work under a new task id, which has its own limit.";
+	const EXCEEDED_DOCS = "https://usertrust.ai/docs/errors/task-limit-exceeded";
+	const CONFLICT_HINT =
+		"A task id names one limit. Use the limit it was created with, or a new task id for a new limit.";
+	const CONFLICT_DOCS = "https://usertrust.ai/docs/errors/task-limit-conflict";
+
+	it("TaskLimitExceededError is an InsufficientBalanceError with the task in its message", () => {
+		const err = new TaskLimitExceededError("triage-1", 2_000, 300, 120);
+		// A budget refusal to every existing catch site and to the denial boundary, which records
+		// it as ledger_rejected.
+		expect(err).toBeInstanceOf(InsufficientBalanceError);
+		expect(err).toBeInstanceOf(Error);
+		expect(isGovernanceDenial(err)).toBe(true);
+		expect(err.name).toBe("TaskLimitExceededError");
+		expect(err.taskId).toBe("triage-1");
+		expect(err.limit).toBe(2_000);
+		expect(err.required).toBe(300);
+		expect(err.available).toBe(120);
+		expect(err.userId).toBe("task:triage-1");
+		expect(err.hint).toBe(EXCEEDED_HINT);
+		expect(err.docsUrl).toBe(EXCEEDED_DOCS);
+		expect(err.message).toBe(
+			`Task triage-1 is at its limit: need 300, have 120 of 2000\n\n  Hint: ${EXCEEDED_HINT}\n  Docs: ${EXCEEDED_DOCS}`,
+		);
+		// No denial record yet: the boundary attaches one to this instance when it records it.
+		expect(err.auditEventHash).toBeUndefined();
+		expect(err.auditDegraded).toBeUndefined();
+	});
+
+	it("TaskLimitExceededError keeps the budget refusal's message untouched", () => {
+		// The subclass carries its own message; the parent's wording, which existing callers read,
+		// does not change.
+		const budget = new InsufficientBalanceError("user1", 100, 50);
+		expect(budget.message).toContain("Insufficient balance for user user1: need 100, have 50");
+		expect(new TaskLimitExceededError("t", 10, 4, 1).message).not.toContain("Insufficient");
+	});
+
+	it("TaskLimitConflictError carries both limits and is not a governance denial", () => {
+		const err = new TaskLimitConflictError("triage-1", 3_000, 2_000);
+		expect(err).toBeInstanceOf(Error);
+		expect(err).not.toBeInstanceOf(InsufficientBalanceError);
+		expect(isGovernanceDenial(err)).toBe(false);
+		expect(err.name).toBe("TaskLimitConflictError");
+		expect(err.taskId).toBe("triage-1");
+		expect(err.requestedLimit).toBe(3_000);
+		expect(err.existingLimit).toBe(2_000);
+		expect(err.hint).toBe(CONFLICT_HINT);
+		expect(err.docsUrl).toBe(CONFLICT_DOCS);
+		expect(err.message).toBe(
+			`Task triage-1 already has a limit of 2000; this call asked for 3000\n\n  Hint: ${CONFLICT_HINT}\n  Docs: ${CONFLICT_DOCS}`,
+		);
+	});
+
+	it("TaskLimitConflictError without the existing limit says another value", () => {
+		const err = new TaskLimitConflictError("t", 10);
+		expect(err.existingLimit).toBeUndefined();
+		expect(err.message).toContain(
+			"Task t already has a limit of another value; this call asked for 10",
+		);
 	});
 });
