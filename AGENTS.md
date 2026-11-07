@@ -1342,6 +1342,26 @@ write, an interrupted repair from it up to the cut, and convergence once the lin
 inside the chain; and a "repair" that chooses which evidence is true. `quarantine/` is a
 subdirectory and `.torn` is not `.jsonl`, so no segment gatherer ever reads evidence as a segment.
 
+**Nothing is appended after a last line that is not an event with a sequence.** One reading of the
+log's text, `tailVerdict` in `audit/chain.ts`, decides it for both places that ask: a last line
+that parses but is not a JSON object with a numeric `sequence` (an event without one, or `42`,
+`[]`, `"x"`, `true`, `null`) is refused with `AuditSequencelessTailError` (`logPath`, and `line`
+numbered among the non-blank lines as `verify.ts` numbers them), and nothing is written. The check
+runs at OPEN in the three public entry points, `createAuditWriter`, `createUnleasedAuditWriter` and
+`openSharedAuditWriter` (after `resolveSharedVault`), before any directory is made or lock taken,
+so `trust()`, `createGovernor()`, `usertrust secret` and `quarantine-tail` refuse where a person
+sees it; and again in `getLastEvent` at every read of the tail by an append, for a log that changed
+after the open (that refusal takes the ordinary degraded path: counted, dead-lettered, rethrown).
+Never put the open check in `createAuditWriterAt` or `joinSharedWriter`: the shared writer is made
+inside a handle's append before its `try`, so a throw there skips the handle's failure report and
+the dead letter. The open check leaves a torn tail, an unparseable last line, an absent or
+unreadable log and a non-regular file to the append, as before: the torn-tail repair opens a writer
+on a torn log, and reading a FIFO would block the open. Out of scope, and pinned as continued: a
+sequenced last line after an earlier sequence-less one (refusing it needs a full check at open).
+*Prevents:* a log in which no event has a sequence (the legacy shape `verify.ts` walks in file
+order) turned into a mixed log that never passes again, by sequenced events counted on from its
+line count; and a non-object last line continued with its next event linked to GENESIS.
+
 **Readers and verifiers never write to the vault.** `packages/verify/src`,
 `packages/core/src/audit/read.ts`, `packages/core/src/audit/effective-budget.ts`, `packages/core/src/audit/dead-letters.ts`, and
 `packages/core/src/audit/verify.ts` contain zero filesystem write calls. Keep it that way — a verifier that mutates its subject is not a verifier.

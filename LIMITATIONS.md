@@ -504,6 +504,22 @@ the next run makes one cut and writes one record, which names those bytes and th
 offset. The evidence is kept byte for byte. What is lost is only that the cut happened
 twice.
 
+**A log whose last line is not an event with a sequence is read-only.** Every release
+writes a `sequence` on every event, so a last line without one (or a line that is JSON
+but not an object, such as `42` or `null`) comes from a log built by hand or by another
+tool. The writer refuses to continue it (`AuditSequencelessTailError`, naming the log and
+the line): `trust()` and `createGovernor()` reject when they are created, and a log that
+gains such a line after that has every append refused and dead-lettered (as for any failed
+audit write, governed calls go on with `auditDegraded` receipts unless `audit.failClosed`
+is set). Nothing is written to the log. There is no repair: adding sequences would rewrite every event, and appending
+sequenced events after it would make a log that `usertrust verify` reports as failed for
+good. Keep that vault as a record (`usertrust verify` still passes a log in which no event has
+a sequence), and start a new vault for new events. Two narrower cases are not
+refused: a log whose last event has a sequence but an earlier one has none is continued
+(`usertrust verify` already reports it as failed, and refusing it would mean checking the
+whole log each time a writer is created), and a sequence that is a number but not the next whole
+number (`2.5`) is not checked when the log is continued.
+
 ## 6. Anomaly governance ships conservative defaults and expects calibration
 
 Anomaly detection is opt-in (`anomaly.enabled: true`) and tuned to catch
