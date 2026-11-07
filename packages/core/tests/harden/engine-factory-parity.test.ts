@@ -66,14 +66,11 @@ describe("engine factory parity — govern.ts and headless.ts stay in lockstep",
 		"isTBInsufficientBalance",
 		"isTBDebitAccountNotFound",
 		"classifyTaskLegRejection",
-	])(
-		"keeps %s identical in both governors",
-		(name) => {
-			expect(extractFunction(headlessSourcePath, name), DRIFT_HINT).toBe(
-				extractFunction(governSourcePath, name),
-			);
-		},
-	);
+	])("keeps %s identical in both governors", (name) => {
+		expect(extractFunction(headlessSourcePath, name), DRIFT_HINT).toBe(
+			extractFunction(governSourcePath, name),
+		);
+	});
 
 	it("both factories check for a ledger before they build a native client, and bound the first answer", () => {
 		for (const path of [governSourcePath, headlessSourcePath]) {

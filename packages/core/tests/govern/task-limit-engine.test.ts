@@ -133,17 +133,25 @@ describe("ensureTaskLimit", () => {
 		const engine = await newEngine();
 		fake.requests.length = 0;
 		const t = task("ensure-1", 500);
-		await expect(engine.ensureTaskLimit({ namespace: NS, taskId: "ensure-1", limit: 500 })).resolves.toEqual(
-			{ key: t.key },
-		);
-		expect(fake.requests.map((r) => r.op)).toEqual(["createAccounts", "createAccounts", "createTransfers"]);
+		await expect(
+			engine.ensureTaskLimit({ namespace: NS, taskId: "ensure-1", limit: 500 }),
+		).resolves.toEqual({ key: t.key });
+		expect(fake.requests.map((r) => r.op)).toEqual([
+			"createAccounts",
+			"createAccounts",
+			"createTransfers",
+		]);
 		const [operator, taskAccount, grant] = fake.requests.map((r) => r.batch[0]);
 		expect(operator).toMatchObject({
 			id: TrustTBClient.deriveTaskLimitOperatorId(NS),
 			ledger: LEDGER_TASK_LIMITS,
 			code: CODE_TASK_LIMIT_OPERATOR,
 		});
-		expect(taskAccount).toMatchObject({ id: t.key, ledger: LEDGER_TASK_LIMITS, code: CODE_TASK_LIMIT });
+		expect(taskAccount).toMatchObject({
+			id: t.key,
+			ledger: LEDGER_TASK_LIMITS,
+			code: CODE_TASK_LIMIT,
+		});
 		expect(grant).toMatchObject({ id: grantId(t.key), amount: 500n, credit_account_id: t.key });
 		expect(account(t.key).credits_posted).toBe(500n);
 	});
@@ -153,7 +161,12 @@ describe("ensureTaskLimit", () => {
 		const t = task("ensure-2", 500);
 		// The task account already exists with other flags: its create is refused.
 		await fake.client.createAccounts([
-			accountOf({ id: t.key, ledger: LEDGER_TASK_LIMITS, code: CODE_TASK_LIMIT, flags: AF.history }),
+			accountOf({
+				id: t.key,
+				ledger: LEDGER_TASK_LIMITS,
+				code: CODE_TASK_LIMIT,
+				flags: AF.history,
+			}),
 		]);
 		fake.requests.length = 0;
 		await expect(
@@ -187,7 +200,9 @@ describe("ensureTaskLimit", () => {
 		// Another engine (another process) asks for another limit under the same task id.
 		const second = await newEngine();
 		fake.requests.length = 0;
-		const err = await settle(second.ensureTaskLimit({ namespace: NS, taskId: "conflict", limit: 700 }));
+		const err = await settle(
+			second.ensureTaskLimit({ namespace: NS, taskId: "conflict", limit: 700 }),
+		);
 		expect(err).toBeInstanceOf(TaskLimitConflictError);
 		expect(err).toMatchObject({ taskId: "conflict", requestedLimit: 700, existingLimit: 500 });
 		expect(account(task("conflict", 500).key).credits_posted).toBe(500n);
@@ -202,13 +217,19 @@ describe("ensureTaskLimit", () => {
 		await engine.ensureTaskLimit({ namespace: NS, taskId: "cached", limit: 500 });
 		expect(fake.requests).toEqual([]);
 		// A changed limit is refused from the cache, without I/O.
-		const err = await settle(engine.ensureTaskLimit({ namespace: NS, taskId: "cached", limit: 600 }));
+		const err = await settle(
+			engine.ensureTaskLimit({ namespace: NS, taskId: "cached", limit: 600 }),
+		);
 		expect(err).toBeInstanceOf(TaskLimitConflictError);
 		expect(err).toMatchObject({ requestedLimit: 600, existingLimit: 500 });
 		expect(fake.requests).toEqual([]);
 		// Another task id is ensured on its own.
 		await engine.ensureTaskLimit({ namespace: NS, taskId: "cached-2", limit: 500 });
-		expect(fake.requests.map((r) => r.op)).toEqual(["createAccounts", "createAccounts", "createTransfers"]);
+		expect(fake.requests.map((r) => r.op)).toEqual([
+			"createAccounts",
+			"createAccounts",
+			"createTransfers",
+		]);
 	});
 
 	it("a second engine ensuring the same task and limit replays the grant and moves nothing", async () => {
@@ -259,7 +280,11 @@ describe("ensureTaskLimit", () => {
 		await engine.spendPending({ transferId: "c2", amount: 50, taskLimit: t });
 		await engine.postPendingSpend("c1", 80);
 		fake.requests.length = 0;
-		await expect(engine.lookupTaskLimit(t.key)).resolves.toEqual({ limit: 500, spent: 80, held: 50 });
+		await expect(engine.lookupTaskLimit(t.key)).resolves.toEqual({
+			limit: 500,
+			spent: 80,
+			held: 50,
+		});
 		expect(fake.requests.map((r) => r.op)).toEqual(["lookupAccounts"]);
 		await expect(engine.lookupTaskLimit(task("never", 1).key)).resolves.toBeUndefined();
 	});
@@ -391,7 +416,12 @@ describe("a hold inside a task", () => {
 				code: 9,
 			}),
 		]);
-		await engine.spendPending({ transferId: "c1", amount: 40, debitAccountId: envelope, taskLimit: t });
+		await engine.spendPending({
+			transferId: "c1",
+			amount: 40,
+			debitAccountId: envelope,
+			taskLimit: t,
+		});
 		expect(account(envelope).debits_pending).toBe(40n);
 		expect(account(holdingWallet()).debits_pending).toBe(0n);
 		expect(account(t.key).debits_pending).toBe(40n);
@@ -416,7 +446,9 @@ describe("which leg refused decides the error", () => {
 		expect(err).toBeInstanceOf(InsufficientBalanceError);
 		expect(err).not.toBeInstanceOf(TaskLimitExceededError);
 		// The message an untasked hold over the seed gets today.
-		expect((err as Error).message).toBe(new InsufficientBalanceError("trust:hold", 400, 100).message);
+		expect((err as Error).message).toBe(
+			new InsufficientBalanceError("trust:hold", 400, 100).message,
+		);
 		expect(account(t.key).debits_pending).toBe(0n);
 	});
 
@@ -562,7 +594,10 @@ describe("settle, void and destroy on a task hold", () => {
 
 	it("settle posts both legs at the capped amount, and the shortfall is reported once", async () => {
 		const { engine, t } = await held(100);
-		await expect(engine.postPendingSpend("c1", 140)).resolves.toEqual({ posted: 100, shortfall: 40 });
+		await expect(engine.postPendingSpend("c1", 140)).resolves.toEqual({
+			posted: 100,
+			shortfall: 40,
+		});
 		const [a, b] = lastBatch();
 		expect(a).toMatchObject({ amount: 100n, flags: TF.post_pending_transfer | TF.linked });
 		expect(b).toMatchObject({ amount: 100n, flags: TF.post_pending_transfer });

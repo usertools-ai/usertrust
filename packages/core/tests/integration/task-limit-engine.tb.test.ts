@@ -118,7 +118,9 @@ function newClient(): TrustTBClient {
 	return tb;
 }
 
-async function newEngine(budget: number): Promise<TrustEngine & Required<Pick<TrustEngine, "ensureTaskLimit" | "lookupTaskLimit">>> {
+async function newEngine(
+	budget: number,
+): Promise<TrustEngine & Required<Pick<TrustEngine, "ensureTaskLimit" | "lookupTaskLimit">>> {
 	const config = TrustConfigSchema.parse({
 		budget,
 		tigerbeetle: { addresses: [TB_ADDRESS], clusterId: 0 },
@@ -234,7 +236,8 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle: the engine's task-limit legs", (
 				limit: 100,
 				flags: 0,
 			});
-		const isPost = (t: { flags: number }) => (t.flags & FAKE_FLAGS.transfer.post_pending_transfer) !== 0;
+		const isPost = (t: { flags: number }) =>
+			(t.flags & FAKE_FLAGS.transfer.post_pending_transfer) !== 0;
 
 		// The usertoken ledger: three holds, two posts and a void, and its posted spend is the costs.
 		const spend = await query({ ledger: LEDGER_USERTOKENS, code: XFER_SPEND, ud64: tag });
@@ -245,14 +248,22 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle: the engine's task-limit legs", (
 
 		// The task-limit ledger: one query by the key returns every limit leg, and nothing else is
 		// on another ledger.
-		const legs = await query({ ledger: LEDGER_TASK_LIMITS, code: XFER_TASK_LIMIT_HOLD, ud128: key });
+		const legs = await query({
+			ledger: LEDGER_TASK_LIMITS,
+			code: XFER_TASK_LIMIT_HOLD,
+			ud128: key,
+		});
 		expect(legs).toHaveLength(6);
 		expect(legs.filter(isPost).reduce((sum, t) => sum + t.amount, 0n)).toBe(45n);
 		const byKey = await query({ ledger: 0, code: 0, ud128: key });
 		expect(byKey.every((t) => t.ledger === LEDGER_TASK_LIMITS)).toBe(true);
 		// The legs and the grant.
 		expect(byKey).toHaveLength(7);
-		await expect(engine.lookupTaskLimit(key)).resolves.toEqual({ limit: 1_000, spent: 45, held: 0 });
+		await expect(engine.lookupTaskLimit(key)).resolves.toEqual({
+			limit: 1_000,
+			spent: 45,
+			held: 0,
+		});
 	});
 
 	it("a post after the payer leg expired takes today's expired path, and the task's spent leaves it out", async () => {

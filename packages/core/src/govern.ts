@@ -573,12 +573,18 @@ export interface TrustEngine {
 	 * stay assignable; both `createTBEngine` factories implement it, and a controller refuses a
 	 * call inside a task when its engine lacks it.
 	 */
-	ensureTaskLimit?(p: { namespace: string; taskId: string; limit: number }): Promise<{ key: bigint }>;
+	ensureTaskLimit?(p: {
+		namespace: string;
+		taskId: string;
+		limit: number;
+	}): Promise<{ key: bigint }>;
 	/**
 	 * Read a task's limit, spent and held amounts from its account, or `undefined` when the
 	 * account does not exist. REPORTING ONLY, like `lookupBalances`.
 	 */
-	lookupTaskLimit?(key: bigint): Promise<{ limit: number; spent: number; held: number } | undefined>;
+	lookupTaskLimit?(
+		key: bigint,
+	): Promise<{ limit: number; spent: number; held: number } | undefined>;
 	destroy?(): void;
 	/**
 	 * `destroy()`, asynchronously, made safe for a ledger client the cluster evicted while it
