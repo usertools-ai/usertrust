@@ -510,9 +510,11 @@ whose sequence is not a whole number from 1 up (`2.5`, `0`, `-1`), one too large
 from (`1e20`, or `Number.MAX_SAFE_INTEGER`, whose next number JavaScript cannot hold exactly),
 or a line that is JSON but not an object (`42`, `null`) comes from a log built by hand or by
 another tool. The writer refuses to continue it (`AuditSequencelessTailError`, naming the log
-and the line): `trust()` and `createGovernor()` reject when they are created, and a log that
-gains such a line after that has every append refused and dead-lettered (as for any failed
-audit write, governed calls go on with `auditDegraded` receipts unless `audit.failClosed` is
+and the line): `trust()` and `createGovernor()` reject when they are created, and if the log
+gains such a line after that, the next append that reads the log is refused and dead-lettered:
+the first append, and the first after a failed append or after the writer had to take its lock
+again (a writer holding its lock chains from its own last event and does not re-read the log;
+as for any failed audit write, governed calls go on with `auditDegraded` receipts unless `audit.failClosed` is
 set). Nothing is written to the log. `usertrust secret ls` still lists the credentials, because
 listing never appends; the subcommands that do (`add`, `rm`, `rotate`, `get`) exit 1 with the
 reason. There is no repair: adding sequences would rewrite every event, and appending sequenced
