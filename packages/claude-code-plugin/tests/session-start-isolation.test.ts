@@ -101,9 +101,13 @@ async function configured(url: string, { peer = false } = {}) {
 	await mkdir(anchor, { recursive: true, mode: 0o700 });
 	const stateDir = await mkdtemp(join(tmpdir(), "utcc-iso-state-"));
 	const path = join(anchor, "session.json");
-	await writeFile(path, JSON.stringify({ url, key: "file-key", mode: "watch", stateDir }), {
-		mode: 0o600,
-	});
+	await writeFile(
+		path,
+		JSON.stringify({ url, key: "file-key", mode: "watch", stateDir, jobTypeInstruction: true }),
+		{
+			mode: 0o600,
+		},
+	);
 	if (peer) {
 		// The old plugin looks enabled: the parent's `warnOfPeer` leaves a warning for the banner.
 		await mkdir(join(home, ".claude"), { recursive: true });
@@ -158,6 +162,7 @@ describe("a configured session's SessionStart request is made from its isolated 
 			UT_SERVER_URL: `https://127.0.0.1:${fake.port}`,
 			UT_SERVER_KEY: "k",
 			UT_CC_STATE_DIR: await mkdtemp(join(tmpdir(), "utcc-iso-env-")),
+			UT_CC_JOB_TYPE_INSTRUCTION: "1",
 			NODE_TLS_REJECT_UNAUTHORIZED: "0",
 		});
 		expect(contextOf(r.stdout)).toContain("usertrust-job.mjs start --type <type>");

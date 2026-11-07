@@ -144,6 +144,7 @@ function parsePin(text) {
 		optionalString(s.role) &&
 		// A pin made before the setting existed has none: the default.
 		(s.holdGraceMs === undefined || isHoldGrace(s.holdGraceMs)) &&
+		(s.jobTypeInstruction === undefined || typeof s.jobTypeInstruction === "boolean") &&
 		optionalString(s.unrecognizedMode);
 	if (!valid) return null;
 	if (value.kind === "configured" && typeof s.key === "string" && s.keyHash === undefined) {
@@ -207,6 +208,7 @@ function pinOf(resolved, kind, now) {
 		unit: resolved.unit,
 		role: resolved.role,
 		holdGraceMs: resolved.holdGraceMs,
+		jobTypeInstruction: resolved.jobTypeInstruction === true,
 		unrecognizedMode,
 	};
 	return {
@@ -232,6 +234,7 @@ export function pinnedSettings(pin, env, passwdHome) {
 		unit: undefined,
 		role: undefined,
 		holdGraceMs: DEFAULT_HOLD_GRACE_MS,
+		jobTypeInstruction: false,
 	};
 	if (pin.kind === "configured") return { ...base, ...rest, configured: true, key };
 	const current = environmentKey(env);
