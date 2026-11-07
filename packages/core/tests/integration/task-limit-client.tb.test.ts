@@ -111,13 +111,14 @@ const freshId = (): bigint => BigInt(`0x${randomBytes(16).toString("hex")}`) | 1
 
 /** Polls `done` every 250 ms; throws when the ledger has not got there within the bound. */
 async function until(what: string, done: () => Promise<boolean>): Promise<void> {
-	// timing: 30 s budget for the ledger to expire a 2 s hold (removal is best-effort, with no
-	// documented bound); slowest of 20 CI runs: NOT YET MEASURED, record it here before merge.
-	const deadline = Date.now() + 30_000;
+	// timing: 15 s budget for the ledger to expire a 2 s hold (removal is best-effort, with no
+	// documented bound); the slowest whole row over 20 runs on a quiet 14-core machine took
+	// 3.9 s, so the wait itself is under that (about 4x headroom).
+	const deadline = Date.now() + 15_000;
 	while (!(await done())) {
-		// timing: the same 30 s budget as the deadline above; the poll interval is 250 ms.
+		// timing: the same 15 s budget as the deadline above; the poll interval is 250 ms.
 		if (Date.now() > deadline) throw new Error(`the ledger did not ${what} within 30 s`);
-		// timing: a 250 ms poll interval inside the 30 s budget above.
+		// timing: a 250 ms poll interval inside the 15 s budget above.
 		await new Promise((resolve) => setTimeout(resolve, 250));
 	}
 }
@@ -211,7 +212,7 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle: task-limit ledger primitives", (
 
 		await tb.voidLinkedPair(whole.payerId, whole.limitId);
 		expect(await t.pending()).toEqual({ task: 0n, payer: 0n });
-	}, 60_000); // timing: 60 s test budget over the 30 s expiry poll above; NOT YET MEASURED on CI.
+	}, 30_000); // timing: 30 s test budget over the 15 s expiry poll above; slowest of 20 runs on a quiet 14-core machine: 3.2 s (about 8x headroom).
 
 	it("ensuring a task's limit is idempotent across clients and replays", async () => {
 		const first = newClient();
@@ -488,7 +489,7 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle: task-limit ledger primitives", (
 		const realStatus = tbNode.CreateTransferStatus as unknown as Record<string, number>;
 		const fakeStatus = FAKE_STATUS as unknown as Record<string, number>;
 		for (const n of used) expect([n, fakeStatus[n]]).toEqual([n, realStatus[n]]);
-	}, 60_000); // timing: 60 s test budget over the 30 s expiry poll above; NOT YET MEASURED on CI.
+	}, 30_000); // timing: 30 s test budget over the 15 s expiry poll above; slowest of 20 runs on a quiet 14-core machine: 3.4 s (about 8x headroom).
 
 	it("a replayed pair answers exists, then linked_event_failed, and the client recovers it with one lookup", async () => {
 		const tb = newClient();
@@ -594,5 +595,5 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle: task-limit ledger primitives", (
 		expect(task?.debits_posted).toBe(0n);
 		expect(task?.debits_pending).toBe(0n);
 		expect(task?.credits_posted).toBe(1_000n);
-	}, 60_000); // timing: 60 s test budget over the 30 s expiry poll above; NOT YET MEASURED on CI.
+	}, 30_000); // timing: 30 s test budget over the 15 s expiry poll above; slowest of 20 runs on a quiet 14-core machine: 3.9 s (about 8x headroom).
 });
