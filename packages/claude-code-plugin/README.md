@@ -640,8 +640,8 @@ are opaque: 1-128 characters of `[A-Za-z0-9._:-]`.
     SessionStart adds a fixed instruction (under 1,000 characters, nothing of yours interpolated) to the
     agent's context: at the start of each distinct task run
     `usertrust-job.mjs start --type <type> --source agent <short-id>`, run it again when the task changes
-    (it says the call is bookkeeping that needs no discussion; it never tells the agent to skip asking you
-    about anything), and after a resume or compact keep a job already
+    (it says what the call does, that it only records a label for usertrust's cost reports, and says
+    nothing about what the agent tells or asks you), and after a resume or compact keep a job already
     open for the same work. Without the option nothing is added, and a type is still recorded when you
     run `usertrust-job.mjs start --type` yourself. With it, the instruction is added on every start, resume, `/clear`, compact and fork. Claude Code
     saves what a hook injects in the session transcript, so it is not hidden: it is simply not shown as a

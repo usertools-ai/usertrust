@@ -569,7 +569,7 @@ describe("SessionStart: ONE JSON object, the agent's instruction only for a serv
 		for (const t of TYPES) expect(context).toContain(t);
 		expect(context).toMatch(/task changes/);
 		// the old "Do not ask the user first" is gone (tests/job-type-opt-in.test.ts pins the wording)
-		expect(context).toMatch(/needs no discussion/);
+		expect(context).toContain("only records a label for usertrust's cost reports");
 		expect(context).toMatch(/resumed or compacted/);
 		expect(context).toMatch(/keep it/);
 	});

@@ -13,8 +13,9 @@ npm, and its version is its own: the `usertrust` packages and their
   the agent to type its jobs unless you say so. To keep job-type labels, set `"jobTypeInstruction": true`
   in the configuration file (or `UT_CC_JOB_TYPE_INSTRUCTION=1`). Only the exact value `1` turns it on in
   the environment, and a configuration value that is not a boolean refuses the file like every other
-  optional key. The instruction itself no longer says "Do not ask the user first": it says the call is
-  bookkeeping that needs no discussion. Typing a job yourself (`usertrust-job.mjs start --type`) is
+  optional key. The instruction itself no longer says "Do not ask the user first": it says only what the call
+  does ("This call only records a label for usertrust's cost reports; it changes nothing else.") and
+  nothing about the conversation. Typing a job yourself (`usertrust-job.mjs start --type`) is
   unaffected, and the health request SessionStart makes is unchanged.
 
 ### Added

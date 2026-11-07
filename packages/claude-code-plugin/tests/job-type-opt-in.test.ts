@@ -139,12 +139,16 @@ describe.each([
 });
 
 describe("the wording", () => {
-	it("never tells the agent to skip asking the user, and says the call needs no discussion", async () => {
+	it("says what the call does and nothing about the conversation", async () => {
 		const text = await instruction();
 		// mutant: the old sentence comes back
 		expect(text).not.toMatch(/\bask/i);
 		expect(text).not.toMatch(/without (asking|checking|permission)/i);
-		expect(text).toContain("This is a bookkeeping call and needs no discussion.");
+		// mutant: a sentence that steers how the agent talks to the user comes back
+		expect(text).not.toMatch(/discussion|mention/i);
+		expect(text).toContain(
+			"This call only records a label for usertrust's cost reports; it changes nothing else.",
+		);
 		// the rest of the instruction is as it was
 		expect(text).toContain("usertrust-job.mjs start --type <type> --source agent <short-id>");
 		expect(text).toContain("keep it and do not start another");
@@ -177,28 +181,35 @@ describe("the setting", () => {
 		});
 	});
 
-	it("a pin made before the setting existed means off", async () => {
+	it("a pin made before the setting existed means off, for both kinds of pin", async () => {
 		const { pinnedSettings } = (await import(pathToFileURL(join(HOOKS, "session.mjs")).href)) as {
 			pinnedSettings(
 				pin: unknown,
 				env: Record<string, string>,
 				home: string,
-			): { jobTypeInstruction: boolean };
+			): { jobTypeInstruction: boolean; refused: string | null };
 		};
-		const pin = {
+		const { keyHash } = (await import(pathToFileURL(join(HOOKS, "config.mjs")).href)) as {
+			keyHash(key: string): string;
+		};
+		const settings = {
+			url: "http://127.0.0.1:1",
+			mode: "watch",
+			failOpen: false,
+			stateDir: "/tmp/x",
+			usage: "transcript",
+			sendContent: true,
+		};
+		const configuredPin = { v: 1, kind: "configured", settings: { ...settings, key: "k" } };
+		const environmentPin = {
 			v: 1,
-			kind: "configured",
-			settings: {
-				url: "http://127.0.0.1:1",
-				key: "k",
-				mode: "watch",
-				failOpen: false,
-				stateDir: "/tmp/x",
-				usage: "transcript",
-				sendContent: true,
-			},
+			kind: "environment",
+			settings: { ...settings, keyHash: keyHash("k") },
 		};
 		// mutant: the missing field is left undefined and read as truthy elsewhere, or defaults to on
-		expect(pinnedSettings(pin, {}, "/tmp").jobTypeInstruction).toBe(false);
+		expect(pinnedSettings(configuredPin, {}, "/tmp").jobTypeInstruction).toBe(false);
+		const env = pinnedSettings(environmentPin, { UT_SERVER_KEY: "k" }, "/tmp");
+		expect(env.refused).toBeNull();
+		expect(env.jobTypeInstruction).toBe(false);
 	});
 });
