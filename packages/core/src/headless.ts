@@ -94,7 +94,15 @@ import {
 	type TrustOpts,
 	trustConfigOverrides,
 } from "./govern.js";
-import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
+import {
+	LEDGER_TASK_LIMITS,
+	TaskLimitLegError,
+	TBTransferError,
+	TransferIdRetiredError,
+	TrustTBClient,
+	XFER_SPEND,
+	XFER_TASK_LIMIT_GRANT,
+} from "./ledger/client.js";
 import { preflightLedger } from "./ledger/preflight.js";
 import {
 	copyAppliedRates,
@@ -145,6 +153,8 @@ import {
 	PendingEntryNotFoundError,
 	PolicyDeniedError,
 	SpendLedgerUnreadableError,
+	TaskLimitConflictError,
+	TaskLimitExceededError,
 	UnheldSettlementRateLimitedError,
 } from "./shared/errors.js";
 import { trustId } from "./shared/ids.js";
@@ -1054,6 +1064,39 @@ function isTBDebitAccountNotFound(err: unknown): boolean {
 }
 
 /**
+ * A linked pair's limit leg was refused: name the TASK, never the payer. A balance refusal
+ * (`exceeds_credits` and the overflow codes) is TaskLimitExceededError, with what is left of the
+ * task re-read AFTER the refusal: it REPORTS rather than decides (the ledger's atomic refusal is
+ * the whole enforcement), and a failed read reports 0. A missing task account is the same state as
+ * a spent limit, so it is TaskLimitExceededError with nothing available (the factory re-ensures
+ * once before it gets here). Anything else is not the task's answer and is rethrown as it came.
+ *
+ * Kept identical in govern.ts and headless.ts (engine-factory-parity.test.ts).
+ */
+async function classifyTaskLegRejection(
+	err: unknown,
+	task: { taskId: string; limit: number },
+	amount: number,
+	readAvailable: () => Promise<number>,
+): Promise<never> {
+	if (err instanceof TaskLimitLegError) {
+		if (isTBInsufficientBalance(err)) {
+			let available = 0;
+			try {
+				available = await readAvailable();
+			} catch {
+				// Reporting only: a failed read must not mask the task's refusal.
+			}
+			throw new TaskLimitExceededError(task.taskId, task.limit, amount, available);
+		}
+		if (isTBDebitAccountNotFound(err)) {
+			throw new TaskLimitExceededError(task.taskId, task.limit, amount, 0);
+		}
+	}
+	throw err;
+}
+
+/**
  * Create a balance-enforcing TrustEngine backed by a real TigerBeetle client.
  *
  * P1-LEDGER-ENFORCE (RECON #3): the holding account is created with
@@ -1105,7 +1148,138 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 	// heldAmount is what postPendingSpend caps against: TigerBeetle REJECTS a post
 	// above the pending amount (exceeds_pending_transfer_amount) — it never caps —
 	// so the truncation must happen here, where the reserve is known (spec D1).
-	const pendingMap = new Map<string, { tbId: bigint; heldAmount: number }>();
+	// A hold made inside a task is a linked pair: `limitTbId` is its limit leg, settled and voided
+	// with the payer leg as one request.
+	const pendingMap = new Map<string, { tbId: bigint; heldAmount: number; limitTbId?: bigint }>();
+
+	// The tasks this engine has ensured, by task key in hex: the limit each was given, and what a
+	// re-ensure needs. A hold inside a task is refused unless its task was ensured here first.
+	const ensuredTasks = new Map<string, { namespace: string; taskId: string; limit: number }>();
+
+	/**
+	 * Give a task its limit on the ledger, or confirm it has it. STRICTLY IN SEQUENCE, each step
+	 * awaited before the next is sent: the operator, then the task's account, then the grant. A
+	 * grant sent before both accounts exist is refused with `credit_account_not_found` or
+	 * `debit_account_not_found`, which RETIRE its id (TigerBeetle answers `id_already_failed` to it
+	 * from then on), and the grant's id is derived from the task: that task could never get its
+	 * limit. Every id is derived, so a second process, or a restart, replays the same three and
+	 * the ledger answers `exists`.
+	 */
+	async function ensureTask(p: {
+		namespace: string;
+		taskId: string;
+		limit: number;
+	}): Promise<{ key: bigint }> {
+		const key = TrustTBClient.deriveTaskLimitAccountId(p.namespace, p.taskId);
+		const keyHex = key.toString(16).padStart(32, "0");
+		const known = ensuredTasks.get(keyHex);
+		if (known !== undefined) {
+			// Known here: the answer needs no I/O, and another limit is refused as the ledger would.
+			if (known.limit !== p.limit) {
+				throw new TaskLimitConflictError(p.taskId, p.limit, known.limit);
+			}
+			return { key };
+		}
+		const operator = await tbClient.createTaskLimitOperator(p.namespace);
+		await tbClient.createTaskLimitAccount(p.namespace, p.taskId);
+		const grantId = TrustTBClient.deriveTransferId(keyHex, "limit");
+		try {
+			await tbClient.immediateTransfer({
+				ledger: LEDGER_TASK_LIMITS,
+				transferId: grantId,
+				debitAccountId: operator,
+				creditAccountId: key,
+				amount: p.limit,
+				code: XFER_TASK_LIMIT_GRANT,
+				userData128: key,
+			});
+		} catch (err) {
+			// The grant already exists with another amount: the task has another limit.
+			if (
+				err instanceof TBTransferError &&
+				err.code === CreateTransferStatus.exists_with_different_amount
+			) {
+				let existing: number | undefined;
+				try {
+					const stored = await tbClient.lookupTransfer(grantId);
+					if (stored !== null) existing = Number(stored.amount);
+				} catch {
+					// Reporting only: the conflict stands without the figure.
+				}
+				throw new TaskLimitConflictError(p.taskId, p.limit, existing);
+			}
+			if (err instanceof TransferIdRetiredError) {
+				throw new Error(
+					`Task ${p.taskId} cannot be given a limit: its grant was refused once and its id is retired; run the work under a new task id`,
+				);
+			}
+			throw err;
+		}
+		ensuredTasks.set(keyHex, { namespace: p.namespace, taskId: p.taskId, limit: p.limit });
+		return { key };
+	}
+
+	/**
+	 * Hold `amount` on the payer and on the task's limit as one linked pair. The payer leg is
+	 * exactly the hold made outside a task (same account, code, timeout and user data). A limit-leg
+	 * refusal is classified as the task's; a payer-leg refusal is rethrown for the caller's own
+	 * classification, unchanged. A missing task account under a warm cache (the ledger was reset)
+	 * is re-ensured ONCE and the hold tried once more.
+	 */
+	async function holdTaskPair(
+		params: {
+			amount: number;
+			userData?: PrincipalLedgerTags | undefined;
+			timeoutSeconds?: number | undefined;
+		},
+		debitAccountId: bigint,
+		task: { key: bigint; rootKey: bigint; taskId: string; limit: number },
+	): Promise<{ payerId: bigint; limitId: bigint }> {
+		const keyHex = task.key.toString(16).padStart(32, "0");
+		const ensured = ensuredTasks.get(keyHex);
+		if (ensured === undefined) {
+			throw new Error(
+				`A hold inside task ${task.taskId} reached the ledger before the task's limit was set: refused`,
+			);
+		}
+		const submit = () =>
+			tbClient.createLinkedPendingPair({
+				amount: params.amount,
+				timeoutSeconds: params.timeoutSeconds ?? LEDGER_HOLD_TIMEOUT_MS / 1000,
+				payer: {
+					debitAccountId,
+					creditAccountId: treasury,
+					code: XFER_SPEND,
+					...(params.userData !== undefined
+						? {
+								userData128: params.userData.userData128,
+								userData64: params.userData.userData64,
+								userData32: params.userData.userData32,
+							}
+						: {}),
+				},
+				limit: {
+					debitAccountId: task.key,
+					creditAccountId: TrustTBClient.deriveTaskLimitOperatorId(ensured.namespace),
+					userData128: task.rootKey,
+				},
+			});
+		const readAvailable = async () => (await tbClient.lookupBalance(task.key)).available;
+		try {
+			return await submit();
+		} catch (err) {
+			if (!(err instanceof TaskLimitLegError) || !isTBDebitAccountNotFound(err)) {
+				return await classifyTaskLegRejection(err, task, params.amount, readAvailable);
+			}
+		}
+		ensuredTasks.delete(keyHex);
+		await ensureTask(ensured);
+		try {
+			return await submit();
+		} catch (err) {
+			return await classifyTaskLegRejection(err, task, params.amount, readAvailable);
+		}
+	}
 
 	return {
 		async spendPending(params: {
@@ -1114,12 +1288,22 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 			debitAccountId?: bigint | undefined;
 			userData?: PrincipalLedgerTags | undefined;
 			timeoutSeconds?: number | undefined;
+			taskLimit?: { key: bigint; rootKey: bigint; taskId: string; limit: number } | undefined;
 		}): Promise<{ transferId: string }> {
 			// An ATTRIBUTED hold names its own debit account — the cost-center
 			// envelope the governor derived at authorize. Unattributed holds keep
 			// debiting the session holding wallet, unchanged.
 			const debitAccountId = params.debitAccountId ?? holdingId;
 			try {
+				if (params.taskLimit !== undefined) {
+					const ids = await holdTaskPair(params, debitAccountId, params.taskLimit);
+					pendingMap.set(params.transferId, {
+						tbId: ids.payerId,
+						limitTbId: ids.limitId,
+						heldAmount: params.amount,
+					});
+					return { transferId: params.transferId };
+				}
 				const tbTransferId = await tbClient.createPendingTransfer({
 					debitAccountId,
 					creditAccountId: treasury,
@@ -1140,6 +1324,9 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 				pendingMap.set(params.transferId, { tbId: tbTransferId, heldAmount: params.amount });
 				return { transferId: params.transferId };
 			} catch (err) {
+				// The task's answer FIRST: a TaskLimitLegError is a TBTransferError, so the payer
+				// checks below would otherwise report a task's refusal as the budget's.
+				if (err instanceof TaskLimitExceededError || err instanceof TaskLimitLegError) throw err;
 				// Over-budget reservation → TB rejects the pending debit. Surface as a
 				// budget error so the governor reports a hard DENY, not an outage.
 				if (isTBInsufficientBalance(err)) {
@@ -1206,6 +1393,26 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 			return await tbClient.lookupBalances(accountIds);
 		},
 
+		async ensureTaskLimit(p: {
+			namespace: string;
+			taskId: string;
+			limit: number;
+		}): Promise<{ key: bigint }> {
+			return await ensureTask(p);
+		},
+
+		async lookupTaskLimit(
+			key: bigint,
+		): Promise<{ limit: number; spent: number; held: number } | undefined> {
+			const [account] = await tbClient.lookupAccounts([key]);
+			if (account === undefined) return undefined;
+			return {
+				limit: Number(account.credits_posted),
+				spent: Number(account.debits_posted),
+				held: Number(account.debits_pending),
+			};
+		},
+
 		async postPendingSpend(
 			transferId: string,
 			actualAmount?: number,
@@ -1220,7 +1427,13 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 			// the full pending amount (amount_max), unchanged.
 			const posted =
 				actualAmount != null ? Math.min(actualAmount, entry.heldAmount) : entry.heldAmount;
-			await tbClient.postTransfer(entry.tbId, actualAmount != null ? posted : undefined);
+			if (entry.limitTbId !== undefined) {
+				// Both legs at one CONCRETE amount, never amount_max: the pair's replay check compares
+				// the amount it sent with the one stored.
+				await tbClient.postLinkedPair(entry.tbId, entry.limitTbId, posted);
+			} else {
+				await tbClient.postTransfer(entry.tbId, actualAmount != null ? posted : undefined);
+			}
 			pendingMap.delete(transferId);
 			return { posted, shortfall: actualAmount != null ? actualAmount - posted : 0 };
 		},
@@ -1231,7 +1444,11 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 				throw new PendingEntryNotFoundError(transferId);
 			}
 			try {
-				await tbClient.voidTransfer(entry.tbId);
+				if (entry.limitTbId !== undefined) {
+					await tbClient.voidLinkedPair(entry.tbId, entry.limitTbId);
+				} else {
+					await tbClient.voidTransfer(entry.tbId);
+				}
 			} catch (err) {
 				// The ledger already ended this hold at its pending timeout and returned its
 				// funds, which is what the void was for: like `exists`, that outcome stands.
@@ -1248,7 +1465,11 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 			const entries = [...pendingMap.entries()];
 			for (const [trustIdKey, entry] of entries) {
 				try {
-					await tbClient.voidTransfer(entry.tbId);
+					if (entry.limitTbId !== undefined) {
+						await tbClient.voidLinkedPair(entry.tbId, entry.limitTbId);
+					} else {
+						await tbClient.voidTransfer(entry.tbId);
+					}
 				} catch {
 					// Best-effort
 				}
