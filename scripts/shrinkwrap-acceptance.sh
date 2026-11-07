@@ -67,11 +67,19 @@ mutant() { # mutant <dir>: writes $work/<dir>.mutant.json and $work/mutant/<dir>
 	dist=$(npm view "${name}@${alt}" dist --json)
 	resolved=$(printf '%s' "$dist" | node -e 'console.log(JSON.parse(require("fs").readFileSync(0,"utf8")).tarball)')
 	integrity=$(printf '%s' "$dist" | node -e 'console.log(JSON.parse(require("fs").readFileSync(0,"utf8")).integrity)')
-	mkdir -p "$work/mutant/$d/x"
-	tar -xzf "$(tgz "$d")" -C "$work/mutant/$d/x"
-	$HELP mutate "$work/mutant/$d/x/package/npm-shrinkwrap.json" "$place" "$alt" "$resolved" "$integrity" >/dev/null
-	cp "$work/mutant/$d/x/package/npm-shrinkwrap.json" "$work/$d.mutant.json"
-	(cd "$work/mutant/$d/x" && tar -czf "$work/mutant/$d/$(basename "$(tgz "$d")")" package)
+	# The control tarball is assembled exactly as the release assembles one (scripts/release-tarball.py),
+	# from the same build tarball and the same root files, with only npm-shrinkwrap.json moved.
+	local roots="$work/mutant/$d/roots" name args=()
+	mkdir -p "$roots"
+	tar -xzf "$(tgz "$d")" -C "$work/mutant/$d"
+	for name in $(cd "$work/mutant/$d/package" && find . -maxdepth 1 -type f | sed 's|^\./||'); do
+		cp "$work/mutant/$d/package/$name" "$roots/$name"
+	done
+	$HELP mutate "$roots/npm-shrinkwrap.json" "$place" "$alt" "$resolved" "$integrity" >/dev/null
+	cp "$roots/npm-shrinkwrap.json" "$work/$d.mutant.json"
+	for name in $(ls "$roots"); do args+=(--root "$name=$roots/$name"); done
+	python3 -I scripts/release-tarball.py assemble --input "$work/packed/$(basename "$(tgz "$d")")" \
+		--output "$work/mutant/$d/$(basename "$(tgz "$d")")" --mtime "$(git show -s --format=%ct HEAD)" "${args[@]}" >/dev/null
 	echo "$place $locked $alt"
 }
 for d in server ui; do
@@ -89,6 +97,15 @@ install_into() { # install_into <dir> <args...>: a user's install, in an empty d
 	(cd "$into" && npm install --ignore-scripts --no-audit --no-fund --cache "$into.cache" "$@" >"$into.log" 2>&1) ||
 		fail "npm install failed in $into: $(tail -c 2000 "$into.log")"
 }
+try_into() { # try_into <dir> <args...>: as install_into, for a row that is recorded, not required
+	local into=$1
+	shift
+	mkdir -p "$into"
+	printf '{"name":"acceptance","private":true}\n' >"$into/package.json"
+	(cd "$into" && npm install --ignore-scripts --no-audit --no-fund --cache "$into.cache" "$@" >"$into.log" 2>&1) && return 0
+	echo "    install failed (recorded): $(tail -c 600 "$into.log" | tr '\n' ' ')"
+	return 1
+}
 row() { # row <variant> <install dir> <package dir> <expected shrinkwrap>: one matrix line
 	local v=$1 dir=$2 d=$3 sw=$4 pkg out
 	pkg=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).name)' "packages/$d/package.json")
@@ -100,17 +117,16 @@ row() { # row <variant> <install dir> <package dir> <expected shrinkwrap>: one m
 
 echo "== 2. the matrix"
 echo "-- (a)-(c): file tarballs (npm reads no _hasShrinkwrap from a file: recorded, not required)"
-install_into "$work/a" "$(tgz server)"
-row "(a)file-alone" "$work/a" server "$work/server.shipped.json"
-install_into "$work/a-control" "$work/mutant/server/$(basename "$(tgz server)")"
-row "(a)file-alone-control" "$work/a-control" server "$work/server.mutant.json"
-install_into "$work/b" "$(tgz ui)"
-row "(b)file-alone" "$work/b" ui "$work/ui.shipped.json"
-install_into "$work/b-control" "$work/mutant/ui/$(basename "$(tgz ui)")"
-row "(b)file-alone-control" "$work/b-control" ui "$work/ui.mutant.json"
-install_into "$work/c" "$(tgz server)" "$(tgz ui)"
-row "(c)file-both" "$work/c" server "$work/server.shipped.json"
-row "(c)file-both" "$work/c" ui "$work/ui.shipped.json"
+if try_into "$work/a" "$(tgz server)"; then row "(a)file-alone" "$work/a" server "$work/server.shipped.json"; else matrix "(a)file-alone server INSTALL-FAILED"; fi
+if try_into "$work/a-control" "$work/mutant/server/$(basename "$(tgz server)")"; then row "(a)file-alone-control" "$work/a-control" server "$work/server.mutant.json"; else matrix "(a)file-alone-control server INSTALL-FAILED"; fi
+if try_into "$work/b" "$(tgz ui)"; then row "(b)file-alone" "$work/b" ui "$work/ui.shipped.json"; else matrix "(b)file-alone ui INSTALL-FAILED"; fi
+if try_into "$work/b-control" "$work/mutant/ui/$(basename "$(tgz ui)")"; then row "(b)file-alone-control" "$work/b-control" ui "$work/ui.mutant.json"; else matrix "(b)file-alone-control ui INSTALL-FAILED"; fi
+if try_into "$work/c" "$(tgz server)" "$(tgz ui)"; then
+	row "(c)file-both" "$work/c" server "$work/server.shipped.json"
+	row "(c)file-both" "$work/c" ui "$work/ui.shipped.json"
+else
+	matrix "(c)file-both server+ui INSTALL-FAILED"
+fi
 
 echo "-- (d): a throwaway local registry, installed by name"
 registry_up() { # registry_up <name>: a fresh verdaccio on 127.0.0.1:4873 whose storage only holds what we publish
