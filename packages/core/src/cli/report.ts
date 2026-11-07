@@ -28,7 +28,7 @@ import {
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import pc from "picocolors";
-import { verifyVaultComplete } from "../audit/complete.js";
+import { checkedEvents, verifyVaultComplete } from "../audit/complete.js";
 import { readEffectiveBudget } from "../audit/effective-budget.js";
 import { describeBudgetSource } from "../audit/read.js";
 import { type ReportFormat, render } from "../report/render.js";
@@ -540,6 +540,9 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 			events,
 			{
 				verified,
+				// The chain's own check apart from completeness: on a broken chain no record is evidence, while an
+				// incomplete vault's walked records still are.
+				chainIntact: result.valid,
 				errors: complete.errors,
 				chainLength: result.chainLength,
 				firstEvent: result.firstEvent,
@@ -555,6 +558,8 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 				budgetSource,
 				spendLedger: readSpendLedger(join(vaultPath, "spend-ledger.json")),
 				deadLetters,
+				// Only the walked events can be evidence; the rest are in every figure and prove nothing.
+				checkedCount: checkedEvents(complete.reading).length,
 				// An unknown budget is never "no budget configured". Its reason names the RECORD when the record is the
 				// problem (several, unreadable, or none published and no config budget), and the config only when the
 				// config itself cannot be read.

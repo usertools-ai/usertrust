@@ -30,6 +30,17 @@
  *   - A denied call moved no money. Denials are COUNTED, never given a dollar value ("saved" would be fabricated).
  *   - Nothing here reads the live ledger balance. Budget status compares the vault's configured `budget` with the
  *     spend RECORDED in the chain, and says so.
+ *
+ * CONFIRMED is about contradiction: no record beside a call says it was not charged. PROVEN (the ledger-proven
+ * figures, the "already charged" count) is about evidence: a record that shows the post happened. The two read the
+ * records differently, by one asymmetric rule. FIGURES keep every record on file, so no call ever drops out of the
+ * spend. EVIDENCE comes only from records the chain walk checked (`ReportOptions.checkedCount`), on a chain whose own
+ * check passed (`IntegrityInfo.chainIntact`): an unchecked or unverified record may WITHHOLD (contradict a call, block
+ * a release, leave a transfer uncertain), and never PROVE (a post, a release, a definite budget debit). The walk does
+ * not say which of its records passed, so when the chain itself fails, no record proves anything; when only
+ * completeness fails (an event is missing, the walked chain is intact), every walked record is still evidence. On any
+ * vault that fails its check, the proof figures themselves are withheld (`proofStatus: "withheld"`), and the spend
+ * figures are printed under the report's UNVERIFIED banner as before.
  */
 
 import { createHash } from "node:crypto";
@@ -122,6 +133,11 @@ export interface ReportOptions {
 	 * is treated as unreadable: the headless proven figure is then an upper bound, never exact.
 	 */
 	deadLetters?: DeadLetters;
+	/**
+	 * How many leading `events` the chain walk checked (`checkedEvents(reading).length`): only those can be evidence.
+	 * The events past them are in every figure and prove nothing. Absent means all of them.
+	 */
+	checkedCount?: number;
 }
 
 /** What the dead-letter queue says about capped posts. A plain file: corruption-detecting, not tamper-evident. */
@@ -146,7 +162,13 @@ export function deadLettersForReport(d: {
 }
 
 export interface IntegrityInfo {
+	/** The vault's verdict: the chain passed its check AND no event is missing from it. */
 	verified: boolean;
+	/**
+	 * The chain alone passed its check (`verified` may still be false for an incomplete vault). When it is false, the walk
+	 * does not say which records passed, so no record is evidence. Absent means the same as `verified`.
+	 */
+	chainIntact?: boolean;
 	errors: readonly string[];
 	chainLength: number;
 	firstEvent: string | null;
@@ -210,6 +232,12 @@ export interface TierBreakdown {
 export interface ReportModel {
 	window: { startIso: string; endIso: string; days: number };
 	integrity: IntegrityInfo;
+	/**
+	 * `withheld` on a vault that fails its check (`integrity.verified` false): the ledger-proven figures and the
+	 * "already charged" count are then 0 and stand for nothing, because no record on such a vault proves a post.
+	 * `shown` otherwise.
+	 */
+	proofStatus: "shown" | "withheld";
 	agentKey: { requested: AgentKey; segment: number | null };
 	totals: {
 		/** Spend: confirmed `llm_call` cost denominated in dollars (see the module comment). */
@@ -234,11 +262,18 @@ export interface ReportModel {
 		unsettledCalls: number;
 		/** Of the unconfirmed calls, those contradicted by another record for the same transfer (a failure or ambiguity marker, a release, an unknown kind). */
 		contradictedCalls: number;
-		/** Calls whose hold was proven released: nothing was charged, and they are in no spend or budget figure. */
+		/**
+		 * Calls whose hold was proven released: nothing was charged, and they are in no spend or budget figure. Only a
+		 * checked release on an intact chain releases a call; any other is a contradiction, and the call is unconfirmed.
+		 */
 		releasedCalls: number;
 		/** Of the unconfirmed, those with no `transferId` to correlate. */
 		uncorrelatedCalls: number;
-		/** Confirmed spend whose post is PROVEN by a record written after it (a headless record, or a `settlement_shortfall`). */
+		/**
+		 * Confirmed spend whose post is PROVEN by a record written after it (a headless record, or a `settlement_shortfall`).
+		 * The call and its evidence must both be checked records, and the six `postProven*` figures are 0 when
+		 * `proofStatus` is `withheld`.
+		 */
 		postProvenUt: UsdUt;
 		postProvenCalls: number;
 		/**
@@ -371,7 +406,8 @@ export interface ReportModel {
 		/**
 		 * Of those, the records whose transfer ALSO has a spend record in this chain: the server writes this record when a
 		 * settle is retried after a restart or an eviction from its settled-memory, so "never charged" would be false for
-		 * them. The rest have no known prior charge (unknown, not "never charged").
+		 * them. The rest have no known prior charge (unknown, not "never charged"). Only checked evidence counts, and it
+		 * is 0 when `proofStatus` is `withheld`.
 		 */
 		priorChargeKnown: number;
 		inputTokens: number;
@@ -593,16 +629,22 @@ function denominationOf(e: PersistedAuditEvent): "usd" | "nominal" | "unlabelled
  *     definite class.
  * Post evidence OUTRANKS a failure marker (a post-commit failure follows a charge that happened). A settled call that a
  * void or release marker contradicts, with no post evidence, is uncertain. "Prior charge known" (an unrecoverable
- * record) is not post evidence for the transfer it names.
+ * record) is not post evidence for the transfer it names. Post evidence comes only from CHECKED records (the module
+ * comment); an unchecked one is still a sibling, so it can leave a transfer uncertain but never make it debited.
  */
 type TransferClass = "debited" | "uncertain" | "not-debited";
 
 interface TransferEvidence {
 	spend?: PersistedAuditEvent; // the first call/action record
 	spendSettledFalse: boolean;
+	/** A CHECKED record says the ledger answered the post. */
 	ledgerPosted: boolean;
+	/** The first ambiguity / shortfall record, checked or not: an amount, and a withholding sibling. */
 	ambiguity?: PersistedAuditEvent;
 	shortfall?: PersistedAuditEvent;
+	/** A CHECKED ambiguity / shortfall record exists: only these are post evidence. */
+	ambiguityChecked: boolean;
+	shortfallChecked: boolean;
 	void: boolean;
 	release: boolean;
 	/**
@@ -614,12 +656,20 @@ interface TransferEvidence {
 
 function classifyTransfer(ev: TransferEvidence): TransferClass {
 	const post =
-		ev.shortfall !== undefined ||
-		ev.ambiguity !== undefined ||
+		ev.shortfallChecked ||
+		ev.ambiguityChecked ||
 		ev.ledgerPosted ||
 		(ev.spend !== undefined && !ev.spendSettledFalse && !ev.void && !ev.release && !ev.foreign);
 	if (post) return "debited";
-	if ((ev.void || ev.release) && ev.spend === undefined) return "not-debited";
+	// An unchecked shortfall or ambiguity is not post evidence, but it still carries an amount: such a transfer is
+	// uncertain, never "not debited", so the amount stays in the upper bound instead of dropping out of the budget.
+	if (
+		(ev.void || ev.release) &&
+		ev.spend === undefined &&
+		ev.shortfall === undefined &&
+		ev.ambiguity === undefined
+	)
+		return "not-debited";
 	// A void or release marker beside a spend record that is not itself post evidence: the record says it was settled, the
 	// marker says it was not. Uncertain. A spend record marked settled:false with nothing else: also uncertain. Anything
 	// else the evidence set does not name is uncertain too: there is no catch-all into a definite class.
@@ -638,7 +688,7 @@ function chargeEvidenced(ev: TransferEvidence): boolean {
 	return (
 		classifyTransfer(ev) === "debited" &&
 		ev.ambiguity === undefined &&
-		(ev.ledgerPosted || ev.shortfall !== undefined)
+		(ev.ledgerPosted || ev.shortfallChecked)
 	);
 }
 
@@ -735,12 +785,24 @@ function buildPlain(
 	const usable = events.filter(isUsableEvent);
 	const malformedEvents = events.length - usable.length;
 
+	// EVIDENCE (the module comment): only a record the walk checked, on a chain whose own check passed, can prove.
+	// Every other record is still in every figure and may still withhold. The PROOF FIGURES need more: a vault that
+	// passes its check as a whole, completeness included.
+	const chainIntact = integrity.chainIntact ?? integrity.verified;
+	const checkedCount = Math.min(opts.checkedCount ?? events.length, events.length);
+	const evidenceRecords = new Set<unknown>(chainIntact ? events.slice(0, checkedCount) : []);
+	const proves = (e: PersistedAuditEvent): boolean => evidenceRecords.has(e);
+	const proofShown = integrity.verified;
+
 	// Whole-chain indexes: a sibling record can sit outside the window of the call it qualifies.
 	const kindsByTransfer = new Map<string, Map<string, number>>();
 	const unprovenReleases = new Set<string>();
 	const postedByTransfer = new Map<string, number>();
 	const spendTransfers = new Set<string>();
+	// Transfers with post evidence from a record that proves, and with a post record of ANY standing (which still
+	// withholds a release).
 	const postProvenTransfers = new Set<string>();
+	const postSeenTransfers = new Set<string>();
 	const shortfallByTransfer = new Map<string, number>();
 	for (const e of usable) {
 		const tid = str(e.data["transferId"]);
@@ -748,10 +810,10 @@ function buildPlain(
 		const ks = kindsByTransfer.get(tid) ?? new Map<string, number>();
 		ks.set(e.kind, (ks.get(e.kind) ?? 0) + 1);
 		kindsByTransfer.set(tid, ks);
-		// A release is proof of "not charged" only when its void is known to have completed.
+		// A release is proof of "not charged" only when it is evidence and its void is known to have completed.
 		if (
 			e.kind === "hold_released" &&
-			(e.data["voidError"] !== undefined || isUnknownVoidRelease(e))
+			(!proves(e) || e.data["voidError"] !== undefined || isUnknownVoidRelease(e))
 		) {
 			unprovenReleases.add(tid);
 		}
@@ -764,14 +826,20 @@ function buildPlain(
 				e.data["source"] === "headless" &&
 				e.data["settled"] === true &&
 				e.data["ledgerPosted"] === true
-			)
-				postProvenTransfers.add(tid);
+			) {
+				postSeenTransfers.add(tid);
+				if (proves(e)) postProvenTransfers.add(tid);
+			}
 		} else if (e.kind === "settlement_shortfall") {
-			postProvenTransfers.add(tid);
+			postSeenTransfers.add(tid);
 			const sf = cost(e.data["shortfall"]);
 			if (sf !== undefined) shortfallByTransfer.set(tid, sf);
-			const posted = cost(e.data["posted"]);
-			if (posted !== undefined) postedByTransfer.set(tid, posted);
+			if (proves(e)) {
+				postProvenTransfers.add(tid);
+				// The exact posted amount only from a record that proves: a later unchecked one never overwrites it.
+				const posted = cost(e.data["posted"]);
+				if (posted !== undefined) postedByTransfer.set(tid, posted);
+			}
 		}
 	}
 
@@ -788,12 +856,14 @@ function buildPlain(
 		const others = siblingKinds(ks, e.kind).filter((k) => !(proven && k.endsWith("_failed")));
 		if (others.length > 0) return { kind: "unconfirmed", reason: "contradicted" };
 		if (ks?.has("hold_released")) {
-			// A release beside a proven post, or one whose void is not known to have completed, proves nothing.
-			if (proven || unprovenReleases.has(tid))
+			// A release beside any post record (one that proves nothing still withholds), a release that is not evidence,
+			// or one whose void is not known to have completed, releases nothing.
+			if (postSeenTransfers.has(tid) || unprovenReleases.has(tid))
 				return { kind: "unconfirmed", reason: "contradicted" };
 			return { kind: "released" };
 		}
-		return { kind: "confirmed", postProven: postProvenTransfers.has(tid) };
+		// The call's own record is read for the amounts (`postedAmount`, the metered upper bound): it must prove too.
+		return { kind: "confirmed", postProven: proofShown && proven && proves(e) };
 	};
 
 	const t = {
@@ -874,21 +944,29 @@ function buildPlain(
 		const ev = evidence.get(key) ?? {
 			spendSettledFalse: false,
 			ledgerPosted: false,
+			ambiguityChecked: false,
+			shortfallChecked: false,
 			void: false,
 			release: false,
 			foreign: false,
 		};
 		evidence.set(key, ev);
+		// Post evidence only from a record that proves; every record still counts as an amount or a withholding sibling.
 		if (isSpend) {
 			if (ev.spend === undefined) {
 				ev.spend = e;
 				ev.spendSettledFalse = e.data["settled"] === false;
 			}
-			if (e.data["ledgerPosted"] === true) ev.ledgerPosted = true;
-		} else if (e.kind === "settlement_ambiguous") ev.ambiguity ??= e;
-		else if (e.kind === "settlement_shortfall") {
+			if (e.data["ledgerPosted"] === true && proves(e)) ev.ledgerPosted = true;
+		} else if (e.kind === "settlement_ambiguous") {
+			ev.ambiguity ??= e;
+			if (proves(e)) ev.ambiguityChecked = true;
+		} else if (e.kind === "settlement_shortfall") {
 			ev.shortfall ??= e;
-			if (e.data["ledgerPosted"] === true) ev.ledgerPosted = true;
+			if (proves(e)) {
+				ev.shortfallChecked = true;
+				if (e.data["ledgerPosted"] === true) ev.ledgerPosted = true;
+			}
 		} else if (e.kind === "hold_released") ev.release = true;
 		else if (e.kind.endsWith("_failed")) ev.void = true;
 	}
@@ -1218,7 +1296,8 @@ function buildPlain(
 			// Served, never charged: usage and no cost. Disclosed, in no spend or budget figure.
 			unrecoverable.records += 1;
 			const idHash = str(e.data["transferIdHash"]);
-			if (idHash !== undefined && spendTransferHashes().has(idHash))
+			// "Already charged" is a proof figure: withheld, with the others, on a vault that fails its check.
+			if (proofShown && idHash !== undefined && spendTransferHashes().has(idHash))
 				unrecoverable.priorChargeKnown += 1;
 			const u = e.data["usage"];
 			const uu = u !== null && typeof u === "object" ? (u as Record<string, unknown>) : {};
@@ -1354,6 +1433,7 @@ function buildPlain(
 			days,
 		},
 		integrity,
+		proofStatus: proofShown ? "shown" : "withheld",
 		agentKey: { requested: agentKey, segment: opts.segment ?? null },
 		totals: t,
 		shortfall: { events: shortfallEvents, ut: shortfallUt },

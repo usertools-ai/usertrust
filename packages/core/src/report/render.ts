@@ -199,8 +199,27 @@ const UPPER_BOUND_NOTE =
 const DEAD_LETTER_NOTE =
 	"The posted amount of the dead-lettered call(s) comes from the writer's dead-letter queue, a plain file the chain does not verify; it is never part of the VERIFIED claim.";
 
+/**
+ * The ledger-proven headline on a vault that fails its check, in place of every amount: no record on such a vault
+ * proves a post (weekly.ts, the module comment). Stated ONCE, in both renderers.
+ */
+export const PROOF_WITHHELD = "not proven: the vault failed verification.";
+
+/**
+ * The qualifier on the lines that state a ledger fact from what a record says (a capped settlement, a charge whose
+ * call record is missing), on a vault that fails its check. ONE wording, in both renderers; absent otherwise.
+ */
+export const RECORDS_ONLY = "as the records say; the vault did not verify";
+
+/** `, <RECORDS_ONLY>` on a vault that fails its check, else nothing. */
+function recordsOnly(m: ReportModel): string {
+	return m.integrity.verified ? "" : `, ${RECORDS_ONLY}`;
+}
+
 /** The ledger-proven headline: the exact part, then any upper-bounded part, then any dead-letter-sourced part, each stated once. */
-function provenText(t: ReportModel["totals"]): string {
+function provenText(m: ReportModel): string {
+	if (m.proofStatus === "withheld") return PROOF_WITHHELD;
+	const t = m.totals;
 	const parts = [`${usd(t.postProvenUt)} across ${t.postProvenCalls} call(s).`];
 	if (t.postProvenDeadLetterCalls > 0) {
 		parts.push(
@@ -268,7 +287,7 @@ export function renderMarkdown(m: ReportModel): string {
 		"## Headline",
 		"",
 		`- **Confirmed spend:** ${usd(t.confirmedUt)} (${utStr(t.confirmedUt)}) across ${t.confirmedCalls} call(s)`,
-		`- **Of which ledger-proven:** ${provenText(t)} ${PROOF_NOTE}`,
+		`- **Of which ledger-proven:** ${provenText(m)} ${PROOF_NOTE}`,
 		`- **Unconfirmed:** ${usd(t.unconfirmedUt)} across ${t.unconfirmedCalls} call(s) whose charge is not proven (not counted as spent)${
 			t.unconfirmedUnlabelledCalls > 0
 				? `; ${t.unconfirmedUnlabelledCalls} of them record no denomination (${tokens(t.unconfirmedUnlabelledUt)} usertokens, not shown as dollars)`
@@ -306,7 +325,7 @@ export function renderMarkdown(m: ReportModel): string {
 	}
 	if (m.shortfall.events > 0) {
 		out.push(
-			`- **Posted below metered:** ${m.shortfall.events} settlement(s) metered ${utStr(m.shortfall.ut)} more than the ledger could post (settlement_shortfall)`,
+			`- **Posted below metered:** ${m.shortfall.events} settlement(s) metered ${utStr(m.shortfall.ut)} more than the ledger could post (settlement_shortfall)${recordsOnly(m)}`,
 		);
 	}
 	out.push("");
@@ -389,7 +408,7 @@ export function renderMarkdown(m: ReportModel): string {
 		);
 		if (m.chargedUnrecorded.records > 0) {
 			out.push(
-				`**Charged but unrecorded:** ${m.chargedUnrecorded.records} capped settlement(s) posted ${tokens(m.chargedUnrecorded.posted)} usertokens to the ledger whose call record is missing. That money moved; it is not counted as spend here because the denomination is not recorded.`,
+				`**Charged but unrecorded:** ${m.chargedUnrecorded.records} capped settlement(s) posted ${tokens(m.chargedUnrecorded.posted)} usertokens to the ledger whose call record is missing${recordsOnly(m)}. That money moved; it is not counted as spend here because the denomination is not recorded.`,
 				"",
 			);
 		}
@@ -471,7 +490,7 @@ export function renderHtml(m: ReportModel): string {
 	body.push(
 		`<header><p class="muted">usertrust</p><h1>Weekly spend report</h1><p class="muted">${esc(m.window.startIso)} to ${esc(m.window.endIso)} (${m.window.days} days, end exclusive)</p><p class="${unverified ? "bad" : "ok"}"><strong>${esc(verdictLine(m, (x) => x))}</strong></p></header>`,
 		`<p class="muted">${esc(PROOF_NOTE)}</p>`,
-		`<section class="headline"><div><span class="big">${usd(t.confirmedUt)}</span><span class="muted">confirmed spend, ${t.confirmedCalls} call(s); of which ledger-proven ${esc(provenText(t))}</span></div><div><span class="big">${usd(t.unconfirmedUt)}</span><span class="muted">unconfirmed (failed, ambiguous, unsettled or uncorrelated), ${t.unconfirmedCalls} call(s)${t.unconfirmedUnlabelledCalls > 0 ? `; ${t.unconfirmedUnlabelledCalls} record no denomination (not shown as dollars)` : ""}</span></div>${
+		`<section class="headline"><div><span class="big">${usd(t.confirmedUt)}</span><span class="muted">confirmed spend, ${t.confirmedCalls} call(s); of which ledger-proven: ${esc(provenText(m))}</span></div><div><span class="big">${usd(t.unconfirmedUt)}</span><span class="muted">unconfirmed (failed, ambiguous, unsettled or uncorrelated), ${t.unconfirmedCalls} call(s)${t.unconfirmedUnlabelledCalls > 0 ? `; ${t.unconfirmedUnlabelledCalls} record no denomination (not shown as dollars)` : ""}</span></div>${
 			t.estimatedCalls > 0
 				? `<div><span class="big">${usd(t.estimatedUt)}</span><span class="muted">of confirmed spend priced from an estimate</span></div>`
 				: ""
@@ -493,7 +512,7 @@ export function renderHtml(m: ReportModel): string {
 				: ""
 		}${
 			m.shortfall.events > 0
-				? `<div><span class="big">${usd(m.shortfall.ut)}</span><span class="muted">metered above what the ledger could post, ${m.shortfall.events} settlement(s) (settlement_shortfall)</span></div>`
+				? `<div><span class="big">${usd(m.shortfall.ut)}</span><span class="muted">metered above what the ledger could post, ${m.shortfall.events} settlement(s) (settlement_shortfall)${esc(recordsOnly(m))}</span></div>`
 				: ""
 		}</section>`,
 		`<h2>Spend per hour</h2>${barsSvg(m.hourlyUt)}`,
@@ -555,7 +574,7 @@ export function renderHtml(m: ReportModel): string {
 						)
 						.join("")}</tbody></table>${
 						m.chargedUnrecorded.records > 0
-							? `<p><strong>Charged but unrecorded:</strong> ${m.chargedUnrecorded.records} capped settlement(s) posted ${tokens(m.chargedUnrecorded.posted)} usertokens to the ledger whose call record is missing. That money moved; it is not counted as spend here because the denomination is not recorded.</p>`
+							? `<p><strong>Charged but unrecorded:</strong> ${m.chargedUnrecorded.records} capped settlement(s) posted ${tokens(m.chargedUnrecorded.posted)} usertokens to the ledger whose call record is missing${esc(recordsOnly(m))}. That money moved; it is not counted as spend here because the denomination is not recorded.</p>`
 							: ""
 					}`,
 				]
