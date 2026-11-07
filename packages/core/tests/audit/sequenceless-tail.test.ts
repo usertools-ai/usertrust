@@ -252,6 +252,87 @@ describe("a last line that is not an event is refused the same way", () => {
 	});
 });
 
+/**
+ * A last event whose `sequence` is a number but not one the writer can count on from: not a
+ * positive safe integer, or the largest one (its successor is not a safe integer). Before, the
+ * writer continued it by adding 1 (2.5 at 3.5, 0 at 1, -1 at 0). Only the writer tightens: the
+ * verifier still walks any numeric sequence as a sequence.
+ */
+describe("a last sequence the writer cannot count on from is refused the same way", () => {
+	const unusable: ReadonlyArray<[string, number]> = [
+		["2.5", 2.5],
+		["0", 0],
+		["-1", -1],
+		["1e20", 1e20],
+		["Number.MAX_SAFE_INTEGER (the next one is not safe)", Number.MAX_SAFE_INTEGER],
+	];
+	for (const [label, seq] of unusable) {
+		it(`a last sequence of ${label} is refused at open, naming its line; nothing is written`, () => {
+			const v = vaultWith(terminated(buildChain([1, 2, seq])));
+			const before = snapshot(v);
+			const err = thrownBy(() => createAuditWriter(v.root));
+			expect(err).toBeInstanceOf(AuditSequencelessTailError);
+			expect(err).toMatchObject({ logPath: v.logPath, line: 3 });
+			expectNothingWritten(v, before);
+		});
+	}
+
+	it("a last sequence of 2.5 that appears after the writer opened is refused at the first append", async () => {
+		const v = vaultWith(null);
+		const w = createAuditWriter(v.root);
+		writers.push(w);
+		writeFileSync(v.logPath, terminated(buildChain([1, 2, 2.5])));
+		const before = readFileSync(v.logPath);
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+		const err = await w
+			.appendEvent({ kind: "test.next", actor: "sys", data: {} })
+			.catch((e: unknown) => e);
+		expect(err).toBeInstanceOf(AuditSequencelessTailError);
+		expect(err).toMatchObject({ logPath: v.logPath, line: 3 });
+		expect(w.isDegraded()).toBe(true);
+		expect(readFileSync(v.logPath).equals(before)).toBe(true);
+		const letters = readFileSync(join(v.root, VAULT_DIR, "dlq", "dead-letters.jsonl"), "utf-8")
+			.trim()
+			.split("\n");
+		expect(letters).toHaveLength(1);
+	});
+
+	it("control: a last sequence of 1 is continued at 2", async () => {
+		const chain = buildChain([1]);
+		const v = vaultWith(terminated(chain));
+		const w = createAuditWriter(v.root);
+		writers.push(w);
+		const e = await w.appendEvent({ kind: "test.next", actor: "sys", data: {} });
+		expect(e).toMatchObject({ sequence: 2, previousHash: hashOf(chain[0] as string) });
+	});
+
+	it("control: a last sequence of 5 is continued at 6", async () => {
+		const chain = buildChain([1, 2, 3, 4, 5]);
+		const v = vaultWith(terminated(chain));
+		const w = createAuditWriter(v.root);
+		writers.push(w);
+		const e = await w.appendEvent({ kind: "test.next", actor: "sys", data: {} });
+		expect(e).toMatchObject({ sequence: 6, previousHash: hashOf(chain[4] as string) });
+	});
+
+	it("control: a last sequence one below Number.MAX_SAFE_INTEGER is continued at it", async () => {
+		const chain = buildChain([1, 2, Number.MAX_SAFE_INTEGER - 1]);
+		const v = vaultWith(terminated(chain));
+		const w = createAuditWriter(v.root);
+		writers.push(w);
+		const e = await w.appendEvent({ kind: "test.next", actor: "sys", data: {} });
+		expect(e).toMatchObject({ sequence: Number.MAX_SAFE_INTEGER });
+	});
+
+	it("control: the verifier is unchanged, and still walks a last sequence of 2.5 as a sequence", () => {
+		const v = vaultWith(terminated(buildChain([1, 2, 2.5])));
+		const r = verifyVault(join(v.root, VAULT_DIR));
+		expect(r.valid).toBe(false);
+		expect(r.errors.some((e) => e.includes("Sequence gap: event 2.5 follows 2"))).toBe(true);
+		expect(r.errors.some((e) => e.startsWith("event without sequence"))).toBe(false);
+	});
+});
+
 describe("trust() and createGovernor() refuse at creation, before any event", () => {
 	const anthropicLike = () => ({
 		messages: {
