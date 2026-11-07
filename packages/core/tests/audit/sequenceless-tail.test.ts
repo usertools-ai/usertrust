@@ -265,7 +265,10 @@ describe("a last sequence the writer cannot count on from is refused the same wa
 		["-1", -1],
 		["1e20", 1e20],
 		["Number.MAX_SAFE_INTEGER (the next one is not safe)", Number.MAX_SAFE_INTEGER],
-		["4503599627370495.5 (a fraction whose successor rounds to a whole number)", 4503599627370495.5],
+		[
+			"4503599627370495.5 (a fraction whose successor rounds to a whole number)",
+			4503599627370495.5,
+		],
 	];
 	for (const [label, seq] of unusable) {
 		it(`a last sequence of ${label} is refused at open, naming its line; nothing is written`, () => {
