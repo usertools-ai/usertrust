@@ -117,20 +117,23 @@ export class AuditTornTailError extends Error {
 }
 
 /**
- * The log's last line is not an event with a numeric `sequence`: an event without one, or a line
- * that parses as some other JSON value (`42`, `[]`, `null`). Every release writes a sequence on
- * every event, so such a tail comes from a hand-built or foreign log. Continuing it would put
- * sequenced events after events without one, a mixed log `usertrust verify` reports for good, so
- * the writer refuses: when it is created, if the log is already there, and at every read of the
- * tail by an append. Nothing is written. `line` is the 1-based number of the tail among the log's
- * non-blank lines, as `usertrust verify` numbers lines.
+ * The log's last line is not an event the writer can continue from: an event without a
+ * `sequence`, one whose `sequence` is not a whole number from 1 up to `Number.MAX_SAFE_INTEGER - 1`
+ * (`2.5`, `0`, `-1`, `1e20`, or the largest safe integer, whose successor is not safe), or a line
+ * that parses as some other JSON value (`42`, `[]`, `null`). Every release writes a sequence of 1,
+ * 2, 3 and so on, so such a tail comes from a hand-built or foreign log. Continuing it would put
+ * sequenced events after it (or count on from a number that is not a whole one), a log
+ * `usertrust verify` reports as failed for good, so the writer refuses: when it is created, if the
+ * log is already there, and at every read of the tail by an append. Nothing is written. `line` is
+ * the 1-based number of the tail among the log's non-blank lines, as `usertrust verify` numbers
+ * lines.
  */
 export class AuditSequencelessTailError extends Error {
 	readonly logPath: string;
 	readonly line: number;
 	constructor(logPath: string, line: number) {
 		super(
-			`Audit log ${logPath} ends in a line that is not an event with a sequence (line ${line}). Refusing to append: sequenced events after it would make a log that \`usertrust verify\` reports as failed for good. Nothing was written. Start a new vault for new events, or keep this one read-only.`,
+			`Audit log ${logPath} ends in a line that is not an event with a sequence (line ${line}): the writer continues only from an event whose sequence is a whole number from 1 up to ${Number.MAX_SAFE_INTEGER - 1}. Refusing to append: sequenced events after it would make a log that \`usertrust verify\` reports as failed for good. Nothing was written. Start a new vault for new events, or keep this one read-only.`,
 		);
 		this.name = "AuditSequencelessTailError";
 		this.logPath = logPath;
@@ -1569,8 +1572,9 @@ interface CachedTail {
  *  - `torn`: the last byte is not a newline (bytes after it: `torn`, their UTF-8 length);
  *  - `empty`: nothing but whitespace;
  *  - `unparseable`: the last non-blank line is not JSON (the `.meta` anchor is the tail then);
- *  - `unsequenced`: it parses, but not as an object with a numeric `sequence` (`line`: its 1-based
- *    number among the non-blank lines, as `usertrust verify` numbers them);
+ *  - `unsequenced`: it parses, but not as an object whose `sequence` the writer can count on from
+ *    ({@link isContinuableSequence}: a whole number from 1 up to `Number.MAX_SAFE_INTEGER - 1`)
+ *    (`line`: its 1-based number among the non-blank lines, as `usertrust verify` numbers them);
  *  - `sequenced`: an event the log can be continued from.
  */
 type TailVerdict =
@@ -1599,11 +1603,20 @@ function tailVerdict(raw: string): TailVerdict {
 		event === null ||
 		typeof event !== "object" ||
 		Array.isArray(event) ||
-		typeof event.sequence !== "number"
+		!isContinuableSequence(event.sequence)
 	) {
 		return { kind: "unsequenced", line: lines.filter((l) => l.trim()).length };
 	}
 	return { kind: "sequenced", hash: event.hash as string, sequence: event.sequence };
+}
+
+/**
+ * A sequence the writer can count on from: a safe integer of at least 1 whose successor is a safe
+ * integer too (so `Number.MAX_SAFE_INTEGER` is not one). The WRITER's rule only: the verifier walks
+ * any number as a sequence, and names a non-integer or a gap there as a gap.
+ */
+function isContinuableSequence(s: unknown): s is number {
+	return typeof s === "number" && Number.isSafeInteger(s) && s >= 1 && Number.isSafeInteger(s + 1);
 }
 
 /**
