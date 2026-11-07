@@ -61,7 +61,12 @@ const DRIFT_HINT =
 	"do not relax this test.";
 
 describe("engine factory parity — govern.ts and headless.ts stay in lockstep", () => {
-	it.each(["createTBEngine", "isTBInsufficientBalance", "isTBDebitAccountNotFound"])(
+	it.each([
+		"createTBEngine",
+		"isTBInsufficientBalance",
+		"isTBDebitAccountNotFound",
+		"classifyTaskLegRejection",
+	])(
 		"keeps %s identical in both governors",
 		(name) => {
 			expect(extractFunction(headlessSourcePath, name), DRIFT_HINT).toBe(
