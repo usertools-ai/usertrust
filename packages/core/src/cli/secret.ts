@@ -9,7 +9,7 @@
 
 import { join } from "node:path";
 import pc from "picocolors";
-import { type AuditWriter, createAuditWriter } from "../audit/chain.js";
+import { AuditSequencelessTailError, type AuditWriter, createAuditWriter } from "../audit/chain.js";
 import { loadConfig } from "../config.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { ActionKind } from "../shared/types.js";
@@ -52,7 +52,23 @@ Subcommands:
 	const cwd = process.cwd();
 	warnIfVaultLoose(join(cwd, VAULT_DIR));
 	const config = await loadConfig(undefined, cwd);
-	const audit = createAuditWriter(cwd);
+	// A vault whose audit log this writer would refuse to continue is refused here, for every
+	// subcommand (`ls` included), before the credential store is opened: nothing is persisted.
+	let audit: AuditWriter;
+	try {
+		audit = createAuditWriter(cwd);
+	} catch (err) {
+		if (!(err instanceof AuditSequencelessTailError)) throw err;
+		if (jsonOut) {
+			console.log(
+				toSafeJson({ command: `secret ${sub}`, success: false, data: { error: err.message } }),
+			);
+		} else {
+			console.error(pc.red(scrubForTerminal(err.message)));
+		}
+		process.exitCode = 1;
+		return;
+	}
 	const vault = await createVaultStore({ vaultBase: cwd, config, audit });
 
 	let commandFailed = false;

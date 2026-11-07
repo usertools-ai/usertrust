@@ -23,6 +23,7 @@ export type {
 export {
 	type AppendEventInput,
 	AUDIT_DEGRADED_WARNING,
+	AuditSequencelessTailError,
 	AuditTornTailError,
 	type AuditWriter,
 	AuditWriterLockHeldError,
