@@ -24,6 +24,7 @@ import {
 	readdirSync,
 	readFileSync,
 	readlinkSync,
+	readSync,
 	realpathSync,
 	renameSync,
 	statSync,
@@ -1568,14 +1569,18 @@ interface CachedTail {
 
 /**
  * What a log's text says about continuing it, decided from its last line alone. ONE reading, used
- * by the open-time check ({@link refuseSequencelessTail}) and every append ({@link getLastEvent}):
+ * by the open-time check ({@link refuseSequencelessTail}) and every append ({@link getLastEvent}),
+ * both through {@link readTailVerdict}:
  *  - `torn`: the last byte is not a newline (bytes after it: `torn`, their UTF-8 length);
  *  - `empty`: nothing but whitespace;
  *  - `unparseable`: the last non-blank line is not JSON (the `.meta` anchor is the tail then);
  *  - `unsequenced`: it parses, but not as an object whose `sequence` the writer can count on from
  *    ({@link isContinuableSequence}: a whole number from 1 up to `Number.MAX_SAFE_INTEGER - 1`)
- *    (`line`: its 1-based number among the non-blank lines, as `usertrust verify` numbers them);
+ *    (`line`: its 1-based number among the text's non-blank lines, as `usertrust verify` numbers
+ *    them, so the log's line only when the text is the whole log);
  *  - `sequenced`: an event the log can be continued from.
+ * Given the end of a log as {@link readTailText} reads it, every verdict but the `line` of
+ * `unsequenced` is the one the whole log's text gives.
  */
 type TailVerdict =
 	| { kind: "torn"; bytes: number }
@@ -1619,22 +1624,87 @@ function isContinuableSequence(s: unknown): s is number {
 	return typeof s === "number" && Number.isSafeInteger(s) && s >= 1 && Number.isSafeInteger(s + 1);
 }
 
+/** Read `buf.length` bytes at `position`, or fewer only where the file ends first; the count. */
+function readAt(fd: number, buf: Buffer, position: number): number {
+	let got = 0;
+	while (got < buf.length) {
+		const n = readSync(fd, buf, got, buf.length - got, position + got);
+		if (n === 0) break;
+		got += n;
+	}
+	return got;
+}
+
+/**
+ * The end of the log at `logPath`, as much as {@link tailVerdict} needs and no more: the last
+ * `windowBytes` bytes, the window doubled back toward the start until the text holds the last
+ * non-blank line (blank as `trim()` reads it) with some non-blank text before it, so trimming the
+ * text never reaches into that line; or the whole file (`whole`). The text starts at the start of
+ * the file or just after a newline byte, never inside a character (0x0A is never part of a
+ * multi-byte UTF-8 sequence), so it decodes to the characters a read of the whole file gives
+ * there. A file that is not a regular one, or that gets shorter while it is read, is read whole, as
+ * before.
+ * @internal Exported for tests.
+ */
+export function readTailText(
+	logPath: string,
+	windowBytes = 8192,
+): { text: string; whole: boolean } {
+	const fd = openSync(logPath, "r");
+	try {
+		const stat = fstatSync(fd);
+		// Positional reads leave the file position at 0, so a whole read here starts at the start.
+		const readWhole = () => ({ text: readFileSync(fd, "utf-8"), whole: true });
+		if (!stat.isFile()) return readWhole();
+		const size = stat.size;
+		let window = Math.max(1, windowBytes);
+		for (;;) {
+			const length = Math.min(window, size);
+			const offset = size - length;
+			const buf = Buffer.alloc(length);
+			if (readAt(fd, buf, offset) < length) return readWhole();
+			if (offset === 0) return { text: buf.toString("utf8"), whole: true };
+			const newline = buf.indexOf(0x0a);
+			if (newline !== -1) {
+				const text = buf.subarray(newline + 1).toString("utf8");
+				if (text.trim().includes("\n")) return { text, whole: false };
+			}
+			window *= 2;
+		}
+	} finally {
+		closeSync(fd);
+	}
+}
+
+/**
+ * The verdict on the log's tail, read from its end ({@link readTailText}). Only a refusal as
+ * `unsequenced` reads the whole log: to number the line, and judged again on that whole text, so
+ * the verdict and its `line` are what one read of the whole log gives.
+ */
+function readTailVerdict(logPath: string): TailVerdict {
+	const tail = readTailText(logPath);
+	const verdict = tailVerdict(tail.text);
+	if (verdict.kind !== "unsequenced" || tail.whole) return verdict;
+	return tailVerdict(readFileSync(logPath, "utf-8"));
+}
+
 /**
  * The open-time check: a writer is never created on a log it would refuse to continue
  * ({@link AuditSequencelessTailError}), so the refusal reaches whoever creates it, before anything
- * is written or locked. Only that verdict throws here. An absent or unreadable log, one that is not
- * a regular file (never read here: a FIFO would block), and a torn tail are left to the first
- * append, as before (the torn-tail repair creates a writer on a torn log).
+ * is written or locked. It reads the end of the log only, and the whole log only to number the
+ * line of a refusal ({@link readTailVerdict}). Only that verdict throws here. An absent or
+ * unreadable log, one that is not a regular file (never read here: a FIFO would block), and a torn
+ * tail are left to the first append, as before (the torn-tail repair creates a writer on a torn
+ * log).
  */
 function refuseSequencelessTail(logPath: string): void {
-	let raw: string;
+	let verdict: TailVerdict;
 	try {
 		if (!statSync(logPath).isFile()) return;
-		raw = readFileSync(logPath, "utf-8");
+		verdict = readTailVerdict(logPath);
 	} catch {
 		return;
 	}
-	const verdict = tailVerdict(raw);
 	if (verdict.kind === "unsequenced") {
 		throw new AuditSequencelessTailError(logPath, verdict.line);
 	}
@@ -1657,13 +1727,17 @@ function readMetaTail(logPath: string): CachedTail | null {
 	return null;
 }
 
+/**
+ * The tail an append chains from: the cached one, or else the log's, read from its end
+ * ({@link readTailVerdict}: the whole log is read only to number the line of a refusal).
+ */
 function getLastEvent(logPath: string, cache: Map<string, CachedTail>): CachedTail | null {
 	const cached = cache.get(logPath);
 	if (cached) return cached;
 
 	if (!existsSync(logPath)) return null;
 
-	const verdict = tailVerdict(readFileSync(logPath, "utf-8"));
+	const verdict = readTailVerdict(logPath);
 	switch (verdict.kind) {
 		// A log whose last byte is not a newline ends in a TORN line (#194). Appending would
 		// concatenate onto it; refuse, and let the operator quarantine it (recorded on the chain).
