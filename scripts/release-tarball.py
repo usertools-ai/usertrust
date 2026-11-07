@@ -551,9 +551,15 @@ def extract_check(path, members):
             raise Refused("tar -x produced other files, or other bytes, than were assembled")
 
 
+# Root files only the release writes (never the build): the manifest, and a shipped package's
+# npm-shrinkwrap.json (scripts/shrinkwrap.mjs, from the release commit's blobs). Each is still
+# FORBIDDEN as any component of a payload path, and only this exact spelling is a root.
+RELEASE_ROOTS = ("package.json", "npm-shrinkwrap.json")
+
+
 def read_root(spec):
     name, eq, path = spec.partition("=")
-    special = name.lower() == "dist" or (name.lower() in FORBIDDEN and name != "package.json")
+    special = name.lower() == "dist" or (name.lower() in FORBIDDEN and name not in RELEASE_ROOTS)
     if not eq or not ROOT_NAME.fullmatch(name) or special:
         raise Refused(f"--root {show(spec)} is not <root file name>=<path>")
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)

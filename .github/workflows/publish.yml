@@ -71,6 +71,7 @@ env:
     openclaw-contract
     tb-integration
     site-build
+    shrinkwrap
     tested-tree
   REPUBLISH: ${{ inputs.republish }}
 

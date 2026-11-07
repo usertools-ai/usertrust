@@ -669,6 +669,35 @@ describe("the input file and the arguments", { timeout: 180_000 }, () => {
 		]);
 	});
 
+	it("takes npm-shrinkwrap.json as a root file the release writes, and ships it", () => {
+		const r = assemble(valid(), { ...BLOBS, "npm-shrinkwrap.json": '{"lockfileVersion":3}\n' });
+		expect(r.status, r.err).toBe(0);
+		const shipped = readTar(r.out as Buffer).find((e) => e.name === "package/npm-shrinkwrap.json");
+		expect(shipped?.data.toString("utf8")).toBe('{"lockfileVersion":3}\n');
+	});
+
+	it("refuses npm-shrinkwrap.json spelled any other way as a root file", () => {
+		for (const name of ["NPM-SHRINKWRAP.JSON", "Npm-Shrinkwrap.json"]) {
+			refused(valid(), "is not <root file name>=<path>", (root) => [
+				"--root",
+				`package.json=${join(root, "package.json")}`,
+				"--root",
+				`${name}=${join(root, "README.md")}`,
+			]);
+		}
+	});
+
+	it("still refuses node_modules and binding.gyp as root files", () => {
+		for (const name of ["node_modules", "binding.gyp"]) {
+			refused(valid(), "is not <root file name>=<path>", (root) => [
+				"--root",
+				`package.json=${join(root, "package.json")}`,
+				"--root",
+				`${name}=${join(root, "README.md")}`,
+			]);
+		}
+	});
+
 	it("refuses a root file that is a symlink", () => {
 		refused(valid(), "symbolic links", (root) => {
 			symlinkSync(join(root, "README.md"), join(root, "linked"));

@@ -113,6 +113,8 @@ jobs:
       - run: node --test scripts/entry-guards.test.mjs
       # The TigerBeetle release manifest's digest check, against a fake GitHub (no network).
       - run: node --test scripts/check-tigerbeetle-release.test.mjs
+      # The npm-shrinkwrap.json a released server or dashboard ships, from the root lockfile (no network).
+      - run: node --test scripts/shrinkwrap.test.mjs
       # A pull request cut from a base that predates a CHANGELOG cut can merge its Unreleased entry into the
       # released section (git places it next to the heading the cut inserted). So the MERGE result is graded against
       # the base it merges into: every line a change adds sits under [Unreleased], no line of a released section
@@ -477,6 +479,32 @@ jobs:
         run: npm run build
         working-directory: site
 
+  shrinkwrap:
+    name: shrinkwrap
+    # The dependency tree usertrust-server and usertrust-ui ship (docs/releasing.md, "The shipped
+    # dependency tree"): their tarballs are assembled as the release assembles them, the
+    # npm-shrinkwrap.json in each must be reproduced byte for byte from this commit, an install of them
+    # into an empty directory must get exactly the root lockfile's versions, and a control that moves
+    # one entry must make that check fail (so npm is proven to install a dependency's shrinkwrap).
+    # It installs from the public registry, as a user would, with --ignore-scripts; no secrets.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2204' || 'ubuntu-latest' }}
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Build usertrust, usertrust-verify, usertrust-server and usertrust-ui
+        run: |
+          (cd packages/core && npx tsc)
+          (cd packages/verify && npx tsc)
+          (cd packages/server && npx tsc -b)
+          (cd packages/ui && npm run build)
+      - name: The shipped tree is reproduced, installed as tested, and honoured by npm
+        run: bash scripts/shrinkwrap-acceptance.sh
+
   # The stamp. A STABLE name, so a re-run supersedes a failure for anything that reads it by name. When every
   # other job of this run passed, it emits ONE annotation, `tested-tree <github.sha>`: the commit this run
   # tested (the merge commit on a pull request, the pushed commit on a push, a candidate/** merge commit
@@ -486,7 +514,7 @@ jobs:
   # scripts/tested-tree.test.mjs pins this job, the candidate trigger and folds, and the cancel rule.
   tested-tree:
     name: tested-tree
-    needs: [agent-config, lint, typecheck, test, scan-linear, sdk-1x, openclaw-contract, tb-integration, site-build]
+    needs: [agent-config, lint, typecheck, test, scan-linear, sdk-1x, openclaw-contract, tb-integration, site-build, shrinkwrap]
     if: always() && !cancelled() && !(github.event_name == 'pull_request' && github.event.pull_request.draft)
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2204' || 'ubuntu-latest' }}
     steps:
@@ -499,5 +527,5 @@ jobs:
         env:
           RESULTS: ${{ toJSON(needs) }}
           TESTED_SHA: ${{ github.sha }}
-          REQUIRED: agent-config lint typecheck test scan-linear sdk-1x openclaw-contract tb-integration site-build
+          REQUIRED: agent-config lint typecheck test scan-linear sdk-1x openclaw-contract tb-integration site-build shrinkwrap
         run: node scripts/tested-tree-verdict.mjs
