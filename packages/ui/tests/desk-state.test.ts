@@ -346,15 +346,19 @@ describe("the provider keeps what the page had", () => {
 		expect(src).not.toMatch(/^\t[a-z]+\.current = /m);
 	});
 
-	it("calls effectiveLevel with its final shape: rows without the models filter, and the window", () => {
+	it("reads the level and the breakdown from the list as drawn: its rows and its filters, and the window", () => {
 		// The formatter may break the call over lines: compare with whitespace and trailing commas removed.
 		const flat = (t: string): string => t.replace(/\s+/g, "").replace(/,\)/g, ")");
-		expect(flat(src)).toContain(
-			flat(
-				'effectiveLevel(dim, applyFilters(list.shownRows, withoutDimension(filters, "model")), window).dim',
-			),
-		);
+		// `levelRows`: the drawn rows without the models filter (list-view.test.ts).
+		expect(flat(src)).toContain(flat("effectiveLevel(dim, levelRows(list), window).dim"));
 		expect(src).not.toContain("effectiveLevel(dim, rows)");
+		expect(flat(src)).toContain(
+			flat("computeBreakdown(list.shownRows, list.filters, window, level)"),
+		);
+		// red-first (the filters just typed): those reach the windows with the deferred render, and read here they cost
+		// a pass over every row in the render each keystroke makes, which nothing can split.
+		expect(src).not.toContain('withoutDimension(filters, "model")');
+		expect(flat(src)).not.toContain(flat("computeBreakdown(list.shownRows, filters,"));
 	});
 
 	it("takes the window from the drawn answer, never the newer shown position", () => {

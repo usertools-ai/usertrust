@@ -12,11 +12,12 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { AtPayload, SummaryPayload } from "../src/shared/api.js";
 import { listState } from "../src/shared/display.js";
-import { EMPTY_FILTERS } from "../src/shared/filters.js";
+import { applyFilters, EMPTY_FILTERS, type FilterState } from "../src/shared/filters.js";
 import {
 	type HoldAnnouncement,
 	heldNote,
 	holdAnnouncement,
+	levelRows,
 	listView,
 	pastHeldNote,
 } from "../src/shared/list-view.js";
@@ -217,6 +218,39 @@ describe("listView", () => {
 			'.ut-drawer[data-held="true"] > .ut-insp-in',
 		])
 			expect(dim?.[1]).toContain(sel);
+	});
+});
+
+// The share window's level (`effectiveLevel`) reads the list's rows under every filter but the models one. It used to
+// filter every row a second time, under the filters just typed rather than the ones the list was drawn with, inside
+// the render each keystroke makes, which nothing can split.
+describe("levelRows", () => {
+	const mixed = Array.from({ length: 400 }, (_, i) => ({
+		...row(i),
+		model: i % 2 === 0 ? "m-even" : "m-odd",
+		actor: i % 3 === 0 ? "alpha" : "beta",
+	}));
+	const draw = (filters: FilterState): ReturnType<typeof listView> =>
+		listView({ rows: mixed, at: null, filters, phase: "loaded", summary: summary() });
+
+	it("red-first (a second pass over every row): with no model picked, they are the list's own filtered rows", () => {
+		const v = draw({ ...EMPTY_FILTERS, search: "alpha" });
+		expect(v.filtered.length).toBe(134);
+		expect(levelRows(v)).toBe(v.filtered);
+	});
+
+	it("with a model picked, they keep every other filter and drop only the models one", () => {
+		const v = draw({ ...EMPTY_FILTERS, search: "alpha", models: ["m-even"] });
+		expect(v.filtered.every((r) => r.model === "m-even")).toBe(true);
+		const rows = levelRows(v);
+		expect(rows).toEqual(applyFilters(mixed, { ...EMPTY_FILTERS, search: "alpha" }));
+		expect(new Set(rows.map((r) => r.model))).toEqual(new Set(["m-even", "m-odd"]));
+		expect(rows.every((r) => r.actor === "alpha")).toBe(true);
+	});
+
+	it("are read under the filters the list was drawn with, which the list carries", () => {
+		const filters = { ...EMPTY_FILTERS, actors: ["alpha"] };
+		expect(draw(filters).filters).toBe(filters);
 	});
 });
 

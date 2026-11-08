@@ -27,16 +27,16 @@ import {
 	orderFilters,
 	removeFilterToken,
 	selectedKeys,
-	withoutDimension,
 } from "../../shared/desk-filters.js";
 import type { WindowId } from "../../shared/desk-layout.js";
-import { applyFilters, EMPTY_FILTERS, isFiltering } from "../../shared/filters.js";
+import { EMPTY_FILTERS, isFiltering } from "../../shared/filters.js";
 import { effectiveLevel } from "../../shared/level.js";
 import {
 	type HoldAnnouncement,
 	heldNote,
 	holdAnnouncement,
 	type ListInput,
+	levelRows,
 	listView,
 	pastHeldNote,
 } from "../../shared/list-view.js";
@@ -257,17 +257,17 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 	const minute = Math.floor(nowMs / 60_000);
 	// biome-ignore lint/correctness/useExhaustiveDependencies: nowMs matters only through its minute
 	const window = useMemo(() => deskWindow(range, list.at, nowMs), [range, list.at, minute]);
-	// The rows exclude the models filter, so a model slice picked at the models level does not drop the donut to lanes;
-	// the window lets the share window adapt a quiet range with one provider.
+	// The level and the breakdown read the list as drawn: its rows under the filters it was drawn with, never the filters
+	// just typed. Those reach the windows with the deferred render; read here, they cost a pass over every row inside
+	// the render each keystroke makes, which nothing can split. The level's rows exclude the models filter
+	// (`levelRows`), and the window lets the share window adapt a quiet range with one provider.
 	const level = useMemo(
-		() =>
-			effectiveLevel(dim, applyFilters(list.shownRows, withoutDimension(filters, "model")), window)
-				.dim,
-		[dim, list.shownRows, filters, window],
+		() => effectiveLevel(dim, levelRows(list), window).dim,
+		[dim, list, window],
 	);
 	const breakdown = useMemo(
-		() => memoOnce(() => computeBreakdown(list.shownRows, filters, window, level)),
-		[list.shownRows, filters, window, level],
+		() => memoOnce(() => computeBreakdown(list.shownRows, list.filters, window, level)),
+		[list, window, level],
 	);
 	const book = useState(() => new ColorBook())[0];
 	// The whole-vault totals the colours rank by, asked for once when the desk mounts, alongside the ledger load. It
