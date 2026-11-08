@@ -394,7 +394,7 @@ function meterRows(data: object): Array<[string, string]> {
 		for (const [label, v] of tokens)
 			out.push([label, count(v) ?? (v === undefined ? ABSENT : INVALID)]);
 	if (w1h !== undefined) {
-		out.push(["  of it 1 h", count(w1h.tokens) ?? INVALID]);
+		out.push(["  of it 1 h", count(w1h.tokens) ?? (w1h.tokens === undefined ? ABSENT : INVALID)]);
 	} else if (d.cacheWrite1h !== undefined) out.push(["  of it 1 h", INVALID]);
 	const perK: Array<[string, unknown]> = [
 		["Rate in /1k", rates?.inputPer1k],
@@ -407,7 +407,11 @@ function meterRows(data: object): Array<[string, string]> {
 	else
 		for (const [label, v] of perK)
 			out.push([label, rate(v) ?? (v === undefined ? ABSENT : INVALID)]);
-	if (w1h !== undefined) out.push(["Rate 1 h write /1k", rate(w1h.ratePer1k) ?? INVALID]);
+	if (w1h !== undefined)
+		out.push([
+			"Rate 1 h write /1k",
+			rate(w1h.ratePer1k) ?? (w1h.ratePer1k === undefined ? ABSENT : INVALID),
+		]);
 	out.push([
 		"Pricing table",
 		d.pricingTableVersion === undefined
@@ -493,7 +497,14 @@ export function renderReceipt(data: ReceiptData): string {
 		for (const [label, value] of meterRows(event.data)) {
 			lines.push(row(`${dotted(`  ${label}`, value, WIDTH - 1)} `));
 		}
-		lines.push(row(pad("  Spend = ceil(sum(n x rate / 1000)), min 1")));
+		// The rule describes a charge priced from counts. A receipt with no `usage` (an estimate-priced settle, or an
+		// older record) was not shown to be priced that way, so it gets no rule to check against.
+		if (record((event.data as Record<string, unknown>).usage) !== undefined) {
+			lines.push(row(pad("  Spend = ceil(sum(n x rate / 1000)), min 1")));
+		} else {
+			lines.push(row(pad("  No token counts in this receipt: Spend")));
+			lines.push(row(pad("  cannot be rebuilt from counts.")));
+		}
 	}
 
 	lines.push(row(`${dotted("  Status", status, WIDTH - 1)} `));

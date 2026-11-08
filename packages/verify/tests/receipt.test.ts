@@ -464,6 +464,30 @@ describe("the receipt prints the metering behind Spend, only as the receipt carr
 		expect(field(out, "Rate write /1k")).toBe("not in receipt");
 	});
 
+	it("a 1-hour record with a missing member prints 'not in receipt', a wrong-typed one 'invalid'", () => {
+		const noTokens = render({ ...metered, cacheWrite1h: { ratePer1k: 6 } });
+		expect(field(noTokens, "of it 1 h")).toBe("not in receipt");
+		expect(field(noTokens, "Rate 1 h write /1k")).toBe("6");
+		const noRate = render({ ...metered, cacheWrite1h: { tokens: 300 } });
+		expect(field(noRate, "of it 1 h")).toBe("300");
+		expect(field(noRate, "Rate 1 h write /1k")).toBe("not in receipt");
+		const bad = render({ ...metered, cacheWrite1h: { tokens: "many", ratePer1k: -1 } });
+		expect(field(bad, "of it 1 h")).toBe("invalid");
+		expect(field(bad, "Rate 1 h write /1k")).toBe("invalid");
+	});
+
+	it("a receipt with no usage prints no rebuild rule, and says it cannot be rebuilt from counts", () => {
+		const { usage: _drop, ...estimated } = metered;
+		const out = render({ ...estimated, usageSource: "estimated" });
+		expect(out).not.toContain("Spend = ceil");
+		expect(out).toContain("No token counts in this receipt: Spend");
+		expect(out).toContain("cannot be rebuilt from counts.");
+		const old = render({ model: "gpt-5", cost: 9, settled: true, transferId: "tx_old" });
+		expect(old).not.toContain("Spend = ceil");
+		expect(old).toContain("cannot be rebuilt from counts.");
+		expect(render(metered)).toContain("Spend = ceil(sum(n x rate / 1000)), min 1");
+	});
+
 	it("a receipt with counts but no 1-hour record prints no 1-hour rows", () => {
 		const { cacheWrite1h: _drop, ...noHour } = metered;
 		const out = render(noHour);
