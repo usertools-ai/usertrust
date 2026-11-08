@@ -144,8 +144,9 @@ describe("shrinkwrap-acceptance.sh files: the registry work after the verdict is
 		assert.throws(() => readFileSync(join(dir, "ran")));
 	});
 	it("a call still running at the budget's end is killed (SIGALRM, 142)", () => {
-		// timing: a 1 s budget against a 30 s hang; the assertion is on the exit status, not the time.
-		const r = run(`deadline=$((SECONDS + 1)); optional perl -e 'sleep 30'; echo "rc=$?"`);
+		// Not 1 s: SECONDS counts whole seconds, so a tick between `deadline=` and `optional` would leave 0 (124).
+		// timing: a 2 s budget against a 30 s hang; the assertion is on the exit status, not the time.
+		const r = run(`deadline=$((SECONDS + 2)); optional perl -e 'sleep 30'; echo "rc=$?"`);
 		assert.match(r.stdout, /rc=142/, r.stderr);
 	});
 });
