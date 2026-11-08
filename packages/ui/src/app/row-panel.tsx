@@ -154,8 +154,13 @@ export function RowPanel(props: {
 	 * as that position's: it reads "updating…" until the view catches up.
 	 */
 	held?: boolean;
+	/**
+	 * Set while the header shows a past position. The explicit check always runs on the vault as it is now, so a past
+	 * view labels it as running today; its verdict text is unchanged.
+	 */
+	past: boolean;
 }): React.JSX.Element {
-	const { row, docked, onClose, focusNonce, onFocusHandled } = props;
+	const { row, docked, onClose, focusNonce, onFocusHandled, past } = props;
 	const held = props.held === true;
 	// A verify response is held for the row VERSION it was requested for (the row object: a status correction replaces
 	// it) and shown only while the row is still that version. Clearing the panel when the status changed ran BEFORE an
@@ -406,10 +411,11 @@ export function RowPanel(props: {
 				</dl>
 			</section>
 			<section className="ut-sec">
-				<div className="ut-lbl">Explicit check</div>
+				<div className="ut-lbl">{`${past ? "today: " : ""}Explicit check`}</div>
 				{tx.kind === "transfer" ? (
 					<>
 						<span className="ut-why">
+							{past ? "Runs on the vault as it is now, not as it was at this position. " : ""}
 							Runs the usertrust-verify check for this transfer and prints its receipt.
 						</span>
 						<button

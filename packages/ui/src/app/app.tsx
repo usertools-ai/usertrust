@@ -228,6 +228,7 @@ export function App(): React.JSX.Element {
 								row={open}
 								docked
 								held={held}
+								past={at !== null}
 								onClose={close}
 								focusNonce={kbOpen}
 								onFocusHandled={() => setKbOpen(undefined)}
@@ -258,7 +259,14 @@ export function App(): React.JSX.Element {
 				/>
 			)}
 			{!dock && view === "audit" && open && (
-				<RowPanel key={open.hash} row={open} docked={false} held={held} onClose={close} />
+				<RowPanel
+					key={open.hash}
+					row={open}
+					docked={false}
+					held={held}
+					past={at !== null}
+					onClose={close}
+				/>
 			)}
 		</div>
 	);
