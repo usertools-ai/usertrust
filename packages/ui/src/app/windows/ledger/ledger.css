@@ -2,3 +2,30 @@
 /* Copyright 2026 Usertools, Inc. */
 
 /* The Ledger window's rules (prefix ut-lg-). Scoped overrides of the older classes use [data-win="ledger"]. */
+
+/* PR 5 replaces this file's body. Day one: the list fills the window's body, and the record panel docks beside it
+   when the window is filled and wide. */
+@layer components {
+	.ut-lg-body {
+		flex: 1 1 0;
+		min-height: 0;
+		display: grid;
+		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.ut-lg-body[data-docked="true"] {
+		grid-template-columns: minmax(0, 1fr) 380px;
+	}
+
+	.ut-lg-list {
+		display: flex;
+		flex-direction: column;
+		min-height: 0;
+		min-width: 0;
+	}
+
+	[data-win="ledger"] .ut-list {
+		flex: 1 1 0;
+		min-height: 0;
+	}
+}

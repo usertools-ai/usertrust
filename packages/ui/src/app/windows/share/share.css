@@ -2,3 +2,11 @@
 /* Copyright 2026 Usertools, Inc. */
 
 /* The Share window's rules (prefix ut-sh-). Scoped overrides of the older classes use [data-win="share"]. */
+
+/* PR 4 replaces this file's body. Day one: the three lists stack in one column, so they fit a window a third of the
+   desk wide. */
+@layer components {
+	[data-win="share"] .ut-split {
+		grid-template-columns: minmax(0, 1fr);
+	}
+}
