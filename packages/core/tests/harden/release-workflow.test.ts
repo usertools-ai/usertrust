@@ -111,6 +111,7 @@ interface Step {
 interface Job {
 	name?: string;
 	needs?: string | string[];
+	if?: string;
 	strategy?: { "fail-fast"?: boolean; matrix?: Record<string, unknown> };
 	outputs?: Record<string, string>;
 	environment?: string | { name: string };
@@ -172,10 +173,17 @@ describe("publish.yml", () => {
 		expect(requiredJobs.length).toBeGreaterThanOrEqual(7);
 	});
 
-	it("runs ci-gate, then build, then publish under the npm-publish environment", () => {
-		expect(Object.keys(publish.jobs).sort()).toEqual(["build", "ci-gate", "publish"]);
+	it("runs ci-gate, then build, then publish under the npm-publish environment, then shipped-tree", () => {
+		expect(Object.keys(publish.jobs).sort()).toEqual([
+			"build",
+			"ci-gate",
+			"publish",
+			"shipped-tree",
+		]);
 		expect([publish.jobs.build?.needs ?? []].flat()).toEqual(["ci-gate"]);
 		expect([publish.jobs.publish?.needs ?? []].flat()).toEqual(["build"]);
+		expect([publish.jobs["shipped-tree"]?.needs ?? []].flat()).toEqual(["publish"]);
+		expect(envName(publish.jobs["shipped-tree"] as Job)).toBeUndefined();
 		expect(envName(publish.jobs.publish as Job)).toBe("npm-publish");
 		expect(envName(publish.jobs.build as Job)).toBeUndefined();
 	});
@@ -297,7 +305,7 @@ describe("publish.yml", () => {
 
 	it("no checkout persists a credential", () => {
 		const checkouts = allSteps().filter(([, s]) => s.uses?.startsWith("actions/checkout@"));
-		expect(checkouts.length).toBe(3);
+		expect(checkouts.length).toBe(4);
 		for (const [job, s] of checkouts) {
 			expect(s.with?.["persist-credentials"], `${job}: checkout`).toBe(false);
 		}
@@ -381,6 +389,37 @@ describe("publish.yml", () => {
 			"publish: Create GitHub Release",
 		]);
 		for (const [, s] of effectful) expect(s.if ?? "").toContain("!inputs.dry_run");
+	});
+
+	it("after a real publish, shipped-tree checks the published packages, unprivileged, at the tagged commit", () => {
+		const job = publish.jobs["shipped-tree"] as Job;
+		// After the publish job, and only when something was published (a republish included).
+		expect(job.if).toBe("${{ !inputs.dry_run }}");
+		expect(job.permissions).toEqual({ contents: "read" });
+		expect(privileged(job)).toBe(false);
+		expect(job).not.toHaveProperty("continue-on-error");
+		expect(JSON.stringify(job)).not.toMatch(/secrets\.|github\.token|NPM_TOKEN/);
+		// What it checks is what the publish job published: its commit and version, as outputs.
+		expect(publish.jobs.publish?.outputs).toEqual({
+			commit: "${{ steps.source.outputs.commit }}",
+			version: "${{ steps.source.outputs.version }}",
+		});
+		const check = step("shipped-tree", "Check the published packages' dependency tree");
+		expect(check.env).toEqual({
+			COMMIT: "${{ needs.publish.outputs.commit }}",
+			VERSION: "${{ needs.publish.outputs.version }}",
+		});
+		// The tag must name that commit; then the script, whose failure fails the run.
+		expect(check.run).toContain('tagged=$(git rev-parse "refs/tags/v${VERSION}^{commit}")');
+		expect(check.run).toMatch(/if \[ "\$tagged" != "\$COMMIT" \]; then\n[^\n]*\n\s*exit 1/);
+		const last = (check.run ?? "").trim().split("\n").at(-1)?.trim();
+		expect(last).toBe('bash scripts/shrinkwrap-published.sh "$VERSION" "$COMMIT"');
+		expect(check.run).not.toMatch(/\|\||set \+e/);
+		expect(check.if).toBeUndefined();
+		// It runs the dispatched commit's script, pinned like the other jobs' checkouts.
+		expect(step("shipped-tree", "Pin the checkout to the dispatched commit").run).toContain(
+			'"$(git rev-parse HEAD)" != "$GITHUB_SHA"',
+		);
 	});
 
 	it("a republish never bumps, commits, tags or pushes", () => {
@@ -490,7 +529,7 @@ describe("publish.yml", () => {
 
 	it("no setup-node restores a cache, and no step is a cache step", () => {
 		const setups = allSteps().filter(([, s]) => s.uses?.startsWith("actions/setup-node@"));
-		expect(setups.map(([j]) => j)).toEqual(["build", "publish"]);
+		expect(setups.map(([j]) => j)).toEqual(["build", "publish", "shipped-tree"]);
 		for (const [job, s] of setups) {
 			expect(s.with?.["package-manager-cache"], `${job}: setup-node`).toBe(false);
 			expect(s.with ?? {}, `${job}: setup-node`).not.toHaveProperty("cache");
@@ -519,7 +558,7 @@ describe("publish.yml", () => {
 		// The publish job's major only; the exact pin is the next test's.
 		expect(
 			setups.map(([j, s]) => `${j}: ${String(s.with?.["node-version"]).split(".")[0]}`),
-		).toEqual(["build: 22", "publish: 24"]);
+		).toEqual(["build: 22", "publish: 24", "shipped-tree: 24"]);
 		// npm trusted publishing needs npm 11.5.1 and Node 22.14.0, and npm 11 added the refusal
 		// to apply latest implicitly to a lower version, the backstop for the dist-tag check:
 		// the step right after setup-node refuses an older npm or Node, on every run (dry runs

@@ -1,0 +1,50 @@
+name: shrinkwrap-registry
+
+# Whether npm, installing a package BY NAME from the public registry, honours the npm-shrinkwrap.json that
+# package ships: the behaviour the shipped dependency tree of usertrust-server and usertrust-ui relies on
+# (docs/releasing.md, "The shipped dependency tree"). It reads the public registry, so it is NOT a required
+# check: an npm outage must block no merge and no release. A failure is loud instead (an ::error::, a failed
+# run, the job summary). What this commit alone decides (the shrinkwrap reproduced byte for byte, the
+# comparator's tests) is ci.yml's required `shrinkwrap` job; the published packages themselves are checked
+# after every release by publish.yml's `shipped-tree` job.
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - scripts/shrinkwrap*
+      - scripts/release.sh
+      - scripts/release-tarball.py
+      - package-lock.json
+      - packages/server/package.json
+      - packages/ui/package.json
+      - .github/workflows/shrinkwrap-registry.yml
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shrinkwrap-registry-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  registry:
+    name: shrinkwrap (registry)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          package-manager-cache: false
+      # No npm ci and no build: it installs one public package into an empty directory, with
+      # --ignore-scripts and its own cache, and reads where npm put each dependency.
+      - name: npm honours a registry package's shrinkwrap
+        run: bash scripts/shrinkwrap-acceptance.sh registry

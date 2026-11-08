@@ -470,21 +470,34 @@ of every project that depends on it.
   tar -xOzf usertrust-server-<version>.tgz package/npm-shrinkwrap.json | cmp - <(bash scripts/release.sh shrinkwrap v<version> server <version>)
   ```
 
-- **CI checks it** on every change (the `shrinkwrap` job, `scripts/shrinkwrap-acceptance.sh`):
-  1. it assembles core, verify, server and ui as the release does, and requires each shipped
-     shrinkwrap to be byte-identical to `release.sh shrinkwrap` at the commit;
-  2. it records, for each way the tarballs can be installed, whether npm installed the package's
-     tree exactly as its shrinkwrap writes it, place by place and both ways, for the tarball as
-     built and for a control whose shrinkwrap moves one entry: from a file (server alone, ui alone,
-     both), from a throwaway local registry by name, and, from the public registry, a published
-     package that ships a shrinkwrap. npm honours a dependency's shrinkwrap only when the package's
-     `_hasShrinkwrap` flag is set, which a file tarball never carries, so the file rows are
-     recorded, not required;
-  3. it requires the public-registry row, and the local-registry rows with their controls when that
-     registry reports `_hasShrinkwrap`.
-
-  `scripts/shrinkwrap.test.mjs` pins the generator's rules on fixture lockfiles and on the real
-  tree. The release requires the `shrinkwrap` job (`REQUIRED_CI_JOBS`).
+- **CI checks it** in two parts, so that only what a commit decides can block a merge or a release:
+  1. **Required:** the `shrinkwrap` job (`scripts/shrinkwrap-acceptance.sh files`). It assembles
+     core, verify, server and ui as the release does, and requires each shipped shrinkwrap to be
+     byte-identical to `release.sh shrinkwrap` at the commit. It then records, never requires, the
+     file rows: whether npm installed the package's tree exactly as its shrinkwrap writes it, place
+     by place and both ways, for the tarball as built and for a control whose shrinkwrap moves one
+     entry to another published version in range, from a file (server alone, ui alone, both). npm
+     honours a dependency's shrinkwrap only when the package's `_hasShrinkwrap` flag is set, which a
+     file tarball never carries, and those installs read the public registry, so a row or a control
+     that cannot run is recorded as such. The release requires this job (`REQUIRED_CI_JOBS`).
+     `scripts/shrinkwrap.test.mjs` pins the generator's rules on fixture lockfiles and on the real
+     tree; `scripts/shrinkwrap-acceptance.test.mjs` pins the comparator and the post-release check
+     below, against a fake npm.
+  2. **Not required:** the `shrinkwrap-registry` workflow (`scripts/shrinkwrap-acceptance.sh
+     registry`), on every pull request that touches the shipped tree's files and nightly. It
+     installs, by name from the public registry, a published package that ships a shrinkwrap, and
+     requires npm to place it as written. It reads the public registry, so an outage must block no
+     merge and no release; a failure is loud instead (an `::error::`, a failed run, the job summary).
+- **After the publish,** the publish workflow's `shipped-tree` job checks what the registry now
+  serves (`scripts/shrinkwrap-published.sh <version> <commit>`, which also runs by hand). For each of
+  usertrust-server and usertrust-ui it requires all three: the registry reports `_hasShrinkwrap:
+  true` for that version; the registry's tarball carries an `npm-shrinkwrap.json` byte-identical to
+  the one the release commit gives; and a clean install by name, into an empty directory with
+  `--ignore-scripts`, places the tree exactly as that file writes it. It holds no write token, no
+  OIDC token and no secret. It runs after the packages are out, so it cannot stop a release: a
+  failure fails the run, and **the CHANGELOG's claim that installs get the tested tree is corrected
+  the same day**, in a CHANGELOG entry under `[Unreleased]` naming the version and what the check
+  found.
 
 ### Credentials
 

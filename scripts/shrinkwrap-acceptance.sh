@@ -2,41 +2,80 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Usertools, Inc.
 #
-# CI's check of the shipped dependency tree (docs/releasing.md, "The shipped dependency tree").
-# Run from the repository root after `npm ci` and a build of core, verify, server and ui. It needs
-# the network: it installs what it assembles, as a user would, and reads the public registry.
+# CI's checks of the shipped dependency tree (docs/releasing.md, "The shipped dependency tree"), in
+# two modes, run from the repository root:
 #
-#  1. Reproduce: assembles core, verify, server and ui as the release does (`release.sh assemble`),
-#     and requires server's and ui's npm-shrinkwrap.json to be byte-identical to
-#     `release.sh shrinkwrap` at this commit.
-#  2. The matrix. For each way a tarball can be installed, it records whether npm installed the
-#     package's dependency tree EXACTLY as its shrinkwrap writes it, place by place and both ways
-#     (`shrinkwrap-acceptance.mjs placed`), for the tarball as built and for a CONTROL tarball whose
-#     shrinkwrap moves one entry to another published version its requirer accepts:
-#       (a) the server tarball installed alone from a file;
-#       (b) the ui tarball alone from a file;
-#       (c) both together from files;
-#       (d) the way users install: the assembled tarballs published to a throwaway local registry
-#           (verdaccio, pinned, our four packages served only from it), then `npm install` by name;
-#       (e) the public registry: a published package that ships a shrinkwrap pinning a version
-#           older than the newest its range allows, installed by name.
-#     npm decides to honour a dependency's shrinkwrap from the package's `_hasShrinkwrap` flag,
-#     which a file tarball never carries, so (a) to (c) are recorded but not required.
-#  3. The verdict: (e) must be HONOURED (npm honours a registry package's shrinkwrap); (d) must be
-#     HONOURED for server and ui, and each control HONOURED at its moved version, unless the local
-#     registry does not report `_hasShrinkwrap` (then (d) is INCONCLUSIVE and says so).
+#   files     the REQUIRED `shrinkwrap` job, after `npm ci` and a build of core, verify, server and ui.
+#             It decides only what this commit decides, so no registry outage can fail it:
+#   1. Reproduce: assembles core, verify, server and ui as the release does (`release.sh assemble`),
+#      and requires server's and ui's npm-shrinkwrap.json to be byte-identical to
+#      `release.sh shrinkwrap` at this commit. This is the verdict.
+#   2. The file rows, RECORDED, never required: whether npm installed each package's tree EXACTLY
+#      as its shrinkwrap writes it, place by place and both ways (`shrinkwrap-acceptance.mjs
+#      placed`), for the tarball as built and for a CONTROL tarball whose shrinkwrap moves one entry
+#      to another published version its requirer accepts: (a) the server tarball alone from a file;
+#      (b) the ui tarball alone; (c) both together. npm decides to honour a dependency's shrinkwrap
+#      from the package's `_hasShrinkwrap` flag, which a file tarball never carries, and the installs
+#      read the public registry, so a row (or a control) that cannot run is recorded as such.
+#
+#   registry  the NON-required `shrinkwrap-registry` workflow (pull requests that touch the shipped
+#             tree's files, and nightly). It needs no build:
+#   (e) the public registry: a published package that ships a shrinkwrap pinning a version older
+#       than the newest its range allows, installed by name, must be HONOURED: npm honours a
+#       registry package's shrinkwrap. A failure is loud (::error::, a failed run, the job summary),
+#       and an outage blocks no merge and no release.
+#
+# The release itself checks the published packages afterwards: scripts/shrinkwrap-published.sh.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 HELP="node scripts/shrinkwrap-acceptance.mjs"
-VERDACCIO=verdaccio@6.10.6
 PUBLIC_PKG=azure-functions-core-tools@4.16.0
+MODE=${1:-}
+case $MODE in
+files | registry) ;;
+*)
+	echo "usage: shrinkwrap-acceptance.sh files|registry" >&2
+	exit 2
+	;;
+esac
 work=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/shrinkwrap-acceptance.XXXXXX")
-version=$(bash scripts/release.sh version)
 fail() {
 	echo "::error::$*" >&2
+	[ -n "${GITHUB_STEP_SUMMARY:-}" ] && printf '### shrinkwrap (%s) FAILED\n\n%s\n' "$MODE" "$*" >>"$GITHUB_STEP_SUMMARY"
 	exit 1
 }
 matrix() { echo "MATRIX $*" | tee -a "$work/matrix"; }
+install_into() { # install_into <dir> <args...>: a user's install, in an empty directory with its own cache
+	local into=$1
+	shift
+	mkdir -p "$into"
+	printf '{"name":"acceptance","private":true}\n' >"$into/package.json"
+	(cd "$into" && npm install --ignore-scripts --no-audit --no-fund --cache "$into.cache" "$@" >"$into.log" 2>&1) ||
+		fail "npm install failed in $into: $(tail -c 2000 "$into.log")"
+}
+
+if [ "$MODE" = registry ]; then
+	echo "== (e): the public registry, a package that ships a shrinkwrap"
+	for p in "$PUBLIC_PKG" sfdx-cli@7.209.6 @cloudflare/wrangler@1.21.0; do
+		echo "registry.npmjs.org: $p _hasShrinkwrap=$(npm view "$p" _hasShrinkwrap 2>/dev/null || echo absent)"
+	done
+	mkdir -p "$work/e-pack"
+	(cd "$work/e-pack" && npm pack "$PUBLIC_PKG" >/dev/null 2>&1) || fail "(e): npm pack $PUBLIC_PKG failed"
+	tar -xOzf "$work/e-pack/"*.tgz package/npm-shrinkwrap.json >"$work/e.shrinkwrap.json" ||
+		fail "(e): $PUBLIC_PKG's tarball carries no npm-shrinkwrap.json"
+	install_into "$work/e" "$PUBLIC_PKG"
+	if out=$($HELP placed "$work/e" "${PUBLIC_PKG%@*}" "$work/e.shrinkwrap.json"); then matrix "(e)public $PUBLIC_PKG HONOURED"; else matrix "(e)public $PUBLIC_PKG NOT-HONOURED"; fi
+	printf '%s\n' "$out" | sed 's/^/    /'
+	$HELP where "$work/e" brace-expansion | sed 's/^/    /'
+	echo "    newest brace-expansion in ^5: $(npm view 'brace-expansion@^5' version --json 2>/dev/null | node -e 'let v=JSON.parse(require("fs").readFileSync(0,"utf8"));v=Array.isArray(v)?v:[v];console.log(v[v.length-1])')"
+	/usr/bin/grep -qF "MATRIX (e)public $PUBLIC_PKG HONOURED" "$work/matrix" ||
+		fail "(e): npm did not install a registry package's shrinkwrap as written, so a released server or dashboard may not get its shipped tree"
+	[ -n "${GITHUB_STEP_SUMMARY:-}" ] && echo "### shrinkwrap (registry): (e) HONOURED" >>"$GITHUB_STEP_SUMMARY"
+	echo "OK: (e) HONOURED"
+	exit 0
+fi
+
+version=$(bash scripts/release.sh version)
 
 mkdir -p "$work/packed"
 for d in core verify server ui; do
@@ -63,8 +102,8 @@ mutant() { # mutant <dir>: writes $work/<dir>.mutant.json and $work/mutant/<dir>
 			node -e 'let v=JSON.parse(require("fs").readFileSync(0,"utf8")||"[]");v=Array.isArray(v)?v:[v];const o=v.filter(x=>x!==process.argv[1]&&!x.includes("-"));console.log(o.length?o[o.length-1]:"")' "$locked")
 		[ -n "$alt" ] && break
 	done < <($HELP candidate "$work/$d.shipped.json")
-	[ -n "${alt:-}" ] || fail "no entry of $d's shrinkwrap has another published version in range: its control cannot run"
-	dist=$(npm view "${name}@${alt}" dist --json)
+	[ -n "${alt:-}" ] || return 1 # no entry has another published version in range (or the registry did not answer)
+	dist=$(npm view "${name}@${alt}" dist --json) || return 1
 	resolved=$(printf '%s' "$dist" | node -e 'console.log(JSON.parse(require("fs").readFileSync(0,"utf8")).tarball)')
 	integrity=$(printf '%s' "$dist" | node -e 'console.log(JSON.parse(require("fs").readFileSync(0,"utf8")).integrity)')
 	# The control tarball is assembled exactly as the release assembles one (scripts/release-tarball.py),
@@ -75,7 +114,7 @@ mutant() { # mutant <dir>: writes $work/<dir>.mutant.json and $work/mutant/<dir>
 	for name in $(cd "$work/mutant/$d/package" && find . -maxdepth 1 -type f | sed 's|^\./||'); do
 		cp "$work/mutant/$d/package/$name" "$roots/$name"
 	done
-	$HELP mutate "$roots/npm-shrinkwrap.json" "$place" "$alt" "$resolved" "$integrity" >/dev/null
+	$HELP mutate "$roots/npm-shrinkwrap.json" "$place" "$alt" "$resolved" "$integrity" >/dev/null || return 1
 	cp "$roots/npm-shrinkwrap.json" "$work/$d.mutant.json"
 	for name in $(ls "$roots"); do args+=(--root "$name=$roots/$name"); done
 	python3 -I scripts/release-tarball.py assemble --input "$work/packed/$(basename "$(tgz "$d")")" \
@@ -83,20 +122,17 @@ mutant() { # mutant <dir>: writes $work/<dir>.mutant.json and $work/mutant/<dir>
 	echo "$place $locked $alt"
 }
 for d in server ui; do
-	read -r place locked alt <<<"$(mutant "$d")"
-	[ -n "${alt:-}" ] || fail "the $d control could not be built"
-	printf '%s %s %s\n' "$place" "$locked" "$alt" >"$work/$d.moved"
-	echo "$d control: $place $locked -> $alt"
+	place="" locked="" alt=""
+	read -r place locked alt <<<"$(mutant "$d")" || true
+	if [ -n "${alt:-}" ] && [ -f "$work/mutant/$d/$(basename "$(tgz "$d")")" ]; then
+		printf '%s %s %s\n' "$place" "$locked" "$alt" >"$work/$d.moved"
+		echo "$d control: $place $locked -> $alt"
+	else
+		: >"$work/$d.moved"
+		matrix "$d control UNAVAILABLE (recorded: the registry gave no other version in range)"
+	fi
 done
 
-install_into() { # install_into <dir> <args...>: a user's install, in an empty directory with its own cache
-	local into=$1
-	shift
-	mkdir -p "$into"
-	printf '{"name":"acceptance","private":true}\n' >"$into/package.json"
-	(cd "$into" && npm install --ignore-scripts --no-audit --no-fund --cache "$into.cache" "$@" >"$into.log" 2>&1) ||
-		fail "npm install failed in $into: $(tail -c 2000 "$into.log")"
-}
 try_into() { # try_into <dir> <args...>: as install_into, for a row that is recorded, not required
 	local into=$1
 	shift
@@ -111,16 +147,23 @@ row() { # row <variant> <install dir> <package dir> <expected shrinkwrap>: one m
 	pkg=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).name)' "packages/$d/package.json")
 	if out=$($HELP placed "$dir" "$pkg" "$sw"); then matrix "$v $d HONOURED"; else matrix "$v $d NOT-HONOURED"; fi
 	printf '%s\n' "$out" | sed 's/^/    /'
-	read -r place _ _ <"$work/$d.moved"
-	$HELP where "$dir" "${place##*node_modules/}" | sed 's/^/    /'
+	place=""
+	read -r place _ _ <"$work/$d.moved" || true
+	[ -z "$place" ] || $HELP where "$dir" "${place##*node_modules/}" | sed 's/^/    /'
+}
+control() { # control <dir>: the control tarball, when it was built
+	[ -s "$work/$1.moved" ] && echo "$work/mutant/$1/$(basename "$(tgz "$1")")"
 }
 
-echo "== 2. the matrix"
-echo "-- (a)-(c): file tarballs (npm reads no _hasShrinkwrap from a file: recorded, not required)"
+echo "== 2. the file rows (npm reads no _hasShrinkwrap from a file: recorded, not required)"
 if try_into "$work/a" "$(tgz server)"; then row "(a)file-alone" "$work/a" server "$work/server.shipped.json"; else matrix "(a)file-alone server INSTALL-FAILED"; fi
-if try_into "$work/a-control" "$work/mutant/server/$(basename "$(tgz server)")"; then row "(a)file-alone-control" "$work/a-control" server "$work/server.mutant.json"; else matrix "(a)file-alone-control server INSTALL-FAILED"; fi
+if [ -n "$(control server)" ]; then
+	if try_into "$work/a-control" "$(control server)"; then row "(a)file-alone-control" "$work/a-control" server "$work/server.mutant.json"; else matrix "(a)file-alone-control server INSTALL-FAILED"; fi
+fi
 if try_into "$work/b" "$(tgz ui)"; then row "(b)file-alone" "$work/b" ui "$work/ui.shipped.json"; else matrix "(b)file-alone ui INSTALL-FAILED"; fi
-if try_into "$work/b-control" "$work/mutant/ui/$(basename "$(tgz ui)")"; then row "(b)file-alone-control" "$work/b-control" ui "$work/ui.mutant.json"; else matrix "(b)file-alone-control ui INSTALL-FAILED"; fi
+if [ -n "$(control ui)" ]; then
+	if try_into "$work/b-control" "$(control ui)"; then row "(b)file-alone-control" "$work/b-control" ui "$work/ui.mutant.json"; else matrix "(b)file-alone-control ui INSTALL-FAILED"; fi
+fi
 if try_into "$work/c" "$(tgz server)" "$(tgz ui)"; then
 	row "(c)file-both" "$work/c" server "$work/server.shipped.json"
 	row "(c)file-both" "$work/c" ui "$work/ui.shipped.json"
@@ -128,99 +171,7 @@ else
 	matrix "(c)file-both server+ui INSTALL-FAILED"
 fi
 
-echo "-- (d): a throwaway local registry, installed by name"
-REG_PORT=4873
-registry_up() { # registry_up <name>: a fresh verdaccio, on a port of its own, whose storage only holds what we publish
-	local n=$1 r="$work/registry-$1"
-	REG_PORT=$((REG_PORT + 1))
-	REG="http://127.0.0.1:$REG_PORT/"
-	mkdir -p "$r/storage"
-	cat >"$r/config.yaml" <<EOF
-storage: $r/storage
-uplinks:
-  npmjs:
-    url: https://registry.npmjs.org/
-packages:
-  'usertrust':
-    access: \$all
-    publish: \$all
-  'usertrust-*':
-    access: \$all
-    publish: \$all
-  '**':
-    access: \$all
-    proxy: npmjs
-log: { type: file, path: $r/verdaccio.log, level: warn }
-EOF
-	npx --yes "$VERDACCIO" --config "$r/config.yaml" --listen "127.0.0.1:$REG_PORT" >"$r/out.log" 2>&1 &
-	echo $! >"$r/pid"
-	local i
-	for i in $(seq 1 60); do
-		curl -sf "${REG}-/ping" >/dev/null && return 0
-		sleep 1
-	done
-	fail "the local registry did not start: $(tail -c 1000 "$r/out.log")"
-}
-kill_tree() { # kill_tree <pid>: npx and the verdaccio it started, and their children
-	local c
-	for c in $(pgrep -P "$1" 2>/dev/null); do kill_tree "$c"; done
-	kill "$1" 2>/dev/null || true
-}
-registry_down() { kill_tree "$(cat "$work/registry-$1/pid")"; sleep 1; }
-publish_local() { # publish_local <tarball>
-	printf '//127.0.0.1:%s/:_authToken=acceptance\n' "$REG_PORT" >"$work/npmrc"
-	npm publish "$1" --registry "$REG" --userconfig "$work/npmrc" --ignore-scripts >"$work/publish.log" 2>&1 ||
-		fail "publish to the local registry failed: $(tail -c 1500 "$work/publish.log")"
-}
-d_variant() { # d_variant <name> <server tarball> <ui tarball> <server shrinkwrap> <ui shrinkwrap>
-	registry_up "$1"
-	publish_local "$(tgz core)"
-	publish_local "$(tgz verify)"
-	publish_local "$2"
-	publish_local "$3"
-	for d in server ui; do
-		pkg=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).name)' "packages/$d/package.json")
-		flag=$(npm view "$pkg@$version" _hasShrinkwrap --registry "$REG" 2>/dev/null || true)
-		echo "local registry ($1): $pkg@$version _hasShrinkwrap=${flag:-absent}"
-		echo "${flag:-absent}" >"$work/d-$1-$d.flag"
-		install_into "$work/d-$1-$d" "$pkg@$version" --registry "$REG"
-	done
-	row "(d)registry-$1" "$work/d-$1-server" server "$4"
-	row "(d)registry-$1" "$work/d-$1-ui" ui "$5"
-	registry_down "$1"
-}
-d_variant built "$(tgz server)" "$(tgz ui)" "$work/server.shipped.json" "$work/ui.shipped.json"
-d_variant control "$work/mutant/server/$(basename "$(tgz server)")" "$work/mutant/ui/$(basename "$(tgz ui)")" "$work/server.mutant.json" "$work/ui.mutant.json"
-
-echo "-- (e): the public registry, a package that ships a shrinkwrap"
-for p in "$PUBLIC_PKG" sfdx-cli@7.209.6 @cloudflare/wrangler@1.21.0 "usertrust-server@$version"; do
-	echo "registry.npmjs.org: $p _hasShrinkwrap=$(npm view "$p" _hasShrinkwrap 2>/dev/null || echo absent)"
-done
-mkdir -p "$work/e-pack"
-(cd "$work/e-pack" && npm pack "$PUBLIC_PKG" >/dev/null 2>&1)
-tar -xOzf "$work/e-pack/"*.tgz package/npm-shrinkwrap.json >"$work/e.shrinkwrap.json"
-install_into "$work/e" "$PUBLIC_PKG"
-if out=$($HELP placed "$work/e" "${PUBLIC_PKG%@*}" "$work/e.shrinkwrap.json"); then matrix "(e)public $PUBLIC_PKG HONOURED"; else matrix "(e)public $PUBLIC_PKG NOT-HONOURED"; fi
-printf '%s\n' "$out" | sed 's/^/    /'
-$HELP where "$work/e" brace-expansion | sed 's/^/    /'
-echo "    newest brace-expansion in ^5: $(npm view 'brace-expansion@^5' version --json 2>/dev/null | node -e 'let v=JSON.parse(require("fs").readFileSync(0,"utf8"));v=Array.isArray(v)?v:[v];console.log(v[v.length-1])')"
-
-echo "== 3. the verdict"
+echo "== the record"
 cat "$work/matrix"
-ok=1
-/usr/bin/grep -qF "MATRIX (e)public $PUBLIC_PKG HONOURED" "$work/matrix" || {
-	echo "::error::(e): npm did not install a registry package's shrinkwrap as written"
-	ok=0
-}
-if [ "$(cat "$work/d-built-server.flag")" = true ]; then
-	for want in "(d)registry-built server HONOURED" "(d)registry-built ui HONOURED" "(d)registry-control server HONOURED" "(d)registry-control ui HONOURED"; do
-		/usr/bin/grep -qF "MATRIX $want" "$work/matrix" || {
-			echo "::error::(d): expected '$want'"
-			ok=0
-		}
-	done
-else
-	echo "::warning::(d) INCONCLUSIVE: the local registry reports _hasShrinkwrap=$(cat "$work/d-built-server.flag") for our package, so it does not show what registry.npmjs.org will do; (e) decides"
-fi
-[ "$ok" = 1 ] || fail "the shipped tree is not installed as written (see the matrix above)"
-echo "OK: reproduced; the matrix above is the evidence"
+[ -n "${GITHUB_STEP_SUMMARY:-}" ] && { echo "### shrinkwrap (files): reproduced; the file rows, recorded"; sed 's/^MATRIX /- /' "$work/matrix"; } >>"$GITHUB_STEP_SUMMARY"
+echo "OK: reproduced; the file rows above are recorded, not required"
