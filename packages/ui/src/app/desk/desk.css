@@ -295,7 +295,10 @@
 			min-height: 100dvh;
 		}
 
+		/* The column takes its content's height and the page scrolls: neither the desk nor a window's slot shrinks to fit
+		   the screen, or the windows' contents run into each other. */
 		.ut-dk-desk {
+			flex: 0 0 auto;
 			display: flex;
 			flex-direction: column;
 			min-height: 0;
@@ -303,6 +306,7 @@
 
 		.ut-win-slot {
 			display: block;
+			flex: 0 0 auto;
 		}
 
 		.ut-win {
@@ -318,6 +322,20 @@
 		.ut-win-body {
 			flex: 0 0 auto;
 			overflow: visible;
+		}
+
+		/* The Ledger's list keeps a scroller of its own above the phone width (`AuditTable`), so its box needs a height:
+		   with none, the list measured zero and drew no rows. */
+		[data-win="ledger"] .ut-lg-body {
+			flex: 0 0 auto;
+			height: 70dvh;
+		}
+	}
+
+	/* A phone: the list flows in the page and the window is its scroller, so its box takes its content's height. */
+	@media (max-width: 760px) {
+		[data-win="ledger"] .ut-lg-body {
+			height: auto;
 		}
 	}
 }

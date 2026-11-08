@@ -183,6 +183,39 @@ describe("the desk's stylesheets", () => {
 		expect(widths.filter((w) => w !== 760 && w !== 900)).toEqual([]);
 	});
 
+	it("red-first: on a narrow screen no window is squeezed, and the Ledger's list keeps a real height above the phone width", () => {
+		const desk = readFileSync(join(APP, "desk", "desk.css"), "utf-8").replace(
+			/\/\*[\s\S]*?\*\//g,
+			"",
+		);
+		/** The text of the first `@media (max-width: <w>px)` block, braces matched. */
+		const block = (w: number): string => {
+			const start = desk.indexOf(`@media (max-width: ${w}px) {`);
+			if (start < 0) return "";
+			let depth = 0;
+			for (let i = desk.indexOf("{", start); i < desk.length; i++) {
+				if (desk[i] === "{") depth++;
+				else if (desk[i] === "}" && --depth === 0) return desk.slice(start, i + 1);
+			}
+			return "";
+		};
+		const rule = (css: string, sel: string): string =>
+			new RegExp(`(?:^|[}\\s])${sel.replace(/[.[\]"=]/g, "\\$&")}\\s*\\{([^}]*)\\}`).exec(
+				css,
+			)?.[1] ?? "";
+		const narrow = block(900);
+		expect(narrow.length).toBeGreaterThan(0);
+		// The column takes its content's height and scrolls with the page: neither the desk nor a window's slot shrinks
+		// to fit the screen (they did, and the windows' contents ran into each other).
+		expect(rule(narrow, ".ut-dk-desk")).toMatch(/flex:\s*0 0 auto/);
+		expect(rule(narrow, ".ut-win-slot")).toMatch(/flex:\s*0 0 auto/);
+		// The Ledger's list has a scroller of its own above the phone width, so its box needs a height (it had none,
+		// and drew no rows).
+		expect(rule(narrow, '[data-win="ledger"] .ut-lg-body')).toMatch(/height:\s*\d+dvh/);
+		// On a phone the list flows in the page and the window is its scroller: its box takes its content's height.
+		expect(rule(block(760), '[data-win="ledger"] .ut-lg-body')).toMatch(/height:\s*auto/);
+	});
+
 	it("keep the panes opaque, and a window free of anything that traps a fixed drawer", () => {
 		expect(token("--dk-pane-a")).toBe("1");
 		const trapping = ["transform", "filter", "backdrop-filter", "contain", "will-change"];
