@@ -296,7 +296,11 @@ under your home as the passwd database gives it.
   In order: the session's job log (`<stateDir>/jobs/<id>.jsonl`) is copied to the new
   state dir, so `usertrust-job` keeps its open job, and so are its `gap` records in
   `watch.jsonl`, each once, so `usertrust-job coverage` still lists a gap from before the
-  re-pin (a line of the old `watch.jsonl` that cannot be read keeps the old pin); the re-pin is appended to
+  re-pin. A line of the old `watch.jsonl` that cannot be read keeps the old pin, with that
+  reason in the warning (never the line). That file is shared by every session pinned to that
+  state dir and only grows, so one such line keeps every later re-pin from that state dir from
+  happening, not just this session's: each such session is warned instead, and a new session
+  uses the configuration file. Then the re-pin is appended to
   `.local/state/usertrust/repins/repins.jsonl` (the old pin, the new pin with its key
   hashed, the reason) while the old pin is still in place; then the old pin is kept
   aside under a second name, a hard link (`<id>.json.repinned.<time>.<random>`), and one rename puts the

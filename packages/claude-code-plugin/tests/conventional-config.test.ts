@@ -838,6 +838,9 @@ describe("session.mjs: SessionStart re-pins a DEAD environment pin to the conven
 		expect(session.note).toContain(
 			"could not be re-pinned to ~/.config/usertrust/claude-code.json: the old watch records hold a line that cannot be read.",
 		);
+		// The reason is fixed: the line itself is never echoed.
+		expect(session.note).not.toContain('"kind":"ga');
+		expect(session.note).not.toContain("23:56:00");
 		expect(nodeFs.existsSync(join(fresh, "watch.jsonl"))).toBe(false);
 		expect(nodeFs.existsSync(recordsOf(home))).toBe(false);
 		expect((JSON.parse(await readFile(pinOf(home), "utf-8")) as Pin).kind).toBe("environment");
