@@ -70,6 +70,21 @@ describe("TotalsIndex", () => {
 			expect(payload.dims[dim]).toEqual(expected);
 			expect(payload.more[dim]).toBe(0);
 		}
+		// Literals, not the oracle: both sides above count through the same rule, so they could agree and be wrong.
+		// The cost of the record whose time does not parse (50 on "local", 9 on bo) and of the records that are not
+		// spend (no cost, a string cost, llm_call_failed 12 on dee, policy_denied 8 on ana) is in no lane's spend and
+		// in no calls count. Only the 24 ordinary records and bo's zero-cost call count: 70 in all, over 25 calls.
+		expect(payload.dims.lane).toEqual([
+			{ key: "dee", spendUt: 19, calls: 6 },
+			{ key: "cy", spendUt: 18, calls: 6 },
+			{ key: "bo", spendUt: 17, calls: 7 },
+			{ key: "ana", spendUt: 16, calls: 6 },
+		]);
+		expect(payload.dims.lane.some((k) => k.key === "local")).toBe(false);
+		for (const dim of DIMS) {
+			expect(payload.dims[dim].reduce((n, k) => n + k.spendUt, 0)).toBe(70);
+			expect(payload.dims[dim].reduce((n, k) => n + k.calls, 0)).toBe(25);
+		}
 		// The oracle is not trivially empty, and it did skip records.
 		expect(payload.dims.lane.length).toBeGreaterThan(1);
 		expect(payload.records).toBe(events.length);

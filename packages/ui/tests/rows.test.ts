@@ -375,6 +375,36 @@ describe("spendFactsOf", () => {
 			["a time that does not parse", { timestamp: "not a time", data: { cost: 7 } }],
 		];
 
+	// Literals for spendFactsOf alone: the parity test below compares it with toLedgerRows, which calls it.
+	it("derives the provider from the model's prefix", () => {
+		expect(spendFactsOf(evt({ data: { model: "claude-sonnet-4-6" } })).provider).toBe("anthropic");
+		expect(spendFactsOf(evt({ data: { model: "grok-4.7" } })).provider).toBe("xai");
+	});
+
+	it("keeps the provider a record names, apart from the one the model gives", () => {
+		expect(spendFactsOf(evt({ data: { model: "gpt-5", provider: "azure" } }))).toEqual({
+			ts: "2026-07-27T10:00:00.000Z",
+			kind: "llm_call",
+			actor: "local",
+			model: "gpt-5",
+			provider: "openai",
+			providerRecorded: "azure",
+		});
+	});
+
+	it("keeps a listed job type, calls an unlisted one unrecognized, and leaves an absent one out", () => {
+		expect(spendFactsOf(evt({ data: { jobType: "bugfix" } })).jobType).toBe("bugfix");
+		expect(spendFactsOf(evt({ data: { jobType: "moonshot" } })).jobType).toBe("unrecognized");
+		expect(Object.hasOwn(spendFactsOf(evt({ data: {} })), "jobType")).toBe(false);
+	});
+
+	it("takes a cost only when it is a number", () => {
+		expect(spendFactsOf(evt({ data: { cost: 5 } })).costUt).toBe(5);
+		expect(spendFactsOf(evt({ data: { cost: 0 } })).costUt).toBe(0);
+		expect(Object.hasOwn(spendFactsOf(evt({ data: { cost: "5" } })), "costUt")).toBe(false);
+		expect(Object.hasOwn(spendFactsOf(evt({ data: {} })), "costUt")).toBe(false);
+	});
+
 	it.each(CASES)("gives exactly the key and spend fields toLedgerRows gives: %s", (_name, over) => {
 		const e = evt(over);
 		const row = toLedgerRows([e], { valid: true, breakIndex: null }, undefined, 0)[0] as LedgerRow;

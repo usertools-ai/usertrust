@@ -80,7 +80,8 @@ describe("GET /api/totals", () => {
 		const specs = bigVault();
 		await seed(specs.length, (n) => specs[n] as Spec);
 		await start({ rowCap: 10 });
-		expect((await totals()).records).toBe(40);
+		const before = await totals();
+		expect(before.records).toBe(40);
 		// A reader of the live tail is attached, so the append is folded in by the tail's grow step, not by a reload.
 		const tail = (
 			(await fetch(`${base()}/api/tail`)).body as ReadableStream<Uint8Array>
@@ -95,6 +96,9 @@ describe("GET /api/totals", () => {
 		expect(rankingFrom(p, "lane")).toEqual(["recent-b", "old-heavy", "recent-a"]);
 		expect(p.dims.lane[0]).toEqual({ key: "recent-b", spendUt: 5015, calls: 6 });
 		expect(p.records).toBe(41);
+		// An append never moves the epoch; a fallback reload of other records does. So 41 records under the same
+		// epoch show the tail's fold ran, not a rebuild.
+		expect(p.epoch).toBe(before.epoch);
 	});
 
 	it("rebuilds on a reload with other records, and moves the epoch with /api/at's", async () => {
