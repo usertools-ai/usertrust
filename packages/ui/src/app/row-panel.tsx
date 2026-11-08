@@ -6,6 +6,7 @@ import { costView, transferView, usageView } from "../shared/display.js";
 import { formatUtc, UT_KEY } from "../shared/format.js";
 import { popoverOwnsEscape } from "../shared/row-nav.js";
 import { JOB_TYPE_CAVEAT, type LedgerRow, statusOf } from "../shared/rows.js";
+import { statusWord } from "../shared/status-word.js";
 import { type Held, heldFor, type VerifyOutcome, verifyOutcome } from "../shared/verify-view.js";
 import { STATUS_TONE } from "./audit-table.js";
 
@@ -294,7 +295,7 @@ export function RowPanel(props: {
 				) : (
 					<span className="ut-pill" data-tone={pillTone(STATUS_TONE[status])}>
 						<i />
-						{status}
+						{statusWord(status)}
 					</span>
 				)}
 				{row.integrity === "verified" ? (

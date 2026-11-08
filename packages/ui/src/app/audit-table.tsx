@@ -22,6 +22,7 @@ import {
 	rowAccessibleName,
 } from "../shared/row-nav.js";
 import { type LedgerRow, type RowStatus, statusOf } from "../shared/rows.js";
+import { statusWord } from "../shared/status-word.js";
 import { useMediaQuery } from "./use-media-query.js";
 
 const SORTS: Array<{ key: SortKey; label: string }> = [
@@ -76,7 +77,7 @@ function RowBody(props: { row: LedgerRow }): React.JSX.Element {
 				<span className="ut-line">
 					<span className="ut-badge" data-tone={STATUS_TONE[status]}>
 						<i aria-hidden="true" />
-						{status}
+						{statusWord(status)}
 					</span>
 					<span className="ut-rtitle">{row.model ?? row.kind}</span>
 				</span>
