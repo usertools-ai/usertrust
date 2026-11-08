@@ -12,7 +12,7 @@ import {
 	holdAnnouncement,
 	type ListInput,
 	listView,
-	PAST_HELD_NOTE,
+	pastHeldNote,
 } from "../shared/list-view.js";
 import type { LedgerRow } from "../shared/rows.js";
 import { MAX_SEARCH_LENGTH, type ViewId } from "../shared/url-state.js";
@@ -39,14 +39,14 @@ const VIEWS: Array<{ id: View; label: string }> = [
 const DOCK_QUERY = "(min-width: 1100px)";
 
 export function App(): React.JSX.Element {
-	const { rows, summary, phase, live, liveIds, resyncs, rowsEpoch } = useLedger();
+	const { rows, summary, phase, live, liveIds, resyncs, rowsVault } = useLedger();
 	// The view, filters and open record live in the page address (`location.hash`): a reload keeps them, a link shares them.
 	const { view, setView, filters, setFilters, openHash, setOpenHash, at, navigation, addressNote } =
 		useUrlState();
 	// The past position shown (`#at=N`, or a preview before it is written there), from /api/at. Until its first answer
 	// lands, or when it fails with nothing loaded, the screen stays live and the status under the header says so: a past
 	// view is only ever drawn from its own answer.
-	const { view: atView } = useAt(at, summary, live, rows, resyncs, rowsEpoch, navigation);
+	const { view: atView } = useAt(at, summary, live, rows, resyncs, rowsVault, navigation);
 	const shownAt = atView.at;
 	// The past view reads each row's status against the rows the page held when the answer's request was SENT
 	// (`atView.rows`), not the rows held when the answer renders: a live `status` frame for a record after the
@@ -55,8 +55,8 @@ export function App(): React.JSX.Element {
 	// whichever of a reload's rows and answer lands first; while none of the answer's own vault is held, nothing is
 	// drawn and the views wait.
 	const past = useMemo(
-		() => pastRows(rows, rowsEpoch, atView, shownAt),
-		[rows, rowsEpoch, atView, shownAt],
+		() => pastRows(rows, rowsVault, atView, shownAt),
+		[rows, rowsVault, atView, shownAt],
 	);
 	const pastHeld = past.kind === "held";
 	const head = summary === null ? -1 : summary.chain.events - 1;
@@ -65,8 +65,8 @@ export function App(): React.JSX.Element {
 	// another moment's phase or chain (`listView`). The rows are cut at the position before the filters, so all of them
 	// see the vault then.
 	const listInput = useMemo<ListInput>(
-		() => ({ rows: past.rows, at: shownAt, filters, phase, summary }),
-		[past.rows, shownAt, filters, phase, summary],
+		() => ({ rows: past.rows, at: shownAt, filters, phase, summary, reloading: pastHeld }),
+		[past.rows, shownAt, filters, phase, summary, pastHeld],
 	);
 	const drawn = useDeferredValue(listInput);
 	const list = useMemo(() => listView(drawn), [drawn]);
@@ -75,7 +75,8 @@ export function App(): React.JSX.Element {
 	// another position than the header: until the deferred render lands (after Back, Forward
 	// or a link). Those views are dimmed and busy meanwhile, and the status under the header says what is coming.
 	// A past view whose vault's rows are not held yet lags too.
-	const holdNote = pastHeld ? PAST_HELD_NOTE : heldNote(list.at, shownAt);
+	const pastNote = pastHeldNote(atView.reloaded);
+	const holdNote = pastHeld ? pastNote : heldNote(list.at, shownAt);
 	const held = holdNote !== null || pastHeld;
 	// What a screen reader hears about it: once when the views start to lag, once when they catch up, never per answer.
 	const [announce, setAnnounce] = useState<HoldAnnouncement>({ held: false, text: "" });
@@ -224,6 +225,8 @@ export function App(): React.JSX.Element {
 								phase={list.phase}
 								chain={list.chain}
 								beforeWindow={list.beforeWindow}
+								reloading={list.reloading}
+								reloadingNote={pastNote}
 								liveIds={liveIds}
 								selected={openHash}
 								restoreFocus={restoreFocus}
@@ -231,7 +234,14 @@ export function App(): React.JSX.Element {
 								onClearFilters={clearFilters}
 							/>
 						) : (
-							<Trends rows={list.filtered} newestOf={newestOf} at={list.at} head={head} />
+							<Trends
+								rows={list.filtered}
+								newestOf={newestOf}
+								at={list.at}
+								head={head}
+								reloading={list.reloading}
+								reloadingNote={pastNote}
+							/>
 						)}
 					</section>
 					{dock &&

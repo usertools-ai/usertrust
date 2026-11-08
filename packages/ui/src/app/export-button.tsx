@@ -23,7 +23,7 @@ export function ExportButton(props: {
 			type="button"
 			className="ut-btn"
 			onClick={props.onExport}
-			disabled={count === 0}
+			disabled={count === 0 || held}
 			data-held={held}
 			aria-busy={held}
 			title={

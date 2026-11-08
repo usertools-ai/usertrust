@@ -124,6 +124,7 @@ export type ListState =
 	| "first-run"
 	| "no-rows"
 	| "before-window"
+	| "reloading"
 	| "filtered-out"
 	| "rows";
 
@@ -131,6 +132,8 @@ export type ListState =
  * What the ledger list shows. Rows start empty while the first snapshot is in flight, and the list printed "no
  * matching transactions — clear filters" for that, for an empty vault, and for filters that hide every row alike.
  * A vault with no rows is a first run only when its chain is empty: a deleted log has no rows either.
+ * `reloading`: a past view waiting for the records of its answer's own vault. They exist and are on their way, so no
+ * empty state is true then: it comes first.
  * `beforeWindow`: a past position before the first row held. No row is shown because the list starts later, not
  * because anything is wrong, whatever the chain says.
  */
@@ -140,7 +143,9 @@ export function listState(input: {
 	total: number;
 	shown: number;
 	beforeWindow?: boolean;
+	reloading?: boolean;
 }): ListState {
+	if (input.reloading === true) return "reloading";
 	if (input.total === 0) {
 		if (input.phase === "failed") return "failed";
 		if (input.phase === "loading" || input.chain === null) return "loading";

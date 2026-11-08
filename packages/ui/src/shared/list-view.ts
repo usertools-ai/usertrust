@@ -22,6 +22,8 @@ export interface ListInput {
 	filters: FilterState;
 	phase: LoadPhase;
 	summary: SummaryPayload | null;
+	/** A past view waiting for the records of its answer's own vault (`pastRows`: held): `rows` is then empty on purpose. */
+	reloading?: boolean;
 }
 
 /**
@@ -49,6 +51,8 @@ export interface ListView {
 	beforeWindow: BeforeWindow | null;
 	phase: LoadPhase;
 	at: AtPayload | null;
+	/** The input's `reloading`: the views say they are updating, never that nothing is held. */
+	reloading: boolean;
 }
 
 export function listView(input: ListInput): ListView {
@@ -62,6 +66,7 @@ export function listView(input: ListInput): ListView {
 		beforeWindow: at !== null && shownRows.length === 0 ? beforeWindowAt(rows, at) : null,
 		phase,
 		at,
+		reloading: input.reloading === true,
 	};
 }
 
@@ -73,8 +78,13 @@ function beforeWindowAt(rows: LedgerRow[], at: AtPayload): BeforeWindow {
 		: { kind: "not-held", upTo: at.pos };
 }
 
-/** What the status says while a past view waits for the records of its answer's own vault (`pastRows`: held). */
-export const PAST_HELD_NOTE = "Updating to the reloaded vault…";
+/**
+ * What the status, the announcement, the list and Trends say while a past view waits for the records of its answer's own
+ * vault (`pastRows`: held). `reloaded`: the answer shown came from a reload of the vault.
+ */
+export function pastHeldNote(reloaded: boolean): string {
+	return reloaded ? "Updating to the reloaded vault…" : "Loading this point's records…";
+}
 
 /**
  * What the views drawn from the list's input say while they show another position than the header, or null when

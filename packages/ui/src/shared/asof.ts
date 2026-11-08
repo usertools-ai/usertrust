@@ -124,14 +124,25 @@ export interface PastRows {
 	rows: LedgerRow[];
 }
 
-/** Two epochs name the same vault only when both are whole numbers and equal: a missing one never matches. */
-function sameEpoch(a: unknown, b: unknown): boolean {
-	return typeof a === "number" && Number.isInteger(a) && typeof b === "number" && a === b;
+/**
+ * The vault a thing comes from, as one key: the server process (`boot`) and the reload count within it (`epoch`, which
+ * restarts at 0 in every process). Null unless the boot is a non-empty string and the epoch a non-negative safe
+ * integer: an older server sends no boot, and a key that is not known never matches another.
+ */
+export function vaultKey(boot: unknown, epoch: unknown): string | null {
+	if (typeof boot !== "string" || boot === "") return null;
+	if (typeof epoch !== "number" || !Number.isSafeInteger(epoch) || epoch < 0) return null;
+	return `${boot}:${epoch}`;
+}
+
+/** Two vault keys name the same vault only when both are known and equal. */
+function sameVault(a: string | null, b: string | null): boolean {
+	return a !== null && b !== null && a === b;
 }
 
 /**
  * The rows a past view draws, paired with the answer by the epoch of the vault they come from (the counter `/api/at`
- * reports and `/api/events` repeats), whichever of a reload's rows and answer lands first.
+ * reports and `/api/events` repeats, with the server's `boot`), whichever of a reload's rows and answer lands first.
  * - Live: the page's rows.
  * - The page's rows are the answer's vault: they, with the statuses the answer was read against (`view.rows`) when
  *   that snapshot is the same vault too.
@@ -141,16 +152,18 @@ function sameEpoch(a: unknown, b: unknown): boolean {
  */
 export function pastRows(
 	rows: LedgerRow[],
-	liveEpoch: number | null,
-	view: { rows: readonly LedgerRow[] | null; rowsEpoch: number | null },
+	liveVault: string | null,
+	view: { rows: readonly LedgerRow[] | null; rowsVault: string | null },
 	at: AtPayload | null,
 ): PastRows {
 	if (at === null) return { kind: "live", rows };
-	if (sameEpoch(liveEpoch, at.epoch)) {
-		const answered = sameEpoch(view.rowsEpoch, at.epoch) && view.rows !== null ? view.rows : rows;
+	const answerVault = vaultKey(at.boot, at.epoch);
+	if (sameVault(liveVault, answerVault)) {
+		const answered =
+			sameVault(view.rowsVault, answerVault) && view.rows !== null ? view.rows : rows;
 		return { kind: "answered", rows: rowsAsAnswered(rows, answered, at) };
 	}
-	if (view.rows !== null && sameEpoch(view.rowsEpoch, at.epoch))
+	if (view.rows !== null && sameVault(view.rowsVault, answerVault))
 		return { kind: "snapshot", rows: [...view.rows] };
 	return { kind: "held", rows: [] };
 }

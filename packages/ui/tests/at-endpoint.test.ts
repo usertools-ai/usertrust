@@ -545,20 +545,57 @@ describe("GET /api/at", () => {
 			}
 			writer.release();
 			const s = await start();
-			const events = async (): Promise<{ epoch?: unknown }> =>
+			const events = async (): Promise<{ epoch?: unknown; boot?: unknown }> =>
 				(await (await fetch(`http://127.0.0.1:${s.port}/api/events`)).json()) as {
 					epoch?: unknown;
+					boot?: unknown;
 				};
 			const first = await at("pos=4");
-			expect((await events()).epoch).toBe(first.body.epoch);
+			const firstEvents = await events();
+			expect(firstEvents.epoch).toBe(first.body.epoch);
+			expect(typeof first.body.boot).toBe("string");
+			expect(first.body.boot).not.toBe("");
+			expect(firstEvents.boot).toBe(first.body.boot);
 			writeFileSync(logPath, readFileSync(join(other, ".usertrust", "audit", "events.jsonl")));
 			s.reload();
 			const second = await at("pos=4");
+			const secondEvents = await events();
 			expect(second.body.epoch).toBeGreaterThan(first.body.epoch);
-			expect((await events()).epoch).toBe(second.body.epoch);
+			expect(secondEvents.epoch).toBe(second.body.epoch);
+			expect(second.body.boot).toBe(first.body.boot);
+			expect(secondEvents.boot).toBe(first.body.boot);
 		} finally {
 			rmSync(other, { recursive: true, force: true });
 		}
+	});
+
+	it("two server instances over the same vault answer different boots, both starting at epoch 0", async () => {
+		await seed(3);
+		await start();
+		const first = (await at("pos=2")).body;
+		await ui?.close();
+		ui = undefined;
+		await start();
+		const second = (await at("pos=2")).body;
+		expect(typeof first.boot).toBe("string");
+		expect(typeof second.boot).toBe("string");
+		expect(first.boot).not.toBe(second.boot);
+		expect(first.epoch).toBe(0);
+		expect(second.epoch).toBe(0);
+	});
+
+	it("the boot is not the session token and is not derived from it", async () => {
+		await seed(3);
+		const s = await start();
+		const boot = (await at("pos=2")).body.boot as string;
+		const session = (await (await fetch(`http://127.0.0.1:${s.port}/api/session`)).json()) as {
+			token: string;
+		};
+		expect(session.token).toBe(s.token);
+		expect(typeof boot).toBe("string");
+		expect(boot).not.toBe(session.token);
+		expect(boot).not.toContain(session.token);
+		expect(session.token).not.toContain(boot);
 	});
 
 	it("the reload, /api/at and /api/events read state and epoch in one synchronous step", () => {
@@ -576,6 +613,8 @@ describe("GET /api/at", () => {
 		expect(resync).toMatch(/epoch \+= 1/);
 		expect(answer).toMatch(/\bepoch,/);
 		expect(events).toMatch(/\bepoch\b/);
+		expect(answer).toMatch(/\bboot,/);
+		expect(events).toMatch(/\bboot\b/);
 	});
 
 	it("epoch stays the same over a forced reload of an unchanged vault", async () => {

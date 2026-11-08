@@ -96,6 +96,11 @@ describe("Export while the list is held", () => {
 			}),
 		);
 
+	it("is off while held, even with rows counted; on when not held", () => {
+		expect(button(true)).toMatch(/<button[^>]*disabled=""/);
+		expect(button(false)).not.toMatch(/<button[^>]*disabled/);
+	});
+
 	it("is marked: dimmed and busy", () => {
 		expect(button(true)).toMatch(
 			/<button[^>]*data-held="true"[^>]*aria-busy="true"[^>]*>Export 12 rows/,

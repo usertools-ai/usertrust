@@ -34,8 +34,8 @@
  *   answer can land before its rows do. Each request also notes how many resyncs the page had installed when it was
  *   sent; an identical re-read sent after another resync replaces the kept snapshot, so rows from before a resync
  *   never outlast the one that corrected them.
- * - Each request also notes the epoch of the vault the page's rows came from (`rowsEpoch`), read with the rows. The
- *   page draws a past view only from rows whose epoch is the answer's (`pastRows`), whichever of a reload's rows and
+ * - Each request also notes the vault key of the vault the page's rows came from (`rowsVault`, a `vaultKey`), read with the rows. The
+ *   page draws a past view only from rows whose vault is the answer's (`pastRows`), whichever of a reload's rows and
  *   answer lands first.
  * - A failure keeps the last good view and says why. It is not retried on its own.
  */
@@ -65,10 +65,10 @@ export interface AtView {
 	/** The vault was reloaded with other records while this position was shown. */
 	reloaded: boolean;
 	/**
-	 * The epoch of the vault the page's rows came from when the request for `at` was sent (null live, and when the
-	 * page had none): taken with `rows`, never when the answer lands. `pastRows` pairs it with `at.epoch`.
+	 * The vault key of the vault the page's rows came from when the request for `at` was sent (null live, and when the
+	 * page had none): taken with `rows`, never when the answer lands. `pastRows` pairs it with the answer's own key.
 	 */
-	rowsEpoch: number | null;
+	rowsVault: string | null;
 }
 
 export const LIVE_VIEW: AtView = {
@@ -79,7 +79,7 @@ export const LIVE_VIEW: AtView = {
 	loading: false,
 	error: null,
 	reloaded: false,
-	rowsEpoch: null,
+	rowsVault: null,
 };
 
 /**
@@ -141,8 +141,8 @@ export class AtFollower {
 	private shownRows: readonly LedgerRow[] | null = null;
 	/** How many resyncs the page had installed when `shownRows` were taken. */
 	private shownResyncs = 0;
-	/** The epoch of the vault `shownRows` came from. */
-	private shownRowsEpoch: number | null = null;
+	/** The vault key of the vault `shownRows` came from. */
+	private shownRowsVault: string | null = null;
 	private epoch: number | null = null;
 	private inFlight = false;
 	private due = false;
@@ -160,7 +160,7 @@ export class AtFollower {
 		private readonly heldRows: () => readonly LedgerRow[] = () => [],
 		/** How many resyncs (wholesale replacements of the rows) the page has installed: read with the rows. */
 		private readonly resyncs: () => number = () => 0,
-		private readonly rowsEpoch: () => number | null = () => null,
+		private readonly rowsVault: () => string | null = () => null,
 	) {}
 
 	/** Show the vault at `pos`, or live (null). */
@@ -175,7 +175,7 @@ export class AtFollower {
 			this.shown = null;
 			this.shownRows = null;
 			this.shownResyncs = 0;
-			this.shownRowsEpoch = null;
+			this.shownRowsVault = null;
 			this.error = null;
 			this.epoch = null;
 			this.due = false;
@@ -241,7 +241,7 @@ export class AtFollower {
 		// Taken in this tick, with the request: see the header.
 		const rows = this.heldRows();
 		const resyncs = this.resyncs();
-		const rowsEpoch = this.rowsEpoch();
+		const rowsVault = this.rowsVault();
 		const abort = new AbortController();
 		// The timeout settles the request whether or not the loader honours the signal.
 		const timedOut = new Promise<never>((_, reject) => {
@@ -251,7 +251,7 @@ export class AtFollower {
 		Promise.race([this.load(chosen?.pos ?? this.reread ?? wanted, abort.signal), timedOut])
 			.then(
 				(answer) =>
-					this.take(answer, wanted, rows, resyncs, rowsEpoch, choice, generation, navigations),
+					this.take(answer, wanted, rows, resyncs, rowsVault, choice, generation, navigations),
 				(err: unknown) => {
 					if (this.wanted === null || generation !== this.generation) return;
 					// A failure for a position the user has left says nothing about the one they are on now.
@@ -273,7 +273,7 @@ export class AtFollower {
 		sentFor: number,
 		rows: readonly LedgerRow[],
 		resyncs: number,
-		rowsEpoch: number | null,
+		rowsVault: string | null,
 		choice: number,
 		generation: number,
 		navigations: number,
@@ -295,19 +295,19 @@ export class AtFollower {
 			this.shown = answer;
 			this.shownRows = rows;
 			this.shownResyncs = resyncs;
-			this.shownRowsEpoch = rowsEpoch;
+			this.shownRowsVault = rowsVault;
 		} else if (this.chosen === null || this.chosen === answer) {
 			this.chosen = answer;
 			this.shown = answer;
 			this.shownRows = rows;
 			this.shownResyncs = resyncs;
-			this.shownRowsEpoch = rowsEpoch;
+			this.shownRowsVault = rowsVault;
 			this.reread = null;
 		} else if (this.shown === null || !sameReading(this.shown, answer)) {
 			this.shown = { ...answer, head: this.chosen.head, clamped: this.chosen.clamped };
 			this.shownRows = rows;
 			this.shownResyncs = resyncs;
-			this.shownRowsEpoch = rowsEpoch;
+			this.shownRowsVault = rowsVault;
 		} else if (
 			resyncs !== this.shownResyncs ||
 			(this.shownRows?.at(-1)?.pos ?? -1) < this.shown.pos
@@ -317,7 +317,7 @@ export class AtFollower {
 			// request, sent later and before this answer, is as valid and is the one the page holds now.
 			this.shownRows = rows;
 			this.shownResyncs = resyncs;
-			this.shownRowsEpoch = rowsEpoch;
+			this.shownRowsVault = rowsVault;
 		}
 	}
 
@@ -333,7 +333,7 @@ export class AtFollower {
 						loading: this.shown === null && this.error === null,
 						error: this.error,
 						reloaded: this.reloaded,
-						rowsEpoch: this.shownRowsEpoch,
+						rowsVault: this.shownRowsVault,
 					};
 		const last = this.published;
 		if (
@@ -341,7 +341,7 @@ export class AtFollower {
 			last.wanted === view.wanted &&
 			last.at === view.at &&
 			last.rows === view.rows &&
-			last.rowsEpoch === view.rowsEpoch &&
+			last.rowsVault === view.rowsVault &&
 			last.resolved === view.resolved &&
 			last.loading === view.loading &&
 			last.error === view.error &&

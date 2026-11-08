@@ -3,6 +3,7 @@
 
 import { useEffect, useState } from "react";
 import type { SummaryPayload } from "../shared/api.js";
+import { vaultKey } from "../shared/asof.js";
 import type { LoadPhase } from "../shared/display.js";
 import { applyStatusChanges, novelRows, type StatusChange } from "../shared/live.js";
 import { frameVersion, SnapshotReplay, type Update } from "../shared/replay.js";
@@ -33,38 +34,34 @@ export interface LedgerData {
 	 */
 	resyncs: number;
 	/**
-	 * The epoch of the vault the rows come from, installed with them in each resync (null: not loaded, or a server that
-	 * sends none). Frames never change it.
+	 * The vault the rows come from (`vaultKey`: the server's boot and epoch), installed with them in each resync. Null
+	 * when not loaded, while a resync is under way, or from a server that sends no boot. Frames never change it.
 	 */
-	rowsEpoch: number | null;
-}
-
-/** The vault epoch a snapshot carries: a non-negative safe integer, else null (an older server sends none). */
-export function snapshotEpoch(v: unknown): number | null {
-	return typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null;
+	rowsVault: string | null;
 }
 
 async function fetchAll(): Promise<{
 	rows: LedgerRow[];
 	summary: SummaryPayload;
 	version: number;
-	epoch: number | null;
+	vault: string | null;
 }> {
 	// ONE request: the rows and the summary are taken at the same version. Two requests let an append land between
 	// them, and its summary frame (the same version as the newer half) was never re-applied over the stale one.
 	const res = await fetch("/api/events");
-	const { rows, summary, version, epoch } = (await res.json()) as {
+	const { rows, summary, version, epoch, boot } = (await res.json()) as {
 		rows: LedgerRow[];
 		summary: SummaryPayload;
 		version?: unknown;
 		epoch?: unknown;
+		boot?: unknown;
 	};
 	// No version: older than every frame, so every kept frame is re-applied on top.
 	return {
 		rows,
 		summary,
 		version: typeof version === "number" ? version : -1,
-		epoch: snapshotEpoch(epoch),
+		vault: vaultKey(boot, epoch),
 	};
 }
 
@@ -76,7 +73,7 @@ export function useLedger(): LedgerData {
 		live: "connecting",
 		liveIds: new Set(),
 		resyncs: 0,
-		rowsEpoch: null,
+		rowsVault: null,
 	});
 
 	useEffect(() => {
@@ -90,8 +87,11 @@ export function useLedger(): LedgerData {
 		};
 		const resync = (): void => {
 			const generation = replay.begin();
+			// The rows held are about to be replaced: until the snapshot lands their vault is unknown, so a frame that
+			// arrives meanwhile is never taken for the old vault's (the server sends `resync` before any later append).
+			if (!cancelled) setData((d) => ({ ...d, rowsVault: null }));
 			fetchAll()
-				.then(({ rows, summary, version, epoch }) => {
+				.then(({ rows, summary, version, vault }) => {
 					// liveIds is flash state for SSE arrivals only — a resync
 					// replaces the row set wholesale, so it starts clean (after
 					// the replay too: a re-applied frame is not a new arrival).
@@ -101,7 +101,7 @@ export function useLedger(): LedgerData {
 							...d,
 							rows,
 							summary,
-							rowsEpoch: epoch,
+							rowsVault: vault,
 							phase: "loaded" as const,
 						}));
 						if (install !== undefined)

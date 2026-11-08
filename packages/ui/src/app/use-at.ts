@@ -38,8 +38,8 @@ async function loadAt(pos: number, signal: AbortSignal): Promise<AtPayload> {
  * `navigation` counts the user's navigations (Back, Forward, a link, a typed address): each one resets the view to the
  * address's position, dropping a preview that was asking for another.
  *
- * `rows` are the rows the page holds, `resyncs` how many times they have been replaced wholesale and `rowsEpoch` the
- * epoch of the vault they come from (read with them, so a view knows which vault its rows were). Each request is sent
+ * `rows` are the rows the page holds, `resyncs` how many times they have been replaced wholesale and `rowsVault` the
+ * key of the vault they come from (read with them, so a view knows which vault its rows were). Each request is sent
  * with the rows held at that moment, and its answer is shown with those rows (`view.rows`), never with the rows held
  * when it lands; a later request that reads the same replaces them once a resync has landed (`AtFollower`).
  */
@@ -49,17 +49,17 @@ export function useAt(
 	live: LiveState,
 	rows: readonly LedgerRow[],
 	resyncs: number,
-	rowsEpoch: number | null,
+	rowsVault: string | null,
 	navigation: number,
 ): { view: AtView; preview(pos: number | null): void } {
 	const [view, setView] = useState<AtView>(LIVE_VIEW);
 	const follower = useRef<AtFollower | null>(null);
 	// The rows as of the last commit, for the follower to read when it sends a request. Written in an effect, never
 	// while rendering, and declared before the effects below so a request they send reads this commit's rows.
-	const held = useRef({ rows, resyncs, rowsEpoch });
+	const held = useRef({ rows, resyncs, rowsVault });
 	useEffect(() => {
-		held.current = { rows, resyncs, rowsEpoch };
-	}, [rows, resyncs, rowsEpoch]);
+		held.current = { rows, resyncs, rowsVault };
+	}, [rows, resyncs, rowsVault]);
 	if (follower.current === null)
 		follower.current = new AtFollower(
 			loadAt,
@@ -67,7 +67,7 @@ export function useAt(
 			undefined,
 			() => held.current.rows,
 			() => held.current.resyncs,
-			() => held.current.rowsEpoch,
+			() => held.current.rowsVault,
 		);
 
 	// A navigation shows the destination's own view, also when its position is the one already wanted: a preview the

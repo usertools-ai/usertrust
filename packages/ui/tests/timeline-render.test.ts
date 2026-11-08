@@ -28,6 +28,12 @@ let SummaryStrip: Component<{
 	live: "live";
 	at?: AtPayload | null;
 }>;
+let TrendsReloading: Component<{
+	rows: never[];
+	newestOf: number | undefined;
+	reloading?: boolean;
+	reloadingNote?: string;
+}>;
 let Trends: Component<{
 	rows: never[];
 	newestOf: number | undefined;
@@ -36,6 +42,7 @@ let Trends: Component<{
 }>;
 beforeAll(async () => {
 	Trends = (await app<{ Trends: typeof Trends }>("trends")).Trends;
+	TrendsReloading = (await app<{ Trends: typeof TrendsReloading }>("trends")).Trends;
 	SummaryStrip = (await app<{ SummaryStrip: typeof SummaryStrip }>("summary-strip")).SummaryStrip;
 });
 
@@ -467,6 +474,8 @@ describe("the list at a past position before the first row held", () => {
 			| { kind: "before"; firstHeld: number; upTo: number }
 			| { kind: "not-held"; upTo: number }
 			| null;
+		reloading?: boolean;
+		reloadingNote?: string;
 		selected: null;
 		onOpen(): void;
 		onClearFilters(): void;
@@ -525,5 +534,71 @@ describe("the list at a past position before the first row held", () => {
 		expect(html).toContain("The 11 records up to this point count in the totals above");
 		expect(html).not.toMatch(/The list starts at position|Before the first record/);
 		expect(html).not.toMatch(/failed verification/i);
+	});
+
+	const notHeld = {
+		rows: [] as never[],
+		total: 0,
+		phase: "loaded" as const,
+		chain: "verified" as const,
+		beforeWindow: { kind: "not-held", upTo: 10 } as const,
+		selected: null,
+		onOpen: () => {},
+		onClearFilters: () => {},
+	};
+
+	it("while the point's records are reloading, the list says so and never says no records are held", () => {
+		const html = text(
+			renderToStaticMarkup(
+				createElement(AuditTable, {
+					...notHeld,
+					reloading: true,
+					reloadingNote: "Updating to the reloaded vault…",
+				}),
+			),
+		);
+		expect(html).toContain("Updating to the reloaded vault…");
+		expect(html).not.toContain("No records are held for this point yet");
+		expect(html).not.toMatch(/No events to show|No governed calls yet/);
+		// Plain text: the status already speaks.
+		expect(
+			renderToStaticMarkup(
+				createElement(AuditTable, {
+					...notHeld,
+					reloading: true,
+					reloadingNote: "Loading this point's records…",
+				}),
+			),
+		).not.toMatch(/role="status"[^>]*>[^<]*Loading this point/);
+	});
+
+	it("CONTROL: a past point with no rows held and not reloading still says no records are held", () => {
+		const html = text(renderToStaticMarkup(createElement(AuditTable, { ...notHeld })));
+		expect(html).toContain("No records are held for this point yet");
+		expect(html).not.toContain("Updating to the reloaded vault…");
+	});
+});
+
+describe("Trends while the point's records are reloading", () => {
+	it("shows the held words instead of its empty state", () => {
+		const html = text(
+			renderToStaticMarkup(
+				createElement(TrendsReloading, {
+					rows: [],
+					newestOf: undefined,
+					reloading: true,
+					reloadingNote: "Updating to the reloaded vault…",
+				}),
+			),
+		);
+		expect(html).toContain("Updating to the reloaded vault…");
+		expect(html).not.toContain("No records in view");
+	});
+
+	it("CONTROL: not reloading, an empty Trends says so", () => {
+		const html = text(
+			renderToStaticMarkup(createElement(TrendsReloading, { rows: [], newestOf: undefined })),
+		);
+		expect(html).toContain("No records in view");
 	});
 });

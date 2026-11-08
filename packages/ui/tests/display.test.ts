@@ -128,6 +128,18 @@ describe("transferView", () => {
 });
 
 describe("listState", () => {
+	it("a view waiting for its vault's records is reloading, before every empty state", () => {
+		for (const chain of ["empty", "verified", "broken", null] as const)
+			for (const phase of ["loading", "loaded", "failed"] as const)
+				expect(
+					listState({ phase, chain, total: 0, shown: 0, beforeWindow: true, reloading: true }),
+				).toBe("reloading");
+		// CONTROL: not reloading, the same input keeps its empty state.
+		expect(
+			listState({ phase: "loaded", chain: "verified", total: 0, shown: 0, beforeWindow: true }),
+		).toBe("before-window");
+	});
+
 	it("red-first ('no matching transactions — clear filters' while loading): loading is its own state", () => {
 		expect(listState({ phase: "loading", chain: null, total: 0, shown: 0 })).toBe("loading");
 		expect(listState({ phase: "loading", chain: "empty", total: 0, shown: 0 })).toBe("loading");

@@ -126,6 +126,9 @@ export const Trends = memo(function Trends(props: {
 	at?: AtPayload | null;
 	/** The live vault's last position: a clamped answer stops saying "latest record" once records follow it. */
 	head?: number;
+	/** The records of the point's own vault are on their way: the empty state is replaced by `reloadingNote`. */
+	reloading?: boolean;
+	reloadingNote?: string;
 }): React.JSX.Element {
 	const at = props.at ?? null;
 	const [granularity, setGranularity] = useState<Granularity>("day");
@@ -232,7 +235,7 @@ export const Trends = memo(function Trends(props: {
 				</div>
 				{series.length === 0 ? (
 					<div className="ut-empty">
-						<b>No records in view</b>
+						<b>{props.reloading === true ? props.reloadingNote : "No records in view"}</b>
 					</div>
 				) : (
 					// The container is the chart's image: the label states the series, and the table below lists every
@@ -301,23 +304,28 @@ export const Trends = memo(function Trends(props: {
 					/>
 				)}
 			</div>
-			<div className="ut-split">
-				<BarList title="Cost by kind" totals={byKind} />
-				<BarList title="Cost by model" totals={byModel} />
-			</div>
-			<div className="ut-split">
-				<BarList
-					title={`Cost by job type (${JOB_TYPE_CAVEAT})`}
-					note={`The type each caller declared when it authorized the job. "untyped": no type was declared. Every bucket is listed, and together they add up to the total in view.`}
-					totals={byJobType}
-					limit={Number.POSITIVE_INFINITY}
-				/>
-			</div>
-			<div className="ut-sub mono">
-				{props.rows.length.toLocaleString()} records {scope}
-				{window && ` · ${formatUtcMinute(window.first)} to ${formatUtcMinute(window.last)}`}
-				{at !== null && ` · ${shownLabel(at, props.head ?? at.head, new Date().toISOString())}`}
-			</div>
+			{/* While the point's records are on their way the lists would only say "none": they wait, as the chart does. */}
+			{props.reloading !== true && (
+				<>
+					<div className="ut-split">
+						<BarList title="Cost by kind" totals={byKind} />
+						<BarList title="Cost by model" totals={byModel} />
+					</div>
+					<div className="ut-split">
+						<BarList
+							title={`Cost by job type (${JOB_TYPE_CAVEAT})`}
+							note={`The type each caller declared when it authorized the job. "untyped": no type was declared. Every bucket is listed, and together they add up to the total in view.`}
+							totals={byJobType}
+							limit={Number.POSITIVE_INFINITY}
+						/>
+					</div>
+					<div className="ut-sub mono">
+						{props.rows.length.toLocaleString()} records {scope}
+						{window && ` · ${formatUtcMinute(window.first)} to ${formatUtcMinute(window.last)}`}
+						{at !== null && ` · ${shownLabel(at, props.head ?? at.head, new Date().toISOString())}`}
+					</div>
+				</>
+			)}
 			<div className="ut-sub mono">{UT_KEY}</div>
 		</div>
 	);

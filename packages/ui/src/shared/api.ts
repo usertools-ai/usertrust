@@ -115,6 +115,11 @@ export interface AtPayload {
 	 * compares epochs across one.
 	 */
 	epoch: number;
+	/**
+	 * An id of the server process this answer comes from, new at every start: `epoch` restarts at 0 in each process, so
+	 * the boot and the epoch together name the vault. Absent from an older server.
+	 */
+	boot?: string;
 	/** Spend at `pos`: the cost of every `llm_call` record at positions `0..pos` (the header's Spend rule). */
 	spentUt: number;
 	/** Records at positions `0..pos`: `llm_call` (not `llm_call_failed`), denials (`policy_denied`, `ledger_rejected`), and the rest. */

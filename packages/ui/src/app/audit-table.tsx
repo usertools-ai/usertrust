@@ -179,6 +179,8 @@ export type { BeforeWindow };
 
 function Empty(props: {
 	state: Exclude<ReturnType<typeof listState>, "rows">;
+	/** What a reloading list says (`pastHeldNote`). */
+	reloadingNote: string;
 	hidden: number;
 	before: BeforeWindow | null;
 	onClearFilters(): void;
@@ -237,6 +239,13 @@ function Empty(props: {
 				</div>
 			);
 		}
+		case "reloading":
+			// Plain text, not a status: the status under the header already announces it.
+			return (
+				<div className="ut-empty">
+					<b>{props.reloadingNote}</b>
+				</div>
+			);
 		case "filtered-out":
 			return (
 				<div className="ut-empty" role="status">
@@ -262,6 +271,9 @@ export const AuditTable = memo(function AuditTable(props: {
 	chain: ChainStatus | null;
 	/** Set at a past position before the first row held: the list is empty because it starts later. */
 	beforeWindow?: BeforeWindow | null;
+	/** The records of the point's own vault are on their way: the list says so (`reloadingNote`), never that none are held. */
+	reloading?: boolean;
+	reloadingNote?: string;
 	liveIds?: Set<string>;
 	selected: string | null;
 	/** `viaKeyboard`: opened with Enter or Space, so the inspector should take focus. A click leaves focus alone. */
@@ -414,6 +426,7 @@ export const AuditTable = memo(function AuditTable(props: {
 		total: props.total,
 		shown: sorted.length,
 		beforeWindow: (props.beforeWindow ?? null) !== null,
+		reloading: props.reloading === true,
 	});
 
 	return (
@@ -461,6 +474,7 @@ export const AuditTable = memo(function AuditTable(props: {
 						state={state}
 						hidden={props.total - sorted.length}
 						before={props.beforeWindow ?? null}
+						reloadingNote={props.reloadingNote ?? ""}
 						onClearFilters={props.onClearFilters}
 					/>
 				) : (

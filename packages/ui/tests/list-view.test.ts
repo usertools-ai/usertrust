@@ -18,6 +18,7 @@ import {
 	heldNote,
 	holdAnnouncement,
 	listView,
+	pastHeldNote,
 } from "../src/shared/list-view.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 
@@ -74,6 +75,7 @@ const state = (v: ReturnType<typeof listView>): ReturnType<typeof listState> =>
 		total: v.total,
 		shown: v.filtered.length,
 		beforeWindow: v.beforeWindow !== null,
+		reloading: v.reloading,
 	});
 
 describe("listView", () => {
@@ -201,6 +203,41 @@ describe("listView", () => {
 			'.ut-drawer[data-held="true"] > .ut-insp-in',
 		])
 			expect(dim?.[1]).toContain(sel);
+	});
+});
+
+describe("pastHeldNote", () => {
+	it("says the vault is being reloaded when the shown answer came from a reload", () => {
+		expect(pastHeldNote(true)).toBe("Updating to the reloaded vault…");
+	});
+
+	it("says the point's records are loading otherwise", () => {
+		expect(pastHeldNote(false)).toBe("Loading this point's records…");
+	});
+});
+
+describe("listView while the records of the answer's own vault are not held", () => {
+	const input = (reloading?: boolean) => ({
+		rows: [] as LedgerRow[],
+		at: at({ pos: 10, windowStartPos: 0 }),
+		filters: EMPTY_FILTERS,
+		phase: "loaded" as const,
+		summary: summary(),
+		...(reloading === undefined ? {} : { reloading }),
+	});
+
+	it("carries the flag to the list's state, which is reloading first", () => {
+		const v = listView(input(true));
+		expect(v.reloading).toBe(true);
+		expect(state(v)).toBe("reloading");
+	});
+
+	it("CONTROL: not reloading, a past point with no rows held keeps its empty state", () => {
+		for (const flag of [false, undefined]) {
+			const v = listView(input(flag));
+			expect(v.reloading).toBe(false);
+			expect(state(v)).toBe("before-window");
+		}
 	});
 });
 
