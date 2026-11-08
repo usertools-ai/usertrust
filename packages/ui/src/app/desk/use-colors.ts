@@ -3,14 +3,26 @@
 
 /**
  * The desk's colours, fixed for the session. A category keeps the colour it was given in every view, whatever the
- * filter, the range or the position: the map is built once per dimension from every record, and a key first seen on
- * the live tail takes the next free slot without repainting any other.
+ * filter, the range or the position: the map is built once per dimension, and a key first seen on the live tail takes
+ * the next free slot without repainting any other.
+ *
+ * The ranking comes from the server's whole-vault totals when they arrived. The rows the page holds are only the
+ * labelled FALLBACK, for a request that failed or timed out: they can miss a category whose spend is all in older
+ * records.
  */
 
 import { isHeaderSpend } from "../../shared/aggregate.js";
+import type { TotalsPayload } from "../../shared/api.js";
 import { type Dimension, keyOf } from "../../shared/breakdown.js";
-import { type ColorMap, rankColors } from "../../shared/colors.js";
+import { type ColorMap, colorsFromRanking, rankColors } from "../../shared/colors.js";
 import type { LedgerRow } from "../../shared/rows.js";
+import { rankingFrom } from "../../shared/totals.js";
+
+/** Where the ranking came from: the whole vault, or (the fallback) the rows the page holds. */
+export type ColorSource = "whole vault" | "held rows";
+
+/** The outcome of the totals request: not settled yet, failed (null), or the payload. */
+export type TotalsOutcome = "pending" | null | TotalsPayload;
 
 interface Entry {
 	map: ColorMap;
@@ -21,17 +33,36 @@ interface Entry {
 
 export class ColorBook {
 	private readonly entries = new Map<Dimension, Entry>();
+	private chosen: { source: ColorSource; totals: TotalsPayload | null } | null = null;
+
+	/** Where the ranking came from; null until the first map is built. Chosen once, for every dimension. */
+	get source(): ColorSource | null {
+		return this.chosen?.source ?? null;
+	}
 
 	/**
-	 * The colour map for `dim`. Until the vault has loaded it is an empty, throwaway map: building the real one from a
-	 * partial snapshot would rank by the wrong totals and then be kept for ever. After that it is built once from
-	 * `allRows` and the same instance comes back every time.
+	 * The colour map for `dim`. Until the vault has loaded AND the totals request has settled it is an empty,
+	 * throwaway map: building the real one from a partial snapshot would rank by the wrong totals and then be kept for
+	 * ever. After that it is built once and the same instance comes back every time.
+	 *
+	 * The source is chosen at the first build and every dimension uses it: with a payload, each map ranks by the
+	 * whole vault; with `null`, by `allRows` (the fallback). An answer that arrives later changes nothing.
 	 */
-	mapFor(dim: Dimension, allRows: readonly LedgerRow[], loaded: boolean): ColorMap {
+	mapFor(
+		dim: Dimension,
+		allRows: readonly LedgerRow[],
+		loaded: boolean,
+		totals: TotalsOutcome,
+	): ColorMap {
 		const have = this.entries.get(dim);
 		if (have !== undefined) return have.map;
-		if (!loaded) return rankColors([], dim);
-		const map = rankColors([...allRows], dim);
+		if (!loaded || totals === "pending") return rankColors([], dim);
+		this.chosen ??=
+			totals === null ? { source: "held rows", totals: null } : { source: "whole vault", totals };
+		const map =
+			this.chosen.totals === null
+				? rankColors([...allRows], dim)
+				: colorsFromRanking(dim, rankingFrom(this.chosen.totals, dim));
 		this.entries.set(dim, { map, scanned: allRows.length, seen: keysOf(dim, allRows, 0) });
 		return map;
 	}

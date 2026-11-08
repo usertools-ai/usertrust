@@ -88,9 +88,9 @@ describe("ColorBook", () => {
 	it("is empty before the vault has loaded, then builds the real map", () => {
 		const book = new ColorBook();
 		const rows = byActor({ a: 9, b: 5 });
-		const before = book.mapFor("lane", rows, false);
+		const before = book.mapFor("lane", rows, false, null);
 		expect(before.of("a")).not.toBe(SERIES[0]);
-		const after = book.mapFor("lane", rows, true);
+		const after = book.mapFor("lane", rows, true, null);
 		expect(after.of("a")).toBe(SERIES[0]);
 		expect(after.of("b")).toBe(SERIES[1]);
 	});
@@ -98,18 +98,18 @@ describe("ColorBook", () => {
 	it("returns the same map for ever once built, and observing a superset repaints nothing", () => {
 		const book = new ColorBook();
 		const rows = byActor({ a: 9, b: 5, c: 3 });
-		const map = book.mapFor("lane", rows, true);
+		const map = book.mapFor("lane", rows, true, null);
 		const was = ["a", "b", "c"].map((k) => map.of(k));
 		const more = [...rows, row({ pos: 3, actor: "d", costUt: 1 })];
 		book.observe("lane", more);
-		expect(book.mapFor("lane", more, true)).toBe(map);
+		expect(book.mapFor("lane", more, true, null)).toBe(map);
 		expect(["a", "b", "c"].map((k) => map.of(k))).toEqual(was);
 	});
 
 	it("gives a key first seen on the live tail the next free slot", () => {
 		const book = new ColorBook();
 		const rows = byActor({ a: 9, b: 5, c: 3 });
-		const map = book.mapFor("lane", rows, true);
+		const map = book.mapFor("lane", rows, true, null);
 		const more = [...rows, row({ pos: 3, actor: "d", costUt: 1 })];
 		book.observe("lane", more);
 		expect(map.of("d")).toBe(SERIES[3]);
@@ -122,8 +122,8 @@ describe("ColorBook", () => {
 			row({ pos: 0, actor: "a", model: "m1", costUt: 9 }),
 			row({ pos: 1, actor: "b", model: "m2", costUt: 1 }),
 		];
-		const lane = book.mapFor("lane", rows, true);
-		const model = book.mapFor("model", rows, true);
+		const lane = book.mapFor("lane", rows, true, null);
+		const model = book.mapFor("model", rows, true, null);
 		expect(lane).not.toBe(model);
 		expect(lane.dim).toBe("lane");
 		expect(model.dim).toBe("model");
@@ -133,7 +133,7 @@ describe("ColorBook", () => {
 	it("rescans after the array shrank without changing a colour it has given", () => {
 		const book = new ColorBook();
 		const rows = byActor({ a: 9, b: 5, c: 3 });
-		const map = book.mapFor("lane", rows, true);
+		const map = book.mapFor("lane", rows, true, null);
 		// A resync: fewer rows than before, and one of them carries a key not seen yet.
 		book.observe("lane", [rows[0] as LedgerRow, row({ pos: 1, actor: "f", costUt: 1 })]);
 		expect(map.of("f")).toBe(SERIES[3]);
@@ -143,7 +143,7 @@ describe("ColorBook", () => {
 	it("does not give a slot to a key that never carries spend", () => {
 		const book = new ColorBook();
 		const rows = byActor({ a: 9 });
-		const map = book.mapFor("lane", rows, true);
+		const map = book.mapFor("lane", rows, true, null);
 		const withGhost = [...rows, row({ pos: 1, actor: "ghost", kind: "budget_set", costUt: 0 })];
 		book.observe("lane", withGhost);
 		book.observe("lane", [...withGhost, row({ pos: 2, actor: "real", costUt: 1 })]);

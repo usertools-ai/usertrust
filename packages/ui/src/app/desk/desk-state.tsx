@@ -21,6 +21,7 @@ import {
 	useState,
 } from "react";
 import { rowsAsAnswered } from "../../shared/asof.js";
+import { AT_TIMEOUT_MS } from "../../shared/at-follow.js";
 import type { Dimension } from "../../shared/breakdown.js";
 import {
 	deskWindow,
@@ -49,8 +50,9 @@ import { useNow } from "../use-now.js";
 import { useUrlState } from "../use-url-state.js";
 import type { DeskData, DeskView, ShellBinding } from "./desk-types.js";
 import type { Peel, PeelState } from "./escape-peel.js";
+import { loadTotals } from "./load-totals.js";
 import { computeBreakdown, memoOnce } from "./use-breakdown.js";
-import { ColorBook } from "./use-colors.js";
+import { ColorBook, type TotalsOutcome } from "./use-colors.js";
 import { useHoverCategory } from "./use-hover.js";
 
 export type { DeskData, DeskView, ShellBinding } from "./desk-types.js";
@@ -271,13 +273,25 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 		[list.shownRows, filters, window, level],
 	);
 	const book = useState(() => new ColorBook())[0];
+	// The whole-vault totals the colours rank by, asked for once when the desk mounts, alongside the ledger load. It
+	// settles to the payload or to null (failed or timed out); the book is built when both it and the rows are in.
+	const [totals, setTotals] = useState<TotalsOutcome>("pending");
+	useEffect(() => {
+		let cancelled = false;
+		void loadTotals(globalThis.fetch, AT_TIMEOUT_MS).then((outcome) => {
+			if (!cancelled) setTotals(outcome);
+		});
+		return () => {
+			cancelled = true;
+		};
+	}, []);
 	const colors = useMemo(
 		() =>
 			memoOnce(() => {
 				book.observe(level, rows);
-				return book.mapFor(level, rows, phase === "loaded");
+				return book.mapFor(level, rows, phase === "loaded", totals);
 			}),
-		[book, level, rows, phase],
+		[book, level, rows, phase, totals],
 	);
 
 	const data = useMemo<DeskData>(
