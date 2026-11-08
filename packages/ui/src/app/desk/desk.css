@@ -1,0 +1,14 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Usertools, Inc. */
+
+/* The desk's stylesheet entry (main.tsx imports it after styles.css, which fixes the layer order). The tokens
+   come first, then each window's sheet, then the shell's own rules. */
+@import "./desk-tokens.css";
+@import "../windows/spend/spend.css";
+@import "../windows/share/share.css";
+@import "../windows/ledger/ledger.css";
+@import "../windows/now/now.css";
+
+@layer components {
+	/* The shell's rules (prefix ut-dk-, and ut-win for a window). */
+}

@@ -1,0 +1,216 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import { MUTED, PROVIDER_COLOR, SERIES } from "../src/shared/colors.js";
+import { allCss, contrast, deskCss, deskCssFiles } from "./helpers/css.js";
+
+const APP = join(import.meta.dirname, "..", "src", "app");
+const TOKENS = readFileSync(join(APP, "desk", "desk-tokens.css"), "utf-8").replace(
+	/\/\*[\s\S]*?\*\//g,
+	"",
+);
+
+const EXPECTED: Record<string, string> = {
+	"--dk-page": "#0b0b0a",
+	"--dk-pane": "#111110",
+	"--dk-raised": "#181816",
+	"--dk-hover": "#201f1d",
+	"--dk-grid": "#272624",
+	"--dk-base": "#3a3835",
+	"--dk-muted": "#66635d",
+	"--dk-label": "#8a877f",
+	"--dk-legend": "#b7b4ab",
+	"--dk-text": "#ece9e1",
+	"--dk-gold": "#F0C462",
+	"--dk-gold-mid": "#C2922F",
+	"--dk-gold-deep": "#5E420E",
+	"--dk-gold-hi": "#FFF2C8",
+	"--dk-s0": "#BE804D",
+	"--dk-s1": "#5D6775",
+	"--dk-s2": "#C8CCD3",
+	"--dk-s3": "#7095C1",
+	"--dk-a0": "#E8B54B",
+	"--dk-series-muted": "#8A877F",
+	"--dk-pane-a": "1",
+	"--dk-radius": "14px",
+	"--dk-gap": "16px",
+};
+
+/** A custom property's value in the token sheet. */
+function token(name: string): string {
+	const m = new RegExp(`(?:^|[\\s;{])${name}\\s*:\\s*([^;}]+)`).exec(TOKENS);
+	if (!m) throw new Error(`no token ${name}`);
+	return (m[1] ?? "").trim();
+}
+
+interface Rule {
+	selectors: string[];
+	decls: Map<string, string>;
+	layer: string | undefined;
+}
+
+/** Rules of one sheet with their cascade layer (undefined when unlayered). Nested at-rules other than `@layer` and
+ * `@media` are skipped whole. */
+function parseRules(source: string): Rule[] {
+	const css = source.replace(/\/\*[\s\S]*?\*\//g, "");
+	const rules: Rule[] = [];
+	let i = 0;
+	const block = (layer: string | undefined): void => {
+		while (i < css.length) {
+			while (i < css.length && /\s/.test(css[i] ?? "")) i++;
+			if (i >= css.length) return;
+			if (css[i] === "}") {
+				i++;
+				return;
+			}
+			let j = i;
+			while (j < css.length && css[j] !== "{" && css[j] !== ";") j++;
+			const prelude = css.slice(i, j).replace(/\s+/g, " ").trim();
+			if (css[j] === ";") {
+				i = j + 1;
+				continue;
+			}
+			i = j + 1;
+			if (prelude.startsWith("@layer")) block(prelude.slice("@layer".length).trim());
+			else if (prelude.startsWith("@media")) block(layer);
+			else if (prelude.startsWith("@")) {
+				let depth = 1;
+				while (i < css.length && depth > 0) {
+					if (css[i] === "{") depth++;
+					if (css[i] === "}") depth--;
+					i++;
+				}
+			} else {
+				const end = css.indexOf("}", i);
+				const decls = new Map<string, string>();
+				for (const d of css.slice(i, end).split(";")) {
+					const colon = d.indexOf(":");
+					if (colon < 0) continue;
+					decls.set(d.slice(0, colon).trim(), d.slice(colon + 1).trim());
+				}
+				rules.push({ selectors: prelude.split(",").map((s) => s.trim()), decls, layer });
+				i = end + 1;
+			}
+		}
+	};
+	block(undefined);
+	return rules;
+}
+
+describe("the desk's colour tokens", () => {
+	it("has every token, with exactly the spec's value", () => {
+		for (const [name, value] of Object.entries(EXPECTED)) {
+			expect(token(name).toLowerCase(), name).toBe(value.toLowerCase());
+		}
+	});
+
+	it("keeps the series colours equal to the data's: SERIES, MUTED and the four providers", () => {
+		for (let k = 0; k < 4; k++) {
+			expect(token(`--dk-s${k}`).toLowerCase()).toBe((SERIES[k] as string).toLowerCase());
+		}
+		expect(token("--dk-a0").toLowerCase()).toBe((SERIES[4] as string).toLowerCase());
+		expect(token("--dk-series-muted").toLowerCase()).toBe(MUTED.toLowerCase());
+		expect(token("--dk-s0").toLowerCase()).toBe(PROVIDER_COLOR.Anthropic.toLowerCase());
+		expect(token("--dk-s1").toLowerCase()).toBe(PROVIDER_COLOR.OpenAI.toLowerCase());
+		expect(token("--dk-s2").toLowerCase()).toBe(PROVIDER_COLOR.xAI.toLowerCase());
+		expect(token("--dk-s3").toLowerCase()).toBe(PROVIDER_COLOR.Google.toLowerCase());
+		// The series grey and the neutral grey are different colours on purpose.
+		expect(token("--dk-series-muted").toLowerCase()).not.toBe(token("--dk-muted").toLowerCase());
+	});
+
+	it("keeps the legacy faint text readable on the desk's pane (4.5:1)", () => {
+		expect(contrast("#7e7e88", token("--dk-pane"))).toBeGreaterThanOrEqual(4.5);
+	});
+
+	it("bridges the legacy page, surface and raised tokens inside .ut-dk only", () => {
+		const bridge = parseRules(TOKENS).find((r) => r.selectors.includes(".ut-dk"));
+		expect(bridge?.layer).toBe("components");
+		expect(bridge?.decls.get("--page")).toBe("var(--dk-page)");
+		expect(bridge?.decls.get("--surface")).toBe("var(--dk-pane)");
+		expect(bridge?.decls.get("--raised")).toBe("var(--dk-raised)");
+		expect([...(bridge?.decls.keys() ?? [])].sort()).toEqual(["--page", "--raised", "--surface"]);
+	});
+});
+
+describe("the desk's stylesheets", () => {
+	it("are the shell's two and the four windows', one each", () => {
+		expect(deskCssFiles()).toEqual([
+			"desk/desk-tokens.css",
+			"desk/desk.css",
+			"windows/ledger/ledger.css",
+			"windows/now/now.css",
+			"windows/share/share.css",
+			"windows/spend/spend.css",
+		]);
+	});
+
+	it("enter through desk.css: the tokens, then each window's sheet", () => {
+		const entry = readFileSync(join(APP, "desk", "desk.css"), "utf-8");
+		const imports = [...entry.matchAll(/@import\s+"([^"]+)"\s*;/g)].map((m) => m[1]);
+		expect(imports).toEqual([
+			"./desk-tokens.css",
+			"../windows/spend/spend.css",
+			"../windows/share/share.css",
+			"../windows/ledger/ledger.css",
+			"../windows/now/now.css",
+		]);
+		expect(entry.indexOf("@layer components")).toBeGreaterThan(entry.lastIndexOf("@import"));
+	});
+
+	it("put every rule inside @layer components, except the one :root token block", () => {
+		for (const file of deskCssFiles()) {
+			const rules = parseRules(readFileSync(join(APP, file), "utf-8"));
+			for (const r of rules) {
+				if (r.layer === undefined) {
+					expect(r.selectors, `${file}: an unlayered rule`).toEqual([":root"]);
+					expect(file).toBe("desk/desk-tokens.css");
+				} else {
+					expect(r.layer, `${file}: ${r.selectors.join(", ")}`).toBe("components");
+				}
+			}
+		}
+		const roots = parseRules(TOKENS).filter((r) => r.layer === undefined);
+		expect(roots).toHaveLength(1);
+	});
+
+	it("use only the two breakpoints the page has: 760px and 900px", () => {
+		const widths = [...allCss().matchAll(/@media\s*\(max-width:\s*(\d+)px\)/g)].map((m) =>
+			Number(m[1]),
+		);
+		expect(widths.filter((w) => w !== 760 && w !== 900)).toEqual([]);
+	});
+
+	it("keep the panes opaque, and a window free of anything that traps a fixed drawer", () => {
+		expect(token("--dk-pane-a")).toBe("1");
+		const trapping = ["transform", "filter", "backdrop-filter", "contain", "will-change"];
+		for (const r of parseRules(deskCss())) {
+			if (!r.selectors.some((s) => s.startsWith(".ut-win"))) continue;
+			for (const p of trapping) {
+				expect(r.decls.has(p), `${r.selectors.join(", ")} sets ${p}`).toBe(false);
+			}
+		}
+	});
+
+	it("blur only on .ut-glass", () => {
+		for (const r of parseRules(deskCss())) {
+			if (r.decls.has("backdrop-filter") || r.decls.has("-webkit-backdrop-filter")) {
+				expect(r.selectors.every((s) => s === ".ut-glass" || s.startsWith(".ut-glass"))).toBe(true);
+			}
+		}
+	});
+});
+
+describe("the reader these checks stand on", () => {
+	// A check that has never been shown a violation proves nothing: feed the reader a bad sheet.
+	it("sees a unlayered rule, a trapping window rule and a blur outside .ut-glass", () => {
+		const bad = parseRules(
+			".ut-win-x { transform: none; } @layer components { .ut-win { will-change: opacity; } .ut-pane { backdrop-filter: blur(4px); } }",
+		);
+		expect(bad.find((r) => r.selectors[0] === ".ut-win-x")?.layer).toBeUndefined();
+		expect(bad.find((r) => r.selectors[0] === ".ut-win")?.decls.has("will-change")).toBe(true);
+		expect(bad.find((r) => r.selectors[0] === ".ut-pane")?.decls.has("backdrop-filter")).toBe(true);
+	});
+});

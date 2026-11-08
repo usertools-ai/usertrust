@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { SummaryPayload } from "../src/shared/api.js";
 import { activeFilterCount, EMPTY_FILTERS, type FilterState } from "../src/shared/filters.js";
 import { PHONE_MAX_WIDTH, PHONE_QUERY } from "../src/shared/layout.js";
+import { allCss, legacyCss } from "./helpers/css.js";
 
-const CSS = readFileSync(join(import.meta.dirname, "..", "src", "app", "styles.css"), "utf-8");
+// The phone block and the wide rules are the original stylesheet's; the breakpoint check below reads every sheet.
+const CSS = legacyCss();
 
 // The components are .tsx, which the tests' typecheck (no jsx) cannot import statically: they are loaded by a computed
 // path, as the other render tests do, and typed here by what these tests pass.
@@ -85,7 +85,9 @@ describe("the phone breakpoint", () => {
 		// Every narrow block is written at the phone width (or the summary's wider 900px step), so a phone block written
 		// with another number, which would drift from the components' query, fails here. (The hit-area block at the end
 		// has its own phone-width section, at the same width.)
-		const widths = [...CSS.matchAll(/@media \(max-width: (\d+)px\)/g)].map((m) => Number(m[1]));
+		const widths = [...allCss().matchAll(/@media \(max-width: (\d+)px\)/g)].map((m) =>
+			Number(m[1]),
+		);
 		expect(widths.filter((w) => w !== PHONE_MAX_WIDTH && w !== 900)).toEqual([]);
 		expect(widths.filter((w) => w === PHONE_MAX_WIDTH).length).toBeGreaterThanOrEqual(1);
 	});
