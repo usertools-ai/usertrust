@@ -212,7 +212,7 @@ describe("heldNote", () => {
 		expect(heldNote(at({ pos: 40, statusAt: {} }), at({ pos: 40, epoch: 1 }))).toBeNull();
 	});
 
-	it("names the position coming, from 1, while they show another (during a drag, after one, after Back or Forward)", () => {
+	it("names the position coming, from 1, while they show another (after a new position, Back or Forward)", () => {
 		expect(heldNote(at({ pos: 40 }), at({ pos: 61 }))).toBe("Updating to record 62…");
 		expect(heldNote(null, at({ pos: 1_233 }))).toBe(
 			`Updating to record ${(1_234).toLocaleString()}…`,
@@ -223,8 +223,8 @@ describe("heldNote", () => {
 		expect(heldNote(at({ pos: 40 }), null)).toBe("Updating to the live vault…");
 	});
 
-	it("after a release: the drag's frozen input is gone, but the list still draws the old position until it renders", () => {
-		// What the page computes in the urgent render after release (the deferred value still the old input), then after.
+	it("after a new position, the list still draws the old one until the deferred render lands", () => {
+		// What the page computes in the urgent render after the change (the deferred value still the old input), then after.
 		const old = at({ pos: 10 });
 		const now = at({ pos: 63 });
 		expect(heldNote(old, now)).not.toBeNull();
@@ -235,8 +235,8 @@ describe("heldNote", () => {
 describe("holdAnnouncement", () => {
 	const start: HoldAnnouncement = { held: false, text: "" };
 
-	it("speaks twice per drag, however many answers land: once as the views lag, once as they catch up", () => {
-		// A drag from 40 to 63, an answer for every position on the way, then the release and the deferred render.
+	it("speaks twice per change of position, however many answers land: once as the views lag, once as they catch up", () => {
+		// A preview moving from 40 to 63, an answer for every position on the way, then the deferred render.
 		let a = start;
 		const said: string[] = [];
 		const step = (drawn: number, shown: number): void => {

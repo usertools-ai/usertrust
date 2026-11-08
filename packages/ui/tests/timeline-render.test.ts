@@ -162,7 +162,7 @@ describe("the header at a past position", () => {
 		expect(text(strip(at({ pos: 40 })))).toContain("41 events");
 	});
 
-	it("a clamped answer stops saying '(latest record)' in the header once more records have arrived, as the timeline label does", () => {
+	it("a clamped answer stops saying '(latest record)' in the header once more records have arrived", () => {
 		const a = at({ pos: 99, head: 99, clamped: true });
 		const live = (events: number): SummaryPayload =>
 			summary({ chain: { events, valid: true, empty: false, breakIndex: null, errors: [] } });

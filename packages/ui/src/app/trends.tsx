@@ -166,7 +166,8 @@ export const Trends = memo(function Trends(props: {
 				<Tile
 					label="Cost in view"
 					value={
-						// A move between positions jumps from recorded value to recorded value; the switch between live and past remounts it.
+						// A move between positions jumps from recorded value to recorded value; the switch between live and past remounts
+						// it.
 						<TickingFigure
 							key={at === null ? "live" : "past"}
 							ut={tiles.totalCostUt}

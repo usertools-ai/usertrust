@@ -59,8 +59,11 @@ class History {
 	}
 }
 
-/** The page: the url state, the writer and the follower, wired as `App` and `useAt` wire them. */
-function page(initialHash: string) {
+/**
+ * The page: the url state, the writer and the follower, wired as `App` and `useAt` wire them. With `manual`, every load
+ * waits in `pending` until the test answers it, so a request can be in flight across a navigation.
+ */
+function page(initialHash: string, opts: { manual?: boolean } = {}) {
 	const history = new History(initialHash);
 	let state: UrlState = decodeUrlState(initialHash);
 	const sync = new AddressSync(
@@ -73,11 +76,13 @@ function page(initialHash: string) {
 		() => {},
 	);
 	const loads: number[] = [];
+	const pending: Array<{ pos: number; resolve(a: AtPayload): void }> = [];
 	const views: AtView[] = [];
 	const follower = new AtFollower(
 		(pos) => {
 			loads.push(pos);
-			return Promise.resolve(answer(pos));
+			if (opts.manual !== true) return Promise.resolve(answer(pos));
+			return new Promise<AtPayload>((resolve) => pending.push({ pos, resolve }));
 		},
 		(v) => views.push(v),
 	);
@@ -86,6 +91,7 @@ function page(initialHash: string) {
 		history,
 		follower,
 		loads,
+		pending,
 		views,
 		get state() {
 			return state;
@@ -170,6 +176,40 @@ describe("a navigation while a preview is pending", () => {
 		p.navigate({ delta: -1 });
 		expect(p.state.at).toBeNull();
 		expect(p.views.at(-1)?.wanted).toBeNull();
+	});
+});
+
+describe("a preview's answer that lands after a navigation", () => {
+	// Let the loader's promise settle and the follower's handlers run.
+	const flush = async (): Promise<void> => {
+		for (let i = 0; i < 20; i++) await Promise.resolve();
+	};
+
+	it("is not shown: a link to another position keeps the last point shown until its own answer lands", async () => {
+		const p = page("#at=20", { manual: true });
+		p.pending.shift()?.resolve(answer(20));
+		await flush();
+		expect(p.views.at(-1)?.at?.pos).toBe(20);
+		p.follower.want(70); // a preview asks for 70; it is still in flight
+		p.navigate({ hash: "#at=30" }); // a link to 30
+		p.pending.shift()?.resolve(answer(70)); // the preview's answer lands after the navigation
+		await flush();
+		expect(p.views.at(-1)?.wanted).toBe(30);
+		expect(p.views.at(-1)?.at?.pos).toBe(20); // never 70
+		p.pending.shift()?.resolve(answer(30));
+		await flush();
+		expect(p.views.at(-1)?.at?.pos).toBe(30);
+	});
+
+	it("CONTROL: without the navigation, the same answer is shown on the way, as a moving preview needs", async () => {
+		const p = page("#at=20", { manual: true });
+		p.pending.shift()?.resolve(answer(20));
+		await flush();
+		p.follower.want(70);
+		p.follower.want(30); // the preview moves on: no navigation
+		p.pending.shift()?.resolve(answer(70));
+		await flush();
+		expect(p.views.at(-1)?.at?.pos).toBe(70);
 	});
 });
 

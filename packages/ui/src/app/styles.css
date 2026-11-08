@@ -907,8 +907,8 @@ body {
 	}
 	/* Everything drawn from the list's input while it shows another position than the header (the moment after a new
 	   position lands, Back or Forward): the list or Trends, the count, Export, the facets and the inspector.
-	   Dimmed, so it is plain they have not caught up; the status under the header says what is coming (.ut-tl-held). Opacity only:
-	   nothing moves, and nothing animates. The drawer is dimmed inside, so it stays opaque over the page. */
+	   Dimmed, so it is plain they have not caught up; the status under the header says what is coming (.ut-tl-held).
+	   Opacity only: nothing moves, and nothing animates. The drawer is dimmed inside, so it stays opaque over the page. */
 	.ut-pane[data-held="true"],
 	.ut-head .ut-label[data-held="true"],
 	.ut-btn[data-held="true"],

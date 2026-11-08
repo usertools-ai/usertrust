@@ -41,9 +41,9 @@ export function App(): React.JSX.Element {
 	// The view, filters and open record live in the page address (`location.hash`): a reload keeps them, a link shares them.
 	const { view, setView, filters, setFilters, openHash, setOpenHash, at, navigation, addressNote } =
 		useUrlState();
-	// The past position shown (`#at=N`, or a preview before it is written there), from /api/at. Until its first
-	// answer lands, or when it fails with nothing loaded, the screen stays live and the status under the header says so: a past view is
-	// only ever drawn from its own answer.
+	// The past position shown (`#at=N`, or a preview before it is written there), from /api/at. Until its first answer
+	// lands, or when it fails with nothing loaded, the screen stays live and the status under the header says so: a past
+	// view is only ever drawn from its own answer.
 	const { view: atView } = useAt(at, summary, live, rows, resyncs, navigation);
 	const shownAt = atView.at;
 	// The past view reads each row's status against the rows the page held when the answer's request was SENT
@@ -138,7 +138,6 @@ export function App(): React.JSX.Element {
 		<div className="ut-app">
 			<SummaryStrip summary={summary} live={live} at={shownAt} />
 			<AtStatus
-				at={shownAt}
 				error={atView.error}
 				reloaded={atView.reloaded}
 				holdNote={holdNote}

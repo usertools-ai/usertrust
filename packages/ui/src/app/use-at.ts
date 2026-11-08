@@ -9,8 +9,8 @@ import { atFailureText } from "../shared/timeline-view.js";
 import type { LiveState } from "./store.js";
 
 /**
- * GET /api/at?pos=N. Every failure is an Error whose message is the short phrase the status under the header shows. `signal` is the
- * follower's: it aborts the request after `AT_TIMEOUT_MS`, so a hung server goes down the failure path.
+ * GET /api/at?pos=N. Every failure is an Error whose message is the short phrase the status under the header shows.
+ * `signal` is the follower's: it aborts the request after `AT_TIMEOUT_MS`, so a hung server goes down the failure path.
  */
 async function loadAt(pos: number, signal: AbortSignal): Promise<AtPayload> {
 	let res: Response;
@@ -29,10 +29,11 @@ async function loadAt(pos: number, signal: AbortSignal): Promise<AtPayload> {
 
 /**
  * The vault as recorded at `pos` (the address's; null: live), from `/api/at`, one request at a time with the latest
- * position winning (`AtFollower`). `preview` asks for a position without touching the address (a hover or a pin in progress).
- * Each new summary (every append, status change and reload sends one) re-reads the position: a later record can change
- * the status a row had there, and a reload can change what the position names. When the live stream comes back after
- * dropping, the server may have restarted and restarted its epochs, so the follower forgets the epoch and re-reads.
+ * position winning (`AtFollower`). `preview` asks for a position without touching the address (a hover or a pin in
+ * progress). Each new summary (every append, status change and reload sends one) re-reads the position: a later record
+ * can change the status a row had there, and a reload can change what the position names. When the live stream comes
+ * back after dropping, the server may have restarted and restarted its epochs, so the follower forgets the epoch and
+ * re-reads.
  *
  * `navigation` counts the user's navigations (Back, Forward, a link, a typed address): each one resets the view to the
  * address's position, dropping a preview that was asking for another.

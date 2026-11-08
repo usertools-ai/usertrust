@@ -9,7 +9,6 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, describe, expect, it } from "vitest";
-import type { AtPayload } from "../src/shared/api.js";
 
 type Component<P> = (props: P) => React.JSX.Element;
 async function app<T>(file: string): Promise<T> {
@@ -17,7 +16,6 @@ async function app<T>(file: string): Promise<T> {
 }
 
 interface Props {
-	at: AtPayload | null;
 	error: string | null;
 	reloaded: boolean;
 	holdNote?: string | null;
@@ -29,29 +27,31 @@ beforeAll(async () => {
 	AtStatus = (await app<{ AtStatus: typeof AtStatus }>("at-status")).AtStatus;
 });
 
-const shown = { pos: 40, head: 99, ts: "2026-11-06T10:04:05.000Z", clamped: false } as AtPayload;
 const render = (over: Partial<Props> = {}): string =>
-	renderToStaticMarkup(
-		createElement(AtStatus, { at: null, error: null, reloaded: false, ...over }),
-	);
+	renderToStaticMarkup(createElement(AtStatus, { error: null, reloaded: false, ...over }));
 const note = (html: string): string =>
 	/<p[^>]*class="ut-tl-msg"[^>]*role="status"[^>]*>([^<]*)<\/p>/.exec(html)?.[1] ?? "<missing>";
 
 describe("AtStatus", () => {
-	it("an error with a past answer shown says the last point is still showing", () => {
-		expect(note(render({ at: shown, error: "the dashboard did not answer" }))).toBe(
-			"Could not show that point: the dashboard did not answer. Still showing the last point loaded.",
+	// The approved design's words: the note says only that the point did not show. Whether a past point or the live
+	// vault is on screen is the header's to say ("As recorded at", or nothing when live).
+	it("an error says only that the point did not show", () => {
+		expect(note(render({ error: "the dashboard did not answer" }))).toBe(
+			"Could not show that point: the dashboard did not answer.",
+		);
+		expect(note(render({ error: "the vault has no records" }))).toBe(
+			"Could not show that point: the vault has no records.",
 		);
 	});
 
-	it("an error with nothing shown says the live vault is shown", () => {
-		expect(note(render({ error: "the vault has no records" }))).toBe(
-			"Could not show that point: the vault has no records; showing the live vault.",
+	it("an error and a reload together say both, the error first", () => {
+		expect(note(render({ error: "the dashboard did not answer", reloaded: true }))).toBe(
+			"Could not show that point: the dashboard did not answer. Read again because the vault was reloaded: this position may now name another record.",
 		);
 	});
 
 	it("a reload says the position may now name another record", () => {
-		expect(note(render({ at: shown, reloaded: true }))).toBe(
+		expect(note(render({ reloaded: true }))).toBe(
 			"Read again because the vault was reloaded: this position may now name another record.",
 		);
 	});
@@ -65,7 +65,6 @@ describe("AtStatus", () => {
 
 	it("a held note is shown to the eye and announced once, by the announcer", () => {
 		const html = render({
-			at: shown,
 			holdNote: "Updating to record 62…",
 			announce: "Updating to record 62…",
 		});

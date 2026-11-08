@@ -103,7 +103,7 @@ describe("AtFollower", () => {
 		await h.flush();
 		// 2 was overtaken while 1 was in flight: only the latest is asked for.
 		expect(h.calls.map((c) => c.pos)).toEqual([1, 3]);
-		// The screen follows the drag: the answer for 1 shows until 3's lands.
+		// The screen follows the preview: the answer for 1 shows until 3's lands.
 		expect(h.last().at?.pos).toBe(1);
 		h.calls[1]?.resolve(at({ pos: 3 }));
 		await h.flush();
@@ -635,10 +635,10 @@ describe("AtFollower", () => {
 	});
 });
 
-describe("a navigation (Back, Forward, a link) while a drag's request is in flight", () => {
-	it("drops the drag's answer: it never replaces the destination, also when the destination's own read fails", async () => {
+describe("a navigation (Back, Forward, a link) while a preview's request is in flight", () => {
+	it("drops the preview's answer: it never replaces the destination, also when the destination's own read fails", async () => {
 		const h = harness();
-		h.follower.want(70); // the drag asks for 70
+		h.follower.want(70); // a preview asks for 70
 		h.follower.navigated(); // Back to #at=20
 		h.follower.want(20);
 		h.calls[0]?.resolve(at({ pos: 70 }));
@@ -650,7 +650,7 @@ describe("a navigation (Back, Forward, a link) while a drag's request is in flig
 		expect(h.last()).toMatchObject({ wanted: 20, at: null, error: "the dashboard did not answer" });
 	});
 
-	it("CONTROL: the same moves without a navigation show 70 on the way, as a drag does", async () => {
+	it("CONTROL: the same moves without a navigation show 70 on the way, as a moving preview does", async () => {
 		const h = harness();
 		h.follower.want(70);
 		h.follower.want(20);
@@ -671,10 +671,10 @@ describe("a navigation (Back, Forward, a link) while a drag's request is in flig
 		expect(h.calls).toHaveLength(1);
 	});
 
-	it("keeps an answer for the destination sent before a drag and a navigation back to it", async () => {
+	it("keeps an answer for the destination sent before a preview and a navigation back to it", async () => {
 		const h = harness();
 		h.follower.want(20); // the address's position: its request is in flight
-		h.follower.want(70); // a drag asks for 70 (due)
+		h.follower.want(70); // a preview asks for 70 (due)
 		h.follower.navigated(); // Back to #at=20
 		h.follower.want(20);
 		h.calls[0]?.resolve(at({ pos: 20 }));
@@ -688,14 +688,14 @@ describe("a navigation (Back, Forward, a link) while a drag's request is in flig
 		expect(h.last().at?.pos).toBe(20);
 	});
 
-	it("shows answers on the way again for a drag that starts after the navigation", async () => {
+	it("shows answers on the way again for a preview that starts after the navigation", async () => {
 		const h = harness();
 		h.follower.want(70);
 		h.follower.navigated();
 		h.follower.want(20);
 		h.calls[0]?.resolve(at({ pos: 70 }));
 		await h.flush();
-		h.follower.want(30); // a new drag, after the navigation
+		h.follower.want(30); // a new preview, after the navigation
 		h.calls[1]?.resolve(at({ pos: 20 }));
 		await h.flush();
 		expect(h.last()).toMatchObject({ wanted: 30 });

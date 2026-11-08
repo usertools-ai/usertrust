@@ -516,7 +516,7 @@ describe("the at field", () => {
 		expect(planHistory(at5, live, "#at=5")).toEqual({ kind: "push", hash: "" });
 	});
 
-	it("scrubbing replaces", () => {
+	it("moving between positions replaces", () => {
 		const at5 = { ...EMPTY_URL_STATE, at: 5 };
 		expect(planHistory(at5, { ...at5, at: 6 }, "#at=5")).toEqual({
 			kind: "replace",

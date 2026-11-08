@@ -98,7 +98,7 @@ describe("applyFilters", () => {
 	});
 });
 
-describe("the drag path's fast paths", () => {
+describe("the fast paths for a moving position", () => {
 	it("no filter at all returns the rows themselves: nothing is copied or scanned", () => {
 		const rows = [
 			{ seq: 1, pos: 1, id: "a", kind: "llm_call", actor: "x" },

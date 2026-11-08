@@ -3,8 +3,9 @@
 
 /**
  * What the list (and Trends) draw, derived in one place from ONE input. The page defers that input
- * (`useDeferredValue`), so a new position paints the header first and the list follows; because the rows, the position, the filters, the load phase and the summary travel together, the list never pairs
- * one position's rows with another moment's phase or chain. Pure.
+ * (`useDeferredValue`), so a new position paints the header first and the list follows; because the rows, the position,
+ * the filters, the load phase and the summary travel together, the list never pairs one position's rows with another
+ * moment's phase or chain. Pure.
  */
 
 import type { AtPayload, SummaryPayload } from "./api.js";
@@ -96,7 +97,8 @@ export interface HoldAnnouncement {
 /**
  * The live region's text moves only when the held state flips: once when the views start to lag the header ("Updating to
  * record N…"), once when they catch up ("Showing record N", or the live vault). In between it keeps its text, so a
- * screen reader hears two announcements per change of position, not one per answer. Returns `prev` itself when nothing flips.
+ * screen reader hears two announcements per change of position, not one per answer. Returns `prev` itself when nothing
+ * flips.
  */
 export function holdAnnouncement(
 	prev: HoldAnnouncement,

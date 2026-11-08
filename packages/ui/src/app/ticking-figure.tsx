@@ -21,9 +21,9 @@ function reducedMotion(): boolean {
  * visually hidden span beside it holds the final value, so a screen reader reads that and never the count. With reduced motion asked for, the final
  * value shows at once. The first render shows the value as it is: only a change counts.
  *
- * `jump`: show every change at once, never counting. A figure at a past position takes it: moving between positions is a
- * jump from one recorded value to another, not money arriving, and a count would still be running frames behind the
- * position.
+ * `jump`: show every change at once, never counting. A figure at a past position takes it: moving between positions
+ * is a jump from one recorded value to another, not money arriving, and a count would still be running frames behind
+ * the position.
  */
 export function TickingFigure(props: { ut: number; jump?: boolean }): React.JSX.Element {
 	const { ut } = props;

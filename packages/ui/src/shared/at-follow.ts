@@ -7,8 +7,8 @@
  *
  * - One request in flight at a time, and the latest wanted position wins: a preview that moves faster than the server
  *   answers asks only for where it ended up, and each answer that lands on the way is shown, so the screen follows.
- * - A navigation (Back, Forward, a link: `navigated()`) cancels the preview: an answer to a request sent before it is no
- *   longer shown on the way, so the screen never moves to a point the user navigated away from, also when the
+ * - A navigation (Back, Forward, a link: `navigated()`) cancels the preview: an answer to a request sent before it is
+ *   no longer shown on the way, so the screen never moves to a point the user navigated away from, also when the
  *   destination's own read then fails. An answer for the position wanted next is still the destination's.
  * - A request that has not answered in `timeoutMs` is aborted (its signal) and goes down the failure path, so a hung
  *   server never freezes the view: the next move or refresh asks again.
