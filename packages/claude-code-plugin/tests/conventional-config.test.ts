@@ -1429,6 +1429,17 @@ describe("session.mjs: SessionStart re-pins a DEAD environment pin to the conven
 				evidence: { session: SESSION, stateDir: old },
 			},
 		]);
+		// A job neither log names is not touched by the change: nothing named for it.
+		const m = await lateModules();
+		const other = await m.repinnedEvidence({
+			job: "job-3",
+			stateDir: fresh,
+			logs: await m.readLogs(join(fresh, "jobs"), "job-3"),
+			watch: await watchOf(fresh),
+			repins: recordsOf(home),
+		});
+		// mutant: any change to the old log named, for every job → one gap here
+		expect(other.knownGaps).toEqual([]);
 	});
 
 	it("a line of the old watch records that cannot be parsed, written after the re-pin: coverage names it", async () => {
@@ -1506,6 +1517,42 @@ describe("session.mjs: SessionStart re-pins a DEAD environment pin to the conven
 		// gap for every job), and the pre-metering counted a second time
 		expect((await leftBehind(home, fresh)).watch).toEqual([]);
 		expect(await coverAcross(home, fresh)).toEqual([CARRIED]);
+	});
+
+	it("the pinned dir read at another path (a copy of it): the session is still followed, through its log there", async () => {
+		const { home, fresh, oldPin } = await repinnedAcross();
+		const copy = await makeDir("utcc-conv-copy-");
+		nodeFs.cpSync(fresh, copy, { recursive: true });
+		const [, late, named] = LATE_WATCH[0] as (typeof LATE_WATCH)[number];
+		expect(await underOldPin(oldPin, (m) => m.recordWatchEvent(late))).toBe(true);
+		// mutant: only a record whose new dir is the dir read is followed → the copy is not that dir,
+		// so [CARRIED], the late gap missed
+		expect(await coverAcross(home, copy)).toEqual([CARRIED, named]);
+	});
+
+	it("a session re-pinned into this dir with nothing of it left here, then a job change under the old pin: followed through the re-pin's record", async () => {
+		const { home, fresh, old, oldPin } = await repinnedAcross();
+		// Its carried log and watch records gone from here (and the old dir's gap with them).
+		for (const path of [
+			join(fresh, "jobs", `${SESSION}.jsonl`),
+			join(fresh, "watch.jsonl"),
+			join(old, "watch.jsonl"),
+		]) {
+			nodeFs.renameSync(path, `${path}.moved`);
+		}
+		const appended = await underOldPin(oldPin, (m) =>
+			m.appendJobOp(SESSION, "start", "job-2", { waitMs: 0 }),
+		);
+		expect(appended.ok).toBe(true);
+		// mutant: only a session with a log or a watch record here is followed → none, the old log
+		// of job-1 written after the re-pin missed. (Coverage also says no log here has job-1, and
+		// the spend is in no log: both true, and not what this case is about.)
+		expect((await leftBehind(home, fresh)).knownGaps).toEqual([
+			{
+				gap: `session ${SESSION}: its job log in the state dir it was re-pinned from was written after the re-pin: its intervals of job-1 may be wrong`,
+				evidence: { session: SESSION, stateDir: old },
+			},
+		]);
 	});
 
 	it("a hook that runs inside the re-pin reads the OLD pin, never none: the record is written before the pin is touched", async () => {

@@ -37,7 +37,7 @@
 //
 // Zero dependencies; reads and writes only the state dir.
 import { constants } from "node:fs";
-import { mkdir, open, readdir } from "node:fs/promises";
+import { mkdir, open, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { settings } from "./config.mjs";
 import {
@@ -749,7 +749,8 @@ const ms = (value) => (typeof value === "string" ? Date.parse(value) : Number.Na
  * The job's tagged cost, and the KNOWN GAPS in the evidence behind it.
  *
  *   jobCoverage({ job, logs: { <sid>: <readLogs entry, or log text> }, records: [<audit event>, ...],
- *                 watch: [<watch record>, ...], unreadable: { audit, watch } })
+ *                 watch: [<watch record>, ...], unreadable: { audit, watch },
+ *                 known: [{ gap, evidence }, ...] })
  *     → { job, diagnostic: true, note, taggedCostUt: <integer string>, transferIds: [...],
  *         beforeMetering: { responses: 0, unattributed: { sessions: { <sid>: n } }, note },
  *         knownGaps: [{ gap, evidence }] }
@@ -768,7 +769,8 @@ const ms = (value) => (typeof value === "string" ? Date.parse(value) : Number.Na
  *  3. every transfer is joined to exactly one `llm_call`, and a hold given back without a
  *     structured `releaseClass: "unused"` is a released hold whose usage is unconfirmed.
  * Plus: an interval with no stop yet (the job is still running), an evidence line that could
- * not be parsed, a missing or invalid log, a denied request of the job.
+ * not be parsed, a missing or invalid log, a denied request of the job, and each gap in `known`
+ * (what the caller found elsewhere: `repinnedEvidence`).
  * A record's APPEND time is never read.
  */
 export function jobCoverage({ job, logs, records, watch = [], unreadable = {}, known = [] }) {
@@ -1145,9 +1147,147 @@ export function jobCoverage({ job, logs, records, watch = [], unreadable = {}, k
 	};
 }
 
-/** STUB (failing first): coverage reads the pinned dir only, as it does at this head. */
-export async function repinnedEvidence() {
-	return { watch: [], knownGaps: [] };
+/**
+ * What a re-pin left behind (hooks/session.mjs `sessionSettings`), for `jobCoverage`:
+ * `{ watch, knownGaps }`, watch records to place beside the pinned dir's, and gaps to name (`known`).
+ *
+ *   repinnedEvidence({ job, stateDir, jobs, logs, watch, repins })
+ *
+ * `stateDir` is the dir coverage reads (its job logs in `jobs`), `logs` and `watch` what it read
+ * there, `repins` the path of the re-pin records (session.mjs `appendRecord`): null when there are
+ * none, `{ refused }` when their directory was refused (it cannot be read). Read-only.
+ *
+ * A hook fixes its state dir from the pin when it launches, and nothing it writes reads the pin
+ * again. So a hook still running under the OLD pin when SessionStart re-pins its session writes to
+ * the OLD dir after the carry: a gap, a deferral or a refusal to its watch.jsonl (lib.mjs
+ * `recordWatchEvent`, the clock-ahead gap of `noteSuspect` included), a job change to its job log
+ * (`appendJobOp`). No snapshot the re-pin takes can see a write that comes after it, so coverage
+ * reads the old dirs as they are when it runs, through the re-pin's record, which names both dirs
+ * and is written before the swap. For each session with a log or a watch record here, or
+ * re-pinned into this dir, and each dir it was re-pinned from:
+ *  - its watch evidence there (`WATCH_EVIDENCE`) is placed as this dir's own is. A record that
+ *    is the same as one here (a carried gap) is the same record, read once;
+ *  - its job log there must still be a beginning of its log here. A line written there after the
+ *    carry never reached the log its calls are labelled by, a named gap for a job either log names;
+ *  - re-pin records, old watch records, a line of them, or an old job log that cannot be read is a
+ *    named gap, never none. A file that is not there is none, as `usertrust-job` reads them.
+ * Its `pre-metering` and `no-transcript-agent` records there are not read: neither is ever a gap,
+ * and the new dir's first hook declares that usage itself (session.mjs `carryGaps`).
+ */
+export async function repinnedEvidence({
+	job,
+	stateDir,
+	jobs = join(stateDir, "jobs"),
+	logs,
+	watch,
+	repins,
+}) {
+	const knownGaps = [];
+	const why = (gap, evidence = {}) => knownGaps.push({ gap, evidence });
+	const real = (path) => realpath(path).catch(() => path);
+	const here = await real(stateDir);
+	const moves = [];
+	let unreadable = repins !== null && typeof repins === "object";
+	try {
+		if (typeof repins !== "string") throw Object.assign(new Error("none"), { code: "ENOENT" });
+		await eachLine(repins, (line) => {
+			if (line === "") return;
+			try {
+				if (line === null) throw new Error("too long");
+				moves.push(JSON.parse(line));
+			} catch {
+				unreadable = true;
+			}
+		});
+	} catch (err) {
+		if (err?.code !== "ENOENT") unreadable = true;
+	}
+	if (unreadable) {
+		why(
+			"the re-pin records cannot be read: evidence left in a state dir a session was re-pinned from cannot be ruled out",
+		);
+	}
+	const sessions = new Set(Object.keys(logs ?? {}));
+	for (const w of watch) if (typeof w?.session === "string") sessions.add(w.session);
+	const followed = new Set();
+	const left = [];
+	for (const move of moves) {
+		const sid = move?.session;
+		const from = move?.old?.settings?.stateDir;
+		const into = move?.new?.settings?.stateDir;
+		// An abandoned record (no `old`) moved nothing.
+		if (typeof sid !== "string" || typeof from !== "string" || from === "") continue;
+		if (!sessions.has(sid) && !(typeof into === "string" && (await real(into)) === here)) continue;
+		const old = await real(from);
+		if (old === here || followed.has(`${sid}\u0000${old}`)) continue;
+		followed.add(`${sid}\u0000${old}`);
+		left.push({ sid, from });
+	}
+
+	const have = new Set(watch.map((w) => JSON.stringify(w)));
+	const out = [];
+	for (const { sid, from } of left) {
+		const at = { session: sid, stateDir: from };
+		let unparsed = 0;
+		try {
+			await eachLine(join(from, "watch.jsonl"), (line) => {
+				if (line === "") return;
+				let w;
+				try {
+					if (line === null) throw new Error("too long");
+					w = JSON.parse(line);
+				} catch {
+					unparsed += 1;
+					return;
+				}
+				if (w?.session !== sid || !WATCH_EVIDENCE.has(w?.kind)) return;
+				const key = JSON.stringify(w);
+				if (have.has(key)) return;
+				have.add(key);
+				out.push(w);
+			});
+		} catch (err) {
+			if (err?.code !== "ENOENT") {
+				why(
+					`session ${sid}: the watch records of the state dir it was re-pinned from cannot be read: a gap written there after the re-pin cannot be ruled out`,
+					at,
+				);
+			}
+		}
+		if (unparsed > 0) {
+			why(
+				`session ${sid}: ${unparsed} line(s) of the watch records in the state dir it was re-pinned from could not be parsed: a gap written there after the re-pin cannot be ruled out`,
+				{ ...at, lines: unparsed },
+			);
+		}
+		const name = `${sanitize(sid)}.jsonl`;
+		let before;
+		try {
+			before = await readRegular(join(from, "jobs", name), READ_BOUND.record);
+		} catch (err) {
+			if (err?.code !== "ENOENT") {
+				why(
+					`session ${sid}: its job log in the state dir it was re-pinned from cannot be read: a job change written there after the re-pin cannot be ruled out`,
+					at,
+				);
+				continue;
+			}
+			before = "";
+		}
+		// This dir's log is what `readLogs` read: one it cannot read throws there too, no verdict.
+		const now = await readRegular(join(jobs, name), READ_BOUND.record).catch((err) => {
+			if (err?.code === "ENOENT") return "";
+			throw err;
+		});
+		const names = (text) => text.includes(`"${job}"`);
+		if (!now.startsWith(before) && (names(before) || names(now))) {
+			why(
+				`session ${sid}: its job log in the state dir it was re-pinned from was written after the re-pin: its intervals of ${job} may be wrong`,
+				at,
+			);
+		}
+	}
+	return { watch: out, knownGaps };
 }
 
 /**

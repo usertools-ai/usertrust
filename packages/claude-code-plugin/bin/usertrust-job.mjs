@@ -15,7 +15,9 @@
 // gives the agent at session start tells it to pass, and a caller that leaves it out records
 // `explicit`. The source defaults only when a type is given; `--source` alone is refused.
 // `coverage` is read-only. It prints the job's tagged cost and the KNOWN GAPS in the evidence
-// behind it: a diagnostic, never a certification.
+// behind it: a diagnostic, never a certification. Besides the pinned dir, it reads each state dir a
+// session was re-pinned from (the re-pin records, hooks/session.mjs), as it is now: a hook launched
+// under the old pin writes there after the re-pin (job-log.mjs `repinnedEvidence`).
 //
 // In a session, every path comes from the session's pin, as every hook's settings do: a
 // state dir changed since the session began is not where its hooks keep its log. A
@@ -29,7 +31,7 @@
 //
 // Exit codes: 0 done, 1 refused (no usable log), 2 bad usage.
 import { readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { passwdHome, refusalNote, resolveSettings, useSession } from "../hooks/config.mjs";
 import {
 	appendJobOp,
@@ -39,9 +41,11 @@ import {
 	jobCoverage,
 	jobsDir,
 	readLogs,
+	repinnedEvidence,
 	TYPE_SOURCES,
 } from "../hooks/job-log.mjs";
-import { eachLine, say, watchLogPath } from "../hooks/lib.mjs";
+import { eachLine, say, stateRoot, watchLogPath } from "../hooks/lib.mjs";
+import { stateSubdir } from "../hooks/private-dir.mjs";
 import { sessionSettings } from "../hooks/session.mjs";
 
 const [command, ...rest] = process.argv.slice(2);
@@ -172,6 +176,19 @@ async function readWatch(path) {
 	return out;
 }
 
+/**
+ * The re-pin records (hooks/session.mjs `appendRecord`), checked as their writer checks them, never
+ * made: their path, null when there are none, `{ refused }` when their directory is refused.
+ */
+function repinsFile() {
+	const home = passwdHome();
+	if (home === null) return null; // no session can be re-pinned without one
+	const uid = typeof process.getuid === "function" ? process.getuid() : null;
+	const where = stateSubdir(home, "repins", { uid, create: false });
+	if (where.refused === "absent") return null;
+	return where.refused === undefined ? join(where.dir, "repins.jsonl") : { refused: where.refused };
+}
+
 try {
 	const standalone = usePinnedSession();
 	if (command === "start" || command === "stop") {
@@ -234,12 +251,26 @@ try {
 		let report;
 		try {
 			const audit = await readRecords(flags.get("--vault"));
+			const jobs = flags.get("--jobs") ?? jobsDir();
+			const logs = await readLogs(jobs, job);
+			const watch = await readWatch(flags.get("--watch") ?? watchLogPath());
+			// A hook launched under a session's OLD pin writes to the old state dir after a re-pin:
+			// the re-pin's records name it, and it is read as it is now (job-log.mjs `repinnedEvidence`).
+			const left = await repinnedEvidence({
+				job,
+				stateDir: flags.has("--jobs") ? dirname(jobs) : stateRoot(),
+				jobs,
+				logs,
+				watch,
+				repins: repinsFile(),
+			});
 			report = jobCoverage({
 				job,
-				logs: await readLogs(flags.get("--jobs") ?? jobsDir(), job),
+				logs,
 				records: audit.records,
-				watch: await readWatch(flags.get("--watch") ?? watchLogPath()),
+				watch: [...watch, ...left.watch],
 				unreadable: { audit: audit.unparsed },
+				known: left.knownGaps,
 			});
 		} catch (err) {
 			// The evidence cannot be read: no verdict. The path is argv, so it goes out through

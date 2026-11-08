@@ -49,7 +49,11 @@ npm, and its version is its own: the `usertrust` packages and their
   copied after the swap; when it cannot be, the new log gets a line that makes it invalid (the
   session's later calls carry `jobState: "invalid"`, and coverage names the gap) and SessionStart
   warns, and `usertrust-job start` or `stop` that finds the pin moved after it wrote exits 1, saying
-  to run it again. Usage from before the re-pin is never posted. A file naming
+  to run it again. A hook still running under the old pin writes to the old state dir after the
+  re-pin, so `usertrust-job coverage` also reads each state dir a session was re-pinned from, through
+  the re-pin's record: the session's gaps, deferrals and refusals there are placed like the pinned
+  dir's own, and a job log there that gained a line after the re-pin, or a file there that cannot be
+  read, is a named known gap. Usage from before the re-pin is never posted. A file naming
   the pin's own state dir (the README's quickstart layout, in the usual case) does not re-pin, since
   that dir already holds the session's earlier usage. `usertrust-job coverage` run outside a session
   reads the state dir a new session would use, the conventional file included, and gives no verdict

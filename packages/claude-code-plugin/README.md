@@ -317,7 +317,12 @@ under your home as the passwd database gives it.
   SessionStart warns: labelling jobs again takes a new session. If even that line cannot be
   written, SessionStart warns to run `usertrust-job.mjs start <job-id>` (or `stop`) again. The
   command itself reads the pin again after it writes, and exits 1, saying to run it again, when
-  the pin moved.
+  the pin moved. A hook already running under the old pin when the re-pin happens keeps writing
+  to the old state dir: a gap, a deferral, a refusal, a job change. So `usertrust-job coverage`
+  also reads each state dir a session was re-pinned from, through the re-pin's record, as it is
+  when coverage runs. The session's gaps, deferrals and refusals there are placed like the pinned
+  dir's own, and a job log there that gained a line after the re-pin, or a file there that cannot
+  be read, is a named known gap.
   SessionStart says so once. The old state dir is left as it was. Nothing is posted
   twice: the new state dir starts metering at the session's next hook, and nothing
   the transcript holds from before it is posted there. If a step fails, the old pin

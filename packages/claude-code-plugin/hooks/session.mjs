@@ -55,8 +55,7 @@
 // (the pin's own, or one it ran in before) would post its earlier usage. The re-pin, in order:
 // 1. the session's job log is carried to the new state dir (`carryJobLog`), since a
 //    resume or compact writes none there (job-log.mjs `writeSessionStart`), and so are its
-//    `gap` records (`carryGaps`), since `usertrust-job coverage` reads the new dir's
-//    watch records only;
+//    `gap` records (`carryGaps`), so the pinned dir holds the gaps from before the re-pin;
 // 2. the re-pin is appended to <private state>/repins/repins.jsonl (old pin, new pin with
 //    the key hashed, reason), synced, while the old pin is still in place;
 // 3. the old pin is kept aside under a second name (a hard link, never a deletion), and
@@ -69,7 +68,11 @@
 //    CLI reads the pin again after its append and says to run it again when the pin moved
 //    (bin/usertrust-job.mjs).
 // So every other hook of the session reads a pin throughout: the old one, then the new
-// one. A step that fails leaves the old pin in place, and SessionStart warns, loudly, that
+// one. A hook fixes its state dir from the pin when it launches, so one still running
+// under the old pin writes to the OLD dir after these carries (a gap, a deferral, a
+// refusal, a job change), and no snapshot taken here can see it. `usertrust-job coverage`
+// reads each dir a session was re-pinned from, through step 2's record, as it is when
+// coverage runs (job-log.mjs `repinnedEvidence`): each such write is placed, or named. A step that fails leaves the old pin in place, and SessionStart warns, loudly, that
 // the session is UNCONFIGURED, with why; a swap that fails after its record is followed by
 // a record naming it abandoned. SessionStart says a re-pin once. The old state dir is left
 // exactly as it was. Any other environment pin is kept, and when a config file would now
@@ -764,8 +767,10 @@ function tailLost(oldDir, newDir, id, carried, { uid, fs }) {
 
 /**
  * Carry session `id`'s `gap` records from the dead pin's `watch.jsonl` to the new state dir's, so
- * `usertrust-job coverage`, which reads the pinned dir's watch records only, still lists a gap the
- * session had before the re-pin: it places each gap by its own time against the carried job log.
+ * the pinned dir holds every gap the session had before the re-pin, wherever the old dir goes later:
+ * `usertrust-job coverage` places each by its own time against the carried job log. A gap written to
+ * the old file after this read (a hook still running under the old pin) is not carried: coverage
+ * reads it in the old dir (job-log.mjs `repinnedEvidence`).
  * Each line is carried as it was written, its times with it, and only once: a line the new file
  * already holds (an earlier carry whose re-pin then failed) is not appended again. Null when they
  * are carried, or there are none; else the fixed reason they are not. The old file is read, never
