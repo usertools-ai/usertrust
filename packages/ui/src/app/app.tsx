@@ -3,6 +3,7 @@
 
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { rowsAsAnswered } from "../shared/asof.js";
+import { pointLoading } from "../shared/at-follow.js";
 import { csvFilename, toCsv } from "../shared/csv.js";
 import { EMPTY_FILTERS, isFiltering } from "../shared/filters.js";
 import {
@@ -139,6 +140,7 @@ export function App(): React.JSX.Element {
 			<SummaryStrip summary={summary} live={live} at={shownAt} />
 			<AtStatus
 				error={atView.error}
+				loading={pointLoading(atView)}
 				reloaded={atView.reloaded}
 				holdNote={holdNote}
 				announce={announce.text}

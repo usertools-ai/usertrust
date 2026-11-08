@@ -73,6 +73,16 @@ export const LIVE_VIEW: AtView = {
 	reloaded: false,
 };
 
+/**
+ * True while a position is wanted and no answer for it has landed yet: the first read of an address's position, or a
+ * new position while an older one is still on screen. False live, once the read has failed (the failure note speaks
+ * then), during a reconnect's re-read (the point shown is still the one asked for) and for a position past the head
+ * once it is answered (with the head). `loading` covers only the first case: nothing shown at all.
+ */
+export function pointLoading(view: AtView): boolean {
+	return view.wanted !== null && view.resolved === null && view.error === null;
+}
+
 /** How long a request may go unanswered before it is given up. */
 export const AT_TIMEOUT_MS = 10_000;
 

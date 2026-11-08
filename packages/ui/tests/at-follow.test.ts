@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AtPayload } from "../src/shared/api.js";
 import { cutRows, rowsAsAnswered } from "../src/shared/asof.js";
-import { AtFollower, type AtView } from "../src/shared/at-follow.js";
+import { AtFollower, type AtView, pointLoading } from "../src/shared/at-follow.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 import { newSince } from "../src/shared/timeline-view.js";
 
@@ -700,5 +700,46 @@ describe("a navigation (Back, Forward, a link) while a preview's request is in f
 		await h.flush();
 		expect(h.last()).toMatchObject({ wanted: 30 });
 		expect(h.last().at?.pos).toBe(20);
+	});
+});
+
+describe("pointLoading", () => {
+	it("is true while a position is wanted and its own answer has not landed, also with an older point still shown", async () => {
+		const h = harness();
+		h.follower.want(40);
+		expect(pointLoading(h.last())).toBe(true);
+		h.calls[0]?.resolve(at({ pos: 40 }));
+		await h.flush();
+		expect(pointLoading(h.last())).toBe(false);
+		h.follower.want(50); // another point, from the address; 40 is still on screen
+		expect(h.last().at?.pos).toBe(40);
+		expect(pointLoading(h.last())).toBe(true);
+		h.calls[1]?.resolve(at({ pos: 50 }));
+		await h.flush();
+		expect(pointLoading(h.last())).toBe(false);
+	});
+
+	it("is false live, and once the read has failed (the failure note speaks then)", async () => {
+		const h = harness();
+		h.follower.want(40);
+		h.calls[0]?.reject(new Error("the dashboard did not answer"));
+		await h.flush();
+		expect(pointLoading(h.last())).toBe(false);
+		h.follower.want(null);
+		expect(pointLoading(h.last())).toBe(false);
+	});
+
+	it("is false during a reconnect's re-read, and for a position past the head once it is answered", async () => {
+		const h = harness();
+		h.follower.want(40);
+		h.calls[0]?.resolve(at({ pos: 40 }));
+		await h.flush();
+		h.follower.reconnected();
+		expect(pointLoading(h.last())).toBe(false);
+		const g = harness();
+		g.follower.want(500); // past the head: answered with the head, clamped
+		g.calls[0]?.resolve(at({ pos: 99, clamped: true }));
+		await g.flush();
+		expect(pointLoading(g.last())).toBe(false);
 	});
 });

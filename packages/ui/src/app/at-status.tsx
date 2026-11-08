@@ -11,6 +11,8 @@
 export function AtStatus(props: {
 	error: string | null;
 	reloaded: boolean;
+	/** The position asked for has no answer yet (`pointLoading`): the note says so until it lands or fails. */
+	loading?: boolean;
 	/**
 	 * Set while the list, the facets, Trends, the inspector and Export still show another position than the header
 	 * (they are dimmed meanwhile): "Updating to record N…", seen but not announced; `announce` is.
@@ -24,7 +26,8 @@ export function AtStatus(props: {
 		<div className="ut-at-status">
 			<p className="ut-tl-msg" role="status">
 				{error !== null && `Could not show that point: ${error}.`}
-				{error !== null && reloaded && " "}
+				{error === null && props.loading === true && "Loading this point…"}
+				{(error !== null || props.loading === true) && reloaded && " "}
 				{reloaded &&
 					"Read again because the vault was reloaded: this position may now name another record."}
 			</p>

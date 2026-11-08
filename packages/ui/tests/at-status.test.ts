@@ -18,6 +18,7 @@ async function app<T>(file: string): Promise<T> {
 interface Props {
 	error: string | null;
 	reloaded: boolean;
+	loading?: boolean;
 	holdNote?: string | null;
 	announce?: string;
 }
@@ -48,6 +49,14 @@ describe("AtStatus", () => {
 		expect(note(render({ error: "the dashboard did not answer", reloaded: true }))).toBe(
 			"Could not show that point: the dashboard did not answer. Read again because the vault was reloaded: this position may now name another record.",
 		);
+	});
+
+	it("while the point asked for loads, the note says so; a failure replaces it", () => {
+		expect(note(render({ loading: true }))).toBe("Loading this point…");
+		expect(note(render({ loading: true, error: "the dashboard did not answer" }))).toBe(
+			"Could not show that point: the dashboard did not answer.",
+		);
+		expect(note(render({ loading: false }))).toBe("");
 	});
 
 	it("a reload says the position may now name another record", () => {
