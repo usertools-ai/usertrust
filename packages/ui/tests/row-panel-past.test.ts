@@ -6,6 +6,8 @@
  * view labels it as running today, in the label and in the help line; the live view is unchanged.
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -63,6 +65,18 @@ describe("the explicit check in the inspector", () => {
 			expect(html).toContain(
 				"Runs the usertrust-verify check for this transfer and prints its receipt.",
 			);
+		}
+	});
+});
+
+describe("the page tells the inspector the position drawn, not the one in the address", () => {
+	it("both RowPanel call sites pass past from list.at, so a #at that failed to load does not label a live screen as past", () => {
+		const src = readFileSync(join(import.meta.dirname, "..", "src", "app", "app.tsx"), "utf8");
+		const sites = src.match(/<RowPanel[\s\S]*?\/?>/g) ?? [];
+		expect(sites).toHaveLength(2);
+		for (const site of sites) {
+			expect(site).toContain("past={list.at !== null}");
+			expect(site).not.toContain("past={at !== null}");
 		}
 	});
 });

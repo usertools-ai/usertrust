@@ -228,7 +228,7 @@ export function App(): React.JSX.Element {
 								row={open}
 								docked
 								held={held}
-								past={at !== null}
+								past={list.at !== null}
 								onClose={close}
 								focusNonce={kbOpen}
 								onFocusHandled={() => setKbOpen(undefined)}
@@ -261,7 +261,7 @@ export function App(): React.JSX.Element {
 					row={open}
 					docked={false}
 					held={held}
-					past={at !== null}
+					past={list.at !== null}
 					onClose={close}
 				/>
 			)}
