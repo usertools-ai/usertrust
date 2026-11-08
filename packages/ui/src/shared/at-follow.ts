@@ -114,6 +114,8 @@ export class AtFollower {
 			this.epoch = null;
 			this.due = false;
 		} else {
+			// A failure belongs to the position it was for: the new one has not failed.
+			this.error = null;
 			this.kick();
 		}
 		this.emit();
@@ -132,7 +134,8 @@ export class AtFollower {
 	 */
 	reconnected(): void {
 		this.generation += 1;
-		this.reread = this.chosen?.pos ?? null;
+		// A second reconnect before the re-read answers has no answer in `chosen`: keep the position the first one found.
+		this.reread = this.chosen?.pos ?? this.reread;
 		this.epoch = null;
 		this.chosen = null;
 		this.reloaded = false;

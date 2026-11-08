@@ -59,6 +59,16 @@ function harness() {
 }
 
 describe("AtFollower", () => {
+	it("asking for another position after a failure clears the failure: it is loading, not 'did not load'", async () => {
+		const h = harness();
+		h.follower.want(10);
+		h.calls[0]?.reject(new Error("the dashboard did not answer"));
+		await h.flush();
+		expect(h.last()).toMatchObject({ wanted: 10, error: "the dashboard did not answer" });
+		h.follower.want(20);
+		expect(h.last()).toMatchObject({ wanted: 20, at: null, loading: true, error: null });
+	});
+
 	it("keeps one request in flight, and the latest wanted position wins", async () => {
 		const h = harness();
 		h.follower.want(1);
@@ -270,6 +280,19 @@ describe("AtFollower", () => {
 			await h.flush();
 			h.follower.reconnected();
 			expect(h.calls[1]?.pos).toBe(99);
+		});
+
+		it("a second reconnect before the first re-read answers still re-reads the position answered, not the one asked for", async () => {
+			const h = harness();
+			h.follower.want(500);
+			h.calls[0]?.resolve(at({ pos: 99, head: 99, clamped: true }));
+			await h.flush();
+			h.follower.reconnected();
+			h.follower.reconnected();
+			// The first re-read is overtaken; the follower asks again once it settles.
+			h.calls[1]?.resolve(at({ pos: 99, head: 99, clamped: true }));
+			await h.flush();
+			expect(h.calls.map((c) => c.pos)).toEqual([500, 99, 99]);
 		});
 
 		it("clears the reloaded note: the old server's epochs say nothing about the new one", async () => {
