@@ -226,6 +226,39 @@ describe("verifyTransaction", () => {
 		expect(result.receipt).not.toContain("8 UT");
 	});
 
+	it("--tx prints the metering the settled llm_call carries, read from the chain event", () => {
+		const lines = buildChain([
+			{
+				kind: "llm_call",
+				data: {
+					transferId: "tx-m",
+					model: "claude-3",
+					cost: 2,
+					settled: true,
+					usageSource: "provider",
+					usage: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0 },
+					appliedRates: {
+						inputPer1k: 3,
+						outputPer1k: 15,
+						cacheReadPer1k: 0.3,
+						cacheWritePer1k: 3.75,
+					},
+					pricingTableVersion: "2026-10-01",
+				},
+				sequence: 1,
+			},
+		]);
+		writeAuditLog(tempDir, lines);
+		const result = verifyTransaction(tempDir, "tx-m");
+		expect(result.found).toBe(true);
+		expect(result.receipt).toMatch(/Tokens in \.+ 100 │/);
+		expect(result.receipt).toMatch(/Tokens out \.+ 50 │/);
+		expect(result.receipt).toMatch(/Rate out \/1k \.+ 15 │/);
+		expect(result.receipt).toMatch(/Pricing table \.+ 2026-10-01 │/);
+		// ceil(100 x 3 / 1000 + 50 x 15 / 1000) = ceil(0.3 + 0.75) = 2
+		expect(result.receipt).toMatch(/Spend \.+ 2 UT │/);
+	});
+
 	it("handles llm_call event with no cost field", () => {
 		const lines = buildChain([
 			{
