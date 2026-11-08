@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { MUTED, PROVIDER_COLOR, SERIES } from "../src/shared/colors.js";
-import { allCss, contrast, deskCss, deskCssFiles } from "./helpers/css.js";
+import { allCss, contrast, deskCss, deskCssFiles, legacyCss } from "./helpers/css.js";
 
 const APP = join(import.meta.dirname, "..", "src", "app");
 const TOKENS = readFileSync(join(APP, "desk", "desk-tokens.css"), "utf-8").replace(
@@ -203,7 +203,44 @@ describe("the desk's stylesheets", () => {
 	});
 });
 
+/** Whether a rule takes the focus ring away: an outline set to none or to zero width. */
+function removesOutline(decls: Map<string, string>): boolean {
+	const outline = decls.get("outline");
+	return (
+		outline === "none" ||
+		outline === "0" ||
+		decls.get("outline-style") === "none" ||
+		decls.get("outline-width") === "0"
+	);
+}
+
+describe("the focus ring", () => {
+	it("is the page's base default: its one global rule sits in @layer base, so a component's own ring wins", () => {
+		const global = parseRules(legacyCss().replace(/\/\*[\s\S]*?\*\//g, "")).filter(
+			(r) => r.selectors.length === 1 && r.selectors[0] === ":focus-visible",
+		);
+		expect(global).toHaveLength(1);
+		expect(global[0]?.layer).toBe("base");
+	});
+
+	it("is never taken away: no stylesheet sets an outline to none or zero", () => {
+		const removed = parseRules(allCss().replace(/\/\*[\s\S]*?\*\//g, ""))
+			.filter((r) => removesOutline(r.decls))
+			.map((r) => r.selectors.join(", "));
+		expect(removed).toEqual([]);
+	});
+});
+
 describe("the reader these checks stand on", () => {
+	it("sees a base-layer focus ring and a rule that removes an outline", () => {
+		const sheet = parseRules(
+			"@layer base { :focus-visible { outline: 2px solid red; } } @layer components { .x:focus { outline: none; } }",
+		);
+		expect(sheet.find((r) => r.selectors[0] === ":focus-visible")?.layer).toBe("base");
+		const x = sheet.find((r) => r.selectors[0] === ".x:focus");
+		expect(x !== undefined && removesOutline(x.decls)).toBe(true);
+	});
+
 	// A check that has never been shown a violation proves nothing: feed the reader a bad sheet.
 	it("sees a unlayered rule, a trapping window rule and a blur outside .ut-glass", () => {
 		const bad = parseRules(

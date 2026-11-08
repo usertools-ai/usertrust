@@ -81,10 +81,14 @@ body {
 	background: rgba(232, 181, 75, 0.35);
 }
 
-:focus-visible {
-	outline: 2px solid var(--words);
-	outline-offset: 2px;
-	border-radius: 6px;
+/* The page's default focus ring. It sits in the base layer so a component's own ring (in @layer components) wins:
+   unlayered, it beat every layered rule, whatever its selector. */
+@layer base {
+	:focus-visible {
+		outline: 2px solid var(--words);
+		outline-offset: 2px;
+		border-radius: 6px;
+	}
 }
 
 @keyframes ut-swap {
@@ -726,7 +730,6 @@ body {
 		color: var(--faint-text);
 	}
 	.ut-search:focus {
-		outline: none;
 		border-color: var(--accent);
 	}
 	.ut-btn {
@@ -878,7 +881,6 @@ body {
 	}
 	.ut-field input:focus,
 	.ut-field-bare:focus {
-		outline: none;
 		border-color: var(--accent);
 	}
 	.ut-active {
