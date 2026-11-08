@@ -701,6 +701,59 @@ describe("session.mjs: SessionStart re-pins a DEAD environment pin to the conven
 		expect((JSON.parse(await readFile(pinOf(home), "utf-8")) as Pin).kind).toBe("environment");
 	});
 
+	for (const held of [
+		{
+			name: "its since-session stamp (it was metered there before)",
+			seed: async (fresh: string) => {
+				// where lib.mjs `sessionFirstRunAt` publishes it: <stateDir>/transcripts/since-session/<id>
+				await mkdir(join(fresh, "transcripts", "since-session"), { recursive: true, mode: 0o700 });
+				await writeFile(
+					join(fresh, "transcripts", "since-session", SESSION),
+					"2026-11-07T20:00:00.000Z",
+					{ mode: 0o600 },
+				);
+			},
+		},
+		{
+			name: "a cursor of it",
+			seed: async (fresh: string) => {
+				await mkdir(join(fresh, "transcripts"), { recursive: true, mode: 0o700 });
+				await writeFile(join(fresh, "transcripts", `${SESSION}__main.json`), cursor(), {
+					mode: 0o600,
+				});
+			},
+		},
+		{
+			name: "a hold of it",
+			seed: async (fresh: string) => {
+				await writeFile(join(fresh, `${SESSION}__0123abcd.settling`), "{}", { mode: 0o600 });
+			},
+		},
+	]) {
+		it(`kept: (5) the file's state dir already holds ${held.name}: its first metered time there predates the re-pin, so nothing is written there`, async () => {
+			const { sessionSettings } = await sessionModule();
+			const home = await makeHome();
+			const fresh = await makeDir("utcc-conv-new-");
+			const old = await deadWithJobLog(home, fresh);
+			await held.seed(fresh);
+			const before = snapshot(fresh);
+			const session = sessionSettings({
+				env: unconfigured(old),
+				payload: { session_id: SESSION },
+				passwdHome: home,
+				uid: UID,
+				repin: true,
+			});
+			// mutant: no clause 5 → re-pinned, and the stamp there posts the usage from before it
+			expect(session.kind).toBe("environment");
+			expect(session.note).toContain(
+				"the conventional file names a state dir that already holds this session's metering state, where the usage recorded before the re-pin would be posted under the new key",
+			);
+			expect(snapshot(fresh)).toEqual(before);
+			expect(nodeFs.existsSync(recordsOf(home))).toBe(false);
+		});
+	}
+
 	/** The watch records in `dir`, parsed as `usertrust-job` reads them (every line is valid here). */
 	const watchOf = async (dir: string): Promise<Record<string, unknown>[]> =>
 		(await readFile(join(dir, "watch.jsonl"), "utf-8").catch(() => ""))

@@ -291,7 +291,12 @@ under your home as the passwd database gives it.
     dir already records when the unconfigured session was first metered, so a re-pin
     there would post that session's earlier usage under the new key. This is the case
     with the quickstart file above whenever `HOME` is your account's home and
-    `CLAUDE_CONFIG_DIR` is unset: such a session is warned, not re-pinned.
+    `CLAUDE_CONFIG_DIR` is unset: such a session is warned, not re-pinned;
+  - the file's `stateDir` holds nothing of the session yet: no `transcripts/since-session/<id>`
+    stamp, no cursor of it under `transcripts/` and no hold of it. Such a stamp is older than
+    the re-pin, so that dir would post the session's earlier usage under the new key, as the
+    pin's own dir would. A dir that does not exist holds nothing; one that cannot be read
+    counts as holding it.
 
   In order: the session's job log (`<stateDir>/jobs/<id>.jsonl`) is copied to the new
   state dir, so `usertrust-job` keeps its open job, and so are its `gap` records in
@@ -746,7 +751,9 @@ are opaque: 1-128 characters of `[A-Za-z0-9._:-]`.
   no usable log; a denied request of the job; a `would_block`, an unmetered `gap` or a breaker's `deferred`
   record (read from `watch.jsonl`, or `--watch FILE`, placed by when its call STARTED); a transfer known only through its
   settlement metadata; a released hold whose usage is unconfirmed; an evidence line that could not be
-  parsed. A watch file that exists but cannot be read gives no verdict. An interval is (start, stop]:
+  parsed. A watch file that exists but cannot be read gives no verdict. Run outside a session, it reads
+  the state dir a new session would use now, the conventional configuration file included; a refused
+  file gives no verdict unless `--jobs` and `--watch` are both given. An interval is (start, stop]:
   usage at exactly the start belongs to the earlier job. Separately, `beforeMetering` reports the
   responses a session of the job wrote before it was metered (its `pre-metering` records), as
   `{ "responses": 0, "unattributed": { "sessions": { "<session>": N } }, "note": … }`: never billed,

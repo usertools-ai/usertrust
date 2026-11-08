@@ -46,12 +46,13 @@
 // made before that file was read (config.mjs `configSource`), and it would otherwise
 // keep a session unconfigured for its whole life, resumes included. Dead means ALL of
 // (`deadPin`): it holds the EMPTY key; the conventional file is the source now, and is
-// accepted; the session moved no money under it (`movedNoMoney`); and the file names a
-// state dir that is NOT the pin's own, links resolved (`sameStateDir`). That last one is
-// what keeps usage from being posted twice: a new state dir stamps the session's first
-// metered hook there (transcript.mjs `sessionFirstRun`), and nothing the transcript holds
-// from before it is ever posted there, while the pin's own dir already holds the stamp and
-// cursors of the unconfigured session. The re-pin, in order:
+// accepted; the session moved no money under it (`movedNoMoney`); the file names a
+// state dir that is NOT the pin's own, links resolved (`sameStateDir`); and that dir holds
+// no metering state of the session (`heldThere`). Those last two are what keep usage from
+// being posted twice: a new state dir stamps the session's first metered hook there
+// (transcript.mjs `sessionFirstRun`), and nothing the transcript holds from before it is
+// ever posted there, while a dir that already holds the session's stamp, cursors or holds
+// (the pin's own, or one it ran in before) would post its earlier usage. The re-pin, in order:
 // 1. the session's job log is carried to the new state dir (`carryJobLog`), since a
 //    resume or compact writes none there (job-log.mjs `writeSessionStart`), and so are its
 //    `gap` records (`carryGaps`), since `usertrust-job coverage` reads the new dir's
@@ -393,11 +394,13 @@ export function movedNoMoney(stateDir, id, { uid, fs = REAL_FS }) {
 /**
  * Whether environment pin `pin` of session `id` is DEAD, so SessionStart may re-pin it: null
  * when it is, else the fixed reason it is kept. `resolved` is what a new session would get now
- * (config.mjs `resolveSettings`). All four must hold:
+ * (config.mjs `resolveSettings`). All five must hold:
  * 1. it holds the EMPTY key (`EMPTY_KEY_HASH`);
  * 2. the conventional config file is the source now (UT_CC_CONFIG unset) and is accepted;
  * 3. the session moved no money under it (`movedNoMoney`);
- * 4. the file names a state dir that is not the pin's own (`sameStateDir`).
+ * 4. the file names a state dir that is not the pin's own (`sameStateDir`);
+ * 5. that state dir holds no metering state of the session (`heldThere`).
+ * All are read before the re-pin writes anything.
  */
 export function deadPin(pin, id, resolved, { uid, fs = REAL_FS }) {
 	if (pin.kind !== "environment") return "it is not an environment pin";
@@ -409,12 +412,45 @@ export function deadPin(pin, id, resolved, { uid, fs = REAL_FS }) {
 	const moved = movedNoMoney(pin.settings.stateDir, id, { uid, fs });
 	if (moved !== null) return moved;
 	if (sameStateDir(pin.settings.stateDir, resolved.stateDir, { fs })) return SAME_STATE_DIR;
+	if (heldThere(resolved.stateDir, id, { fs })) return HELD_THERE;
 	return null;
 }
 
 /** Why a dead pin is kept when the conventional file names its own state dir (`sameStateDir`). */
 const SAME_STATE_DIR =
 	"the conventional file names the state dir it was pinned with, where the usage recorded before the re-pin would be posted under the new key";
+
+/** Why a dead pin is kept when the file's state dir already holds the session's state (`heldThere`). */
+const HELD_THERE =
+	"the conventional file names a state dir that already holds this session's metering state, where the usage recorded before the re-pin would be posted under the new key";
+
+/**
+ * Whether state dir `dir` already holds metering state of session `id`: its first-metered stamp
+ * (`transcripts/since-session/<id>`, lib.mjs `sessionFirstRunAt`), a cursor of it
+ * (`transcripts/<id>__…`) or a hold of it at the top level (`<id>__…`). Such a stamp predates the
+ * re-pin, so the transcript entries written before it would be posted there under the new key;
+ * the clause `sameStateDir` keeps for the pin's own dir, here for any dir. A dir that does not
+ * exist holds none; anything else unreadable, or over a bound, counts as held: the strict side.
+ */
+function heldThere(dir, id, { fs }) {
+	const prefix = `${id}__`;
+	const holds = (path) => {
+		let list;
+		try {
+			list = fs.readdirSync(path);
+		} catch (err) {
+			return err?.code !== "ENOENT";
+		}
+		return list.length > MAX_DEAD_NAMES || list.some((name) => name.startsWith(prefix));
+	};
+	try {
+		fs.lstatSync(join(dir, "transcripts", "since-session", id));
+		return true;
+	} catch (err) {
+		if (err?.code !== "ENOENT") return true;
+	}
+	return holds(join(dir, "transcripts")) || holds(dir);
+}
 
 /**
  * Whether state dirs `a` and `b` are one directory, links resolved. A dir that does not exist is

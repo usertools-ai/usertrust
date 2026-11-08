@@ -20,12 +20,14 @@
 // In a session, every path comes from the session's pin, as every hook's settings do: a
 // state dir changed since the session began is not where its hooks keep its log. A
 // session with no pin yet is pinned now (hooks/session.mjs), as its next hook would be:
-// the one write outside the state dir, and `coverage`'s only one.
+// the one write outside the state dir, and `coverage`'s only one. Outside a session, the
+// paths come from what a new session would read now, the conventional config file included,
+// and a refused file is no verdict unless `--jobs` and `--watch` are both given.
 //
 // Exit codes: 0 done, 1 refused (no usable log), 2 bad usage.
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { passwdHome, useSession } from "../hooks/config.mjs";
+import { passwdHome, refusalNote, resolveSettings, useSession } from "../hooks/config.mjs";
 import {
 	appendJobOp,
 	DEFAULT_WAIT_MS,
@@ -78,17 +80,28 @@ function parseStart(args) {
 	return { job: ids[0], ...(type === undefined ? {} : { type, typeSource: source ?? "explicit" }) };
 }
 
-/** This session's settings, from its pin, before any path is computed. Outside a session, none. */
+/**
+ * This session's settings, from its pin, before any path is computed. Outside a session, what a
+ * new session would resolve now (config.mjs `resolveSettings`), the conventional config file
+ * included: that file's state dir is where the hooks keep the logs and watch records, and the
+ * unit-test default (`settings()`, which never reads that file) is not. Returns the settings
+ * used outside a session (their `refused` says a file was refused), else null.
+ */
 function usePinnedSession() {
 	const sessionId = process.env.CLAUDE_CODE_SESSION_ID;
-	if (typeof sessionId !== "string" || sessionId === "") return;
 	const uid = typeof process.getuid === "function" ? process.getuid() : null;
+	if (typeof sessionId !== "string" || sessionId === "") {
+		const resolved = resolveSettings({ env: process.env, passwdHome: passwdHome(), uid });
+		useSession(resolved);
+		return resolved;
+	}
 	const session = sessionSettings({
 		payload: { session_id: sessionId },
 		passwdHome: passwdHome(),
 		uid,
 	});
 	useSession(session.settings);
+	return null;
 }
 
 function usage(why) {
@@ -157,7 +170,7 @@ async function readWatch(path) {
 }
 
 try {
-	usePinnedSession();
+	const standalone = usePinnedSession();
 	if (command === "start" || command === "stop") {
 		const wantsId = command === "start";
 		if (!wantsId && rest.length !== 0) usage("stop takes no argument");
@@ -194,6 +207,13 @@ try {
 			flags.set(rest[i], rest[i + 1]);
 		}
 		if (!flags.has("--vault")) usage("coverage needs --vault <the .usertrust directory>");
+		// A refused config file names no state dir to read, and the one `refusedSettings` falls back
+		// to is not where that file's sessions keep their evidence: no verdict, unless both paths
+		// are given.
+		if (standalone?.refused && !(flags.has("--jobs") && flags.has("--watch"))) {
+			say(`usertrust-job: ${refusalNote(standalone.refused, standalone.configSource)}: no verdict`);
+			process.exit(1);
+		}
 		let report;
 		try {
 			const audit = await readRecords(flags.get("--vault"));

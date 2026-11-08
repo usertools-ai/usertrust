@@ -10,6 +10,7 @@ import {
 	mkdtemp,
 	readdir,
 	readFile,
+	realpath,
 	stat,
 	truncate,
 	utimes,
@@ -457,6 +458,68 @@ describe("usertrust-job in a session: its paths come from the session's pin, as 
 		// The job is open in the pinned log only. mutant: the current state dir's logs are
 		// read, which hold no interval of it, and no such gap
 		expect(r.stdout).toContain("job still running");
+	});
+});
+
+describe("usertrust-job outside a session: its paths come from what a new session would read, the conventional file included", () => {
+	/** A passwd home whose conventional file (0600, in a 0700 anchor) names `stateDir`, with `mode`. */
+	async function conventionalHome(stateDir: string, mode = 0o600): Promise<string> {
+		// realpath: the anchor is refused when it resolves elsewhere (macOS's tmpdir is a link)
+		const home = await realpath(await mkdtemp(join(tmpdir(), "utcc-job-home-")));
+		const anchor = join(home, ".config", "usertrust");
+		await mkdir(anchor, { recursive: true });
+		await chmod(anchor, 0o700);
+		const file = join(anchor, "claude-code.json");
+		await writeFile(
+			file,
+			JSON.stringify({
+				url: "http://127.0.0.1:4520",
+				key: "file-key-0123",
+				mode: "watch",
+				stateDir,
+			}),
+		);
+		await chmod(file, mode);
+		return home;
+	}
+
+	it("coverage with no session reads the job logs and watch records in the conventional file's state dir", async () => {
+		const custom = await mkdtemp(join(tmpdir(), "utcc-job-custom-"));
+		await mkdir(join(custom, "jobs"), { recursive: true });
+		await writeFile(
+			join(custom, "jobs", `${SID}.jsonl`),
+			start(SID, T0) + op(SID, T0 + 1000, "start", "bug-1") + op(SID, T0 + 5000, "stop", null),
+		);
+		await writeFile(
+			join(custom, "watch.jsonl"),
+			`${JSON.stringify({ at: iso(T0 + 2000), started: iso(T0 + 2000), kind: "gap", mode: "watch", session: SID, agent: "main" })}\n`,
+		);
+		const vault = await mkdtemp(join(tmpdir(), "utcc-job-vault-"));
+		await mkdir(join(vault, "audit"));
+		// UT_CC_STATE_DIR names `state`, which holds neither: the file wins, as it does for a new session.
+		const r = await cliOut(["coverage", "bug-1", "--vault", vault], {
+			TEST_PASSWD_HOME: await conventionalHome(custom),
+		});
+		expect(r.code).toBe(0);
+		// mutant: settings() alone (never the conventional file) → the UT_* dir's empty logs, no gap
+		expect(r.stdout).toContain(`session ${SID}: a gap fell inside an interval of bug-1`);
+		expect(r.stdout).not.toContain("job still running");
+	});
+
+	it("a refused conventional file is no verdict: never the UT_* or default state dir in its place", async () => {
+		const custom = await mkdtemp(join(tmpdir(), "utcc-job-custom-"));
+		const vault = await mkdtemp(join(tmpdir(), "utcc-job-vault-"));
+		await mkdir(join(vault, "audit"));
+		const r = await cliOut(["coverage", "bug-1", "--vault", vault], {
+			TEST_PASSWD_HOME: await conventionalHome(custom, 0o644),
+		});
+		// mutant: use the refused settings → a report over the default state dir, exit 0
+		expect(r.code).toBe(1);
+		expect(r.stderr).toContain(
+			"~/.config/usertrust/claude-code.json was refused (config: file refused (mode))",
+		);
+		expect(r.stderr).toContain("no verdict");
+		expect(r.stdout).toBe("");
 	});
 });
 
