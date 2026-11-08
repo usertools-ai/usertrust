@@ -265,6 +265,11 @@ body {
 		border: 2px solid var(--accent);
 		animation: ut-pulse 1.8s ease-out infinite;
 	}
+	/* A past point is shown: the stream may be up, but the screen is not live, so no pulse (the word is "connected"). */
+	.ut-live[data-past="true"] i::after {
+		content: none;
+		animation: none;
+	}
 	.ut-live[data-st="reconnecting"],
 	.ut-live[data-st="connecting"] {
 		color: var(--info);

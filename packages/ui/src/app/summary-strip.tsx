@@ -79,6 +79,8 @@ function TopBar(props: {
 	vaultPath: string | null;
 	live: LiveState;
 	kit: boolean;
+	/** A past point is shown: the stream may be up, but the screen is not live. */
+	past: boolean;
 }): React.JSX.Element {
 	const [copied, setCopied] = useState(false);
 	const path = props.vaultPath;
@@ -104,9 +106,15 @@ function TopBar(props: {
 				</button>
 			)}
 			<span className="ut-grow" />
-			<span className="ut-live" data-st={props.live} role="status">
+			{/* "live" means the screen shows now AND the stream is up; at a past point an up stream is only "connected". */}
+			<span
+				className="ut-live"
+				data-st={props.live}
+				data-past={props.past ? "true" : undefined}
+				role="status"
+			>
 				<i aria-hidden="true" />
-				{LIVE_LABEL[props.live]}
+				{props.past && props.live === "live" ? "connected" : LIVE_LABEL[props.live]}
 			</span>
 		</header>
 	);
@@ -640,7 +648,7 @@ export function SummaryStrip(props: {
 			<>
 				{showBar && (
 					<>
-						<TopBar vaultPath={null} live={props.live} kit={false} />
+						<TopBar vaultPath={null} live={props.live} kit={false} past={at !== null} />
 						<AsAtLine at={null} head={-1} />
 					</>
 				)}
@@ -656,7 +664,7 @@ export function SummaryStrip(props: {
 		<>
 			{showBar && (
 				<>
-					<TopBar vaultPath={s.vaultPath} live={props.live} kit={s.remote.kit} />
+					<TopBar vaultPath={s.vaultPath} live={props.live} kit={s.remote.kit} past={at !== null} />
 					{status === "broken" && (
 						<div className="ut-alarm" role="alert">
 							<b>Chain integrity failure</b>
