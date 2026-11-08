@@ -6,6 +6,7 @@ import type { AtPayload } from "../src/shared/api.js";
 import {
 	atFailureText,
 	goLiveKeepingFocus,
+	isStepEvent,
 	newSince,
 	stepFor,
 	timelineLabel,
@@ -187,5 +188,32 @@ describe("goLiveKeepingFocus", () => {
 		const calls: string[] = [];
 		goLiveKeepingFocus(() => calls.push("live"), null);
 		expect(calls).toEqual(["live"]);
+	});
+});
+
+describe("isStepEvent", () => {
+	const key = (k: string, over: Partial<{ altKey: boolean; ctrlKey: boolean; metaKey: boolean }> = {}) => ({
+		key: k,
+		altKey: false,
+		ctrlKey: false,
+		metaKey: false,
+		...over,
+	});
+	it("a bare step key moves the thumb", () => {
+		for (const k of ["ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End"])
+			expect(isStepEvent(key(k))).toBe(true);
+	});
+	it("Shift alone does not stop it", () => {
+		expect(isStepEvent({ ...key("ArrowLeft"), shiftKey: true } as never)).toBe(true);
+	});
+	it("Alt, Ctrl or Meta with a step key is the browser's (Back, Forward, top, bottom), not the thumb's", () => {
+		expect(isStepEvent(key("ArrowLeft", { altKey: true }))).toBe(false);
+		expect(isStepEvent(key("ArrowRight", { metaKey: true }))).toBe(false);
+		expect(isStepEvent(key("Home", { ctrlKey: true }))).toBe(false);
+		expect(isStepEvent(key("End", { metaKey: true }))).toBe(false);
+	});
+	it("a key that is not a step key is never one", () => {
+		expect(isStepEvent(key("a"))).toBe(false);
+		expect(isStepEvent(key("Tab"))).toBe(false);
 	});
 });

@@ -26,6 +26,20 @@ export function isStepKey(key: string): key is StepKey {
 }
 
 /**
+ * Whether a key press is one the timeline moves by. A step key with Alt, Ctrl or Meta held is the browser's own
+ * (Alt+Left and Alt+Right are Back and Forward, Cmd+Left and Cmd+Right are history on macOS, Ctrl+Home and Ctrl+End
+ * scroll), so it is left alone. Shift does not stop it.
+ */
+export function isStepEvent(e: {
+	key: string;
+	altKey: boolean;
+	ctrlKey: boolean;
+	metaKey: boolean;
+}): boolean {
+	return isStepKey(e.key) && !e.altKey && !e.ctrlKey && !e.metaKey;
+}
+
+/**
  * The time a record carries, as the rows show it (`formatUtc`), with the year in front when it is not the year of
  * `nowIso`: the rows' `MM-DD` never needs one, a point a year back does.
  */

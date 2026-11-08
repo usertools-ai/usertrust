@@ -6,8 +6,9 @@ import type { AtPayload } from "../shared/api.js";
 import { Scrubber, type ScrubIo } from "../shared/scrub.js";
 import {
 	goLiveKeepingFocus,
-	isStepKey,
+	isStepEvent,
 	newSince,
+	type StepKey,
 	stepFor,
 	timelineTexts,
 } from "../shared/timeline-view.js";
@@ -198,9 +199,9 @@ export function Timeline(props: {
 					if (Number.isSafeInteger(next) && next !== value) move(next);
 				}}
 				onKeyDown={(e) => {
-					if (!isStepKey(e.key) || head < 0) return;
+					if (!isStepEvent(e) || head < 0) return;
 					e.preventDefault();
-					const next = stepFor(e.key, value, head);
+					const next = stepFor(e.key as StepKey, value, head);
 					if (next !== value) move(next);
 				}}
 				onKeyUp={release}
