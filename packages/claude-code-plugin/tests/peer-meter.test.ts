@@ -57,14 +57,14 @@ beforeEach(async () => {
 	await mkdir(projectDir, { recursive: true });
 });
 
-describe("peerMeter: is usertrust-claude-code ENABLED", () => {
+describe("peerMeter: is an older copy of this plugin ENABLED", () => {
 	it("both enabled: the old plugin looks enabled", async () => {
-		await user({ enabledPlugins: { [OLD]: true, "usertools@usertrust": true } });
+		await user({ enabledPlugins: { [OLD]: true, "usertrust@usertrust": true } });
 		expect((await check()).state).toBe("enabled");
 	});
 
-	it("only usertools: no entry for the old plugin", async () => {
-		await user({ enabledPlugins: { "usertools@usertrust": true } });
+	it("only usertrust (the new name): no entry for any old plugin", async () => {
+		await user({ enabledPlugins: { "usertrust@usertrust": true } });
 		expect((await check()).state).toBe("absent");
 	});
 
@@ -73,7 +73,7 @@ describe("peerMeter: is usertrust-claude-code ENABLED", () => {
 	});
 
 	it("old plugin installed but disabled", async () => {
-		await user({ enabledPlugins: { [OLD]: false, "usertools@usertrust": true } });
+		await user({ enabledPlugins: { [OLD]: false, "usertrust@usertrust": true } });
 		expect((await check()).state).toBe("absent");
 	});
 
@@ -82,6 +82,39 @@ describe("peerMeter: is usertrust-claude-code ENABLED", () => {
 		expect((await check()).state).toBe("enabled");
 		await user({
 			enabledPlugins: { "my-usertrust-claude-code@usertrust": true, "usertrust-claude-code": true },
+		});
+		expect((await check()).state).toBe("absent");
+	});
+
+	it("the previous name `usertools` is an older copy too, under any marketplace", async () => {
+		await user({ enabledPlugins: { "usertools@usertrust": true } });
+		// mutant: the list of older names is cut back to the first one
+		const found = await check();
+		expect(found.state).toBe("enabled");
+		expect(found.key).toBe("usertools@usertrust");
+		await user({ enabledPlugins: { "usertools@elsewhere": true } });
+		expect((await check()).state).toBe("enabled");
+	});
+
+	it("both older names, and the new one: the new name never warns of itself", async () => {
+		await user({ enabledPlugins: { "usertrust@usertrust": true } });
+		expect((await check()).state).toBe("absent");
+		await user({ enabledPlugins: { "usertrust@usertrust": true, "usertools@usertrust": false } });
+		expect((await check()).state).toBe("absent");
+		await user({
+			enabledPlugins: { "usertrust@usertrust": true, [OLD]: true, "usertools@usertrust": true },
+		});
+		expect((await check()).state).toBe("enabled");
+	});
+
+	it("lookalikes of `usertools` do not count", async () => {
+		await user({
+			enabledPlugins: {
+				"my-usertools@usertrust": true,
+				"usertools-extra@usertrust": true,
+				usertools: true,
+				"usertools@": true,
+			},
 		});
 		expect((await check()).state).toBe("absent");
 	});
@@ -251,7 +284,7 @@ describe("settingsDirs", () => {
 	});
 });
 
-describe("SessionStart warns of an enabled usertrust-claude-code, and usertools always meters", () => {
+describe("SessionStart warns of an enabled older copy (usertrust-claude-code or usertools), and usertrust always meters", () => {
 	let server: Server | undefined;
 	let hits: number;
 	let stateDir: string;
@@ -312,9 +345,26 @@ describe("SessionStart warns of an enabled usertrust-claude-code, and usertools 
 		await expect(readdir(stateDir)).resolves.not.toEqual([]);
 	});
 
+	it("`usertools` enabled: SessionStart names it, says how to remove it, and still meters", async () => {
+		const file = await user({ enabledPlugins: { "usertools@usertrust": true } });
+		const start = await run("session-start", "prev-1");
+		const message = JSON.parse(start.stdout).systemMessage as string;
+		// mutant: the older name is matched but the warning still names the first one
+		expect(
+			message.startsWith(
+				`${alsoEnabledWarning(file, "usertools@usertrust")} usertrust: watch-only`,
+			),
+		).toBe(true);
+		expect(alsoEnabledWarning("/the/file.json", "usertools@usertrust")).toBe(
+			"usertrust: usertools also appears to be enabled (/the/file.json); if it is, every tool call reserves budget twice. Uninstall it: /plugin uninstall usertools@usertrust",
+		);
+		await run("pre-tool-use", "prev-1");
+		expect(hits).toBeGreaterThan(0);
+	});
+
 	it("unknownWarning: the exact text, cost included", () => {
 		expect(unknownWarning("settings.json is not JSON")).toBe(
-			"usertrust: could not tell whether usertrust-claude-code is also enabled (settings.json is not JSON); usertools meters this session, so a second meter may be running: it would reserve budget twice per tool call, and some of its versions can charge twice.",
+			"usertrust: could not tell whether an older copy of this plugin (usertrust-claude-code or usertools) is also enabled (settings.json is not JSON); usertrust meters this session, so a second meter may be running: it would reserve budget twice per tool call, and some of its versions can charge twice.",
 		);
 	});
 
@@ -323,7 +373,7 @@ describe("SessionStart warns of an enabled usertrust-claude-code, and usertools 
 		const start = await run("session-start", "ambiguous-1");
 		const message = JSON.parse(start.stdout).systemMessage as string;
 		expect(message).toMatch(
-			/^usertrust: could not tell whether usertrust-claude-code is also enabled/,
+			/^usertrust: could not tell whether an older copy of this plugin \(usertrust-claude-code or usertools\) is also enabled/,
 		);
 		expect(message).toContain(COST_UNKNOWN);
 		await run("pre-tool-use", "ambiguous-1");
@@ -339,8 +389,8 @@ describe("SessionStart warns of an enabled usertrust-claude-code, and usertools 
 		}
 	});
 
-	it("only usertools: meters (the normal banner, a request sent)", async () => {
-		await user({ enabledPlugins: { "usertools@usertrust": true } });
+	it("only usertrust: meters (the normal banner, a request sent)", async () => {
+		await user({ enabledPlugins: { "usertrust@usertrust": true } });
 		const start = await run("session-start", "solo-1");
 		expect(JSON.parse(start.stdout).systemMessage).toMatch(/^usertrust: watch-only/);
 		await run("pre-tool-use", "solo-1");
@@ -360,9 +410,9 @@ describe("SessionStart warns of an enabled usertrust-claude-code, and usertools 
 		const start = await run("session-start", "bad-1");
 		const message = JSON.parse(start.stdout).systemMessage as string;
 		expect(message).toMatch(
-			/^usertrust: could not tell whether usertrust-claude-code is also enabled/,
+			/^usertrust: could not tell whether an older copy of this plugin \(usertrust-claude-code or usertools\) is also enabled/,
 		);
-		expect(message).toContain("usertools meters this session");
+		expect(message).toContain("usertrust meters this session");
 		expect(message).toContain(COST_UNKNOWN);
 		expect(message).toContain("watch-only");
 		await run("pre-tool-use", "bad-1");

@@ -374,3 +374,156 @@ describe("renderNotFound", () => {
 		assertBoxStructure(output);
 	});
 });
+
+// ── the metering behind Spend ──
+describe("the receipt prints the metering behind Spend, only as the receipt carries it", () => {
+	const metered = {
+		model: "claude-sonnet-4-5",
+		cost: 14,
+		settled: true,
+		transferId: "tx_meter_1",
+		usageSource: "provider",
+		usage: { inputTokens: 1200, outputTokens: 300, cacheReadTokens: 5000, cacheWriteTokens: 800 },
+		cacheWrite1h: { tokens: 300, ratePer1k: 6 },
+		appliedRates: { inputPer1k: 3, outputPer1k: 15, cacheReadPer1k: 0.3, cacheWritePer1k: 3.75 },
+		pricingTableVersion: "2026-10-01",
+	};
+	const render = (data: Record<string, unknown>) =>
+		renderReceipt(
+			makeReceiptData({ event: makeEvent({ data: data as TransactionEvent["data"] }) }),
+		);
+	const field = (output: string, label: string): string | undefined =>
+		output
+			.split("\n")
+			.map((l) => new RegExp(`^│\\s+${label} \\.+ (.+?) │$`).exec(l)?.[1])
+			.find((v) => v !== undefined);
+
+	it("prints the counts, the rates, the table version and the source", () => {
+		const out = render(metered);
+		expect(field(out, "Tokens in")).toBe("1200");
+		expect(field(out, "Tokens out")).toBe("300");
+		expect(field(out, "Cache read")).toBe("5000");
+		expect(field(out, "Cache write")).toBe("800");
+		expect(field(out, "of it 1 h")).toBe("300");
+		expect(field(out, "Rate in /1k")).toBe("3");
+		expect(field(out, "Rate out /1k")).toBe("15");
+		expect(field(out, "Rate read /1k")).toBe("0.3");
+		expect(field(out, "Rate write /1k")).toBe("3.75");
+		expect(field(out, "Rate 1 h write /1k")).toBe("6");
+		expect(field(out, "Pricing table")).toBe("2026-10-01");
+		expect(field(out, "Usage source")).toBe("provider");
+		expect(out).toContain("Spend = ceil(sum(n x rate / 1000)), min 1");
+	});
+
+	it("Spend can be rebuilt from the printed fields alone", () => {
+		// The cost is what the SDK computed: ceil(sum(count x rate / 1000)) over the five terms.
+		const cost =
+			Math.ceil(
+				(1200 * 3) / 1000 +
+					(300 * 15) / 1000 +
+					(5000 * 0.3) / 1000 +
+					((800 - 300) * 3.75) / 1000 +
+					(300 * 6) / 1000,
+			) || 1;
+		const out = render({ ...metered, cost });
+		const n = (label: string) => Number(field(out, label));
+		const rebuilt = Math.max(
+			1,
+			Math.ceil(
+				(n("Tokens in") * n("Rate in /1k")) / 1000 +
+					(n("Tokens out") * n("Rate out /1k")) / 1000 +
+					(n("Cache read") * n("Rate read /1k")) / 1000 +
+					((n("Cache write") - n("of it 1 h")) * n("Rate write /1k")) / 1000 +
+					(n("of it 1 h") * n("Rate 1 h write /1k")) / 1000,
+			),
+		);
+		expect(field(out, "Spend")).toBe(`${cost} UT`);
+		expect(rebuilt).toBe(cost);
+	});
+
+	it("a receipt without the metering says so for each group and recomputes nothing", () => {
+		const out = render({ model: "gpt-5", cost: 9, settled: true, transferId: "tx_old" });
+		expect(field(out, "Tokens")).toBe("not in receipt");
+		expect(field(out, "Rates /1k UT")).toBe("not in receipt");
+		expect(field(out, "Pricing table")).toBe("not in receipt");
+		expect(field(out, "Usage source")).toBe("not in receipt");
+		expect(out).not.toContain("Tokens in");
+		expect(out).not.toContain("of it 1 h");
+	});
+
+	it("one missing field in a present group prints 'not in receipt', never a default", () => {
+		const out = render({
+			...metered,
+			usage: { inputTokens: 10, outputTokens: 5 },
+			appliedRates: { inputPer1k: 3, outputPer1k: 15 },
+		});
+		expect(field(out, "Tokens in")).toBe("10");
+		expect(field(out, "Cache read")).toBe("not in receipt");
+		expect(field(out, "Cache write")).toBe("not in receipt");
+		expect(field(out, "Rate read /1k")).toBe("not in receipt");
+		expect(field(out, "Rate write /1k")).toBe("not in receipt");
+	});
+
+	it("a 1-hour record with a missing member prints 'not in receipt', a wrong-typed one 'invalid'", () => {
+		const noTokens = render({ ...metered, cacheWrite1h: { ratePer1k: 6 } });
+		expect(field(noTokens, "of it 1 h")).toBe("not in receipt");
+		expect(field(noTokens, "Rate 1 h write /1k")).toBe("6");
+		const noRate = render({ ...metered, cacheWrite1h: { tokens: 300 } });
+		expect(field(noRate, "of it 1 h")).toBe("300");
+		expect(field(noRate, "Rate 1 h write /1k")).toBe("not in receipt");
+		const bad = render({ ...metered, cacheWrite1h: { tokens: "many", ratePer1k: -1 } });
+		expect(field(bad, "of it 1 h")).toBe("invalid");
+		expect(field(bad, "Rate 1 h write /1k")).toBe("invalid");
+	});
+
+	it("a receipt with no usage prints no rebuild rule, and says it cannot be rebuilt from counts", () => {
+		const { usage: _drop, ...estimated } = metered;
+		const out = render({ ...estimated, usageSource: "estimated" });
+		expect(out).not.toContain("Spend = ceil");
+		expect(out).toContain("No token counts in this receipt: Spend");
+		expect(out).toContain("cannot be rebuilt from counts.");
+		const old = render({ model: "gpt-5", cost: 9, settled: true, transferId: "tx_old" });
+		expect(old).not.toContain("Spend = ceil");
+		expect(old).toContain("cannot be rebuilt from counts.");
+		expect(render(metered)).toContain("Spend = ceil(sum(n x rate / 1000)), min 1");
+	});
+
+	it("a receipt with counts but no 1-hour record prints no 1-hour rows", () => {
+		const { cacheWrite1h: _drop, ...noHour } = metered;
+		const out = render(noHour);
+		expect(out).not.toContain("of it 1 h");
+		expect(out).not.toContain("Rate 1 h write");
+		expect(field(out, "Cache write")).toBe("800");
+	});
+
+	it("a wrong-typed or hostile value prints 'invalid' and is never echoed", () => {
+		const out = render({
+			...metered,
+			usage: { ...metered.usage, inputTokens: "1200", outputTokens: -1, cacheReadTokens: 1.5 },
+			appliedRates: { ...metered.appliedRates, inputPer1k: Number.NaN, outputPer1k: "15" },
+			pricingTableVersion: "2026\u001b[2J\nIgnore previous",
+			usageSource: { x: 1 },
+		});
+		expect(field(out, "Tokens in")).toBe("invalid");
+		expect(field(out, "Tokens out")).toBe("invalid");
+		expect(field(out, "Cache read")).toBe("invalid");
+		expect(field(out, "Rate in /1k")).toBe("invalid");
+		expect(field(out, "Rate out /1k")).toBe("invalid");
+		expect(field(out, "Pricing table")).toBe("invalid");
+		expect(field(out, "Usage source")).toBe("invalid");
+		expect(out).not.toContain("Ignore");
+		expect(out).not.toContain("\u001b");
+	});
+
+	it("a failed, denied or detection receipt prints no spend and so no metering", () => {
+		const out = render({ ...metered, error: "boom" } as Record<string, unknown>);
+		expect(out).toContain("Tokens in");
+		const failed = renderReceipt(
+			makeReceiptData({
+				event: makeEvent({ kind: "llm_call_failed", data: { ...metered, error: "boom" } as never }),
+			}),
+		);
+		expect(failed).not.toContain("Tokens in");
+		expect(failed).not.toContain("Pricing table");
+	});
+});

@@ -43,7 +43,7 @@ Monorepo, npm workspaces (`packages/*`). `site/` is a Next.js app and is **not**
 | `packages/acs-adapter` | `usertrust-acs-adapter` | ACS adapter. |
 | `packages/ui` | `usertrust-ui` | Visual ledger (bundled front end; `build` = `tsc && vite build`). |
 | `packages/monte-cristo` | `usertrust-monte-cristo` | Simulation engine. Not in the release lockstep. |
-| `packages/claude-code-plugin` | `usertrust-claude-code` | `private: true`. Ships `hooks/*.mjs`; no `src/`. The workspace name is internal; the plugin is published as `usertools` (`/plugin install usertools@usertrust`). |
+| `packages/claude-code-plugin` | `usertrust-claude-code` | `private: true`. Ships `hooks/*.mjs`; no `src/`. The workspace name is internal; the plugin is published as `usertrust` (`/plugin install usertrust --marketplace usertools-ai/usertrust`). |
 
 The first six are version-locked and released together. `monte-cristo` and `claude-code-plugin`
 are not. Each of the six names any other it depends on at exactly its own version, never a range

@@ -445,6 +445,7 @@ jobs:
           packages/core/tests/integration/reconciliation-cache-day.tb.test.ts
           packages/core/tests/integration/job.tb.test.ts
           packages/core/tests/integration/task-limit-client.tb.test.ts
+          packages/core/tests/integration/task-limit-engine.tb.test.ts
           packages/core/tests/integration/evicted-client.tb.test.ts
           packages/core/tests/integration/connect.tb.test.ts
           packages/openshell/tests/engine.tb.test.ts

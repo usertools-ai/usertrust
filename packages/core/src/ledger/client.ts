@@ -1485,11 +1485,9 @@ export class TrustTBClient {
 		const amount = BigInt(p.amount);
 		// Minted here, OUTSIDE withReconnect: a retry resubmits these same two ids, which is what
 		// makes a lost reply a replay rather than a second hold.
-		const payerId = tbId();
-		const limitId = tbId();
-		const batch: [Transfer, Transfer] = [
+		const first: [Transfer, Transfer] = [
 			{
-				id: payerId,
+				id: tbId(),
 				debit_account_id: p.payer.debitAccountId,
 				credit_account_id: p.payer.creditAccountId,
 				amount,
@@ -1504,7 +1502,7 @@ export class TrustTBClient {
 				timestamp: 0n,
 			},
 			{
-				id: limitId,
+				id: tbId(),
 				debit_account_id: p.limit.debitAccountId,
 				credit_account_id: p.limit.creditAccountId,
 				amount,
@@ -1519,8 +1517,15 @@ export class TrustTBClient {
 				timestamp: 0n,
 			},
 		];
-		await this.submitPair(batch, "Pending transfer", false);
-		return { payerId, limitId };
+		// The pair is built ONCE, here, from the params as they are now. A re-mint after an await swaps
+		// only the two ids on copies of these transfers: it never reads `p` again, so a caller that reuses
+		// or edits the object it passed cannot change which accounts or task the second send names.
+		const mint = (): [Transfer, Transfer] => [
+			{ ...first[0], id: tbId() },
+			{ ...first[1], id: tbId() },
+		];
+		const sent = await this.submitPair(first, "Pending transfer", false, mint);
+		return { payerId: sent[0].id, limitId: sent[1].id };
 	}
 
 	/**
@@ -1584,9 +1589,8 @@ export class TrustTBClient {
 	}
 
 	/**
-	 * Submit a linked pair and read its two answers. TigerBeetle 0.17.9 answers one result per
-	 * event, so anything but exactly two is a hard failure: reading an empty answer as "both
-	 * created" would report a hold the ledger may never have made.
+	 * Submit a linked pair and read its two answers (`sendPair`), and return the batch the answer
+	 * belongs to.
 	 *  - `created`, `created`: success.
 	 *  - a payer-leg failure, then `linked_event_failed`: a plain TBTransferError with the payer's
 	 *    code (an `exists_with_different_*` on the payer leg included: a hard conflict).
@@ -1600,10 +1604,54 @@ export class TrustTBClient {
 	 * The batch is fixed before withReconnect, so a reconnect's retry resubmits these same ids.
 	 */
 	private async submitPair(
-		batch: [Transfer, Transfer],
+		first: [Transfer, Transfer],
 		what: string,
 		resolvesPending: boolean,
-	): Promise<void> {
+		remint?: () => [Transfer, Transfer],
+	): Promise<[Transfer, Transfer]> {
+		let batch = first;
+		let [payer, limit] = await this.sendPair(batch);
+		const S = CreateTransferStatus;
+		// A pending pair refused for a transient reason (exceeds_credits, a missing account) retires
+		// the id of the leg that failed. When that answer was lost and the reconnect resent the same
+		// two ids, the resend reads `id_already_failed` on that leg and says nothing about the payer
+		// or the task now. These ids were minted for this call alone, so only its own earlier attempt
+		// can have retired one, and nothing of that attempt was kept (a refused chain is undone). So
+		// mint two new ids and send ONCE more, and read that answer on its merits. A post or void
+		// pair is never re-minted: its `id_already_failed` is about the pending transfers it names.
+		const retiredByOwnAttempt =
+			(payer === S.linked_event_failed && limit === S.id_already_failed) ||
+			(payer === S.id_already_failed && limit === S.linked_event_failed);
+		if (remint !== undefined && retiredByOwnAttempt) {
+			batch = remint();
+			[payer, limit] = await this.sendPair(batch);
+		}
+		const name = (status: number) => CreateTransferStatus[status] ?? String(status);
+		const fails = (status: number) =>
+			status !== S.created && status !== S.exists && status !== S.linked_event_failed;
+		if (payer === S.created && limit === S.created) return batch;
+		if (payer === S.exists && limit === S.linked_event_failed) {
+			await this.verifyReplayedPair(batch, resolvesPending);
+			return batch;
+		}
+		if (limit === S.linked_event_failed && fails(payer)) {
+			throw new TBTransferError(payer, `${what} failed: ${name(payer)}`);
+		}
+		if (payer === S.linked_event_failed && fails(limit)) {
+			throw new TaskLimitLegError(limit, `${what} failed on the task-limit leg: ${name(limit)}`);
+		}
+		throw new TBTransferError(
+			payer !== S.created ? payer : limit,
+			`Linked pair answered inconsistently: ${name(payer)}, ${name(limit)}`,
+		);
+	}
+
+	/**
+	 * Send one linked pair and return its two statuses. TigerBeetle 0.17.9 answers one result per
+	 * event, so anything but exactly two is a hard failure: reading an empty answer as "both
+	 * created" would report a hold the ledger may never have made.
+	 */
+	private async sendPair(batch: [Transfer, Transfer]): Promise<[number, number]> {
 		const results = await this.withReconnect((native) => native.createTransfers(batch));
 		if (results.length !== 2) {
 			throw new Error(`Linked pair answered ${results.length} results for 2 transfers`);
@@ -1613,26 +1661,7 @@ export class TrustTBClient {
 		if (payer === undefined || limit === undefined) {
 			throw new Error("Unknown account/transfer error");
 		}
-		const S = CreateTransferStatus;
-		const name = (status: number) => CreateTransferStatus[status] ?? String(status);
-		const fails = (status: number) =>
-			status !== S.created && status !== S.exists && status !== S.linked_event_failed;
-		if (payer === S.created && limit === S.created) return;
-		if (payer === S.exists && limit === S.linked_event_failed) {
-			await this.verifyReplayedPair(batch, resolvesPending);
-			return;
-		}
-		if (limit === S.linked_event_failed && fails(payer)) {
-			throw new TBTransferError(payer, `${what} failed: ${name(payer)}`);
-		}
-		if (payer === S.linked_event_failed && fails(limit)) {
-			throw new TaskLimitLegError(limit, `${what} failed on the task-limit leg: ${name(limit)}`);
-		}
-		const first = payer !== S.created ? payer : limit;
-		throw new TBTransferError(
-			first,
-			`Linked pair answered inconsistently: ${name(payer)}, ${name(limit)}`,
-		);
+		return [payer, limit];
 	}
 
 	/**

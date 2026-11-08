@@ -1,4 +1,4 @@
-# Changelog: usertools (formerly usertrust-claude-code)
+# Changelog: usertrust (formerly usertools, and before that usertrust-claude-code)
 
 The Claude Code plugin's own changes. It is installed from this repository's
 plugin marketplace (`/plugin marketplace add usertools-ai/usertrust`), not from
@@ -6,6 +6,27 @@ npm, and its version is its own: the `usertrust` packages and their
 [changelog](../../CHANGELOG.md) are versioned separately.
 
 ## [Unreleased]
+
+### Renamed
+
+- **BREAKING: the plugin is renamed from `usertools` to `usertrust`.** Install it with
+  `/plugin install usertrust --marketplace usertools-ai/usertrust` (Claude Code v2.1.275 or later; it
+  opens a scope chooser, so it is not a silent install), or add the marketplace and run
+  `/plugin install usertrust@usertrust` on an older Claude Code. **An existing `usertools` install does
+  NOT update itself to the new name**: Claude Code treats a renamed plugin as a new one. Run
+  `/plugin uninstall usertools@usertrust`, then install `usertrust`. With both installed, every tool
+  call reserves budget twice until you remove the old one. SessionStart now warns when `usertools`
+  looks enabled, as it already did for `usertrust-claude-code`, naming the settings file and the
+  uninstall line. The new plugin always meters.
+  - **Unchanged:** the marketplace name (`usertrust`), the configuration file path
+    (`~/.config/usertrust/`), every `UT_CC_*` variable, the hooks and their behaviour, and the state
+    directory (`~/.claude/usertrust-cc`, or `UT_CC_STATE_DIR`). The plugin never reads
+    `CLAUDE_PLUGIN_DATA`, and nothing it stores is keyed by its name, so pending holds and cursors stay
+    where they are. A test pins this.
+  - There are no slash commands yet; when there are, they will be `/usertrust:…`.
+- **The plugin's descriptions are true in every mode.** The four places that describe it (the
+  manifest, the marketplace entry, `package.json` and the README's first paragraph) no longer say
+  "Ledger-backed"; they say it puts a spend hold on every tool call and is watch-only by default.
 
 ### Changed
 
@@ -49,6 +70,15 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ### Fixed
 
+- **A Workflow tool's agents are charged from their own transcripts, not at the estimate.** Claude Code
+  writes such an agent's transcript one level below the other subagents', under
+  `subagents/workflows/<run>/`, and its tool hooks name no transcript path, so the plugin read the
+  transcript as missing. It settled every call of the agent at the per-call estimate, priced at the
+  fallback model `unknown`, and wrote a `late-transcript` gap when the agent stopped. On one measured
+  session that recorded about 3.8 times the agent's real usage, with the wrong token counts and no
+  cache split. The plugin now finds the transcript and its meta file in those run directories too,
+  for every hook and for the remainder at Stop. It looks only in real directories with a run's name,
+  never through a symlink.
 - **A hook launcher killed just after it started a child no longer leaves that child running.** This covered SessionStart's probe child and the child the other hooks send from. The launcher installed its SIGTERM, SIGINT and SIGHUP handlers (and, for the probe, its exit cleanup) after it started the child. A signal in between took the launcher down by the signal's default action, which runs no cleanup, so the child ran on, orphaned: the probe child until its own 3-second bound, a hook's child until that hook finished. The handlers are now in place before the child starts; a signal before the child exists ends the launcher as it would have, and after that the signal is forwarded to the child as before.
 
 ## [3.1.0] - 2026-10-27

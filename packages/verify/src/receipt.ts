@@ -351,6 +351,80 @@ export function eventStatus(event: TransactionEvent): TransferStatus {
 	return "PENDING";
 }
 
+// ── Metering rows ──
+
+const ABSENT = "not in receipt";
+const INVALID = "invalid";
+/** A settled `llm_call` event keeps these keys (core: `govern.ts` auditData); an older or non-LLM receipt has none. */
+const record = (v: unknown): Record<string, unknown> | undefined =>
+	v !== null && typeof v === "object" && !Array.isArray(v)
+		? (v as Record<string, unknown>)
+		: undefined;
+const count = (v: unknown): string | undefined =>
+	typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? String(v) : undefined;
+const rate = (v: unknown): string | undefined =>
+	typeof v === "number" && Number.isFinite(v) && v >= 0 ? String(v) : undefined;
+const token = (v: unknown, re: RegExp): string | undefined =>
+	typeof v === "string" && re.test(v) ? v : undefined;
+
+/**
+ * The token counts, the applied rates and the pricing table version a settled call carries, as label/value rows, so a
+ * charge can be rebuilt by hand: `Spend = max(1, ceil(sum(tokens x rate / 1000)))` over the input, output, cache-read
+ * and cache-write terms (the 1-hour part of the write at its own rate, the rest at the write rate).
+ *
+ * EVERY value is read from the event and from nowhere else. A field the receipt does not carry prints
+ * "not in receipt", and nothing is recomputed or looked up in a live table: the receipt is a frozen format. A value
+ * of the wrong type, or a string that is not a plain token, prints "invalid" and is never echoed (the event is written
+ * by the party under audit and this reaches a terminal).
+ */
+function meterRows(data: object): Array<[string, string]> {
+	const d = data as Record<string, unknown>;
+	const out: Array<[string, string]> = [];
+	const usage = record(d.usage);
+	const w1h = record(d.cacheWrite1h);
+	const rates = record(d.appliedRates);
+	const tokens: Array<[string, unknown]> = [
+		["Tokens in", usage?.inputTokens],
+		["Tokens out", usage?.outputTokens],
+		["Cache read", usage?.cacheReadTokens],
+		["Cache write", usage?.cacheWriteTokens],
+	];
+	if (usage === undefined) out.push(["Tokens", d.usage === undefined ? ABSENT : INVALID]);
+	else
+		for (const [label, v] of tokens)
+			out.push([label, count(v) ?? (v === undefined ? ABSENT : INVALID)]);
+	if (w1h !== undefined) {
+		out.push(["  of it 1 h", count(w1h.tokens) ?? (w1h.tokens === undefined ? ABSENT : INVALID)]);
+	} else if (d.cacheWrite1h !== undefined) out.push(["  of it 1 h", INVALID]);
+	const perK: Array<[string, unknown]> = [
+		["Rate in /1k", rates?.inputPer1k],
+		["Rate out /1k", rates?.outputPer1k],
+		["Rate read /1k", rates?.cacheReadPer1k],
+		["Rate write /1k", rates?.cacheWritePer1k],
+	];
+	if (rates === undefined)
+		out.push(["Rates /1k UT", d.appliedRates === undefined ? ABSENT : INVALID]);
+	else
+		for (const [label, v] of perK)
+			out.push([label, rate(v) ?? (v === undefined ? ABSENT : INVALID)]);
+	if (w1h !== undefined)
+		out.push([
+			"Rate 1 h write /1k",
+			rate(w1h.ratePer1k) ?? (w1h.ratePer1k === undefined ? ABSENT : INVALID),
+		]);
+	out.push([
+		"Pricing table",
+		d.pricingTableVersion === undefined
+			? ABSENT
+			: (token(d.pricingTableVersion, /^[0-9A-Za-z._-]{1,24}$/) ?? INVALID),
+	]);
+	out.push([
+		"Usage source",
+		d.usageSource === undefined ? ABSENT : (token(d.usageSource, /^[a-z_]{1,16}$/) ?? INVALID),
+	]);
+	return out;
+}
+
 // ── Receipt renderer ──
 
 export function renderReceipt(data: ReceiptData): string {
@@ -419,6 +493,18 @@ export function renderReceipt(data: ReceiptData): string {
 	if (!isFailed && !isDenied && !isDetection && cost !== undefined) {
 		lines.push(row(`${dotted("  Spend", `${cost} UT`, WIDTH - 1)} `));
 		lines.push(row(`${dotted("  Conversion", formatUsd(cost), WIDTH - 1)} `));
+		// The metering the Spend came from, ONLY as the receipt carries it (see `meterRows`).
+		for (const [label, value] of meterRows(event.data)) {
+			lines.push(row(`${dotted(`  ${label}`, value, WIDTH - 1)} `));
+		}
+		// The rule describes a charge priced from counts. A receipt with no `usage` (an estimate-priced settle, or an
+		// older record) was not shown to be priced that way, so it gets no rule to check against.
+		if (record((event.data as Record<string, unknown>).usage) !== undefined) {
+			lines.push(row(pad("  Spend = ceil(sum(n x rate / 1000)), min 1")));
+		} else {
+			lines.push(row(pad("  No token counts in this receipt: Spend")));
+			lines.push(row(pad("  cannot be rebuilt from counts.")));
+		}
 	}
 
 	lines.push(row(`${dotted("  Status", status, WIDTH - 1)} `));

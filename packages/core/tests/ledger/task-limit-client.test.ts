@@ -620,6 +620,111 @@ function expectInheritedFieldsSentAsZero(batch: SentTransfer[]): void {
 	}
 }
 
+describe("a resend after a refused pair", () => {
+	// A pair refused for a transient reason (exceeds_credits, a missing account) retires the id of
+	// the leg that failed. If that answer is lost and the client resends the same two ids, the
+	// resend reads id_already_failed, which says nothing about the task or the payer now. With
+	// freshly minted ids it can only come from this call's own earlier attempt, so the client mints
+	// two new ids and submits once more, and that answer is read on its merits.
+	const idsOf = (i: number) => sentBatch(i).map((t) => t.id);
+
+	it("a resend after a limit-leg refusal re-mints both ids once and is refused on its merits", async () => {
+		await ledgers(1_000n, 100n);
+		loseFirstReply();
+		const err = await settle(client.createLinkedPendingPair(pairFor(400)));
+		expect(err).toBeInstanceOf(TaskLimitLegError);
+		expect((err as TaskLimitLegError).code).toBe(S.exceeds_credits);
+		// The first attempt, its resend under the same ids, then one attempt under new ids.
+		expect(requestsOf("createTransfers")).toHaveLength(3);
+		expect(idsOf(1)).toEqual(idsOf(0));
+		for (const id of idsOf(2)) expect(idsOf(0)).not.toContain(id);
+		expect(balance(WALLET).debits_pending).toBe(0n);
+	});
+
+	it("a re-mint sends the accounts the call started with, even if the caller changes its params meanwhile", async () => {
+		await ledgers(1_000n, 100n);
+		const params = pairFor(400);
+		// After the first send commits (and its reply is lost), the caller reuses and edits the object it
+		// passed. The re-mint runs after that, so it must not read the object again.
+		loseFirstReply(() => {
+			params.payer.debitAccountId = 9_901n;
+			params.limit.debitAccountId = 9_902n;
+		});
+		const err = await settle(client.createLinkedPendingPair(params));
+		expect(err).toBeInstanceOf(TaskLimitLegError);
+		const remint = sentBatch(2);
+		expect(remint.map((t) => t.debit_account_id)).toEqual([WALLET, TASK]);
+		expect(remint.map((t) => t.credit_account_id)).toEqual([TREASURY, OPERATOR]);
+	});
+
+	it("a resend after a limit-leg refusal is admitted under new ids once the task has room again", async () => {
+		await ledgers(1_000n, 400n);
+		const first = await client.createLinkedPendingPair(pairFor(300));
+		fake.requests.length = 0;
+		// The second pair is refused (100 left), its reply is lost, and the first pair is voided
+		// before the resend reaches the ledger.
+		loseFirstReply(() => {
+			void fake.client.createTransfers([
+				transferOf({
+					id: 9_201n,
+					pending_id: first.payerId,
+					flags: TF.void_pending_transfer | TF.linked,
+				}),
+				transferOf({ id: 9_202n, pending_id: first.limitId, flags: TF.void_pending_transfer }),
+			]);
+		});
+		const second = await client.createLinkedPendingPair(pairFor(300));
+		const transfers = requestsOf("createTransfers");
+		// The refused attempt, the out-of-band void, the resend, then the attempt under new ids.
+		expect(transfers).toHaveLength(4);
+		const last = transfers[3]?.batch as SentTransfer[];
+		expect([second.payerId, second.limitId]).toEqual(last.map((t) => t.id));
+		for (const id of [second.payerId, second.limitId]) expect(idsOf(0)).not.toContain(id);
+		expect(balance(TASK).debits_pending).toBe(300n);
+	});
+
+	it("a resend after a payer-leg refusal re-mints too, and keeps the payer's code", async () => {
+		await ledgers(100n, 1_000n);
+		loseFirstReply();
+		const err = await settle(client.createLinkedPendingPair(pairFor(400)));
+		expect(err).toBeInstanceOf(TBTransferError);
+		expect(err).not.toBeInstanceOf(TaskLimitLegError);
+		expect((err as TBTransferError).code).toBe(S.exceeds_credits);
+		expect(requestsOf("createTransfers")).toHaveLength(3);
+	});
+
+	it("re-mints at most once: a second id_already_failed is a hard failure", async () => {
+		await ledgers(1_000n, 1_000n);
+		// The third send and every later one is really applied. A re-mint without a bound would then end
+		// by ADMITTING the pair, so this row fails on an assertion instead of looping until a timeout.
+		let sent = 0;
+		fake.onRequest = (op, _batch, apply) => {
+			if (op !== "createTransfers") return apply();
+			sent += 1;
+			return sent <= 2
+				? [
+						{ timestamp: 0n, status: S.linked_event_failed },
+						{ timestamp: 0n, status: S.id_already_failed },
+					]
+				: apply();
+		};
+		const err = await settle(client.createLinkedPendingPair(pairFor(10)));
+		expect(err).toBeInstanceOf(TaskLimitLegError);
+		expect((err as TaskLimitLegError).code).toBe(S.id_already_failed);
+		expect(requestsOf("createTransfers")).toHaveLength(2);
+	});
+
+	it("a post or void pair answered id_already_failed is not re-minted", async () => {
+		await ledgers(1_000n, 1_000n);
+		const { payerId, limitId } = await client.createLinkedPendingPair(pairFor(10));
+		fake.requests.length = 0;
+		answer(S.linked_event_failed, S.id_already_failed);
+		await expect(client.postLinkedPair(payerId, limitId, 10)).rejects.toThrow();
+		await expect(client.voidLinkedPair(payerId, limitId)).rejects.toThrow();
+		expect(requestsOf("createTransfers")).toHaveLength(2);
+	});
+});
+
 describe("postLinkedPair and voidLinkedPair", () => {
 	async function heldPair(amount: number, timeoutSeconds = HOLD_S) {
 		await ledgers(1_000n, 1_000n);

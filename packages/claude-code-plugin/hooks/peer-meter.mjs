@@ -1,7 +1,8 @@
 // A second meter is visible, a missing one is not. This plugin was renamed from
-// `usertrust-claude-code`; an install of the old name cannot be updated, and with both
+// `usertrust-claude-code`, and then from `usertools`; an install of an older name cannot be
+// updated (Claude Code treats a renamed plugin as a new one), and with both
 // loaded (both share one state dir), every tool call reserves budget twice, and some versions
-// of the old plugin can also charge twice. SessionStart WARNS when the old plugin looks enabled,
+// of the oldest plugin can also charge twice. SessionStart WARNS when an older copy looks enabled,
 // and this plugin always meters: settings files are evidence of what Claude Code loaded, not
 // proof (--settings and --setting-sources, a change made after the session started, and a
 // different home all make them wrong), and a wrong "enabled" that stopped metering would be a
@@ -29,12 +30,15 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { READ_BOUND, readRegular } from "./lib.mjs";
 
-/** The retired plugin's name; the key is `<name>@<marketplace>`. */
-export const PEER_PLUGIN = "usertrust-claude-code";
+/**
+ * The names this plugin has had before `usertrust`; the key is `<name>@<marketplace>`. Claude Code
+ * treats a renamed plugin as a new one, so an install under an older name keeps running beside it.
+ */
+export const PEER_PLUGINS = ["usertrust-claude-code", "usertools"];
 
-/** Whether `name` is the old plugin under any marketplace. */
+/** Whether `name` is an older copy of this plugin under any marketplace. */
 const isPeerKey = (name) =>
-	name.startsWith(`${PEER_PLUGIN}@`) && name.length > PEER_PLUGIN.length + 1;
+	PEER_PLUGINS.some((peer) => name.startsWith(`${peer}@`) && name.length > peer.length + 1);
 
 /**
  * One settings file's say on the old plugin: `{ keys }` (each matching key -> its boolean), or
@@ -215,7 +219,13 @@ export function settingsDirs({ env, payload }) {
  * `<name>@<marketplace>` whose winning value is true.
  */
 export function alsoEnabledWarning(file, key) {
-	return `usertrust: usertrust-claude-code also appears to be enabled (${file}); if it is, every tool call reserves budget twice, and some of its versions can charge twice. Uninstall it: /plugin uninstall ${key}`;
+	const name = key.slice(0, key.indexOf("@"));
+	// "Some of its versions can charge twice" was measured of `usertrust-claude-code` only.
+	const cost =
+		name === "usertrust-claude-code"
+			? "every tool call reserves budget twice, and some of its versions can charge twice"
+			: "every tool call reserves budget twice";
+	return `usertrust: ${name} also appears to be enabled (${file}); if it is, ${cost}. Uninstall it: /plugin uninstall ${key}`;
 }
 
 /**
@@ -224,7 +234,7 @@ export function alsoEnabledWarning(file, key) {
  * twice per tool call, and some versions of the old plugin can charge twice.
  */
 export function unknownWarning(why) {
-	return `usertrust: could not tell whether usertrust-claude-code is also enabled (${why}); usertools meters this session, so a second meter may be running: it would reserve budget twice per tool call, and some of its versions can charge twice.`;
+	return `usertrust: could not tell whether an older copy of this plugin (${PEER_PLUGINS.join(" or ")}) is also enabled (${why}); usertrust meters this session, so a second meter may be running: it would reserve budget twice per tool call, and some of its versions can charge twice.`;
 }
 
 /** What `launch.mjs` found, for SessionStart (same process) to put first on its line. */
