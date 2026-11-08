@@ -66,9 +66,12 @@ export function useAt(
 		follower.current?.want(pos);
 	}, [pos]);
 
+	// A snapshot that lands after a newer summary frame reinstalls the summary already held: the rows and `resyncs`
+	// change and `summary` does not, and the answer still needs the re-read that replaces its rows.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: `resyncs` is a trigger, not a value the effect reads
 	useEffect(() => {
 		if (summary !== null) follower.current?.refresh();
-	}, [summary]);
+	}, [summary, resyncs]);
 
 	// "live" after "reconnecting" or "offline" is a reconnect; the first "live" (after "connecting") is not.
 	const wasDown = useRef(false);

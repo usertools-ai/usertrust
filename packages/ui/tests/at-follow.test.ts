@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AtPayload } from "../src/shared/api.js";
 import { cutRows, rowsAsAnswered } from "../src/shared/asof.js";
@@ -547,6 +548,18 @@ describe("AtFollower", () => {
 			await h.flush();
 			expect(h.last().rows).toBe(fresh);
 			expect(statusesAt(h.last(), fresh)).toEqual(["settled"]);
+		});
+
+		it("the hook re-reads when a resync is installed, whether or not the summary object changed", () => {
+			// A snapshot overtaken by a newer summary frame reinstalls the summary already held: rows and the resync count
+			// change, the summary does not. The effects have no DOM to run in here, so the dependency list is pinned.
+			const src = readFileSync(new URL("../src/app/use-at.ts", import.meta.url), "utf-8");
+			const effect =
+				/useEffect\(\(\) => \{\s*if \(summary !== null\)[\s\S]*?\}, \[([^\]]*)\]\)/.exec(src);
+			expect(effect).not.toBeNull();
+			const deps = (effect?.[1] ?? "").split(",").map((d) => d.trim());
+			expect(deps).toContain("summary");
+			expect(deps).toContain("resyncs");
 		});
 
 		it("an answer that landed on the way is paired with its own request's rows", async () => {
