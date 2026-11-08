@@ -185,6 +185,10 @@ async function pinFromEnvironment(home: string, env: Record<string, string>): Pr
 	return JSON.parse(await readFile(pinOf(home), "utf-8")) as Pin;
 }
 
+/** Why a dead pin is kept when the conventional file names the state dir it was pinned with. */
+const SAME_DIR =
+	"the conventional file names the state dir it was pinned with, where the usage recorded before the re-pin would be posted under the new key";
+
 const FILE = (stateDir: string) => ({
 	url: "http://127.0.0.1:4520",
 	key: "file-key-0123",
@@ -481,6 +485,22 @@ describe("session.mjs: SessionStart re-pins a DEAD environment pin to the conven
 			why: "its state dir is unreadable",
 		},
 		{
+			name: "(4) the conventional file names the SAME state dir (the README's default layout)",
+			spoil: async (old, home) => {
+				await writeConventional(home, FILE(old));
+			},
+			why: SAME_DIR,
+		},
+		{
+			name: "(4) the conventional file names a link to the same state dir",
+			spoil: async (old, home) => {
+				const link = join(await makeDir("utcc-conv-link-"), "state");
+				nodeFs.symlinkSync(old, link);
+				await writeConventional(home, FILE(link));
+			},
+			why: SAME_DIR,
+		},
+		{
 			name: "(3) the conventional file refused",
 			spoil: async (_old, home) => chmod(conventionalOf(home), 0o644),
 			why: "the config file ~/.config/usertrust/claude-code.json was refused (config: file refused (mode)); the UT_* variables are never used in its place",
@@ -687,6 +707,41 @@ describe("through the hooks: (b) the warning, the ignored UT_* note, and a re-pi
 		// Only what came after the re-pin: 360, never msg_old's 120 too.
 		expect(server.charged()).toBe(360);
 		expect(await readdir(old)).toContain("transcripts");
+	});
+
+	it("a re-pin into the SAME state dir is refused: UNCONFIGURED, loudly, and nothing old is charged", async () => {
+		// The README's layout: the conventional file's stateDir is the environment default. That dir
+		// already holds the session's first-metered stamp and its cursors, so a re-pin there would post
+		// the unconfigured session's usage (msg_old) under the new key.
+		const home = await makeHome();
+		const old = await makeDir("utcc-conv-old-");
+		const project = await mkdtemp(join(tmpdir(), "utcc-conv-project-"));
+		const transcript = join(project, `${SESSION}.jsonl`);
+		await writeFile(transcript, `${JSON.stringify({ type: "user", sessionId: SESSION })}\n`);
+		const env = { ...unconfigured(old), TEST_PASSWD_HOME: home };
+		const stop = () =>
+			runHook(hook("stop"), { session_id: SESSION, transcript_path: transcript }, env);
+		expect((await stop()).code).toBe(0);
+		await append(transcript, [...responseEntries("msg_old", 100, 20)]);
+		expect((await stop()).code).toBe(0);
+		const server = await recordingServer();
+		await writeConventional(home, { ...FILE(old), url: server.url });
+		const start = await runHook(
+			hook("session-start"),
+			{ session_id: SESSION, source: "resume" },
+			env,
+		);
+		expect(start.code).toBe(0);
+		const message = systemMessage(start.stdout);
+		// mutant: re-pin whatever dir the file names
+		expect(message).toMatch(/^usertrust: WARNING: this session is UNCONFIGURED\./);
+		expect(message).toContain(`It is not re-pinned: ${SAME_DIR}.`);
+		expect(nodeFs.existsSync(recordsOf(home))).toBe(false);
+		await append(transcript, [...responseEntries("msg_new", 300, 60)]);
+		expect((await stop()).code).toBe(0);
+		// Still the environment pin, key-less, at a server that never answered: 0 charged, not 480.
+		expect(server.charged()).toBe(0);
+		expect((JSON.parse(await readFile(pinOf(home), "utf-8")) as Pin).kind).toBe("environment");
 	});
 
 	it("(b) SessionStart says UNCONFIGURED, loudly, for a kept environment pin while the conventional file exists", async () => {
