@@ -2,7 +2,6 @@
 // Copyright 2026 Usertools, Inc.
 
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import type { AtPayload } from "../shared/api.js";
 import { rowsAsAnswered } from "../shared/asof.js";
 import { csvFilename, toCsv } from "../shared/csv.js";
 import { EMPTY_FILTERS, isFiltering } from "../shared/filters.js";
@@ -46,19 +45,15 @@ export function App(): React.JSX.Element {
 	// The past position shown (`#at=N`, or a drag's preview before it is written there), from /api/at. Until its first
 	// answer lands, or when it fails with nothing loaded, the screen stays live and the timeline says so: a past view is
 	// only ever drawn from its own answer.
-	const { view: atView, preview } = useAt(at, summary, live);
+	const { view: atView, preview } = useAt(at, summary, live, rows);
 	const shownAt = atView.at;
-	// The rows the page held when the answer was read. A live `status` frame can change an earlier row before the
-	// answer is read again; until then the past view keeps the status the answer was read against (`rowsAsAnswered`).
-	// Set while rendering, from state, when the answer is a new one.
-	const [answered, setAnswered] = useState<{ at: AtPayload | null; rows: LedgerRow[] }>({
-		at: shownAt,
-		rows,
-	});
-	if (answered.at !== shownAt) setAnswered({ at: shownAt, rows });
+	// The past view reads each row's status against the rows the page held when the answer's request was SENT
+	// (`atView.rows`), not the rows held when the answer renders: a live `status` frame for a record after the
+	// position, one the server had not seen when it answered, can arrive in between, and `statusAt` cannot correct it
+	// (`rowsAsAnswered`).
 	const pastRows = useMemo(
-		() => rowsAsAnswered(rows, answered.rows, shownAt),
-		[rows, answered.rows, shownAt],
+		() => rowsAsAnswered(rows, atView.rows ?? rows, shownAt),
+		[rows, atView.rows, shownAt],
 	);
 	const head = summary === null ? -1 : summary.chain.events - 1;
 	// What the list, the facets, Trends and Export draw: ONE input, deferred, so a timeline drag paints the thumb, its
@@ -255,6 +250,7 @@ export function App(): React.JSX.Element {
 			<Timeline
 				at={shownAt}
 				wanted={atView.wanted}
+				resolved={atView.resolved}
 				committed={at}
 				head={head}
 				error={atView.error}

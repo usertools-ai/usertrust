@@ -19,16 +19,34 @@
  * - `reconnected()`: the live stream came back, and the server may have restarted, which restarts its epochs. The
  *   epoch and the baseline are forgotten, answers to requests sent before it are dropped, and the re-read is a new
  *   baseline, never compared with the old server's epoch.
+ * - Each request takes a snapshot of the rows the page holds in the tick it is sent, and its answer is shown with that
+ *   snapshot (`AtView.rows`), never with the rows held when the answer lands. The server answers at a head at least as
+ *   new as the snapshot, so every record after the position that the snapshot reflects is also known to the server,
+ *   and `statusAt` corrects its rows; a live frame that arrives after the send never touches the snapshot. A
+ *   superseded request's answer goes with its snapshot.
+ * - `resolved` is the record the wanted position was answered with, kept across reconnects: the re-read of a clamped
+ *   position is asked for by the record answered and comes back unclamped, but the selection stays on that record.
  * - A failure keeps the last good view and says why. It is not retried on its own.
  */
 
 import type { AtPayload } from "./api.js";
+import type { LedgerRow } from "./rows.js";
 
 export interface AtView {
 	/** The position wanted (a preview during a drag, or the address's), or null for live. */
 	wanted: number | null;
 	/** The answer shown, or null: live, or nothing has loaded for the wanted position yet. */
 	at: AtPayload | null;
+	/**
+	 * The rows the page held when the request for `at` was sent (null with `at`): the rows the answer is read against.
+	 * Not the rows held when it lands.
+	 */
+	rows: readonly LedgerRow[] | null;
+	/**
+	 * The record the wanted position was answered with (a position past the head is answered with the head), kept
+	 * across reconnects; null until the first answer for the wanted position, and live.
+	 */
+	resolved: number | null;
 	/** True while a position is wanted and no answer for it has been shown yet. */
 	loading: boolean;
 	/** Why the last request failed (a short phrase), or null. */
@@ -40,6 +58,8 @@ export interface AtView {
 export const LIVE_VIEW: AtView = {
 	wanted: null,
 	at: null,
+	rows: null,
+	resolved: null,
 	loading: false,
 	error: null,
 	reloaded: false,
@@ -88,6 +108,8 @@ export class AtFollower {
 	/** The answer the current choice was first answered with: its position, head and clamped flag stay. */
 	private chosen: AtPayload | null = null;
 	private shown: AtPayload | null = null;
+	/** The rows held when the request for `shown` was sent. */
+	private shownRows: readonly LedgerRow[] | null = null;
 	private epoch: number | null = null;
 	private inFlight = false;
 	private due = false;
@@ -101,6 +123,8 @@ export class AtFollower {
 		private readonly load: (pos: number, signal: AbortSignal) => Promise<AtPayload>,
 		private readonly publish: (view: AtView) => void,
 		private readonly timeoutMs: number = AT_TIMEOUT_MS,
+		/** The rows the page holds right now: read in the tick a request is sent. */
+		private readonly heldRows: () => readonly LedgerRow[] = () => [],
 	) {}
 
 	/** Show the vault at `pos`, or live (null). */
@@ -113,6 +137,7 @@ export class AtFollower {
 		this.reloaded = false;
 		if (pos === null) {
 			this.shown = null;
+			this.shownRows = null;
 			this.error = null;
 			this.epoch = null;
 			this.due = false;
@@ -164,6 +189,8 @@ export class AtFollower {
 		const choice = this.choice;
 		const generation = this.generation;
 		const chosen = this.chosen;
+		// Taken in this tick, with the request: see the header.
+		const rows = this.heldRows();
 		const abort = new AbortController();
 		// The timeout settles the request whether or not the loader honours the signal.
 		const timedOut = new Promise<never>((_, reject) => {
@@ -172,7 +199,7 @@ export class AtFollower {
 		const timer = setTimeout(() => abort.abort(), this.timeoutMs);
 		Promise.race([this.load(chosen?.pos ?? this.reread ?? wanted, abort.signal), timedOut])
 			.then(
-				(answer) => this.take(answer, choice, generation),
+				(answer) => this.take(answer, rows, choice, generation),
 				(err: unknown) => {
 					if (this.wanted === null || generation !== this.generation) return;
 					// A failure for a position the user has left says nothing about the one they are on now.
@@ -188,7 +215,12 @@ export class AtFollower {
 			});
 	}
 
-	private take(answer: AtPayload, choice: number, generation: number): void {
+	private take(
+		answer: AtPayload,
+		rows: readonly LedgerRow[],
+		choice: number,
+		generation: number,
+	): void {
 		if (this.wanted === null || generation !== this.generation) return;
 		if (this.epoch !== null && answer.epoch !== this.epoch) {
 			this.reloaded = true;
@@ -200,12 +232,15 @@ export class AtFollower {
 		if (choice !== this.choice) {
 			// An answer for a position the drag has moved past: shown on the way; the latest is already due.
 			this.shown = answer;
+			this.shownRows = rows;
 		} else if (this.chosen === null || this.chosen === answer) {
 			this.chosen = answer;
 			this.shown = answer;
+			this.shownRows = rows;
 			this.reread = null;
 		} else if (this.shown === null || !sameReading(this.shown, answer)) {
 			this.shown = { ...answer, head: this.chosen.head, clamped: this.chosen.clamped };
+			this.shownRows = rows;
 		}
 	}
 
@@ -216,6 +251,8 @@ export class AtFollower {
 				: {
 						wanted: this.wanted,
 						at: this.shown,
+						rows: this.shownRows,
+						resolved: this.chosen?.pos ?? this.reread,
 						loading: this.shown === null && this.error === null,
 						error: this.error,
 						reloaded: this.reloaded,
@@ -225,6 +262,8 @@ export class AtFollower {
 			last !== null &&
 			last.wanted === view.wanted &&
 			last.at === view.at &&
+			last.rows === view.rows &&
+			last.resolved === view.resolved &&
 			last.loading === view.loading &&
 			last.error === view.error &&
 			last.reloaded === view.reloaded

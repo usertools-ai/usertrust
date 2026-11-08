@@ -43,6 +43,8 @@ export function Timeline(props: {
 	at: AtPayload | null;
 	/** The position asked for (a preview, or the address's), or null for live. */
 	wanted: number | null;
+	/** The record the position asked for was answered with (a position past the head is answered with the head), or null. */
+	resolved: number | null;
 	/** The address's position (`#at`): a change the drag did not write drops its pending commit. */
 	committed: number | null;
 	/** The live vault's last position; -1 when it has no records. */
@@ -68,7 +70,7 @@ export function Timeline(props: {
 	onHold(holding: boolean): void;
 	onLive(): void;
 }): React.JSX.Element {
-	const { at, wanted, head } = props;
+	const { at, wanted, resolved, head } = props;
 	// Read at render, never subscribed to: the clock only decides whether a label names the year, and a ticking clock
 	// re-rendered the timeline every 15 s while live for nothing.
 	const nowIso = new Date().toISOString();
@@ -98,12 +100,13 @@ export function Timeline(props: {
 	}, [props.committed]);
 
 	const max = Math.max(head, 0);
-	// A position asked for past the head was answered with the head: the thumb sits on the record answered.
+	// A position asked for past the head was answered with the head: the thumb sits on the record answered, and stays
+	// there when a reconnect re-reads that record (unclamped) while the head moves on.
 	const settled =
 		wanted === null
 			? max
-			: at?.clamped === true && wanted > at.pos
-				? at.pos
+			: resolved !== null && wanted > resolved
+				? resolved
 				: Math.min(wanted, max);
 	const value = thumb ?? settled;
 	const past = wanted !== null || thumb !== null;

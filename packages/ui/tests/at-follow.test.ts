@@ -3,7 +3,9 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AtPayload } from "../src/shared/api.js";
+import { cutRows, rowsAsAnswered } from "../src/shared/asof.js";
 import { AtFollower, type AtView } from "../src/shared/at-follow.js";
+import type { LedgerRow } from "../src/shared/rows.js";
 import { newSince } from "../src/shared/timeline-view.js";
 
 function at(overrides: Partial<AtPayload> = {}): AtPayload {
@@ -30,8 +32,26 @@ function at(overrides: Partial<AtPayload> = {}): AtPayload {
 	};
 }
 
+function row(pos: number, overrides: Partial<LedgerRow> = {}): LedgerRow {
+	return {
+		seq: pos,
+		pos,
+		id: `id-${pos}`,
+		ts: "2026-10-12T17:59:02.770Z",
+		kind: "llm_call",
+		actor: "local",
+		hash: pos.toString(16).padStart(64, "0"),
+		previousHash: "0".repeat(64),
+		integrity: "verified",
+		status: "settled",
+		...overrides,
+	};
+}
+
 /** A loader whose answers the test gives by hand, in any order. */
 function harness() {
+	// The rows the page holds right now: the test replaces them as live frames arrive.
+	const page = { rows: [] as LedgerRow[] };
 	const calls: Array<{
 		pos: number;
 		signal: AbortSignal;
@@ -45,6 +65,8 @@ function harness() {
 				calls.push({ pos, signal, resolve, reject });
 			}),
 		(v) => views.push(v),
+		undefined,
+		() => page.rows,
 	);
 	const last = (): AtView => {
 		const v = views.at(-1);
@@ -55,7 +77,7 @@ function harness() {
 	const flush = async (): Promise<void> => {
 		for (let i = 0; i < 20; i++) await Promise.resolve();
 	};
-	return { follower, calls, views, last, flush };
+	return { follower, calls, views, last, flush, page };
 }
 
 describe("AtFollower", () => {
@@ -375,6 +397,146 @@ describe("AtFollower", () => {
 			const h = harness();
 			h.follower.reconnected();
 			expect(h.calls).toHaveLength(0);
+		});
+	});
+
+	describe("the rows an answer is paired with are the ones held when its request was sent", () => {
+		const sent = [row(0), row(1)];
+		/** A live `status` frame: a record after the position turned row 0 ambiguous. */
+		const turned = (): LedgerRow[] =>
+			sent.map((r) => (r.pos === 0 ? { ...r, status: "ambiguous" as const } : r));
+		const statusesAt = (view: AtView, live: LedgerRow[]): Array<string | undefined> => {
+			if (view.at === null || view.rows === null) throw new Error("no answer shown");
+			return cutRows(rowsAsAnswered(live, view.rows, view.at), view.at).map((r) => r.status);
+		};
+
+		it("a status frame that overtakes the answer does not reach the past view", async () => {
+			const h = harness();
+			h.page.rows = sent;
+			h.follower.want(0);
+			// The server answered at a head that had no record after position 0 (statusAt is empty); a frame for one
+			// reaches the page before the answer renders.
+			h.page.rows = turned();
+			h.calls[0]?.resolve(at({ pos: 0, head: 1 }));
+			await h.flush();
+			expect(h.last().rows).toBe(sent);
+			expect(statusesAt(h.last(), h.page.rows)).toEqual(["settled"]);
+		});
+
+		it("the same when the answer's re-read fails: the view keeps the pair it was answered with", async () => {
+			const h = harness();
+			h.page.rows = sent;
+			h.follower.want(0);
+			h.page.rows = turned();
+			h.calls[0]?.resolve(at({ pos: 0, head: 1 }));
+			await h.flush();
+			h.follower.refresh();
+			h.calls[1]?.reject(new Error("the dashboard did not answer"));
+			await h.flush();
+			expect(h.last().error).toBe("the dashboard did not answer");
+			expect(h.last().rows).toBe(sent);
+			expect(statusesAt(h.last(), h.page.rows)).toEqual(["settled"]);
+		});
+
+		it("a re-read that covers the change is paired with the rows held when it was sent", async () => {
+			const h = harness();
+			h.page.rows = sent;
+			h.follower.want(0);
+			h.calls[0]?.resolve(at({ pos: 0, head: 1 }));
+			await h.flush();
+			const now = turned();
+			h.page.rows = now;
+			h.follower.refresh();
+			h.calls[1]?.resolve(at({ pos: 0, head: 1, statusAt: { [row(0).hash]: "settled" } }));
+			await h.flush();
+			expect(h.last().rows).toBe(now);
+			expect(statusesAt(h.last(), now)).toEqual(["settled"]);
+		});
+
+		it("a re-read that changes nothing keeps the pair and publishes nothing", async () => {
+			const h = harness();
+			h.page.rows = sent;
+			h.follower.want(0);
+			h.calls[0]?.resolve(at({ pos: 0, head: 1 }));
+			await h.flush();
+			const published = h.views.length;
+			h.page.rows = turned();
+			h.follower.refresh();
+			h.calls[1]?.resolve(at({ pos: 0, head: 1 }));
+			await h.flush();
+			expect(h.views).toHaveLength(published);
+			expect(h.last().rows).toBe(sent);
+		});
+
+		it("an answer that landed on the way is paired with its own request's rows", async () => {
+			const h = harness();
+			h.page.rows = sent;
+			h.follower.want(0);
+			h.follower.want(1);
+			const later = turned();
+			h.page.rows = later;
+			h.calls[0]?.resolve(at({ pos: 0, head: 1 }));
+			await h.flush();
+			expect(h.last().rows).toBe(sent);
+			// The next request (for 1) was sent after the frame.
+			h.calls[1]?.resolve(at({ pos: 1, head: 1 }));
+			await h.flush();
+			expect(h.last().rows).toBe(later);
+		});
+
+		it("going live drops the rows with the answer", async () => {
+			const h = harness();
+			h.page.rows = sent;
+			h.follower.want(0);
+			h.calls[0]?.resolve(at({ pos: 0, head: 1 }));
+			await h.flush();
+			h.follower.want(null);
+			expect(h.last()).toMatchObject({ at: null, rows: null });
+		});
+
+		it("rows older than the window the answer covers are not drawn, whatever later changes them", async () => {
+			const held = [row(0), row(1), row(2), row(3), row(4), row(5)];
+			const h = harness();
+			h.page.rows = held;
+			h.follower.want(4);
+			// A record after the position changes row 1, which the server has since evicted: its statusAt cannot say so.
+			const live = held.map((r) => (r.pos === 1 ? { ...r, status: "ambiguous" as const } : r));
+			h.page.rows = live;
+			h.calls[0]?.resolve(at({ pos: 4, head: 5, windowStartPos: 3 }));
+			await h.flush();
+			const view = h.last();
+			if (view.at === null || view.rows === null) throw new Error("no answer shown");
+			const shown = cutRows(rowsAsAnswered(live, view.rows, view.at), view.at);
+			expect(shown.map((r) => r.pos)).toEqual([3, 4]);
+		});
+	});
+
+	describe("the resolved selection", () => {
+		it("a position asked for past the head is resolved to the record answered, and stays so across a reconnect", async () => {
+			const h = harness();
+			h.follower.want(500);
+			expect(h.last().resolved).toBeNull();
+			h.calls[0]?.resolve(at({ pos: 99, head: 99, clamped: true }));
+			await h.flush();
+			expect(h.last().resolved).toBe(99);
+			h.follower.reconnected();
+			// Between the reconnect and the re-read's answer.
+			expect(h.last().resolved).toBe(99);
+			h.calls[1]?.resolve(at({ pos: 99, head: 120, clamped: false }));
+			await h.flush();
+			expect(h.last()).toMatchObject({ wanted: 500, resolved: 99 });
+			expect(h.last().at).toMatchObject({ pos: 99, clamped: false });
+		});
+
+		it("a new position starts unresolved", async () => {
+			const h = harness();
+			h.follower.want(500);
+			h.calls[0]?.resolve(at({ pos: 99, head: 99, clamped: true }));
+			await h.flush();
+			h.follower.want(40);
+			expect(h.last().resolved).toBeNull();
+			h.follower.want(null);
+			expect(h.last().resolved).toBeNull();
 		});
 	});
 });

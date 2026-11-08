@@ -85,12 +85,14 @@ function indexByHash(rows: readonly LedgerRow[]): Map<string, LedgerRow> {
 }
 
 /**
- * `rows` with each row at or before the answer's position given the status it had when the answer was read
- * (`answeredRows`: the rows the page held then), unless the answer names one for it. A live `status` frame can change an
- * earlier row between an answer and its re-read; the answer has no status for that row yet, and the row is no later
- * than the position, so the change is not what the position recorded. The re-read takes it up (`statusAt`), and
- * until it lands the list keeps what the answer was read against. Only for a position the page had already
- * received: for a later one, nothing is held. `rows` itself when nothing differs.
+ * `rows` with each row at or before the answer's position given the status it had when the answer's request was sent
+ * (`answeredRows`: the rows the page held then, never the rows held when the answer renders), unless the answer names
+ * one for it. The server answers at a head at least as new as that moment, so a record after the position that the
+ * rows reflect is also known to it and `statusAt` corrects the row; a frame that arrives after the send is not. A live
+ * `status` frame can change an earlier row between an answer and its re-read; the answer has no status for that row
+ * yet, and the row is no later than the position, so the change is not what the position recorded. The re-read takes
+ * it up (`statusAt`), and until it lands the list keeps what the answer was read against. Only for a position the page
+ * had already received: for a later one, nothing is held. `rows` itself when nothing differs.
  */
 export function rowsAsAnswered(
 	rows: LedgerRow[],

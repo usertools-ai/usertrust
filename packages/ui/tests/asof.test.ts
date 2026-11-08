@@ -4,6 +4,8 @@
 import { describe, expect, it } from "vitest";
 import type { AtPayload, SummaryPayload } from "../src/shared/api.js";
 import { chainAt, cutRows, rowsAsAnswered, windowNote, windowNoteAt } from "../src/shared/asof.js";
+import { EMPTY_FILTERS } from "../src/shared/filters.js";
+import { type ListInput, listView } from "../src/shared/list-view.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 
 function row(pos: number, overrides: Partial<LedgerRow> = {}): LedgerRow {
@@ -248,5 +250,32 @@ describe("rowsAsAnswered", () => {
 		// Rows that arrived after the answer was read are shown as they are.
 		const more = [...now, row(4)];
 		expect(rowsAsAnswered(more, answered, at({ pos: 4 }))[4]).toBe(more[4]);
+	});
+});
+
+describe("rows older than the window the answer covers", () => {
+	// The page kept rows 0..2 after the server's window moved to 3. A record after the position changed row 1; the
+	// server evicted it before it could say so, so its live status is not a status at the position.
+	const held = [row(0), row(1, { status: "ambiguous" }), row(2), row(3), row(4), row(5)];
+	const listInput = (payload: AtPayload): ListInput => ({
+		rows: held,
+		at: payload,
+		filters: EMPTY_FILTERS,
+		phase: "loaded",
+		summary: null,
+	});
+
+	it("are not drawn at a position inside the window", () => {
+		const view = listView(listInput(at({ pos: 4, head: 5, windowStartPos: 3 })));
+		expect(view.shownRows.map((r) => r.pos)).toEqual([3, 4]);
+		expect(view.beforeWindow).toBeNull();
+	});
+
+	it("leave a position before the window to the note that names where the list starts", () => {
+		const payload = at({ pos: 1, head: 5, windowStartPos: 3 });
+		const view = listView(listInput(payload));
+		expect(view.shownRows).toEqual([]);
+		expect(view.beforeWindow).toEqual({ kind: "before", firstHeld: 3, upTo: 1 });
+		expect(windowNoteAt(payload)).toContain("from position 4");
 	});
 });

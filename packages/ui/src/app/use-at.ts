@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AtPayload, SummaryPayload } from "../shared/api.js";
 import { AtFollower, type AtView, LIVE_VIEW } from "../shared/at-follow.js";
+import type { LedgerRow } from "../shared/rows.js";
 import { atFailureText } from "../shared/timeline-view.js";
 import type { LiveState } from "./store.js";
 
@@ -32,15 +33,26 @@ async function loadAt(pos: number, signal: AbortSignal): Promise<AtPayload> {
  * Each new summary (every append, status change and reload sends one) re-reads the position: a later record can change
  * the status a row had there, and a reload can change what the position names. When the live stream comes back after
  * dropping, the server may have restarted and restarted its epochs, so the follower forgets the epoch and re-reads.
+ *
+ * `rows` are the rows the page holds. Each request is sent with the rows held at that moment, and its answer is shown
+ * with those rows (`view.rows`), never with the rows held when it lands (`AtFollower`).
  */
 export function useAt(
 	pos: number | null,
 	summary: SummaryPayload | null,
 	live: LiveState,
+	rows: readonly LedgerRow[],
 ): { view: AtView; preview(pos: number | null): void } {
 	const [view, setView] = useState<AtView>(LIVE_VIEW);
 	const follower = useRef<AtFollower | null>(null);
-	if (follower.current === null) follower.current = new AtFollower(loadAt, setView);
+	// The rows as of the last commit, for the follower to read when it sends a request. Written in an effect, never
+	// while rendering, and declared before the effects below so a request they send reads this commit's rows.
+	const held = useRef(rows);
+	useEffect(() => {
+		held.current = rows;
+	}, [rows]);
+	if (follower.current === null)
+		follower.current = new AtFollower(loadAt, setView, undefined, () => held.current);
 
 	useEffect(() => {
 		follower.current?.want(pos);

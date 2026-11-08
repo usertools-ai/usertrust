@@ -27,6 +27,7 @@ async function app<T>(file: string): Promise<T> {
 interface TimelineProps {
 	at: AtPayload | null;
 	wanted: number | null;
+	resolved: number | null;
 	head: number;
 	loading: boolean;
 	error: string | null;
@@ -549,6 +550,7 @@ describe("the timeline", () => {
 	const props = (over: Partial<TimelineProps> = {}): TimelineProps => ({
 		at: null,
 		wanted: null,
+		resolved: null,
 		head: 99,
 		loading: false,
 		error: null,
@@ -644,12 +646,20 @@ describe("the timeline", () => {
 
 	it("a clamped position puts the thumb on the record answered, and stops calling it the latest once more arrive", () => {
 		const a = at({ pos: 99, head: 99, clamped: true });
-		const html = render({ at: a, wanted: 500 });
+		const html = render({ at: a, wanted: 500, resolved: 99 });
 		expect(html).toMatch(/<input[^>]*value="99"/);
 		expect(text(html)).toContain("(latest record)");
-		const later = render({ at: a, wanted: 500, head: 120 });
+		const later = render({ at: a, wanted: 500, resolved: 99, head: 120 });
 		expect(text(later)).not.toContain("(latest record)");
 		expect(later).toMatch(/<input[^>]*value="99"/);
+	});
+
+	it("after a reconnect re-reads the clamped record (clamped: false), the thumb, the spoken value and the keys stay on it, not on the advancing head", () => {
+		const reread = at({ pos: 99, head: 120, clamped: false });
+		const html = render({ at: reread, wanted: 500, resolved: 99, head: 120 });
+		expect(html).toMatch(/<input[^>]*value="99"/);
+		expect(html).toMatch(/<input[^>]*aria-valuetext="Record 100 of 121/);
+		expect(html).not.toMatch(/<input[^>]*value="120"/);
 	});
 
 	it("the status note is in the markup with no error too, so a note that arrives is announced as a change, not an insertion", () => {
