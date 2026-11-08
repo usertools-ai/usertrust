@@ -1662,13 +1662,15 @@ body {
 	.ut-tl-btn:hover {
 		border-color: var(--accent);
 	}
-	/* Live while already live: still a focusable button (so focus stays put after pressing it), but it reads as at rest. */
+	/* Live while already live: still a focusable button (so focus stays put after pressing it), but it reads as at rest.
+	   The colours are dimmed, not the element: opacity would fade its focus outline too, and this is where focus rests. */
 	.ut-tl-btn[aria-disabled="true"] {
-		opacity: 0.4;
+		color: var(--faint-text);
+		border-color: var(--line);
 		cursor: default;
 	}
 	.ut-tl-btn[aria-disabled="true"]:hover {
-		border-color: var(--control-line);
+		border-color: var(--line);
 	}
 	/* The browser's own slider, in gold. Its box is its hit area (a press anywhere on it moves the thumb there): the
 	   hit-area block sets its height. No margin or border, so the box is exactly that height. */

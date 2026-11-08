@@ -222,3 +222,20 @@ describe("the accent stays off the chart marks and the live pill's states stay a
 		expect(decl('.ut-live[data-st="live"] i', "background")).toBe("var(--accent)");
 	});
 });
+
+describe("the Live button at rest keeps a focus ring a reader can see", () => {
+	// While live, the Live button is aria-disabled but focusable: it is where focus rests after going live. Dimming the
+	// element would composite the global focus outline with it (about 2:1), below the 3:1 of WCAG 1.4.11 and 2.4.11, so
+	// the rest state dims its colours and leaves the element at full opacity.
+	const rest = '.ut-tl-btn[aria-disabled="true"]';
+	it("does not fade the element, so its :focus-visible outline stays full strength", () => {
+		const body = ruleBody(rest);
+		expect(body).not.toMatch(/(?:^|[\s;])opacity\s*:/);
+		expect(decl(rest, "color")).toBe("var(--faint-text)");
+		expect(decl(rest, "border-color")).toBe("var(--line)");
+	});
+
+	it("the focus ring is the words colour at 2px", () => {
+		expect(decl(":focus-visible", "outline")).toMatch(/^2px solid var\(--words\)$/);
+	});
+});
