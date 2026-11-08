@@ -10,24 +10,50 @@
  */
 
 import type { KeyTotal, TotalsPayload } from "./api.js";
-import { byTotalDesc, type Dimension, keyOf, spendInWindow, WHOLE_VAULT } from "./breakdown.js";
+import { type Dimension, keyOf, rankOrder, spendInWindow, WHOLE_VAULT } from "./breakdown.js";
 import type { SpendFacts } from "./rows.js";
 
 /** The most keys per dimension a response carries; `more` counts the rest. The index itself keeps every key. */
 export const TOTALS_KEYS_MAX = 100;
 
-const DIMENSIONS: readonly Dimension[] = ["lane", "role", "model", "kind", "provider"];
-
 type Entry = { spendUt: number; calls: number };
 
-export class TotalsIndex {
-	private readonly byDim: Record<Dimension, Map<string, Entry>> = {
-		lane: new Map(),
-		role: new Map(),
-		model: new Map(),
-		kind: new Map(),
-		provider: new Map(),
+/** The one list of dimensions: an object literal over `Dimension`, so a sixth one fails to compile until it is here. */
+function perDimension<T>(make: (dim: Dimension) => T): Record<Dimension, T> {
+	return {
+		lane: make("lane"),
+		role: make("role"),
+		model: make("model"),
+		kind: make("kind"),
+		provider: make("provider"),
 	};
+}
+
+/**
+ * The first `k` keys of the ranking `byTotalDesc` gives over the same pairs, in that order, in O(n log k): a sorted
+ * array of at most `k` pairs, into which a pair that ranks before the current last is inserted by binary search.
+ */
+export function topKeys(entries: Iterable<readonly [string, number]>, k: number): string[] {
+	if (k <= 0) return [];
+	const kept: Array<readonly [string, number]> = [];
+	for (const pair of entries) {
+		if (kept.length === k && rankOrder(pair, kept[k - 1] as readonly [string, number]) >= 0)
+			continue;
+		let lo = 0;
+		let hi = kept.length;
+		while (lo < hi) {
+			const mid = (lo + hi) >>> 1;
+			if (rankOrder(kept[mid] as readonly [string, number], pair) <= 0) lo = mid + 1;
+			else hi = mid;
+		}
+		kept.splice(lo, 0, pair);
+		if (kept.length > k) kept.pop();
+	}
+	return kept.map(([key]) => key);
+}
+
+export class TotalsIndex {
+	private readonly byDim = perDimension((): Map<string, Entry> => new Map());
 	private folded = 0;
 
 	/** Fold one record in. Every record counts toward `records`; only spend adds to a key. */
@@ -35,7 +61,7 @@ export class TotalsIndex {
 		this.folded += 1;
 		const cost = spendInWindow(f, WHOLE_VAULT);
 		if (cost === undefined) return;
-		for (const dim of DIMENSIONS) {
+		for (const dim of Object.keys(this.byDim) as Dimension[]) {
 			const map = this.byDim[dim];
 			const key = keyOf(dim, f);
 			const entry = map.get(key);
@@ -52,21 +78,23 @@ export class TotalsIndex {
 		return this.folded;
 	}
 
-	/** Each dimension's keys ranked as `breakdown` ranks them, cut at `TOTALS_KEYS_MAX`. New arrays every call. */
+	/**
+	 * Each dimension's keys ranked as `breakdown` ranks them, cut at `TOTALS_KEYS_MAX`. New arrays every call. The
+	 * work is a bounded selection per dimension, not a sort of every key: with one lane per session the keys are many
+	 * and the response is not.
+	 */
 	payload(epoch: number): TotalsPayload {
-		const dims = {} as Record<Dimension, KeyTotal[]>;
-		const more = {} as Record<Dimension, number>;
-		for (const dim of DIMENSIONS) {
+		const dims = perDimension((dim): KeyTotal[] => {
 			const map = this.byDim[dim];
-			const spend = new Map<string, number>();
-			for (const [key, entry] of map) spend.set(key, entry.spendUt);
-			const ranked = byTotalDesc(spend);
-			dims[dim] = ranked.slice(0, TOTALS_KEYS_MAX).map((key) => {
+			const spend = (function* () {
+				for (const [key, entry] of map) yield [key, entry.spendUt] as const;
+			})();
+			return topKeys(spend, TOTALS_KEYS_MAX).map((key) => {
 				const entry = map.get(key) as Entry;
 				return { key, spendUt: entry.spendUt, calls: entry.calls };
 			});
-			more[dim] = Math.max(0, ranked.length - TOTALS_KEYS_MAX);
-		}
+		});
+		const more = perDimension((dim) => Math.max(0, this.byDim[dim].size - TOTALS_KEYS_MAX));
 		return { epoch, records: this.folded, dims, more };
 	}
 }

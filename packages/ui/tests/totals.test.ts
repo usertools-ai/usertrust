@@ -4,9 +4,9 @@
 import type { PersistedAuditEvent } from "usertrust";
 import { describe, expect, it } from "vitest";
 import type { TotalsPayload } from "../src/shared/api.js";
-import { breakdown, type Dimension, WHOLE_VAULT } from "../src/shared/breakdown.js";
+import { breakdown, byTotalDesc, type Dimension, WHOLE_VAULT } from "../src/shared/breakdown.js";
 import { spendFactsOf, toLedgerRows } from "../src/shared/rows.js";
-import { rankingFrom, TOTALS_KEYS_MAX, TotalsIndex } from "../src/shared/totals.js";
+import { rankingFrom, TOTALS_KEYS_MAX, TotalsIndex, topKeys } from "../src/shared/totals.js";
 
 const DIMS: Dimension[] = ["lane", "role", "model", "kind", "provider"];
 
@@ -144,6 +144,30 @@ describe("TotalsIndex", () => {
 		first.dims.lane.length = 0;
 		first.dims.lane.push({ key: "x", spendUt: 99, calls: 1 });
 		expect(idx.payload(0).dims.lane).toEqual([{ key: "local", spendUt: 2, calls: 1 }]);
+	});
+});
+
+describe("topKeys", () => {
+	it("keeps exactly what a full ranking keeps", () => {
+		// 1,000 keys over only 12 distinct spends, so many keys tie, including a tie that straddles the cut.
+		const map = new Map<string, number>();
+		for (let i = 0; i < 1000; i++) map.set(`key-${String(i).padStart(4, "0")}`, (i * 7) % 12);
+		// Shuffled insertion order (a fixed permutation, so a failure reproduces).
+		const pairs = [...map.entries()];
+		for (let i = pairs.length - 1; i > 0; i--) {
+			const j = (i * 7919 + 13) % (i + 1);
+			[pairs[i], pairs[j]] = [pairs[j] as [string, number], pairs[i] as [string, number]];
+		}
+		const shuffled = new Map(pairs);
+		const full = byTotalDesc(shuffled);
+		// The cut at 100 falls inside a run of equal spends: the key after the cut ties with the last one kept.
+		expect(shuffled.get(full[99] as string)).toBe(shuffled.get(full[100] as string));
+		expect(topKeys(shuffled, 100)).toEqual(full.slice(0, 100));
+		expect(topKeys(shuffled, 1)).toEqual(full.slice(0, 1));
+		expect(topKeys(shuffled, 1000)).toEqual(full);
+		expect(topKeys(shuffled, 5000)).toEqual(full);
+		expect(topKeys(shuffled, 0)).toEqual([]);
+		expect(topKeys([], 10)).toEqual([]);
 	});
 });
 

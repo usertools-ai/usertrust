@@ -96,13 +96,16 @@ export function breakdown(rows: readonly LedgerRow[], win: SpendWindow, dim: Dim
 	return { dim, keys, byKey, totalUt, calls };
 }
 
+/** The order of two `[key, spend]` pairs: spend highest first, ties A to Z. Negative when `a` ranks before `b`. */
+export function rankOrder(a: readonly [string, number], b: readonly [string, number]): number {
+	const d = b[1] - a[1];
+	if (d !== 0) return d;
+	return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
+}
+
 /** Keys ordered by spend, highest first; ties A to Z. The order `breakdown` uses. */
 export function byTotalDesc(totals: ReadonlyMap<string, number>): string[] {
-	return [...totals.keys()].sort((a, b) => {
-		const d = (totals.get(b) ?? 0) - (totals.get(a) ?? 0);
-		if (d !== 0) return d;
-		return a < b ? -1 : a > b ? 1 : 0;
-	});
+	return [...totals].sort(rankOrder).map(([key]) => key);
 }
 
 /**
