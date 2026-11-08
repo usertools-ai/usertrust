@@ -468,6 +468,41 @@ describe("AtFollower", () => {
 			expect(h.last().rows).toBe(sent);
 		});
 
+		it("an identical re-read adopts a fresher snapshot when the kept one ends before the position", async () => {
+			const h = harness();
+			// The first request is sent before the page holds the position (a position in the address, on load).
+			h.page.rows = [];
+			h.follower.want(1);
+			h.calls[0]?.resolve(at({ pos: 1, head: 1 }));
+			await h.flush();
+			// The rows load, and the summary refresh asks again; its answer reads the same.
+			const loaded = [row(0), row(1), row(2), row(3), row(4), row(5)];
+			h.page.rows = loaded;
+			h.follower.refresh();
+			h.calls[1]?.resolve(at({ pos: 1, head: 1 }));
+			await h.flush();
+			expect(h.last().rows).toBe(loaded);
+			// A live frame for a record after the position turns row 0 ambiguous; the answer has no status for it.
+			const live = loaded.map((r) => (r.pos === 0 ? { ...r, status: "ambiguous" as const } : r));
+			h.page.rows = live;
+			expect(statusesAt(h.last(), live)).toEqual(["settled", "settled"]);
+		});
+
+		it("an identical re-read keeps the pair when the kept snapshot already covers the position", async () => {
+			const h = harness();
+			h.page.rows = sent;
+			h.follower.want(1);
+			h.calls[0]?.resolve(at({ pos: 1, head: 1 }));
+			await h.flush();
+			const published = h.views.length;
+			h.page.rows = [...sent, row(2)];
+			h.follower.refresh();
+			h.calls[1]?.resolve(at({ pos: 1, head: 2 }));
+			await h.flush();
+			expect(h.views).toHaveLength(published);
+			expect(h.last().rows).toBe(sent);
+		});
+
 		it("an answer that landed on the way is paired with its own request's rows", async () => {
 			const h = harness();
 			h.page.rows = sent;

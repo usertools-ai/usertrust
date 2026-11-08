@@ -13,7 +13,8 @@
  *   for past the head stays the record the reader was shown. A later record can change the status a row had there
  *   (a hold settled after it), so the answer is taken again; its `head` and `clamped` stay those of the answer the
  *   position was chosen with, which is what "N new since" counts from. A re-read that changes nothing keeps the same
- *   answer object and publishes nothing.
+ *   answer object and publishes nothing (unless its snapshot reaches the position and the kept one does not: then the
+ *   snapshot is replaced).
  * - An answer from another `epoch` (a reload whose records differ: the position may now name another record) is shown
  *   as it is, flagged `reloaded`, and becomes the baseline. Moving to another position or going live clears the flag.
  * - `reconnected()`: the live stream came back, and the server may have restarted, which restarts its epochs. The
@@ -240,6 +241,10 @@ export class AtFollower {
 			this.reread = null;
 		} else if (this.shown === null || !sameReading(this.shown, answer)) {
 			this.shown = { ...answer, head: this.chosen.head, clamped: this.chosen.clamped };
+			this.shownRows = rows;
+		} else if ((this.shownRows?.at(-1)?.pos ?? -1) < this.shown.pos) {
+			// The same reading, but the kept snapshot was taken before the page held the position (the address's, on
+			// load): the snapshot of this request, sent later and before this answer, is as valid and holds more.
 			this.shownRows = rows;
 		}
 	}
