@@ -154,23 +154,24 @@ export function Timeline(props: {
 						{`${fresh.toLocaleString()} new since`}
 					</button>
 				)}
-				{past && (
-					<button
-						type="button"
-						className="ut-tl-btn"
-						title="Show the vault as it is now"
-						onClick={live}
-					>
-						Live
-						{/* On a phone the "N new since" button is folded in here, so the label and one button share a row. */}
-						{fresh > 0 && (
-							<span className="ut-tl-count">
-								{` +${fresh.toLocaleString()}`}
-								<span className="sr-only"> new records</span>
-							</span>
-						)}
-					</button>
-				)}
+				{/* Always mounted: pressing it goes live, and a button that unmounts under keyboard focus drops focus to the
+				    page. While live it is aria-disabled (not disabled, which cannot hold focus) and does nothing. */}
+				<button
+					type="button"
+					className="ut-tl-btn"
+					title={past ? "Show the vault as it is now" : "Already showing the vault as it is now"}
+					aria-disabled={past ? undefined : true}
+					onClick={past ? live : undefined}
+				>
+					Live
+					{/* On a phone the "N new since" button is folded in here, so the label and one button share a row. */}
+					{fresh > 0 && (
+						<span className="ut-tl-count">
+							{` +${fresh.toLocaleString()}`}
+							<span className="sr-only"> new records</span>
+						</span>
+					)}
+				</button>
 			</div>
 			<input
 				type="range"

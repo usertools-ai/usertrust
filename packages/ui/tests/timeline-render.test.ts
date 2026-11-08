@@ -539,8 +539,24 @@ describe("the timeline", () => {
 		expect(html).toMatch(/<input[^>]*max="99"/);
 		expect(html).toMatch(/<input[^>]*aria-valuetext="Live"/);
 		expect(html).toMatch(/<input[^>]*value="99"/);
-		// Live: no Live button to press.
-		expect(html).not.toMatch(/<button[^>]*>Live<\/button>/);
+	});
+
+	it("while live, the Live button is still mounted, marked aria-disabled, so keyboard focus has nowhere to fall from", () => {
+		const html = render();
+		const btn = /<button[^>]*>Live<\/button>/.exec(html)?.[0] ?? "";
+		expect(btn).toMatch(/aria-disabled="true"/);
+		expect(btn).toMatch(/type="button"/);
+		// Not the native attribute: a disabled button cannot hold focus, and the press would drop it to the body.
+		expect(btn).not.toMatch(/\sdisabled(=|>|\s)/);
+		// In the past it is the live action, with no aria-disabled.
+		const past = /<button[^>]*>Live[^<]*(?:<span[\s\S]*?<\/span>)?<\/button>/.exec(
+			render({ at: at(), wanted: 40 }),
+		)?.[0];
+		expect(past).toBeDefined();
+		expect(past).not.toContain("aria-disabled");
+		// One Live button either way.
+		expect(html.match(/>Live<\/button>/g)).toHaveLength(1);
+		expect(render({ at: at(), wanted: 40 }).match(/>Live</g)).toHaveLength(1);
 	});
 
 	it("at a past position, aria-valuetext gives the record and the visible label, and Live is a real button", () => {
