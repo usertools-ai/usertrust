@@ -227,12 +227,13 @@ export function addressHolds(state: UrlState): boolean {
 
 /**
  * What to do with the address when the state changes from `prev` to `next` while the address reads `currentHash`.
- * Changing the view or the open record, or entering or leaving a position, pushes an entry, so Back returns to the
- * previous view or record; a filter tweak or a move between positions replaces the current one, so typing in the
- * search box or a preview moving along the chart does not flood the back button. Nothing is written when
- * the address already describes `next` (the state came from the address, or a write already landed). A state the
- * address cannot hold (`addressHolds`) writes the empty hash: a reload or a copied link opens a clean page, never a
- * different filter set, and the page tells the user.
+ * Changing the view or the open record, or entering or leaving a position or a fill, pushes an entry, so Back
+ * returns to the previous view or record and undoes a fill; a filter tweak, a move between positions or a direct
+ * switch from one fill window to another replaces the current one, so typing in the search box or a preview moving
+ * along the chart does not flood the back button. Nothing is written when the address already describes `next` (the
+ * state came from the address, or a write already landed). A state the address cannot hold (`addressHolds`) writes
+ * the empty hash: a reload or a copied link opens a clean page, never a different filter set, and the page tells the
+ * user.
  */
 export function planHistory(
 	prev: UrlState,
@@ -241,9 +242,13 @@ export function planHistory(
 ): { kind: "push" | "replace" | "none"; hash: string } {
 	const hash = addressHolds(next) ? encodeUrlState(next) : "";
 	if (encodeUrlState(decodeUrlState(currentHash)) === hash) return { kind: "none", hash };
-	// Entering or leaving a position is a navigation; moving between positions (a preview) is not.
+	// Entering or leaving a position or a fill is a navigation; moving between positions (a preview) is not, nor is
+	// switching straight from one fill window to another.
 	const navigated =
-		prev.view !== next.view || prev.open !== next.open || (prev.at === null) !== (next.at === null);
+		prev.view !== next.view ||
+		prev.open !== next.open ||
+		(prev.at === null) !== (next.at === null) ||
+		(prev.fill === null) !== (next.fill === null);
 	return { kind: navigated ? "push" : "replace", hash };
 }
 

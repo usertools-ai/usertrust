@@ -490,6 +490,27 @@ describe("planHistory", () => {
 		expect(planHistory(none, none, "#%E0%A4%A").kind).toBe("none");
 	});
 
+	it("pushes an entry when a fill is entered or left, so Back undoes it", () => {
+		const share = { ...none, fill: "share" as const };
+		expect(planHistory(none, share, "")).toEqual({ kind: "push", hash: "#fill=share" });
+		expect(planHistory(share, none, "#fill=share")).toEqual({ kind: "push", hash: "" });
+	});
+
+	it("replaces the entry when one fill window gives way to another", () => {
+		const share = { ...none, fill: "share" as const };
+		const spend = { ...none, fill: "spend" as const };
+		expect(planHistory(share, spend, "#fill=share")).toEqual({
+			kind: "replace",
+			hash: "#fill=spend",
+		});
+	});
+
+	it("writes nothing for a fill change the address already describes", () => {
+		const share = { ...none, fill: "share" as const };
+		expect(planHistory(none, share, "#fill=share").kind).toBe("none");
+		expect(planHistory(share, none, "").kind).toBe("none");
+	});
+
 	it("replaces a stale address with the state's hash when only filters differ", () => {
 		expect(planHistory(none, withFilters({ search: "x" }), "#q=y").kind).toBe("replace");
 	});
