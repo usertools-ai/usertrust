@@ -96,6 +96,9 @@ const CI = join(ROOT, ".github/workflows/ci.yml");
 const RELEASING = join(ROOT, "docs/releasing.md");
 const SCRIPT = join(ROOT, "scripts/release.sh");
 const TOOL = join(ROOT, "scripts/release-tarball.py");
+const SHRINKWRAP_TOOL = join(ROOT, "scripts/shrinkwrap.mjs");
+/** The packages whose publish tarball carries an npm-shrinkwrap.json (release.sh SHRINKWRAPPED). */
+const SHRINKWRAPPED = new Set(["server", "ui"]);
 
 interface Step {
 	name?: string;
@@ -108,6 +111,7 @@ interface Step {
 interface Job {
 	name?: string;
 	needs?: string | string[];
+	if?: string;
 	strategy?: { "fail-fast"?: boolean; matrix?: Record<string, unknown> };
 	outputs?: Record<string, string>;
 	environment?: string | { name: string };
@@ -169,10 +173,17 @@ describe("publish.yml", () => {
 		expect(requiredJobs.length).toBeGreaterThanOrEqual(7);
 	});
 
-	it("runs ci-gate, then build, then publish under the npm-publish environment", () => {
-		expect(Object.keys(publish.jobs).sort()).toEqual(["build", "ci-gate", "publish"]);
+	it("runs ci-gate, then build, then publish under the npm-publish environment, then shipped-tree", () => {
+		expect(Object.keys(publish.jobs).sort()).toEqual([
+			"build",
+			"ci-gate",
+			"publish",
+			"shipped-tree",
+		]);
 		expect([publish.jobs.build?.needs ?? []].flat()).toEqual(["ci-gate"]);
 		expect([publish.jobs.publish?.needs ?? []].flat()).toEqual(["build"]);
+		expect([publish.jobs["shipped-tree"]?.needs ?? []].flat()).toEqual(["publish"]);
+		expect(envName(publish.jobs["shipped-tree"] as Job)).toBeUndefined();
 		expect(envName(publish.jobs.publish as Job)).toBe("npm-publish");
 		expect(envName(publish.jobs.build as Job)).toBeUndefined();
 	});
@@ -294,7 +305,7 @@ describe("publish.yml", () => {
 
 	it("no checkout persists a credential", () => {
 		const checkouts = allSteps().filter(([, s]) => s.uses?.startsWith("actions/checkout@"));
-		expect(checkouts.length).toBe(3);
+		expect(checkouts.length).toBe(4);
 		for (const [job, s] of checkouts) {
 			expect(s.with?.["persist-credentials"], `${job}: checkout`).toBe(false);
 		}
@@ -378,6 +389,37 @@ describe("publish.yml", () => {
 			"publish: Create GitHub Release",
 		]);
 		for (const [, s] of effectful) expect(s.if ?? "").toContain("!inputs.dry_run");
+	});
+
+	it("after a real publish, shipped-tree checks the published packages, unprivileged, at the tagged commit", () => {
+		const job = publish.jobs["shipped-tree"] as Job;
+		// After the publish job, and only when something was published (a republish included).
+		expect(job.if).toBe("${{ !inputs.dry_run }}");
+		expect(job.permissions).toEqual({ contents: "read" });
+		expect(privileged(job)).toBe(false);
+		expect(job).not.toHaveProperty("continue-on-error");
+		expect(JSON.stringify(job)).not.toMatch(/secrets\.|github\.token|NPM_TOKEN/);
+		// What it checks is what the publish job published: its commit and version, as outputs.
+		expect(publish.jobs.publish?.outputs).toEqual({
+			commit: "${{ steps.source.outputs.commit }}",
+			version: "${{ steps.source.outputs.version }}",
+		});
+		const check = step("shipped-tree", "Check the published packages' dependency tree");
+		expect(check.env).toEqual({
+			COMMIT: "${{ needs.publish.outputs.commit }}",
+			VERSION: "${{ needs.publish.outputs.version }}",
+		});
+		// The tag must name that commit; then the script, whose failure fails the run.
+		expect(check.run).toContain('tagged=$(git rev-parse "refs/tags/v${VERSION}^{commit}")');
+		expect(check.run).toMatch(/if \[ "\$tagged" != "\$COMMIT" \]; then\n[^\n]*\n\s*exit 1/);
+		const last = (check.run ?? "").trim().split("\n").at(-1)?.trim();
+		expect(last).toBe('bash scripts/shrinkwrap-published.sh "$VERSION" "$COMMIT"');
+		expect(check.run).not.toMatch(/\|\||set \+e/);
+		expect(check.if).toBeUndefined();
+		// It runs the dispatched commit's script, pinned like the other jobs' checkouts.
+		expect(step("shipped-tree", "Pin the checkout to the dispatched commit").run).toContain(
+			'"$(git rev-parse HEAD)" != "$GITHUB_SHA"',
+		);
 	});
 
 	it("a republish never bumps, commits, tags or pushes", () => {
@@ -487,7 +529,7 @@ describe("publish.yml", () => {
 
 	it("no setup-node restores a cache, and no step is a cache step", () => {
 		const setups = allSteps().filter(([, s]) => s.uses?.startsWith("actions/setup-node@"));
-		expect(setups.map(([j]) => j)).toEqual(["build", "publish"]);
+		expect(setups.map(([j]) => j)).toEqual(["build", "publish", "shipped-tree"]);
 		for (const [job, s] of setups) {
 			expect(s.with?.["package-manager-cache"], `${job}: setup-node`).toBe(false);
 			expect(s.with ?? {}, `${job}: setup-node`).not.toHaveProperty("cache");
@@ -516,7 +558,7 @@ describe("publish.yml", () => {
 		// The publish job's major only; the exact pin is the next test's.
 		expect(
 			setups.map(([j, s]) => `${j}: ${String(s.with?.["node-version"]).split(".")[0]}`),
-		).toEqual(["build: 22", "publish: 24"]);
+		).toEqual(["build: 22", "publish: 24", "shipped-tree: 24"]);
 		// npm trusted publishing needs npm 11.5.1 and Node 22.14.0, and npm 11 added the refusal
 		// to apply latest implicitly to a lower version, the backstop for the dist-tag check:
 		// the step right after setup-node refuses an older npm or Node, on every run (dry runs
@@ -1071,6 +1113,26 @@ function seedWorld(): void {
 	mkdirSync(join(repo, "scripts"), { recursive: true });
 	writeFileSync(join(repo, "scripts/release.sh"), readFileSync(SCRIPT, "utf8"));
 	writeFileSync(join(repo, "scripts/release-tarball.py"), readFileSync(TOOL, "utf8"));
+	writeFileSync(join(repo, "scripts/shrinkwrap.mjs"), readFileSync(SHRINKWRAP_TOOL, "utf8"));
+	// The root lockfile a shrinkwrap is written from: our six as workspace links, and zod, the one
+	// third-party package the real manifests (realManifests) name at run time.
+	const lockPackages: Record<string, unknown> = {
+		"": { name: "repo", workspaces: ["packages/*"] },
+	};
+	for (const d of DIRS) {
+		lockPackages[`node_modules/${NAMES[d]}`] = { link: true, resolved: `packages/${d}` };
+		lockPackages[`packages/${d}`] = { name: NAMES[d], version: "1.0.0" };
+	}
+	lockPackages["node_modules/zod"] = {
+		version: "4.6.7",
+		resolved: "https://registry.npmjs.org/zod/-/zod-4.6.7.tgz",
+		integrity: "sha512-fixture",
+		license: "MIT",
+	};
+	writeFileSync(
+		join(repo, "package-lock.json"),
+		`${JSON.stringify({ name: "repo", lockfileVersion: 3, requires: true, packages: lockPackages }, null, 2)}\n`,
+	);
 	writePackages("1.0.0");
 	writeFileSync(join(repo, "README"), "x\n");
 	git("init", "-q", "-b", "master");
@@ -3197,6 +3259,25 @@ describe("release.sh publish ships the pins", { timeout: 30_000 }, () => {
 		expect(log()).toEqual(published("1.0.0", DIRS, true));
 		expect(deps(handed("server"))).toEqual({ usertrust: "1.0.0", zod: "^4.6.5" });
 		expect(deps(handed("ui"))).toEqual({ usertrust: "1.0.0", "usertrust-verify": "1.0.0" });
+		// The shipped trees: each sibling at the release's version, zod as the root lockfile holds it.
+		const tree = (d: string) =>
+			JSON.parse(
+				readTar(readFileSync(join(dir, `log.${NAMES[d]}-1.0.0.tgz`)))
+					.find((e) => e.name === "package/npm-shrinkwrap.json")
+					?.data.toString("utf8") ?? "null",
+			).packages;
+		expect(Object.keys(tree("server"))).toEqual(["", "node_modules/usertrust", "node_modules/zod"]);
+		expect(tree("server")["node_modules/usertrust"]).toMatchObject({ version: "1.0.0" });
+		expect(tree("server")["node_modules/zod"]).toMatchObject({
+			version: "4.6.7",
+			integrity: "sha512-fixture",
+		});
+		expect(Object.keys(tree("ui"))).toEqual([
+			"",
+			"node_modules/usertrust",
+			"node_modules/usertrust-verify",
+			"node_modules/zod",
+		]);
 	});
 
 	it("refuses a commit whose manifest names a sibling at anything else, before publishing any", () => {
@@ -3483,6 +3564,94 @@ describe("release.sh treats build output as data", { timeout: 30_000 }, () => {
 		});
 	});
 
+	describe("the shipped dependency tree: server and ui carry the commit's npm-shrinkwrap.json", () => {
+		/** The npm-shrinkwrap.json the fake npm was handed for <d>, or undefined. */
+		const shipped = (d: string) =>
+			readTar(readFileSync(join(dir, `log.${NAMES[d]}-1.0.0.tgz`)))
+				.find((e) => e.name === "package/npm-shrinkwrap.json")
+				?.data.toString("utf8");
+		const generated = (d: string) => {
+			const r = run(["shrinkwrap", "HEAD", d, "1.0.0"]);
+			expect(r.status, r.err).toBe(0);
+			return r.out;
+		};
+
+		it("server and ui ship exactly what `release.sh shrinkwrap` writes at the commit; no other package ships one", () => {
+			const out = packAll();
+			const r = run(["publish", out, "HEAD", "--dry-run"]);
+			expect(r.status, r.err).toBe(0);
+			for (const d of DIRS) {
+				if (SHRINKWRAPPED.has(d)) {
+					const body = shipped(d);
+					expect(body).toBe(generated(d));
+					expect(JSON.parse(body ?? "{}")).toMatchObject({
+						name: NAMES[d],
+						version: "1.0.0",
+						lockfileVersion: 3,
+					});
+				} else {
+					expect(shipped(d)).toBeUndefined();
+				}
+			}
+		});
+
+		it("a shrinkwrap the build wrote into server's tarball is discarded for the commit's", () => {
+			const out = packAll();
+			const forged = join(out, `${NAMES.server}-1.0.0.tgz`);
+			writeFileSync(
+				forged,
+				gz(
+					archive(
+						member(
+							"package/package.json",
+							JSON.stringify({ name: NAMES.server, version: "1.0.0", license: "Apache-2.0" }),
+						),
+						member(
+							"package/npm-shrinkwrap.json",
+							'{"lockfileVersion":3,"packages":{"node_modules/evil":{"version":"6.6.6"}}}',
+						),
+						member("package/dist/index.js", "export {};\n"),
+					),
+				),
+			);
+			const r = run(["publish", out, "HEAD", "--dry-run"]);
+			expect(r.status, r.err).toBe(0);
+			expect(shipped("server")).toBe(generated("server"));
+			expect(shipped("server")).not.toContain("evil");
+		});
+
+		it("a package that ships no shrinkwrap refuses a build tarball that carries one, and nothing is published", () => {
+			const out = packAll();
+			writeFileSync(
+				join(out, `${NAMES.core}-1.0.0.tgz`),
+				gz(
+					archive(
+						member(
+							"package/package.json",
+							JSON.stringify({ name: NAMES.core, version: "1.0.0", license: "Apache-2.0" }),
+						),
+						member("package/npm-shrinkwrap.json", "{}"),
+						member("package/dist/index.js", "export {};\n"),
+					),
+				),
+			);
+			const r = run(["publish", out, "HEAD", "--dry-run"]);
+			expect(r.status).not.toBe(0);
+			expect(r.err).toContain("is not a root file this package ships");
+			expect(log()).toEqual([]);
+		});
+
+		it("a root lockfile it cannot read refuses the publish, and nothing is published", () => {
+			writeFileSync(join(repo, "package-lock.json"), "not json\n");
+			git("commit", "-q", "-am", "a broken lockfile");
+			const out = packAll();
+			const r = run(["publish", out, "HEAD", "--dry-run"]);
+			expect(r.status).not.toBe(0);
+			expect(r.err).toContain("Could not write usertrust-server's npm-shrinkwrap.json");
+			expect(log()).toEqual([]);
+		});
+	});
+
 	describe("the build's root files are discarded: what is published carries the commit's", () => {
 		const forge = (out: string, d: string, manifest: Record<string, unknown>) =>
 			writeFileSync(
@@ -3533,6 +3702,7 @@ describe("release.sh treats build output as data", { timeout: 30_000 }, () => {
 				const entries = readTar(readFileSync(join(dir, `log.${NAMES[d]}-1.0.0.tgz`)));
 				expect(entries.map((e) => e.name)).toEqual([
 					"package/dist/index.js",
+					...(SHRINKWRAPPED.has(d) ? ["package/npm-shrinkwrap.json"] : []),
 					"package/package.json",
 				]);
 			});
@@ -3598,6 +3768,16 @@ describe("npm publish is handed exactly the assembled tarball", { timeout: 120_0
 			writeFileSync(join(roots, name), `${git("show", `HEAD:packages/${d}/${name}`)}\n`);
 			args.push("--root", `${name}=${join(roots, name)}`);
 		}
+		if (SHRINKWRAPPED.has(d)) {
+			// Written by the generator alone, from the commit (not by release.sh): the two must agree.
+			const sw = spawnSync("node", [SHRINKWRAP_TOOL, "HEAD", d, "1.0.0"], {
+				cwd: repo,
+				encoding: "utf8",
+			});
+			expect(sw.status, sw.stderr).toBe(0);
+			writeFileSync(join(roots, "npm-shrinkwrap.json"), sw.stdout);
+			args.push("--root", `npm-shrinkwrap.json=${join(roots, "npm-shrinkwrap.json")}`);
+		}
 		const target = join(roots, "out.tgz");
 		const r = spawnSync(
 			"python3",
@@ -3636,6 +3816,7 @@ describe("npm publish is handed exactly the assembled tarball", { timeout: 120_0
 				"package/README.md",
 				"package/dist/cli/main.js",
 				"package/dist/index.js",
+				...(SHRINKWRAPPED.has(d) ? ["package/npm-shrinkwrap.json"] : []),
 				"package/package.json",
 			]);
 		}

@@ -85,6 +85,10 @@ unset _name
 
 # The tool that writes the publish tarballs: this checkout's own copy, next to this script.
 TARBALL_TOOL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/release-tarball.py"
+SHRINKWRAP_TOOL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/shrinkwrap.mjs"
+# The packages whose tarball carries an npm-shrinkwrap.json: the two that are run (a server and a
+# dashboard), never a library (an installed library's shrinkwrap would override its users' trees).
+SHRINKWRAPPED="server ui"
 
 # The lockstep set, as <directory under packages/>:<npm name>, in publish order (a package
 # comes after the packages it depends on). AGENTS.md lists the same six.
@@ -734,31 +738,69 @@ pack() {
 # and one set of dist/ bytes always give the same tarball. Fails if any build tarball is
 # missing or refused; <what> ("the build" or "the rebuild") names the source in the error.
 assemble_all() {
-	local tardir="$1" commit="$2" version="$3" out="$4" what="$5" mtime dir pkg tgz names name
-	mtime=$(git show -s --format=%ct "$commit") || return 1
+	local tardir="$1" commit="$2" version="$3" out="$4" what="$5" mtime dir
+	mtime=$(commit_time "$commit") || return 1
+	for dir in $(dirs); do
+		assemble_one "$tardir" "$commit" "$version" "$out" "$what" "$mtime" "$dir" || return 1
+	done
+}
+
+# The release commit's time, the mtime of every assembled member.
+commit_time() {
+	local mtime
+	mtime=$(git show -s --format=%ct "$1") || return 1
 	case "$mtime" in
 	'' | *[!0-9]*)
-		err "Could not read the commit time of ${commit}."
+		err "Could not read the commit time of ${1}."
 		return 1
 		;;
 	esac
-	for dir in $(dirs); do
-		pkg=$(name_of "$dir") || return 1
-		tgz="${tardir}/${pkg}-${version}.tgz"
-		if [ -L "$tgz" ] || [ ! -f "$tgz" ]; then
-			err "${pkg}-${version}.tgz is missing from ${tardir}, or is not a regular file"
+	echo "$mtime"
+}
+
+# Assembles one package's publish tarball (see assemble_all). A SHRINKWRAPPED package also gets
+# an npm-shrinkwrap.json root file: scripts/shrinkwrap.mjs writes it from <commit>'s git blobs only
+# (the root lockfile CI tested, and the manifests), so both build legs give the same bytes.
+assemble_one() {
+	local tardir="$1" commit="$2" version="$3" out="$4" what="$5" mtime="$6" dir="$7" pkg tgz names name
+	pkg=$(name_of "$dir") || return 1
+	tgz="${tardir}/${pkg}-${version}.tgz"
+	if [ -L "$tgz" ] || [ ! -f "$tgz" ]; then
+		err "${pkg}-${version}.tgz is missing from ${tardir}, or is not a regular file"
+		return 1
+	fi
+	mkdir "${out}/${dir}" "${out}/${dir}/root" || return 1
+	names=$(root_files "$commit" "$dir" "$version" "${out}/${dir}/root") || return 1
+	case " ${SHRINKWRAPPED} " in
+	*" ${dir} "*)
+		if ! node "$SHRINKWRAP_TOOL" "$commit" "$dir" "$version" >"${out}/${dir}/root/npm-shrinkwrap.json"; then
+			err "Could not write ${pkg}'s npm-shrinkwrap.json from ${commit}; refusing to publish anything."
 			return 1
 		fi
-		mkdir "${out}/${dir}" "${out}/${dir}/root" || return 1
-		names=$(root_files "$commit" "$dir" "$version" "${out}/${dir}/root") || return 1
-		set -- assemble --input "$tgz" --output "${out}/${dir}/${pkg}-${version}.tgz" --mtime "$mtime"
-		for name in $names; do
-			set -- "$@" --root "${name}=${out}/${dir}/root/${name}"
-		done
-		if ! python3 -I "$TARBALL_TOOL" "$@"; then
-			err "${pkg}-${version}.tgz from ${what} was refused; refusing to publish anything."
-			return 1
-		fi
+		names="${names} npm-shrinkwrap.json"
+		;;
+	esac
+	set -- assemble --input "$tgz" --output "${out}/${dir}/${pkg}-${version}.tgz" --mtime "$mtime"
+	for name in $names; do
+		set -- "$@" --root "${name}=${out}/${dir}/root/${name}"
+	done
+	if ! python3 -I "$TARBALL_TOOL" "$@"; then
+		err "${pkg}-${version}.tgz from ${what} was refused; refusing to publish anything."
+		return 1
+	fi
+}
+
+# assemble <tardir> <commit> <out> <dir>...: assembles the named packages only, as the release would
+# (CI checks the shrinkwrapped ones this way, on a tree it built itself).
+assemble_some() {
+	local tardir="$1" commit="$2" out="$3" version mtime dir
+	shift 3
+	version=$(lockstep_version) || return 1
+	mtime=$(commit_time "$commit") || return 1
+	mkdir -p "$out" || return 1
+	for dir in "$@"; do
+		assemble_one "$tardir" "$commit" "$version" "$out" "the build" "$mtime" "$dir" || return 1
+		echo "assembled ${out}/${dir}/$(name_of "$dir")-${version}.tgz"
 	done
 }
 
@@ -1724,9 +1766,11 @@ pack) pack "${2:-}" ;;
 preflight-token) preflight_token ;;
 publish) publish "${2:-}" "${3:-}" "${4:-}" ;;
 compare-builds) compare_builds "${2:-}" "${3:-}" "${4:-}" ;;
+shrinkwrap) node "$SHRINKWRAP_TOOL" "${2:?usage: shrinkwrap <commit> <dir> <version>}" "${3:?usage: shrinkwrap <commit> <dir> <version>}" "${4:?usage: shrinkwrap <commit> <dir> <version>}" ;;
+assemble) assemble_some "${2:?usage: assemble <tardir> <commit> <out> <dir>...}" "${3:?usage: assemble <tardir> <commit> <out> <dir>...}" "${4:?usage: assemble <tardir> <commit> <out> <dir>...}" "${@:5}" ;;
 gate) gate ;;
 *)
-	err "usage: release.sh dirs | names | version | pin-siblings | version-at <commit> | expected-version <bump> | assert-bump <bump> | assert-published | assert-unreleased | assert-protected <env> | assert-npm | gate | release-parent | verify-release <bundle> <version> | latest-flag <version> | tag-release <version> <commit> | release-note <version> | dist-tag <version> | pack <dir> | preflight-token | publish <dir> <commit> [--dry-run] | compare-builds <dir> <rebuild dir> <commit>"
+	err "usage: release.sh dirs | names | version | pin-siblings | version-at <commit> | expected-version <bump> | assert-bump <bump> | assert-published | assert-unreleased | assert-protected <env> | assert-npm | gate | release-parent | verify-release <bundle> <version> | latest-flag <version> | tag-release <version> <commit> | release-note <version> | dist-tag <version> | pack <dir> | preflight-token | publish <dir> <commit> [--dry-run] | compare-builds <dir> <rebuild dir> <commit> | shrinkwrap <commit> <dir> <version> | assemble <tardir> <commit> <out> <dir>..."
 	exit 2
 	;;
 esac

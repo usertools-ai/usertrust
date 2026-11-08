@@ -386,9 +386,11 @@ publishes an archive the build made and never lets npm walk a directory the buil
    directories pass. Any failure, of a rule or of the process, refuses the whole release before
    anything is published.
 2. **Each member is classified.**
-   - Root members (`package/package.json`, `README.md`, `LICENSE`, `NOTICE`, and any root
-     file the release commit's manifest lists in `files`) must be regular files, within the
-     caps, and not repeated; **their contents are discarded**. Any other root member refuses.
+   - Root members (`package/package.json`, `README.md`, `LICENSE`, `NOTICE`, any root file
+     the release commit's manifest lists in `files`, and, for usertrust-server and usertrust-ui,
+     `npm-shrinkwrap.json`) must be regular files, within the caps, and not repeated; **their
+     contents are discarded**. Any other root member refuses (a build tarball of another package
+     that carries an `npm-shrinkwrap.json` refuses the release).
    - Every other member must be under `package/dist/`, and its whole name must match
      `package/dist/[A-Za-z0-9._@-]+(/[A-Za-z0-9._@-]+)*`. No component may begin or end with a
      dot (so no `.npmignore`, `.gitignore` or `.npmrc` at any depth, and no `..`), and none
@@ -397,7 +399,8 @@ publishes an archive the build made and never lets npm walk a directory the buil
      or sit inside a file.
 3. **The output is written from scratch.** Its root files come from the release commit's git
    blobs (`package.json` among them, checked for its version and for every sibling at that
-   version); its other files are the accepted
+   version), or, for the shipped `npm-shrinkwrap.json`, are written from them (see "The shipped
+   dependency tree"); its other files are the accepted
    `dist/` members' bytes. Every header is new: the name, the size, mode 0644, owner 0 with
    empty user and group names, the release commit's time, type "regular file". Members are
    sorted. The format is USTAR when every name fits its fields (true of every name the six
@@ -433,6 +436,71 @@ file set, so a build that goes wrong on one runner is refused; it cannot catch a
 both builds make alike (see "Approving the `npm-publish` deployment"). It cannot change the manifest, the root files, any configuration,
 the registry, install scripts, or anything outside `dist/`, and it cannot reach the push, the
 OIDC token or `NPM_TOKEN`.
+
+### The shipped dependency tree
+
+usertrust-server and usertrust-ui are run, not imported: a server and a dashboard. Each of their
+tarballs carries an `npm-shrinkwrap.json`, so an install of either gets **exactly the third-party
+versions the release was tested with**, not the newest ones its version ranges allow on the day it
+is installed. The libraries (usertrust, usertrust-verify, usertrust-openclaw,
+usertrust-acs-adapter) never ship one: an installed library's shrinkwrap would override the tree
+of every project that depends on it.
+
+- **Where it comes from.** `scripts/shrinkwrap.mjs` writes it in the publish job, while the tarball
+  is assembled (`release.sh` `assemble_one`), from the release commit's git blobs only: the root
+  `package-lock.json`, which is the tree CI's `npm ci` installed and tested, and the packages'
+  `package.json` files. It is the closure of the package's run-time dependencies in that lockfile,
+  found with node's resolution. A third-party entry is the lockfile's (version, `resolved` and
+  `integrity`). One of our own packages becomes a registry entry at the release's version, with no
+  `integrity`: its tarball is assembled in the same release, and its exact version on an immutable
+  registry, together with its provenance, already names its bytes. Embedding its digest could not
+  be checked before it is published, and a wrong one would break every install of the release.
+  devDependencies are never followed. The generator refuses (and the release stops before
+  anything is published) when a run-time dependency is missing from the lockfile, when two lockfile
+  packages would land at one place, or when a sibling is not pinned to the release's version.
+- **It is in neither the release commit nor the build.** The release commit still changes only
+  the six `package.json` files, and a shrinkwrap in a build tarball is discarded like every root
+  member. Both build legs assemble it from the same blobs, so the rebuild check still compares
+  byte-identical tarballs.
+- **Reproduce it** from the tag: `bash scripts/release.sh shrinkwrap v<version> server <version>`
+  (or `ui`), and compare with the published file:
+
+  ```bash
+  npm pack usertrust-server@<version>
+  tar -xOzf usertrust-server-<version>.tgz package/npm-shrinkwrap.json | cmp - <(bash scripts/release.sh shrinkwrap v<version> server <version>)
+  ```
+
+- **CI checks it** in two parts, so that only what a commit decides can block a merge or a release:
+  1. **Required:** the `shrinkwrap` job (`scripts/shrinkwrap-acceptance.sh files`). It assembles
+     core, verify, server and ui as the release does, and requires each shipped shrinkwrap to be
+     byte-identical to `release.sh shrinkwrap` at the commit. It then records, never requires, the
+     file rows: whether npm installed the package's tree exactly as its shrinkwrap writes it, place
+     by place and both ways, for the tarball as built and for a control whose shrinkwrap moves one
+     entry to another published version in range, from a file (server alone, ui alone, both). npm
+     honours a dependency's shrinkwrap only when the package's `_hasShrinkwrap` flag is set, which a
+     file tarball never carries, and those installs read the public registry, so a row or a control
+     that cannot run is recorded as such. That registry work shares one budget,
+     `SHRINKWRAP_OPTIONAL_S` seconds (600 by default), and each npm call in it fetches with no
+     retries and a 30 s timeout, so a slow or absent registry costs the job at most the budget.
+     The release requires this job (`REQUIRED_CI_JOBS`).
+     `scripts/shrinkwrap.test.mjs` pins the generator's rules on fixture lockfiles and on the real
+     tree; `scripts/shrinkwrap-acceptance.test.mjs` pins the comparator and the post-release check
+     below, against a fake npm.
+  2. **Not required:** the `shrinkwrap-registry` workflow (`scripts/shrinkwrap-acceptance.sh
+     registry`), on every pull request that touches the shipped tree's files and nightly. It
+     installs, by name from the public registry, a published package that ships a shrinkwrap, and
+     requires npm to place it as written. It reads the public registry, so an outage must block no
+     merge and no release; a failure is loud instead (an `::error::`, a failed run, the job summary).
+- **After the publish,** the publish workflow's `shipped-tree` job checks what the registry now
+  serves (`scripts/shrinkwrap-published.sh <version> <commit>`, which also runs by hand). For each of
+  usertrust-server and usertrust-ui it requires all three: the registry reports `_hasShrinkwrap:
+  true` for that version; the registry's tarball carries an `npm-shrinkwrap.json` byte-identical to
+  the one the release commit gives; and a clean install by name, into an empty directory with
+  `--ignore-scripts`, places the tree exactly as that file writes it. It holds no write token, no
+  OIDC token and no secret. It runs after the packages are out, so it cannot stop a release: a
+  failure fails the run, and **the CHANGELOG's claim that installs get the tested tree is corrected
+  the same day**, in a CHANGELOG entry under `[Unreleased]` naming the version and what the check
+  found.
 
 ### Credentials
 

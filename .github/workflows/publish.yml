@@ -71,6 +71,7 @@ env:
     openclaw-contract
     tb-integration
     site-build
+    shrinkwrap
     tested-tree
   REPUBLISH: ${{ inputs.republish }}
 
@@ -355,6 +356,10 @@ jobs:
       contents: write
       id-token: write
       actions: read
+    # For the shipped-tree job, which checks what this job published.
+    outputs:
+      commit: ${{ steps.source.outputs.commit }}
+      version: ${{ steps.source.outputs.version }}
     steps:
       # No credential is persisted: the token reaches git only inside the push step.
       - uses: actions/checkout@v7
@@ -551,3 +556,50 @@ jobs:
               echo "- ${name}@${VERSION}"
             done
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # After the publish: the registry must serve usertrust-server and usertrust-ui with the
+  # dependency tree the CHANGELOG says they ship (docs/releasing.md, "The shipped dependency
+  # tree"). For each: the registry's `_hasShrinkwrap` flag, which npm reads before it honours a
+  # dependency's shrinkwrap; the registry tarball's npm-shrinkwrap.json, byte-identical to the one
+  # the release commit gives; and a clean install by name that places the tree as written. A
+  # failure fails this run loudly, after the packages are out: the claim is then corrected the
+  # same day. Unprivileged: a read-only token, no OIDC token, no secret.
+  shipped-tree:
+    needs: publish
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Pin the checkout to the dispatched commit
+        run: |
+          if [ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]; then
+            echo "::error::Checked out $(git rev-parse HEAD), but this run is for ${GITHUB_SHA}."
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.21.0
+          package-manager-cache: false
+
+      # The tag the publish job pushed (or, on a republish, the one dispatched on) must name the
+      # commit it published: the check reads the shrinkwrap that commit gives.
+      - name: Check the published packages' dependency tree
+        env:
+          COMMIT: ${{ needs.publish.outputs.commit }}
+          VERSION: ${{ needs.publish.outputs.version }}
+        run: |
+          git fetch --quiet --no-tags --force origin "+refs/tags/v${VERSION}:refs/tags/v${VERSION}"
+          tagged=$(git rev-parse "refs/tags/v${VERSION}^{commit}")
+          if [ "$tagged" != "$COMMIT" ]; then
+            echo "::error::v${VERSION} names ${tagged}, but the publish job published ${COMMIT}."
+            exit 1
+          fi
+          bash scripts/shrinkwrap-published.sh "$VERSION" "$COMMIT"
