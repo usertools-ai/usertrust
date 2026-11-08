@@ -21,12 +21,14 @@ export function lttb(xs: ArrayLike<number>, ys: ArrayLike<number>, target: numbe
 	if (n <= 2 || target >= n) return Array.from({ length: n }, (_, i) => i);
 	if (target < 3) return [0, n - 1];
 	const keep = [0];
-	const every = (n - 2) / (target - 2);
+	// Bucket edges in exact integer arithmetic: k * (n - 2) is exact, so edge(target - 2) is exactly n - 1 and the last
+	// bucket reaches index n - 2 (a float `every` can land a hair under and drop it).
+	const edge = (k: number): number => Math.floor((k * (n - 2)) / (target - 2)) + 1;
 	let a = 0;
 	for (let b = 0; b < target - 2; b++) {
 		// The average point of the next bucket: the far corner of every triangle in this one.
-		const nextStart = Math.floor((b + 1) * every) + 1;
-		const nextEnd = Math.min(n, Math.floor((b + 2) * every) + 1);
+		const nextStart = edge(b + 1);
+		const nextEnd = Math.min(n, edge(b + 2));
 		let cx = 0;
 		let cy = 0;
 		for (let j = nextStart; j < nextEnd; j++) {
@@ -36,8 +38,8 @@ export function lttb(xs: ArrayLike<number>, ys: ArrayLike<number>, target: numbe
 		const count = Math.max(1, nextEnd - nextStart);
 		cx /= count;
 		cy /= count;
-		const start = Math.floor(b * every) + 1;
-		const end = Math.min(n - 1, Math.floor((b + 1) * every) + 1);
+		const start = edge(b);
+		const end = Math.min(n - 1, edge(b + 1));
 		const ax = xs[a] as number;
 		const ay = ys[a] as number;
 		let best = -1;

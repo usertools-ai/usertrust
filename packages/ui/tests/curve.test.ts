@@ -12,6 +12,28 @@ function spiky(n: number, at: number, height: number): { xs: number[]; ys: numbe
 }
 
 describe("lttb", () => {
+	it("keeps a lone spike next to the last point, for every length and target", () => {
+		const lost: string[] = [];
+		for (let n = 10; n <= 120; n++) {
+			const xs = Array.from({ length: n }, (_, i) => i);
+			for (let target = 4; target < n; target++) {
+				for (const at of [n - 2, n - 3]) {
+					const ys = xs.map((i) => (i === at ? 100 : 0));
+					const kept = lttb(xs, ys, target);
+					expect(kept.length).toBe(target);
+					if (!kept.includes(at)) lost.push(`n=${n} target=${target} at=${at}`);
+				}
+			}
+		}
+		expect(lost).toEqual([]);
+	});
+
+	it("keeps the spike in the case that divides unevenly (17 points, 13 kept)", () => {
+		const xs = Array.from({ length: 17 }, (_, i) => i);
+		const ys = xs.map((i) => (i === 15 ? 100 : 0));
+		expect(lttb(xs, ys, 13)).toContain(15);
+	});
+
 	it("keeps the global maximum of a series with one spike", () => {
 		for (const at of [7, 250, 499, 733]) {
 			const { xs, ys } = spiky(1000, at, 500);
