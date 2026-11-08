@@ -5,7 +5,12 @@ import { type CSSProperties, type ReactNode, useEffect, useRef, useState } from 
 import markUrl from "../../brand/usertrust-mark.svg?inline";
 import type { AtPayload, SummaryPayload } from "../shared/api.js";
 import { windowNote } from "../shared/asof.js";
-import { budgetAsOf, budgetDisplay, budgetSourceWord } from "../shared/budget-display.js";
+import {
+	budgetAsOf,
+	budgetDisplay,
+	budgetSourceWord,
+	isControllerRecord,
+} from "../shared/budget-display.js";
 import {
 	ANCHOR_VERIFY_COMMAND,
 	anchorView,
@@ -370,7 +375,7 @@ function PastBudgetFact(props: { at: AtPayload }): React.JSX.Element {
 	const now = useNow();
 	const word = budgetSourceWord(budget.source, budget.writtenAt, now).word;
 	const from =
-		budget.source === "governor" && budget.writtenAt !== null
+		isControllerRecord(budget.source) && budget.writtenAt !== null
 			? `${word}, as of ${formatUtcMinute(budget.writtenAt)}`
 			: word;
 	const line = budget.ut !== null ? `${from}. ${budget.note}` : budget.note;
@@ -411,7 +416,7 @@ function PastBudgetFact(props: { at: AtPayload }): React.JSX.Element {
 			<FactLine
 				className="ut-why"
 				text={line}
-				title={budget.source === "governor" ? line : `${budget.provenance}. ${line}`}
+				title={isControllerRecord(budget.source) ? line : `${budget.provenance}. ${line}`}
 			/>
 		</div>
 	);

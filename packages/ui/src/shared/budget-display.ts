@@ -97,6 +97,14 @@ export function budgetRecordAge(writtenAt: string, now: number): BudgetRecordAge
 }
 
 /**
+ * Whether the budget is a controller's own record of the budget it enforces. The one place the display names that
+ * source's wire value: every check of it goes through here, so no component spells it.
+ */
+export function isControllerRecord(source: SummaryPayload["budgetSource"]): boolean {
+	return source === "governor";
+}
+
+/**
  * The budget's source as one word, beside the figure; the full provenance sentence is in its tooltip. Only a
  * controller's FRESH record of what it enforces reads as enforced: an older one (or one with no readable time) reads
  * `recorded`, in the amber tone, because the file cannot say the controller is still running.
@@ -109,7 +117,7 @@ export function budgetSourceWord(
 	word: string;
 	tone: "ink" | "info" | "body";
 } {
-	if (source === "governor")
+	if (isControllerRecord(source))
 		return writtenAt !== null && budgetRecordAge(writtenAt, now).fresh
 			? { word: "enforced", tone: "ink" }
 			: { word: "recorded", tone: "info" };
@@ -127,7 +135,7 @@ export function budgetAsOf(
 	s: Pick<SummaryPayload, "budgetSource" | "budgetWrittenAt" | "budgetProvenance">,
 	now: number,
 ): { text: string; title: string | null; isRecord: boolean } {
-	if (s.budgetSource !== "governor")
+	if (!isControllerRecord(s.budgetSource))
 		return { text: s.budgetProvenance, title: null, isRecord: false };
 	if (s.budgetWrittenAt === null)
 		return { text: "recorded at an unknown time", title: null, isRecord: true };
