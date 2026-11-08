@@ -238,26 +238,23 @@ export function App(): React.JSX.Element {
 						))}
 				</div>
 			</main>
-			{/* Shown once the vault has records, and whenever a position is asked for (so Live is always reachable). */}
-			{(head >= 0 || at !== null || atView.wanted !== null) && (
-				<Timeline
-					at={shownAt}
-					wanted={atView.wanted}
-					committed={at}
-					head={head}
-					error={atView.error}
-					reloaded={atView.reloaded}
-					holdNote={holdNote}
-					announce={announce.text}
-					onPreview={preview}
-					onHold={onHold}
-					onCommit={setAt}
-					onLive={() => {
-						preview(null);
-						setAt(null);
-					}}
-				/>
-			)}
+			<Timeline
+				at={shownAt}
+				wanted={atView.wanted}
+				committed={at}
+				head={head}
+				error={atView.error}
+				reloaded={atView.reloaded}
+				holdNote={holdNote}
+				announce={announce.text}
+				onPreview={preview}
+				onHold={onHold}
+				onCommit={setAt}
+				onLive={() => {
+					preview(null);
+					setAt(null);
+				}}
+			/>
 			{!dock && view === "audit" && open && (
 				<RowPanel
 					key={open.hash}

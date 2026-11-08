@@ -615,6 +615,21 @@ describe("the timeline", () => {
 		expect(src).toContain("goLiveKeepingFocus(live, liveBtn.current)");
 	});
 
+	it("with no records the range is disabled and the Live button is still there, so going live from an unreachable point leaves focus somewhere", () => {
+		const html = render({ head: -1 });
+		expect(html).toMatch(/<input[^>]*disabled/);
+		expect(html).toMatch(/<button[^>]*>Live<\/button>/);
+	});
+
+	it("the page renders the Timeline whether or not there are records or a position, so it never unmounts under focus", () => {
+		const src = readFileSync(join(import.meta.dirname, "..", "src", "app", "app.tsx"), "utf8");
+		const at = src.indexOf("<Timeline");
+		expect(at).toBeGreaterThan(0);
+		// Not behind a condition: the text before it, back to the previous tag, holds no `&&` or `?`.
+		const before = src.slice(src.lastIndexOf(">", at - 1) + 1, at);
+		expect(before).not.toMatch(/&&|\?/);
+	});
+
 	it("while the first answer loads, it says so and never claims Live", () => {
 		const html = render({ wanted: 40, loading: true });
 		expect(html).not.toMatch(/aria-valuetext="Live"/);
