@@ -6,7 +6,7 @@
  * Windows read them through the hooks below; pointer movement never goes through either (it uses the hover bus).
  *
  * `DeskProvider` is what the page's root component used to be, moved and not rewritten: the one ledger, the one
- * address state, the one past position, the held list input and the drawn list. The shapes are in desk-types.ts.
+ * address state, the one past position and the drawn list. The shapes are in desk-types.ts.
  */
 
 import {
@@ -17,11 +17,10 @@ import {
 	useDeferredValue,
 	useEffect,
 	useMemo,
-	useRef,
 	useState,
 } from "react";
-import { rowsAsAnswered } from "../../shared/asof.js";
-import { AT_TIMEOUT_MS } from "../../shared/at-follow.js";
+import { createCutter, pastRows } from "../../shared/asof.js";
+import { AT_TIMEOUT_MS, pointLoading } from "../../shared/at-follow.js";
 import type { Dimension } from "../../shared/breakdown.js";
 import {
 	deskWindow,
@@ -35,11 +34,11 @@ import { applyFilters, EMPTY_FILTERS, isFiltering } from "../../shared/filters.j
 import { effectiveLevel } from "../../shared/level.js";
 import {
 	type HoldAnnouncement,
-	heldInput,
 	heldNote,
 	holdAnnouncement,
 	type ListInput,
 	listView,
+	pastHeldNote,
 } from "../../shared/list-view.js";
 import type { LedgerRow } from "../../shared/rows.js";
 import { litState } from "../../shared/selection.js";
@@ -148,7 +147,7 @@ export function useOpenRecord(): {
 	return useMemo(() => ({ openHash, setOpenHash, open }), [openHash, setOpenHash, open]);
 }
 
-/** The position in the vault's history: the pin and the timeline are one thing. `shown` is the header's answer. */
+/** The position in the vault's history: the address's `#at`, and the Spend chart's pin. `shown` is the header's answer. */
 export function usePosition(): {
 	at: number | null;
 	setAt(p: number | null): void;
@@ -192,7 +191,7 @@ function sameList(a: readonly string[], b: readonly string[]): boolean {
  * windows draw, published in the three contexts.
  */
 export function DeskProvider({ children }: { children: ReactNode }): React.JSX.Element {
-	const { rows, summary, phase, live, liveIds, resyncs } = useLedger();
+	const { rows, summary, phase, live, liveIds, resyncs, rowsVault } = useLedger();
 	// The view, filters and open record live in the page address (`location.hash`): a reload keeps them, a link shares them.
 	const {
 		filters,
@@ -210,44 +209,41 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 		navigation,
 		addressNote,
 	} = useUrlState();
-	// The past position shown (`#at=N`, or a drag's preview before it is written there), from /api/at. Until its first
-	// answer lands, or when it fails with nothing loaded, the screen stays live and the timeline says so: a past view is
-	// only ever drawn from its own answer.
-	const { view: atView, preview } = useAt(at, summary, live, rows, resyncs, navigation);
+	// The past position shown (`#at=N`), from /api/at. Until its first answer lands, or when it fails with nothing loaded,
+	// the screen stays live and the status under the header says so: a past view is only ever drawn from its own answer.
+	const { view: atView, preview } = useAt(at, summary, live, rows, resyncs, rowsVault, navigation);
 	const shownAt = atView.at;
 	// The past view reads each row's status against the rows the page held when the answer's request was SENT
 	// (`atView.rows`), not the rows held when the answer renders: a live `status` frame for a record after the
 	// position, one the server had not seen when it answered, can arrive in between, and `statusAt` cannot correct it
-	// (`rowsAsAnswered`).
-	const pastRows = useMemo(
-		() => rowsAsAnswered(rows, atView.rows ?? rows, shownAt),
-		[rows, atView.rows, shownAt],
+	// (`rowsAsAnswered`). The rows are paired with the answer by the vault they come from (`pastRows`), whichever of a
+	// reload's rows and answer lands first; while none of the answer's own vault is held, nothing is drawn and the
+	// windows wait.
+	const past = useMemo(
+		() => pastRows(rows, rowsVault, atView, shownAt),
+		[rows, rowsVault, atView, shownAt],
 	);
+	const pastHeld = past.kind === "held";
 	const head = summary === null ? -1 : summary.chain.events - 1;
-	// What the windows draw: ONE input, deferred, so a timeline drag paints the thumb, its label and the header first
-	// and the rest follows when there is time, never mixing one position's rows with another moment's phase or chain
-	// (`listView`). The rows are cut at the position before the filters, so all of them see the vault then.
+	// What the windows draw: ONE input, deferred, so a new position paints the header first and the rest follows when
+	// there is time, never mixing one position's rows with another moment's phase or chain (`listView`). The rows are
+	// cut at the position before the filters, so all of them see the vault then.
 	const listInput = useMemo<ListInput>(
-		() => ({ rows: pastRows, at: shownAt, filters, phase, summary }),
-		[pastRows, shownAt, filters, phase, summary],
+		() => ({ rows: past.rows, at: shownAt, filters, phase, summary, reloading: pastHeld }),
+		[past.rows, shownAt, filters, phase, summary, pastHeld],
 	);
-	// While a timeline drag is on, the list keeps the input it had when the drag began (`heldInput`): only the thumb,
-	// its label and the header follow the drag, and the list renders once on release or after the drag sits still. The
-	// input is frozen in the drag's own event (state, never a ref written while rendering), from the last committed one.
-	const [frozen, setFrozen] = useState<ListInput | null>(null);
-	const committed = useRef(listInput);
-	useEffect(() => {
-		committed.current = listInput;
-	}, [listInput]);
-	const onHold = useCallback((on: boolean) => setFrozen(on ? committed.current : null), []);
-	const drawn = useDeferredValue(heldInput(frozen, listInput));
-	const list = useMemo(() => listView(drawn), [drawn]);
+	const drawn = useDeferredValue(listInput);
+	// The list's own cut (`createCutter`): a past row keeps its identity from one draw to the next while its record and
+	// its status there are unchanged, so a check's result held for it in the inspector survives an unrelated record.
+	const [cutter] = useState(createCutter);
+	const list = useMemo(() => listView(drawn, cutter), [drawn, cutter]);
 	const { shownRows, filtered } = list;
-	// Whether what the windows draw shows another position than the header: during a drag, and after it until the
-	// deferred render lands (or after Live, Back, Forward or a link). Those views are dimmed and busy meanwhile, and the
-	// timeline says what is coming.
-	const holdNote = heldNote(list.at, shownAt);
-	const held = holdNote !== null;
+	// Whether what the windows draw shows another position than the header: until the deferred render lands (after
+	// Back, Forward or a link). Those views are dimmed and busy meanwhile, and the status under the header says what is
+	// coming. A past view whose vault's records are not held yet lags too.
+	const pastNote = pastHeldNote(atView.reloaded);
+	const holdNote = pastHeld ? pastNote : heldNote(list.at, shownAt);
+	const held = holdNote !== null || pastHeld;
 	// What a screen reader hears about it: once when the views start to lag, once when they catch up, never per answer.
 	const [announce, setAnnounce] = useState<HoldAnnouncement>({ held: false, text: "" });
 	useEffect(() => {
@@ -255,7 +251,8 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 	}, [holdNote, shownAt]);
 
 	const nowMs = useNow();
-	// The window comes from the DRAWN answer, so the rows and the window never come from two moments during a drag.
+	// The window comes from the DRAWN answer, so the rows and the window never come from two moments while a new
+	// position lands.
 	// It changes with the minute, not with every clock tick, so the breakdown below is not rebuilt for nothing.
 	const minute = Math.floor(nowMs / 60_000);
 	// biome-ignore lint/correctness/useExhaustiveDependencies: nowMs matters only through its minute
@@ -305,6 +302,8 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 			head,
 			held,
 			holdNote,
+			pastHeld,
+			pastNote,
 			nowMs,
 			window,
 			level,
@@ -321,6 +320,8 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 			head,
 			held,
 			holdNote,
+			pastHeld,
+			pastNote,
 			nowMs,
 			window,
 			level,
@@ -396,17 +397,11 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 			: `${filtered.length.toLocaleString()} of ${shownRows.length.toLocaleString()} records`;
 	const shell = useMemo<ShellBinding>(
 		() => ({
-			timeline: {
-				wanted: atView.wanted,
-				resolved: atView.resolved,
-				committed: at,
-				navigation,
+			status: {
 				error: atView.error,
+				loading: pointLoading(atView),
 				reloaded: atView.reloaded,
 				announce: announce.text,
-				onPreview: preview,
-				onHold,
-				onCommit: setAt,
 			},
 			goLive,
 			filtering: isFiltering(drawn.filters),
@@ -416,22 +411,7 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 			peel,
 			act,
 		}),
-		[
-			atView,
-			at,
-			navigation,
-			announce.text,
-			preview,
-			onHold,
-			setAt,
-			goLive,
-			drawn.filters,
-			newestOf,
-			count,
-			addressNote,
-			peel,
-			act,
-		],
+		[atView, announce.text, goLive, drawn.filters, newestOf, count, addressNote, peel, act],
 	);
 
 	return (

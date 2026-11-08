@@ -10,10 +10,12 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { appSource } from "./helpers/app-source.js";
 
 const root = join(import.meta.dirname, "..");
 const read = (...p: string[]): string => readFileSync(join(root, ...p), "utf8");
-const app = read("src", "app", "app.tsx");
+// The page: its root and what used to be in it (the desk's state, its shell and the Ledger window).
+const app = appSource();
 const css = read("src", "app", "styles.css");
 
 describe("the dashboard has no slider", () => {
@@ -22,7 +24,7 @@ describe("the dashboard has no slider", () => {
 	});
 
 	it.each([["<Timeline"], ['type="range"'], ["Scrubber"], ["ut-tl-range"]])(
-		"app.tsx has no %s",
+		"the page has no %s",
 		(needle) => {
 			expect(app).not.toContain(needle);
 		},

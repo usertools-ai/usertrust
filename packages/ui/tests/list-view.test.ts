@@ -317,9 +317,11 @@ describe("holdAnnouncement", () => {
 		expect(holdAnnouncement(lagging, null, null).text).toBe("Showing the live vault");
 	});
 
-	it("the page feeds it the held note and the header's position, and hands its text to the timeline", () => {
+	it("the page feeds it the held note and the header's position, and hands its text to the status under the header", () => {
 		const app = appSource();
 		expect(app).toContain("setAnnounce((prev) => holdAnnouncement(prev, holdNote, shownAt));");
-		expect(app).toContain("announce={announce}");
+		// The desk's state puts the text in the shell's binding, and the shell hands it to the status.
+		expect(app).toContain("announce: announce.text");
+		expect(app).toContain("announce={status.announce}");
 	});
 });

@@ -30,9 +30,16 @@ export interface DeskData {
 	at: AtPayload | null;
 	/** The last position of the vault, or -1 before a summary lands. */
 	head: number;
-	/** Whether what the windows draw lags the header (a timeline drag, or a deferred render still landing). */
+	/** Whether what the windows draw lags the header (a deferred render still landing, or `pastHeld`). */
 	held: boolean;
 	holdNote: string | null;
+	/**
+	 * The past view waits for the records of the point's own vault (`pastRows` held): the windows draw none, say
+	 * `pastNote` instead of their empty states, and Export writes nothing.
+	 */
+	pastHeld: boolean;
+	/** The held words (`pastHeldNote`): "Updating to the reloaded vault…" after a reload, else "Loading this point's records…". */
+	pastNote: string;
 	nowMs: number;
 	/** The window the breakdown reads (`deskWindow`). */
 	window: SpendWindow;
@@ -60,21 +67,16 @@ export interface DeskView {
 	setAt(p: number | null): void;
 }
 
-/** What only the shell reads: the timeline's wiring, the count, the address note and the Esc layers. */
+/** What only the shell reads: the status under the header, the count, the address note and the Esc layers. */
 export interface ShellBinding {
-	timeline: {
-		wanted: number | null;
-		/** The record the wanted position was answered with, kept across reconnects (`AtView.resolved`). */
-		resolved: number | null;
-		committed: number | null;
-		/** How many navigations the user made: a change drops every pending preview and commit. */
-		navigation: number;
+	/** The status under the header (`AtStatus`), for the position the address names; its held note is `DeskData`'s. */
+	status: {
 		error: string | null;
+		/** The position asked for has no answer yet (`pointLoading`). */
+		loading: boolean;
 		reloaded: boolean;
+		/** The polite live region's text (`holdAnnouncement`). */
 		announce: string;
-		onPreview(p: number | null): void;
-		onHold(on: boolean): void;
-		onCommit(p: number | null): void;
 	};
 	goLive(): void;
 	filtering: boolean;

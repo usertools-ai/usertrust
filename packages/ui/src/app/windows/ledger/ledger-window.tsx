@@ -17,7 +17,7 @@ import { Window } from "../../desk/window.js";
 import { InspectorHint, RowPanel } from "../../row-panel.js";
 
 export const LedgerWindow = memo(function LedgerWindow(): React.JSX.Element {
-	const { list, liveIds, held } = useDeskData();
+	const { list, liveIds, held, pastNote } = useDeskData();
 	const { clear } = useFilters();
 	const { openHash, setOpenHash, open } = useOpenRecord();
 	// Wide by default (the server's answer): the docked panel only exists on a desktop window, and a browser reads the
@@ -37,7 +37,7 @@ export const LedgerWindow = memo(function LedgerWindow(): React.JSX.Element {
 		},
 		[openHash, setOpenHash],
 	);
-	// Stable, so the memoized list does not re-render for a new callback on every timeline answer.
+	// Stable, so the memoized list does not re-render for a new callback on every answer.
 	const openRow = useCallback(
 		(r: LedgerRow, viaKeyboard: boolean) => {
 			setOpenHash(r.hash);
@@ -61,6 +61,8 @@ export const LedgerWindow = memo(function LedgerWindow(): React.JSX.Element {
 									phase={list.phase}
 									chain={list.chain}
 									beforeWindow={list.beforeWindow}
+									reloading={list.reloading}
+									reloadingNote={pastNote}
 									liveIds={liveIds}
 									selected={openHash}
 									restoreFocus={restoreFocus}

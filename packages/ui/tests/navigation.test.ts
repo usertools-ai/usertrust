@@ -235,7 +235,7 @@ describe("the wiring the model mirrors", () => {
 	});
 
 	it("the page pairs its rows with the answer by epoch: past.rows feed the list, and Export waits while held", () => {
-		const app = read("app.tsx");
+		const app = appSource();
 		expect(app).toMatch(/pastRows\(rows, rowsVault, atView, shownAt\)/);
 		expect(app).toMatch(/rows: past\.rows,/);
 		expect(app).toMatch(/reloading: pastHeld\b/);

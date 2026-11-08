@@ -12,11 +12,20 @@ import { Window } from "../../desk/window.js";
 import { Trends } from "../../trends.js";
 
 export const ShareWindow = memo(function ShareWindow(): React.JSX.Element {
-	const { list, summary } = useDeskData();
+	const { list, summary, pastNote } = useDeskData();
 	const newestOf = summary?.truncated ? summary.rowCount : undefined;
 	return (
 		<Window id="share" title="Share of spend" subtitle="by kind, model and job type">
-			{() => <Trends part="lists" rows={list.filtered} newestOf={newestOf} at={list.at} />}
+			{() => (
+				<Trends
+					part="lists"
+					rows={list.filtered}
+					newestOf={newestOf}
+					at={list.at}
+					reloading={list.reloading}
+					reloadingNote={pastNote}
+				/>
+			)}
 		</Window>
 	);
 });

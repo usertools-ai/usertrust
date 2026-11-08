@@ -22,7 +22,13 @@ async function app<T>(file: string): Promise<T> {
 
 type TrendsPart = "chart" | "lists" | "all";
 type StripPart = "bar" | "facts" | "all";
-let Trends: Component<{ rows: LedgerRow[]; newestOf: number | undefined; part?: TrendsPart }>;
+let Trends: Component<{
+	rows: LedgerRow[];
+	newestOf: number | undefined;
+	part?: TrendsPart;
+	reloading?: boolean;
+	reloadingNote?: string;
+}>;
 let SummaryStrip: Component<{
 	summary: SummaryPayload | null;
 	live: "live";
@@ -135,6 +141,28 @@ describe("Trends draws one part", () => {
 		expect(html).not.toContain("Cost over time");
 		expect(html).not.toContain("Cost in view");
 		expect(html).not.toContain("Show table");
+	});
+
+	it("while the point's records are on their way, each part says so instead of an empty state or empty lists", () => {
+		const held = (part: TrendsPart, rowsIn: LedgerRow[]): string =>
+			renderToStaticMarkup(
+				createElement(Trends, {
+					rows: rowsIn,
+					newestOf: undefined,
+					part,
+					reloading: true,
+					reloadingNote: "Loading this point's records…",
+				}),
+			);
+		const chart = held("chart", []);
+		expect(chart).toContain("Loading this point");
+		expect(chart).not.toContain("No records in view");
+		const lists = held("lists", rows());
+		expect(lists).toContain("Loading this point");
+		expect(lists).not.toContain("Cost by kind");
+		// CONTROL: not reloading, the lists part draws its lists and no held words.
+		expect(trends("lists")).toContain("Cost by kind");
+		expect(trends("lists")).not.toContain("Loading this point");
 	});
 });
 

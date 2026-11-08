@@ -33,6 +33,8 @@ export function defaultDeskData(over: Partial<DeskData> = {}): DeskData {
 		head: -1,
 		held: false,
 		holdNote: null,
+		pastHeld: false,
+		pastNote: "Loading this point's records…",
 		nowMs,
 		window,
 		level: "lane",
@@ -64,16 +66,7 @@ export function defaultDeskView(over: Partial<DeskView> = {}): DeskView {
 /** The shell's wiring for a vault with nothing happening: no note in the address, nothing to peel, handlers that do nothing. */
 export function defaultShellBinding(over: Partial<ShellBinding> = {}): ShellBinding {
 	const base: ShellBinding = {
-		timeline: {
-			wanted: null,
-			committed: null,
-			error: null,
-			reloaded: false,
-			announce: "",
-			onPreview: () => undefined,
-			onHold: () => undefined,
-			onCommit: () => undefined,
-		},
+		status: { error: null, loading: false, reloaded: false, announce: "" },
 		goLive: () => undefined,
 		filtering: false,
 		newestOf: undefined,

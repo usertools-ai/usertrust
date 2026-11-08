@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * The shell: the page the desk makes of four windows, the top bar, the filters and the timeline. Rendered as static
+ * The shell: the page the desk makes of four windows, the top bar, the status under it and the filters. Rendered as static
  * markup inside the desk's contexts (`withDesk`); the parts that need a browser (focus after a fill, the glass, Esc)
  * are pinned in the source here and walked in the browser gate.
  */
@@ -54,15 +54,15 @@ describe("the desk shell", () => {
 		expect(wins).toEqual(["spend", "share", "ledger", "now"]);
 	});
 
-	it("puts the page in the desk's frame: backdrop, top bar, filters, the desk, then the timeline", async () => {
+	it("puts the page in the desk's frame: backdrop, top bar, the status under it, filters, then the desk", async () => {
 		const html = await shell({ data: loadedData() });
 		const order = [
 			'class="ut-dk"',
 			'class="ut-dk-backdrop"',
 			'class="ut-dk-top ut-glass"',
+			'class="ut-at-status"',
 			'class="ut-dk-filters"',
 			'class="ut-dk-desk"',
-			'type="range"',
 		].map((s) => html.indexOf(s));
 		for (const at of order) expect(at).toBeGreaterThan(-1);
 		expect([...order].sort((a, b) => a - b)).toEqual(order);
@@ -82,11 +82,31 @@ describe("the desk shell", () => {
 		for (const tag of panes) expect(classesOf(tag)).not.toContain("ut-glass");
 	});
 
-	it("draws the timeline whatever the data: empty, still loading, or loaded", async () => {
+	it("draws no slider and keeps the status under the header mounted, whatever the data", async () => {
 		for (const data of [{}, loadedData(), { summary: dayOneSummary() }]) {
 			const html = await shell({ data });
-			expect(html.match(/type="range"/g)).toHaveLength(1);
+			expect(html).not.toContain('type="range"');
+			expect(html).not.toContain("ut-tl-range");
+			expect(html.match(/class="ut-at-status"/g)).toHaveLength(1);
 		}
+	});
+
+	it("the status under the header says why a point did not show, and that one is loading", async () => {
+		const failed = await shell({
+			shell: {
+				status: {
+					error: "the dashboard did not answer",
+					loading: false,
+					reloaded: false,
+					announce: "",
+				},
+			},
+		});
+		expect(failed).toContain("Could not show that point: the dashboard did not answer.");
+		const loading = await shell({
+			shell: { status: { error: null, loading: true, reloaded: false, announce: "" } },
+		});
+		expect(loading).toContain("Loading this point…");
 	});
 
 	it("keeps the search box to the length the address holds, under the same name and placeholder", async () => {
@@ -137,11 +157,18 @@ describe("the page's source, now spread over the shell", () => {
 		expect(src).not.toContain(String.fromCodePoint(0xfeff));
 	});
 
-	it("never puts the timeline behind a condition", () => {
-		const at = src.indexOf("<Timeline");
+	it("never puts the status under the header behind a condition, and mounts no slider", () => {
+		const at = src.indexOf("<AtStatus");
 		expect(at).toBeGreaterThan(0);
 		const before = src.slice(src.lastIndexOf(">", at - 1) + 1, at);
 		expect(before).not.toMatch(/&&|\?/);
+		expect(src).not.toContain("<Timeline");
+	});
+
+	it("Export writes nothing while the past view waits for its vault's records", () => {
+		const fn = /function exportCsv\(\): void \{([\s\S]*?)\n\t\}\n/.exec(src)?.[1] ?? "";
+		expect(fn.length).toBeGreaterThan(20);
+		expect(fn.slice(0, fn.indexOf("new Blob"))).toMatch(/if \(pastHeld\) return;/);
 	});
 
 	it("shrinks the root to the provider and the shell", () => {

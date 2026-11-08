@@ -12,13 +12,21 @@ import { Window } from "../../desk/window.js";
 import { Trends } from "../../trends.js";
 
 export const SpendWindow = memo(function SpendWindow(): React.JSX.Element {
-	const { list, summary, head } = useDeskData();
+	const { list, summary, head, pastNote } = useDeskData();
 	// The server's row window, when it holds only the newest N events.
 	const newestOf = summary?.truncated ? summary.rowCount : undefined;
 	return (
 		<Window id="spend" title="Spend">
 			{() => (
-				<Trends part="chart" rows={list.filtered} newestOf={newestOf} at={list.at} head={head} />
+				<Trends
+					part="chart"
+					rows={list.filtered}
+					newestOf={newestOf}
+					at={list.at}
+					head={head}
+					reloading={list.reloading}
+					reloadingNote={pastNote}
+				/>
 			)}
 		</Window>
 	);

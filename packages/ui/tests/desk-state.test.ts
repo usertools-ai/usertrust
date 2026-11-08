@@ -330,11 +330,16 @@ describe("the desk's hooks", () => {
 describe("the provider keeps what the page had", () => {
 	const src = readFileSync(join(import.meta.dirname, "../src/app/desk/desk-state.tsx"), "utf8");
 
-	it("holds the list input through a drag, and draws one deferred input", () => {
-		expect(src).toContain("useDeferredValue(heldInput(frozen, listInput))");
-		expect(src).toContain("listView(drawn)");
-		expect(src).toContain("const holdNote = heldNote(list.at, shownAt);");
+	it("draws one deferred input through the list's own cutter, held while the point's vault is not", () => {
+		expect(src).toContain("const drawn = useDeferredValue(listInput);");
+		expect(src).not.toContain("heldInput");
+		expect(src).toContain("const [cutter] = useState(createCutter);");
+		expect(src).toContain("listView(drawn, cutter)");
+		// The rows are paired with the answer by their vault, and a past view that waits says so.
+		expect(src).toContain("pastRows(rows, rowsVault, atView, shownAt)");
+		expect(src).toContain("const holdNote = pastHeld ? pastNote : heldNote(list.at, shownAt);");
 		expect(src).toContain("setAnnounce((prev) => holdAnnouncement(prev, holdNote, shownAt));");
+		expect(src).toContain("useAt(at, summary, live, rows, resyncs, rowsVault, navigation)");
 	});
 
 	it("writes no ref while rendering", () => {

@@ -2,19 +2,19 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * The desk's shell: the page around the four windows. The top bar (glass: it is a control), the filters and the count,
- * the desk itself, and the timeline along the bottom. Everything it shows comes from the desk's state; it keeps no
- * state of its own except what a screen needs to hand focus back after a window fills the desk or is restored.
+ * The desk's shell: the page around the four windows. The top bar (glass: it is a control), the status under it, the
+ * filters and the count, and the desk itself. Everything it shows comes from the desk's state; it keeps no state of its
+ * own except what a screen needs to hand focus back after a window fills the desk or is restored.
  */
 
 import { useEffect, useRef } from "react";
 import { csvFilename, toCsv } from "../../shared/csv.js";
 import { HOME_ROWS, type WindowId } from "../../shared/desk-layout.js";
 import { MAX_SEARCH_LENGTH } from "../../shared/url-state.js";
+import { AtStatus } from "../at-status.js";
 import { ExportButton } from "../export-button.js";
 import { FilterBar } from "../filter-bar.js";
 import { SummaryStrip } from "../summary-strip.js";
-import { Timeline } from "../timeline.js";
 import { Backdrop } from "./backdrop.js";
 import { useDeskData, useFill, useFilters, useShellBinding } from "./desk-state.js";
 import { useEscapePeel } from "./escape-peel.js";
@@ -43,23 +43,10 @@ function useFocusAfterFill(fill: WindowId | null): void {
 }
 
 export function DeskShell(): React.JSX.Element {
-	const { list, summary, live, at: shownAt, head, held, holdNote } = useDeskData();
+	const { list, summary, live, at: shownAt, held, holdNote, pastHeld } = useDeskData();
 	const { filters, setFilters } = useFilters();
 	const { fill } = useFill();
-	const { timeline, goLive, filtering, newestOf, count, addressNote, peel, act } =
-		useShellBinding();
-	const {
-		wanted,
-		resolved,
-		committed,
-		navigation,
-		error,
-		reloaded,
-		announce,
-		onPreview,
-		onHold,
-		onCommit,
-	} = timeline;
+	const { status, filtering, newestOf, count, addressNote, peel, act } = useShellBinding();
 	const { shownRows, filtered } = list;
 
 	useEscapePeel(peel, act);
@@ -71,6 +58,8 @@ export function DeskShell(): React.JSX.Element {
 	// Export what the operator is looking at — the filtered set, not the vault, and within the server's window: the
 	// filename says both. BOM first: Excel reads UTF-8 CSV as latin-1 without it.
 	function exportCsv(): void {
+		// Never a mix: while the records of the point's own vault are not held, nothing is written.
+		if (pastHeld) return;
 		const blob = new Blob([`\uFEFF${toCsv(filtered)}`], { type: "text/csv;charset=utf-8" });
 		const url = URL.createObjectURL(blob);
 		const a = document.createElement("a");
@@ -102,6 +91,13 @@ export function DeskShell(): React.JSX.Element {
 					onExport={exportCsv}
 				/>
 			</header>
+			<AtStatus
+				error={status.error}
+				loading={status.loading}
+				reloaded={status.reloaded}
+				holdNote={holdNote}
+				announce={status.announce}
+			/>
 			{/* Never a link that opens something else: when the address does not describe this view, we say so. */}
 			{addressNote === "cannot-hold" && (
 				<div className="ut-notice ut-address-note" role="status">
@@ -129,22 +125,6 @@ export function DeskShell(): React.JSX.Element {
 					<Component key={id} />
 				))}
 			</main>
-			<Timeline
-				at={shownAt}
-				wanted={wanted}
-				resolved={resolved}
-				committed={committed}
-				navigation={navigation}
-				head={head}
-				error={error}
-				reloaded={reloaded}
-				holdNote={holdNote}
-				announce={announce}
-				onPreview={onPreview}
-				onHold={onHold}
-				onCommit={onCommit}
-				onLive={goLive}
-			/>
 		</div>
 	);
 }

@@ -349,7 +349,13 @@ export const Trends = memo(function Trends(props: {
 					)}
 				</div>
 			)}
-			{/* While the point's records are on their way the lists would only say "none": they wait, as the chart does. */}
+			{/* While the point's records are on their way the lists would only say "none": they wait, as the chart does. With
+			    no chart drawn (the lists part), the held words stand in their place. */}
+			{drawLists && !drawChart && props.reloading === true && (
+				<div className="ut-empty">
+					<b>{props.reloadingNote ?? pastHeldNote(false)}</b>
+				</div>
+			)}
 			{drawLists && props.reloading !== true && (
 				<>
 					<div className="ut-split">
