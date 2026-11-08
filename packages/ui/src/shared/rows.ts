@@ -123,6 +123,32 @@ function bool(v: unknown): boolean | undefined {
 }
 
 /**
+ * The fields of a record a breakdown key reads and its spend rule counts. Both `toLedgerRows` and the server's
+ * whole-vault totals derive them HERE, so a record has one set of key fields whichever way it is read. A field the
+ * record does not carry is ABSENT, not present as `undefined` (`exactOptionalPropertyTypes` makes the two differ).
+ */
+export type SpendFacts = Pick<
+	LedgerRow,
+	"ts" | "kind" | "actor" | "model" | "provider" | "providerRecorded" | "jobType" | "costUt"
+>;
+
+export function spendFactsOf(e: PersistedAuditEvent): SpendFacts {
+	const facts: SpendFacts = { ts: e.timestamp, kind: e.kind, actor: e.actor };
+	const model = str(e.data.model);
+	if (model !== undefined) {
+		facts.model = model;
+		facts.provider = detectProvider(model);
+	}
+	const costUt = num(e.data.cost);
+	if (costUt !== undefined) facts.costUt = costUt;
+	const providerRecorded = str(e.data.provider);
+	if (providerRecorded !== undefined) facts.providerRecorded = providerRecorded;
+	const jobType = closed(e.data.jobType, JOB_TYPES);
+	if (jobType !== undefined) facts.jobType = jobType;
+	return facts;
+}
+
+/**
  * `verdictOf` gives an event's TRANSFER verdict (the server builds it over every event of the transfer, with
  * usertrust-verify's `transferVerdict`). Without it, a row whose kind carries a transfer's outcome is "unknown":
  * this module never guesses an outcome from one row's fields. `firstPos` is the position of `events[0]` (`pos`), which
@@ -135,8 +161,7 @@ export function toLedgerRows(
 	firstPos: number,
 ): LedgerRow[] {
 	return events.map((e, i) => {
-		const model = str(e.data.model);
-		const costUt = num(e.data.cost);
+		const facts = spendFactsOf(e);
 		const usageSource =
 			e.data.usageSource === "provider" || e.data.usageSource === "estimated"
 				? e.data.usageSource
@@ -145,9 +170,9 @@ export function toLedgerRows(
 			seq: typeof e.sequence === "number" ? e.sequence : null,
 			pos: firstPos + i,
 			id: e.id,
-			ts: e.timestamp,
-			kind: e.kind,
-			actor: e.actor,
+			ts: facts.ts,
+			kind: facts.kind,
+			actor: facts.actor,
 			hash: e.hash,
 			previousHash: e.previousHash,
 			integrity:
@@ -155,16 +180,13 @@ export function toLedgerRows(
 		};
 		const source = str(e.data.source);
 		if (source !== undefined) row.source = source;
-		if (model !== undefined) {
-			row.model = model;
-			row.provider = detectProvider(model);
+		if (facts.model !== undefined) row.model = facts.model;
+		if (facts.provider !== undefined) row.provider = facts.provider;
+		if (facts.costUt !== undefined) {
+			row.costUt = facts.costUt;
+			row.costUsd = facts.costUt * UT_TO_USD;
 		}
-		if (costUt !== undefined) {
-			row.costUt = costUt;
-			row.costUsd = costUt * UT_TO_USD;
-		}
-		const providerRecorded = str(e.data.provider);
-		if (providerRecorded !== undefined) row.providerRecorded = providerRecorded;
+		if (facts.providerRecorded !== undefined) row.providerRecorded = facts.providerRecorded;
 		const settled = bool(e.data.settled);
 		if (settled !== undefined) row.settled = settled;
 		const error = str(e.data.error);
@@ -174,8 +196,7 @@ export function toLedgerRows(
 		if (usageSource !== undefined) row.usageSource = usageSource;
 		const job = str(e.data.job);
 		if (job !== undefined) row.job = job;
-		const jobType = closed(e.data.jobType, JOB_TYPES);
-		if (jobType !== undefined) row.jobType = jobType;
+		if (facts.jobType !== undefined) row.jobType = facts.jobType;
 		const typeSource = closed(e.data.typeSource, TYPE_SOURCES);
 		if (typeSource !== undefined) row.typeSource = typeSource;
 		row.status = statusFor(e.kind, e.data, verdictOf?.(e));

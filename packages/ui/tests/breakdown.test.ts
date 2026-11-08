@@ -10,6 +10,8 @@ import {
 	type Dimension,
 	keyOf,
 	shareBands,
+	spendInWindow,
+	WHOLE_VAULT,
 } from "../src/shared/breakdown.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 import { bucketTotals } from "../src/shared/spend-series.js";
@@ -304,5 +306,45 @@ describe("shareBands", () => {
 
 	it("is empty for a vault with no spend", () => {
 		expect(shareBands([row({ kind: "info" })], WIN, "lane", BUCKET).size).toBe(0);
+	});
+});
+
+describe("spendInWindow", () => {
+	it("is the rule breakdown counts by", () => {
+		const rows = fixture();
+		for (const dim of DIMS) {
+			let sum = 0;
+			for (const r of rows) sum += spendInWindow(r, WIN) ?? 0;
+			expect(breakdown(rows, WIN, dim).totalUt).toBe(sum);
+		}
+	});
+
+	it("counts a row's cost inside the half-open window, and nothing on or past its end", () => {
+		expect(spendInWindow(row({ costUt: 4, ts: new Date(WIN.startMs).toISOString() }), WIN)).toBe(4);
+		expect(
+			spendInWindow(row({ costUt: 4, ts: new Date(WIN.endMs).toISOString() }), WIN),
+		).toBeUndefined();
+	});
+
+	it("puts a record whose time does not parse in no window, even the whole vault", () => {
+		expect(
+			spendInWindow({ kind: "llm_call", costUt: 4, ts: "not a time" }, WHOLE_VAULT),
+		).toBeUndefined();
+		expect(spendInWindow({ kind: "llm_call", costUt: 4, ts: "not a time" }, WIN)).toBeUndefined();
+	});
+
+	it("skips what is not header spend", () => {
+		expect(
+			spendInWindow({ kind: "policy_denied", costUt: 9, ts: row().ts }, WHOLE_VAULT),
+		).toBeUndefined();
+		expect(
+			spendInWindow({ kind: "llm_call_failed", costUt: 9, ts: row().ts }, WHOLE_VAULT),
+		).toBeUndefined();
+		expect(spendInWindow({ kind: "llm_call", ts: row().ts }, WHOLE_VAULT)).toBeUndefined();
+		expect(spendInWindow({ kind: "llm_call", costUt: 9, ts: row().ts }, WHOLE_VAULT)).toBe(9);
+	});
+
+	it("a zero cost is spend: it counts as a call", () => {
+		expect(spendInWindow({ kind: "llm_call", costUt: 0, ts: row().ts }, WHOLE_VAULT)).toBe(0);
 	});
 });
