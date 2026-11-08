@@ -173,7 +173,9 @@ describe("listView", () => {
 		const app = readFileSync(join(import.meta.dirname, "..", "src", "app", "app.tsx"), "utf-8");
 		expect(app).toContain("useDeferredValue(listInput)");
 		expect(app).not.toContain("heldInput");
-		expect(app).toContain("listView(drawn)");
+		// With the list's own cutter, made once for the page (`useState(createCutter)`), never per render.
+		expect(app).toContain("listView(drawn, cutter)");
+		expect(app).toContain("useState(createCutter)");
 		expect(app).toContain("phase={list.phase}");
 		expect(app).not.toMatch(/phase=\{phase\}/);
 	});

@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { pastRows } from "../shared/asof.js";
+import { createCutter, pastRows } from "../shared/asof.js";
 import { pointLoading } from "../shared/at-follow.js";
 import { csvFilename, toCsv } from "../shared/csv.js";
 import { EMPTY_FILTERS, isFiltering } from "../shared/filters.js";
@@ -69,7 +69,10 @@ export function App(): React.JSX.Element {
 		[past.rows, shownAt, filters, phase, summary, pastHeld],
 	);
 	const drawn = useDeferredValue(listInput);
-	const list = useMemo(() => listView(drawn), [drawn]);
+	// The list's own cut (`createCutter`): a past row keeps its identity from one draw to the next while its record and
+	// its status there are unchanged, so a check's result held for it in the inspector survives an unrelated record.
+	const [cutter] = useState(createCutter);
+	const list = useMemo(() => listView(drawn, cutter), [drawn, cutter]);
 	const { shownRows, filtered } = list;
 	// Whether what the list's input draws (the list, the facets, Trends, the inspector, the count and Export) shows
 	// another position than the header: until the deferred render lands (after Back, Forward

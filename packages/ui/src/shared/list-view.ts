@@ -9,7 +9,7 @@
  */
 
 import type { AtPayload, SummaryPayload } from "./api.js";
-import { chainAt, cutRows } from "./asof.js";
+import { type Cutter, chainAt, cutRows } from "./asof.js";
 import { type ChainStatus, chainStatus, type LoadPhase } from "./display.js";
 import { applyFilters, type FilterState } from "./filters.js";
 import type { LedgerRow } from "./rows.js";
@@ -55,9 +55,26 @@ export interface ListView {
 	reloading: boolean;
 }
 
-export function listView(input: ListInput): ListView {
+/** The rows the list draws: live, the rows themselves (the cutter's projections end); else the cut at `at`. */
+function drawnRows(
+	rows: LedgerRow[],
+	at: AtPayload | null,
+	cutter: Cutter | undefined,
+): LedgerRow[] {
+	if (at === null) {
+		cutter?.live();
+		return rows;
+	}
+	return cutter === undefined ? cutRows(rows, at) : cutter.cut(rows, at);
+}
+
+/**
+ * The list drawn from `input`. `cutter` is the list's own (`createCutter`): with it, a past row keeps its identity from
+ * one draw to the next while its record and its status there are unchanged; without one, the cut keeps nothing.
+ */
+export function listView(input: ListInput, cutter?: Cutter): ListView {
 	const { rows, at, filters, phase, summary } = input;
-	const shownRows = at === null ? rows : cutRows(rows, at);
+	const shownRows = drawnRows(rows, at, cutter);
 	return {
 		shownRows,
 		filtered: applyFilters(shownRows, filters),

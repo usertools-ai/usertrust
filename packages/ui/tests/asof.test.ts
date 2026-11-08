@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import type { AtPayload, SummaryPayload } from "../src/shared/api.js";
 import {
+	type Cutter,
 	chainAt,
+	createCutter,
 	cutRows,
 	pastRows,
 	rowsAsAnswered,
@@ -15,7 +17,9 @@ import {
 import { toCsv } from "../src/shared/csv.js";
 import { EMPTY_FILTERS } from "../src/shared/filters.js";
 import { type ListInput, listView } from "../src/shared/list-view.js";
+import { applyStatusChanges } from "../src/shared/live.js";
 import type { LedgerRow } from "../src/shared/rows.js";
+import { heldFor } from "../src/shared/verify-view.js";
 
 function row(pos: number, overrides: Partial<LedgerRow> = {}): LedgerRow {
 	return {
@@ -259,6 +263,129 @@ describe("rowsAsAnswered", () => {
 		// Rows that arrived after the answer was read are shown as they are.
 		const more = [...now, row(4)];
 		expect(rowsAsAnswered(more, answered, at({ pos: 4 }))[4]).toBe(more[4]);
+	});
+});
+
+describe("a list's cutter keeps a past row's identity while its record and its status there are unchanged", () => {
+	// Row 1 is ambiguous now (a later record changed it); at position 2 it was settled, so the answer names its status
+	// there and the cut shows a projection of the row.
+	const live = [row(0), row(1, { status: "ambiguous" }), row(2)];
+	const answer = at({ pos: 2, head: 3, statusAt: { [row(1).hash]: "settled" } });
+	// Each test draws with its own cutter, as the page keeps one for its list: nothing passes from one test to the next.
+	let cutter: Cutter;
+	beforeEach(() => {
+		cutter = createCutter();
+	});
+	// What the page draws, and the row it finds again by hash for the open inspector (app.tsx).
+	const opened = (rows: LedgerRow[], a: AtPayload | null = answer): LedgerRow => {
+		const view = listView(
+			{ rows, at: a, filters: EMPTY_FILTERS, phase: "loaded", summary: null },
+			cutter,
+		);
+		const found = view.shownRows.find((r) => r.hash === row(1).hash);
+		if (found === undefined) throw new Error("row 1 is not drawn");
+		return found;
+	};
+	const rowOne = (rows: LedgerRow[]): LedgerRow | undefined => rows.find((r) => r.pos === 1);
+
+	it("red-first: a check started on such a row still shows its receipt after an unrelated record arrives", () => {
+		const first = opened(live);
+		expect(first.status).toBe("settled");
+		// The inspector holds the check for the row object it was started on (`heldFor`).
+		const check = { row: first, value: "receipt" };
+		// An unrelated append: a new rows array with the same row objects, and the same answer (its re-read read the same).
+		expect(heldFor(check, opened([...live, row(3)]))).toBe("receipt");
+		// The cutter itself: the same object for that row across two draws with the same record and answer.
+		const a = rowOne(cutter.cut(live, answer));
+		expect(a).toBeDefined();
+		expect(rowOne(cutter.cut(live, answer))).toBe(a);
+	});
+
+	it("CONTROL: a real status change of the record still clears the held receipt", () => {
+		const check = { row: opened(live), value: "receipt" };
+		// A status frame replaces row 1 with a new version of the record, as the page applies it.
+		const corrected = applyStatusChanges(live, [
+			{ id: row(1).id, hash: row(1).hash, status: "failed" },
+		]);
+		const shown = opened(corrected);
+		expect(shown.status).toBe("settled");
+		expect(heldFor(check, shown)).toBeNull();
+	});
+
+	it("another status at the position is another projection, and so is changing back, as for a status correction", () => {
+		const other = at({ pos: 2, head: 3, statusAt: { [row(1).hash]: "released" } });
+		const first = opened(live);
+		const check = { row: first, value: "receipt" };
+		const second = opened(live, other);
+		expect(second.status).toBe("released");
+		expect(heldFor(check, second)).toBeNull();
+		expect(heldFor(check, opened(live))).toBeNull();
+		// A row whose status there is its status now is the row itself.
+		expect(cutRows(live, answer).find((r) => r.pos === 0)).toBe(live[0]);
+	});
+
+	it("a draw that shows the row as it is now, between two that project it, ends the projection (it failed against a copy kept by status alone)", () => {
+		// The page moves to an answer that does not name row 1 (its status there is its status now), then to a new answer
+		// that names it settled again: a new version, so a receipt from before, or one that landed in between, stays hidden.
+		const check = { row: opened(live), value: "receipt" };
+		const between = opened(live, at({ pos: 2, head: 3, statusAt: {} }));
+		expect(between).toBe(live[1]);
+		expect(heldFor(check, between)).toBeNull();
+		const again = opened(live, at({ pos: 2, head: 3, statusAt: { [row(1).hash]: "settled" } }));
+		expect(again.status).toBe("settled");
+		expect(heldFor(check, again)).toBeNull();
+		// The same when the answer in between names the row with its status now.
+		const check2 = { row: again, value: "receipt" };
+		opened(live, at({ pos: 2, head: 3, statusAt: { [row(1).hash]: "ambiguous" } }));
+		const third = opened(live, at({ pos: 2, head: 3, statusAt: { [row(1).hash]: "settled" } }));
+		expect(heldFor(check2, third)).toBeNull();
+	});
+
+	it("drawing live between two draws that project the row ends the projection (it failed while the live view did not end the run)", () => {
+		// The operator checks the row at the point, goes live and comes back. The live view drew the record as it is now,
+		// so a receipt from before, or one that landed while live, stays hidden.
+		const check = { row: opened(live), value: "receipt" };
+		expect(opened(live, null)).toBe(live[1]);
+		expect(heldFor(check, live[1] as LedgerRow)).toBeNull();
+		const back = opened(live, at({ pos: 2, head: 3, statusAt: { [row(1).hash]: "settled" } }));
+		expect(back.status).toBe("settled");
+		expect(heldFor(check, back)).toBeNull();
+	});
+
+	it("a new reading that leaves the row's status there unchanged keeps the projection, and the receipt", () => {
+		const check = { row: opened(live), value: "receipt" };
+		// Another row's status there is new, so the reading is a new answer; row 1's status there is the same.
+		const next = at({
+			pos: 2,
+			head: 4,
+			statusAt: { [row(1).hash]: "settled", [row(0).hash]: "released" },
+		});
+		expect(heldFor(check, opened(live, next))).toBe("receipt");
+	});
+
+	it("two cutters interleaved keep their own projections", () => {
+		const other = createCutter();
+		const mine = rowOne(cutter.cut(live, answer));
+		const theirs = rowOne(other.cut(live, answer));
+		expect(mine).toBeDefined();
+		expect(theirs).not.toBe(mine);
+		// The other list draws the row as it is now, then live: its own run ends, this one's does not.
+		other.cut(live, at({ pos: 2, head: 3, statusAt: {} }));
+		other.live();
+		expect(rowOne(cutter.cut(live, answer))).toBe(mine);
+		expect(rowOne(other.cut(live, answer))).not.toBe(theirs);
+	});
+
+	it("a stateless cutRows call between two of the list's draws neither ends nor reuses the list's projections", () => {
+		const first = opened(live);
+		// A direct cut that shows the row as it is now, and direct cuts that project it: each keeps nothing.
+		expect(rowOne(cutRows(live, at({ pos: 2, head: 3, statusAt: {} })))).toBe(live[1]);
+		const direct = rowOne(cutRows(live, answer));
+		expect(direct?.status).toBe("settled");
+		expect(direct).not.toBe(first);
+		expect(rowOne(cutRows(live, answer))).not.toBe(direct);
+		// The list's next draw still reuses its own projection.
+		expect(opened(live)).toBe(first);
 	});
 });
 

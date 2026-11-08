@@ -8,7 +8,7 @@
 
 import type { AtPayload, SummaryPayload } from "./api.js";
 import { type ChainStatus, windowNotice } from "./display.js";
-import type { LedgerRow } from "./rows.js";
+import type { LedgerRow, RowStatus } from "./rows.js";
 
 /** Whether `rows` are in position order (each `pos` above the last), computed once per array: rows are replaced, never mutated. */
 const ordered = new WeakMap<readonly LedgerRow[], boolean>();
@@ -40,8 +40,48 @@ function prefixLength(rows: readonly LedgerRow[], pos: number): number {
 }
 
 /**
+ * One list's cut, keeping each past row's projection (a row whose status at the position differs from now, drawn with
+ * that status) while its record and its status there are unchanged. A redraw (every summary recomputes the list) and a
+ * new reading that leaves the row's status there unchanged keep the projection's identity, which the inspector holds a
+ * check's result for (`heldFor`). A draw that does not show it (another point, one where its status is its status now,
+ * or the live view: `live`) ends it, and so do a new version of the record (a status correction replaces the row
+ * object) and another status there: a status that changes and changes back is a new version, and an old result never
+ * returns. The state is the cutter's own (the list's owner keeps one) and holds only its last draw's projections;
+ * `cutRows` keeps none.
+ */
+export interface Cutter {
+	/** `cutRows`, reusing a projection only when this cutter's previous draw showed it too, with the same status. */
+	cut(rows: LedgerRow[], at: AtPayload): LedgerRow[];
+	/** The live view was drawn: no projection carries over to the next cut. */
+	live(): void;
+}
+
+export function createCutter(): Cutter {
+	// The projections the previous draw showed, by the row object each projects: the only ones a draw may reuse.
+	let shown = new Map<LedgerRow, LedgerRow>();
+	return {
+		cut(rows, at) {
+			const before = shown;
+			const now = new Map<LedgerRow, LedgerRow>();
+			const out = cutWith(rows, at, (r, status) => {
+				const kept = before.get(r);
+				const projected = kept !== undefined && kept.status === status ? kept : { ...r, status };
+				now.set(r, projected);
+				return projected;
+			});
+			shown = now;
+			return out;
+		},
+		live() {
+			shown = new Map();
+		},
+	};
+}
+
+/**
  * The rows at positions `0..at.pos`, with `status` taken from `at.statusAt` (by event hash) where it has one. A
- * replaced row is a new object; every other row keeps its identity, so a list keyed on rows redraws only what changed.
+ * replaced row is a new object (a `Cutter` keeps it across one list's draws); every other row keeps its identity, so a
+ * list keyed on rows redraws only what changed.
  *
  * Only rows the server still holds (`windowStartPos` and after) are drawn: the page keeps rows the server has since
  * evicted, and `statusAt` has nothing for them, so a later record's change to one would show as its status at the
@@ -53,9 +93,18 @@ function prefixLength(rows: readonly LedgerRow[], pos: number): number {
  * one, as before.
  */
 export function cutRows(rows: LedgerRow[], at: AtPayload): LedgerRow[] {
+	return cutWith(rows, at, (r, status) => ({ ...r, status }));
+}
+
+/** The cut (`cutRows`), with `project` giving the row drawn for one whose status at the position differs from now. */
+function cutWith(
+	rows: LedgerRow[],
+	at: AtPayload,
+	project: (r: LedgerRow, status: RowStatus) => LedgerRow,
+): LedgerRow[] {
 	const status = (r: LedgerRow): LedgerRow => {
 		const s = Object.hasOwn(at.statusAt, r.hash) ? at.statusAt[r.hash] : undefined;
-		return s !== undefined && s !== r.status ? { ...r, status: s } : r;
+		return s !== undefined && s !== r.status ? project(r, s) : r;
 	};
 	if (!inPositionOrder(rows)) {
 		const out: LedgerRow[] = [];
