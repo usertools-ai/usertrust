@@ -19,7 +19,13 @@ import { createUiServer, type UiServer } from "../../src/server/server.js";
 export const GENESIS = "0".repeat(64);
 export const T0 = Date.parse("2026-11-06T10:00:00.000Z");
 
-export type Spec = { kind: string; data?: Record<string, unknown>; timestamp?: string };
+export type Spec = {
+	kind: string;
+	/** The record's actor, which is its lane. "local" unless given. */
+	actor?: string;
+	data?: Record<string, unknown>;
+	timestamp?: string;
+};
 
 /**
  * A hash-linked chain with `sequence`, one event per spec; event i is at 10:00Z plus i minutes unless given. The first
@@ -30,7 +36,7 @@ export function chain(specs: readonly Spec[], firstSequence = 1): PersistedAudit
 	let previousHash = GENESIS;
 	return specs.map((s, i) => {
 		const rest = {
-			actor: "local",
+			actor: s.actor ?? "local",
 			data: s.data ?? {},
 			id: `evt-${i}`,
 			kind: s.kind,
@@ -110,7 +116,7 @@ export function useVaultServer(): VaultServer {
 			const writer = createAuditWriter(tempDir);
 			for (let i = 0; i < count; i++) {
 				const s = spec?.(i) ?? { kind: "llm_call", data: { cost: 1 } };
-				await writer.appendEvent({ kind: s.kind, actor: "local", data: s.data ?? {} });
+				await writer.appendEvent({ kind: s.kind, actor: s.actor ?? "local", data: s.data ?? {} });
 			}
 			writer.release();
 		},
