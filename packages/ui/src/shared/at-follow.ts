@@ -226,7 +226,7 @@ export class AtFollower {
 		const timer = setTimeout(() => abort.abort(), this.timeoutMs);
 		Promise.race([this.load(chosen?.pos ?? this.reread ?? wanted, abort.signal), timedOut])
 			.then(
-				(answer) => this.take(answer, rows, resyncs, choice, generation, navigations),
+				(answer) => this.take(answer, wanted, rows, resyncs, choice, generation, navigations),
 				(err: unknown) => {
 					if (this.wanted === null || generation !== this.generation) return;
 					// A failure for a position the user has left says nothing about the one they are on now.
@@ -244,6 +244,8 @@ export class AtFollower {
 
 	private take(
 		answer: AtPayload,
+		/** The position wanted when the request was sent. */
+		sentFor: number,
 		rows: readonly LedgerRow[],
 		resyncs: number,
 		choice: number,
@@ -252,8 +254,9 @@ export class AtFollower {
 	): void {
 		if (this.wanted === null || generation !== this.generation) return;
 		// Sent before a navigation, for a position other than the one wanted now: the drag that asked for it was
-		// cancelled, so it is not shown on the way (the destination's own answer is still to come).
-		if (choice !== this.choice && navigations !== this.navigations) return;
+		// cancelled, so it is not shown on the way. The position is compared, not the choice: a drag in between moves
+		// the choice on, and an answer for the destination itself is still the destination's.
+		if (navigations !== this.navigations && sentFor !== this.wanted) return;
 		if (this.epoch !== null && answer.epoch !== this.epoch) {
 			this.reloaded = true;
 			// The records changed under the position: this answer is the new baseline.

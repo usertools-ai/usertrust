@@ -671,6 +671,23 @@ describe("a navigation (Back, Forward, a link) while a drag's request is in flig
 		expect(h.calls).toHaveLength(1);
 	});
 
+	it("keeps an answer for the destination sent before a drag and a navigation back to it", async () => {
+		const h = harness();
+		h.follower.want(20); // the address's position: its request is in flight
+		h.follower.want(70); // a drag asks for 70 (due)
+		h.follower.navigated(); // Back to #at=20
+		h.follower.want(20);
+		h.calls[0]?.resolve(at({ pos: 20 }));
+		await h.flush();
+		expect(h.last().at?.pos).toBe(20);
+		// The request for 20 sent after the navigation fails: the destination's earlier answer stays on screen.
+		expect(h.calls.map((c) => c.pos)).toEqual([20, 20]);
+		h.calls[1]?.reject(new Error("the dashboard did not answer"));
+		await h.flush();
+		expect(h.last()).toMatchObject({ wanted: 20, error: "the dashboard did not answer" });
+		expect(h.last().at?.pos).toBe(20);
+	});
+
 	it("shows answers on the way again for a drag that starts after the navigation", async () => {
 		const h = harness();
 		h.follower.want(70);
