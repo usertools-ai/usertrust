@@ -67,9 +67,14 @@ export function useAt(
 		);
 
 	// A navigation shows the destination's own view, also when its position is the one already wanted: a preview the
-	// drag was asking for is not the address's position, and the address is what Back or Forward went to.
-	// biome-ignore lint/correctness/useExhaustiveDependencies: `navigation` is a trigger, not a value the effect reads
+	// drag was asking for is not the address's position, and the address is what Back or Forward went to. The follower
+	// hears of the navigation first, so an answer to the drag's request still in flight is not shown on the way.
+	const lastNavigation = useRef(navigation);
 	useEffect(() => {
+		if (navigation !== lastNavigation.current) {
+			lastNavigation.current = navigation;
+			follower.current?.navigated();
+		}
 		follower.current?.want(pos);
 	}, [pos, navigation]);
 

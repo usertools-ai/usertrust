@@ -7,6 +7,9 @@
  *
  * - One request in flight at a time, and the latest wanted position wins: a drag that moves faster than the server
  *   answers asks only for where it ended up, and each answer that lands on the way is shown, so the screen follows.
+ * - A navigation (Back, Forward, a link: `navigated()`) cancels the drag: an answer to a request sent before it is no
+ *   longer shown on the way, so the screen never moves to a point the user navigated away from, also when the
+ *   destination's own read then fails. An answer for the position wanted next is still the destination's.
  * - A request that has not answered in `timeoutMs` is aborted (its signal) and goes down the failure path, so a hung
  *   server never freezes the timeline: the next move or refresh asks again.
  * - A refresh (the live vault changed) re-reads the position answered, not the one asked for, so a position asked
@@ -110,6 +113,8 @@ export class AtFollower {
 	private choice = 0;
 	/** Bumped by every reconnect: an answer to a request sent before one is dropped. */
 	private generation = 0;
+	/** Bumped by every navigation: an answer to a request sent before one is not shown on the way (`navigated`). */
+	private navigations = 0;
 	/** The answer the current choice was first answered with: its position, head and clamped flag stay. */
 	private chosen: AtPayload | null = null;
 	private shown: AtPayload | null = null;
@@ -159,6 +164,16 @@ export class AtFollower {
 		this.emit();
 	}
 
+	/**
+	 * The user navigated (Back, Forward, a link, a typed address). Call it before `want` with the address's position.
+	 * An answer to a request sent before this is no longer shown on the way: the drag that asked for it was cancelled,
+	 * and the screen must never move to a point the user navigated away from. An answer for the position wanted next is
+	 * still taken: it is the destination's own.
+	 */
+	navigated(): void {
+		this.navigations += 1;
+	}
+
 	/** The live vault changed: read the position shown again. Nothing while live. */
 	refresh(): void {
 		if (this.wanted === null) return;
@@ -198,6 +213,7 @@ export class AtFollower {
 		this.due = false;
 		const choice = this.choice;
 		const generation = this.generation;
+		const navigations = this.navigations;
 		const chosen = this.chosen;
 		// Taken in this tick, with the request: see the header.
 		const rows = this.heldRows();
@@ -210,7 +226,7 @@ export class AtFollower {
 		const timer = setTimeout(() => abort.abort(), this.timeoutMs);
 		Promise.race([this.load(chosen?.pos ?? this.reread ?? wanted, abort.signal), timedOut])
 			.then(
-				(answer) => this.take(answer, rows, resyncs, choice, generation),
+				(answer) => this.take(answer, rows, resyncs, choice, generation, navigations),
 				(err: unknown) => {
 					if (this.wanted === null || generation !== this.generation) return;
 					// A failure for a position the user has left says nothing about the one they are on now.
@@ -232,8 +248,12 @@ export class AtFollower {
 		resyncs: number,
 		choice: number,
 		generation: number,
+		navigations: number,
 	): void {
 		if (this.wanted === null || generation !== this.generation) return;
+		// Sent before a navigation, for a position other than the one wanted now: the drag that asked for it was
+		// cancelled, so it is not shown on the way (the destination's own answer is still to come).
+		if (choice !== this.choice && navigations !== this.navigations) return;
 		if (this.epoch !== null && answer.epoch !== this.epoch) {
 			this.reloaded = true;
 			// The records changed under the position: this answer is the new baseline.

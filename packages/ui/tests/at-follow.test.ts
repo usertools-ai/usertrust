@@ -634,3 +634,54 @@ describe("AtFollower", () => {
 		});
 	});
 });
+
+describe("a navigation (Back, Forward, a link) while a drag's request is in flight", () => {
+	it("drops the drag's answer: it never replaces the destination, also when the destination's own read fails", async () => {
+		const h = harness();
+		h.follower.want(70); // the drag asks for 70
+		h.follower.navigated(); // Back to #at=20
+		h.follower.want(20);
+		h.calls[0]?.resolve(at({ pos: 70 }));
+		await h.flush();
+		expect(h.last().at).toBeNull();
+		expect(h.calls.map((c) => c.pos)).toEqual([70, 20]);
+		h.calls[1]?.reject(new Error("the dashboard did not answer"));
+		await h.flush();
+		expect(h.last()).toMatchObject({ wanted: 20, at: null, error: "the dashboard did not answer" });
+	});
+
+	it("CONTROL: the same moves without a navigation show 70 on the way, as a drag does", async () => {
+		const h = harness();
+		h.follower.want(70);
+		h.follower.want(20);
+		h.calls[0]?.resolve(at({ pos: 70 }));
+		await h.flush();
+		expect(h.last()).toMatchObject({ wanted: 20 });
+		expect(h.last().at?.pos).toBe(70);
+	});
+
+	it("keeps an answer for the destination itself, sent before the navigation", async () => {
+		const h = harness();
+		h.follower.want(20);
+		h.follower.navigated();
+		h.follower.want(20);
+		h.calls[0]?.resolve(at({ pos: 20 }));
+		await h.flush();
+		expect(h.last().at?.pos).toBe(20);
+		expect(h.calls).toHaveLength(1);
+	});
+
+	it("shows answers on the way again for a drag that starts after the navigation", async () => {
+		const h = harness();
+		h.follower.want(70);
+		h.follower.navigated();
+		h.follower.want(20);
+		h.calls[0]?.resolve(at({ pos: 70 }));
+		await h.flush();
+		h.follower.want(30); // a new drag, after the navigation
+		h.calls[1]?.resolve(at({ pos: 20 }));
+		await h.flush();
+		expect(h.last()).toMatchObject({ wanted: 30 });
+		expect(h.last().at?.pos).toBe(20);
+	});
+});

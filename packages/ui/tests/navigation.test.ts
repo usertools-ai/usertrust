@@ -131,6 +131,7 @@ function page(initialHash: string) {
 			state = sameUrlState(state, next) ? state : next;
 			// What the hooks do on that navigation: the timeline's effect and `useAt`'s effect.
 			scrub.navigated(state.at);
+			follower.navigated();
 			follower.want(state.at);
 		},
 		/** Switch view in the page (a tab click): a pushed entry. */
@@ -251,12 +252,19 @@ describe("the wiring the model mirrors", () => {
 		expect(effect?.[1]).not.toMatch(/\bif \(.*committed/);
 	});
 
-	it("useAt wants the address's position again whenever the count changes", () => {
+	it("useAt tells the follower of each navigation, then wants the address's position, whenever the count changes", () => {
 		const src = read("use-at.ts");
 		const effect =
-			/useEffect\(\(\) => \{\s*follower\.current\?\.want\(pos\);\s*\}, \[([^\]]*)\]\)/.exec(src);
+			/useEffect\(\(\) => \{((?:(?!useEffect)[\s\S])*?follower\.current\?\.want\(pos\);\s*)\}, \[([^\]]*)\]\)/.exec(
+				src,
+			);
 		expect(effect).not.toBeNull();
-		const deps = (effect?.[1] ?? "").split(",").map((d) => d.trim());
+		const body = effect?.[1] ?? "";
+		// Only a change of the count is a navigation: a position the drag wrote is not one.
+		expect(body).toMatch(/if \(navigation !== lastNavigation\.current\)/);
+		expect(body).toMatch(/follower\.current\?\.navigated\(\)/);
+		expect(body.indexOf("navigated()")).toBeLessThan(body.indexOf("want(pos)"));
+		const deps = (effect?.[2] ?? "").split(",").map((d) => d.trim());
 		expect(deps).toContain("pos");
 		expect(deps).toContain("navigation");
 	});
