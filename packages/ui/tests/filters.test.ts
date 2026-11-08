@@ -184,3 +184,24 @@ describe("sortRows", () => {
 		expect(rows.map((r) => r.id)).toEqual(before);
 	});
 });
+
+describe("applyFilters: a model filter on a record with no model", () => {
+	const rows = [
+		row({ id: "has", model: "gpt-5" }),
+		row({ id: "none-a" }),
+		row({ id: "none-b", kind: "llm_call" }),
+	];
+
+	it('"unknown" is the key the breakdown gives a model-less record, so it keeps exactly those', () => {
+		expect(applyFilters(rows, { ...EMPTY_FILTERS, models: ["unknown"] }).map((r) => r.id)).toEqual([
+			"none-a",
+			"none-b",
+		]);
+	});
+
+	it("a named model still excludes model-less records", () => {
+		expect(applyFilters(rows, { ...EMPTY_FILTERS, models: ["gpt-5"] }).map((r) => r.id)).toEqual([
+			"has",
+		]);
+	});
+});
