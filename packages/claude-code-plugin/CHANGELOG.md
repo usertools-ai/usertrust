@@ -32,6 +32,36 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ### Changed
 
+- **Behaviour change: `~/.config/usertrust/claude-code.json` is read without `UT_CC_CONFIG`.** With
+  `UT_CC_CONFIG` unset, a new session now reads the conventional configuration file in your account's
+  home whenever anything is at that path, and ignores every `UT_*` variable, as `UT_CC_CONFIG` always
+  made it. Only "no such file" falls through to the variables: a conventional file that fails its checks
+  (a dangling link, the wrong mode or owner) is refused, so the session runs watch-only and key-less and
+  never uses the `UT_*` variables in its place. `UT_CC_CONFIG`, when set, still wins. When a file wins
+  while `UT_*` variables are set, SessionStart names the file and the ignored variables (names only).
+- **A session pinned unconfigured before that file existed is re-pinned once, or warned about.** At
+  SessionStart, an environment pin made with no key, for a session that moved no money in its state dir
+  (no hold; no cursor id posted, accounted, unresolved or assigned; no watch record but a gap), is
+  re-pinned to the conventional file when the file names a different state dir that holds none of the
+  session's metering state (no first-metered stamp, cursor or hold of it): the session's job log
+  and its gap records are copied there (so `usertrust-job coverage` of a job open across the re-pin still
+  lists a gap from before it), the change is appended to `.local/state/usertrust/repins/repins.jsonl` (key hashed)
+  while the old pin is still in place, one rename then puts the new pin in its place (the old one is
+  kept aside), and SessionStart says so. A job change written to the old log during the re-pin is
+  copied after the swap; when it cannot be, the new log gets a line that makes it invalid (the
+  session's later calls carry `jobState: "invalid"`, and coverage names the gap) and SessionStart
+  warns, and `usertrust-job start` or `stop` that finds the pin moved after it wrote exits 1, saying
+  to run it again. A hook still running under the old pin writes to the old state dir after the
+  re-pin, so `usertrust-job coverage` also reads each state dir a session was re-pinned from, through
+  the re-pin's record: the session's gaps, deferrals and refusals there are placed like the pinned
+  dir's own, and a job log there that gained a line after the re-pin, or a file there that cannot be
+  read, is a named known gap. Usage from before the re-pin is never posted. A file naming
+  the pin's own state dir (the README's quickstart layout, in the usual case) does not re-pin, since
+  that dir already holds the session's earlier usage. `usertrust-job coverage` run outside a session
+  reads the state dir a new session would use, the conventional file included, and gives no verdict
+  when that file is refused. Any other environment pin is kept, and
+  SessionStart now opens with `usertrust: WARNING: this session is UNCONFIGURED.` and the reason, while
+  a configuration file would be read.
 - **Behaviour change: the job-type instruction is now off by default.** SessionStart no longer asks
   the agent to type its jobs unless you say so. To keep job-type labels, set `"jobTypeInstruction": true`
   in the configuration file (or `UT_CC_JOB_TYPE_INSTRUCTION=1`). Only the exact value `1` turns it on in

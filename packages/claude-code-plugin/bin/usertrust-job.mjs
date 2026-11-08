@@ -15,17 +15,24 @@
 // gives the agent at session start tells it to pass, and a caller that leaves it out records
 // `explicit`. The source defaults only when a type is given; `--source` alone is refused.
 // `coverage` is read-only. It prints the job's tagged cost and the KNOWN GAPS in the evidence
-// behind it: a diagnostic, never a certification.
+// behind it: a diagnostic, never a certification. Besides the pinned dir, it reads each state dir a
+// session was re-pinned from (the re-pin records, hooks/session.mjs), as it is now: a hook launched
+// under the old pin writes there after the re-pin (job-log.mjs `repinnedEvidence`).
 //
 // In a session, every path comes from the session's pin, as every hook's settings do: a
 // state dir changed since the session began is not where its hooks keep its log. A
 // session with no pin yet is pinned now (hooks/session.mjs), as its next hook would be:
-// the one write outside the state dir, and `coverage`'s only one.
+// the one write outside the state dir, and `coverage`'s only one. After `start` or `stop`
+// appends, the pin is read again: when the session was re-pinned to another state dir
+// meanwhile, the change may be only in the old dir's log, and it exits 1 saying to run it
+// again (a second `start` of the same job, or a second `stop`, changes nothing). Outside a session, the
+// paths come from what a new session would read now, the conventional config file included,
+// and a refused file is no verdict unless `--jobs` and `--watch` are both given.
 //
 // Exit codes: 0 done, 1 refused (no usable log), 2 bad usage.
 import { readdir } from "node:fs/promises";
-import { join } from "node:path";
-import { passwdHome, useSession } from "../hooks/config.mjs";
+import { dirname, join } from "node:path";
+import { passwdHome, refusalNote, resolveSettings, useSession } from "../hooks/config.mjs";
 import {
 	appendJobOp,
 	DEFAULT_WAIT_MS,
@@ -34,9 +41,11 @@ import {
 	jobCoverage,
 	jobsDir,
 	readLogs,
+	repinnedEvidence,
 	TYPE_SOURCES,
 } from "../hooks/job-log.mjs";
-import { eachLine, say, watchLogPath } from "../hooks/lib.mjs";
+import { eachLine, say, stateRoot, watchLogPath } from "../hooks/lib.mjs";
+import { stateSubdir } from "../hooks/private-dir.mjs";
 import { sessionSettings } from "../hooks/session.mjs";
 
 const [command, ...rest] = process.argv.slice(2);
@@ -78,23 +87,34 @@ function parseStart(args) {
 	return { job: ids[0], ...(type === undefined ? {} : { type, typeSource: source ?? "explicit" }) };
 }
 
-/** This session's settings, from its pin, before any path is computed. Outside a session, none. */
+/**
+ * This session's settings, from its pin, before any path is computed. Outside a session, what a
+ * new session would resolve now (config.mjs `resolveSettings`), the conventional config file
+ * included: that file's state dir is where the hooks keep the logs and watch records, and the
+ * unit-test default (`settings()`, which never reads that file) is not. Returns the settings
+ * used outside a session (their `refused` says a file was refused), else null.
+ */
 function usePinnedSession() {
 	const sessionId = process.env.CLAUDE_CODE_SESSION_ID;
-	if (typeof sessionId !== "string" || sessionId === "") return;
 	const uid = typeof process.getuid === "function" ? process.getuid() : null;
+	if (typeof sessionId !== "string" || sessionId === "") {
+		const resolved = resolveSettings({ env: process.env, passwdHome: passwdHome(), uid });
+		useSession(resolved);
+		return resolved;
+	}
 	const session = sessionSettings({
 		payload: { session_id: sessionId },
 		passwdHome: passwdHome(),
 		uid,
 	});
 	useSession(session.settings);
+	return null;
 }
 
 function usage(why) {
 	say(`usertrust-job: ${why}`);
 	say(
-		"usage: usertrust-job.mjs start [--type <type>] [--source agent|explicit] <job-id> | stop | coverage <job-id> [--vault DIR] [--jobs DIR]",
+		"usage: usertrust-job.mjs start [--type <type>] [--source agent|explicit] <job-id> | stop | coverage <job-id> --vault DIR [--jobs DIR] [--watch FILE]",
 	);
 	say(`types: ${JOB_TYPES.join(" ")}`);
 	process.exit(2);
@@ -156,8 +176,21 @@ async function readWatch(path) {
 	return out;
 }
 
+/**
+ * The re-pin records (hooks/session.mjs `appendRecord`), checked as their writer checks them, never
+ * made: their path, null when there are none, `{ refused }` when their directory is refused.
+ */
+function repinsFile() {
+	const home = passwdHome();
+	if (home === null) return null; // no session can be re-pinned without one
+	const uid = typeof process.getuid === "function" ? process.getuid() : null;
+	const where = stateSubdir(home, "repins", { uid, create: false });
+	if (where.refused === "absent") return null;
+	return where.refused === undefined ? join(where.dir, "repins.jsonl") : { refused: where.refused };
+}
+
 try {
-	usePinnedSession();
+	const standalone = usePinnedSession();
 	if (command === "start" || command === "stop") {
 		const wantsId = command === "start";
 		if (!wantsId && rest.length !== 0) usage("stop takes no argument");
@@ -167,6 +200,7 @@ try {
 			say("usertrust-job: CLAUDE_CODE_SESSION_ID is not set, so there is no session to label");
 			process.exit(2);
 		}
+		const before = jobsDir();
 		const result = await appendJobOp(sessionId, command, started?.job ?? null, {
 			waitMs: waitMs(),
 			...(started?.type === undefined
@@ -175,6 +209,19 @@ try {
 		});
 		if (!result.ok) {
 			say(`usertrust-job: ${result.reason}`);
+			process.exit(1);
+		}
+		// The job-log writers take no lock, and a resume or compact can re-pin the session to
+		// another state dir while this runs (hooks/session.mjs `repin`). So the pin is read again
+		// after the append: when it moved, the change went to the old dir's log, and that dir's
+		// session no longer reads it. The re-pin carries what it finds there after its swap
+		// (`carryJobTail`, which marks the new log invalid when it cannot), but a change written
+		// after that is left behind: said, never silent.
+		usePinnedSession();
+		if (jobsDir() !== before) {
+			say(
+				"usertrust-job: this session was re-pinned while it ran, so the change may be only in the old state dir's job log: run it again",
+			);
 			process.exit(1);
 		}
 		if (result.noop) say("usertrust-job: no job is open");
@@ -194,15 +241,36 @@ try {
 			flags.set(rest[i], rest[i + 1]);
 		}
 		if (!flags.has("--vault")) usage("coverage needs --vault <the .usertrust directory>");
+		// A refused config file names no state dir to read, and the one `refusedSettings` falls back
+		// to is not where that file's sessions keep their evidence: no verdict, unless both paths
+		// are given.
+		if (standalone?.refused && !(flags.has("--jobs") && flags.has("--watch"))) {
+			say(`usertrust-job: ${refusalNote(standalone.refused, standalone.configSource)}: no verdict`);
+			process.exit(1);
+		}
 		let report;
 		try {
 			const audit = await readRecords(flags.get("--vault"));
+			const jobs = flags.get("--jobs") ?? jobsDir();
+			const logs = await readLogs(jobs, job);
+			const watch = await readWatch(flags.get("--watch") ?? watchLogPath());
+			// A hook launched under a session's OLD pin writes to the old state dir after a re-pin:
+			// the re-pin's records name it, and it is read as it is now (job-log.mjs `repinnedEvidence`).
+			const left = await repinnedEvidence({
+				job,
+				stateDir: flags.has("--jobs") ? dirname(jobs) : stateRoot(),
+				jobs,
+				logs,
+				watch,
+				repins: repinsFile(),
+			});
 			report = jobCoverage({
 				job,
-				logs: await readLogs(flags.get("--jobs") ?? jobsDir(), job),
+				logs,
 				records: audit.records,
-				watch: await readWatch(flags.get("--watch") ?? watchLogPath()),
+				watch: [...watch, ...left.watch],
 				unreadable: { audit: audit.unparsed },
+				known: left.knownGaps,
 			});
 		} catch (err) {
 			// The evidence cannot be read: no verdict. The path is argv, so it goes out through

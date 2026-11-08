@@ -81,6 +81,8 @@ EOF
 export UT_CC_CONFIG="$UT_DIR/claude-code.json"
 ```
 
+The `export` is optional for this one path: with `UT_CC_CONFIG` unset, the plugin reads `~/.config/usertrust/claude-code.json` in your account's home whenever anything is there (see [Where the settings come from](#where-the-settings-come-from)).
+
 If the file is in the wrong place, or has the wrong owner or mode, the plugin refuses it. The session then runs watch-only with no key and sends nothing, and the first line Claude Code shows says why: `usertrust: watch-only and key-less — the config file UT_CC_CONFIG names was refused (config: anchor refused (missing)) …`. That is what a file written under a `$HOME` that is not your account's home produces. See [Configuration file](#configuration-file).
 
 4. Start Claude Code. Each session opens with a line naming the mode, for example
@@ -92,14 +94,16 @@ If the file is in the wrong place, or has the wrong owner or mode, the plugin re
 
 ## Environment variables
 
-These are read only when `UT_CC_CONFIG` is not set. With it set, the plugin reads
-every setting from one file instead: see [Configuration file](#configuration-file).
+These are read only when no configuration file is used: `UT_CC_CONFIG` is not set,
+and nothing is at `~/.config/usertrust/claude-code.json` in your account's home.
+Otherwise the plugin reads every setting from one file instead: see
+[Where the settings come from](#where-the-settings-come-from).
 Either way, a session reads its settings once, at its first hook: see
 [One session, one set of settings](#one-session-one-set-of-settings).
 
 | Variable             | Default                  | Meaning                                          |
 | -------------------- | ------------------------ | ------------------------------------------------ |
-| `UT_CC_CONFIG`       | unset                    | Path of a [configuration file](#configuration-file); when set, even empty, none of the variables below is read |
+| `UT_CC_CONFIG`       | unset                    | Path of a [configuration file](#configuration-file); when set, even empty, none of the variables below is read. Unset, the conventional file is read if there is one |
 | `UT_SERVER_URL`      | `http://127.0.0.1:4519`  | Base URL of your usertrust-server; requests go to its origin and path, without a trailing `/`, query or fragment |
 | `UT_SERVER_KEY`      | (empty)                  | Tenant bearer key                                |
 | `UT_CC_MODE`         | `watch`                  | `enforce` (matched case-insensitively) blocks over-budget calls; any other value is watch-only (see [Modes](#modes-watch-only-by-default)) |
@@ -153,7 +157,23 @@ The path is built from your account's home directory (`os.userInfo().homedir`), 
 | `holdGraceMs` | no       | `60000`             | A Bash call's hold life past its timeout, in ms, 0 to 3 600 000 (`UT_CC_HOLD_GRACE_MS`) |
 | `jobTypeInstruction` | no | `false`            | `true` asks the agent to type its jobs at SessionStart (`UT_CC_JOB_TYPE_INSTRUCTION=1`) |
 
-**With `UT_CC_CONFIG` set, even to an empty string, the session is configured:**
+### Where the settings come from
+
+The first of these that applies decides, for a new session:
+
+1. **`UT_CC_CONFIG` is set**, even to an empty string: the file it names.
+2. **Anything is at `~/.config/usertrust/claude-code.json`** in your account's home
+   (the conventional file; only "no such file" means nothing is there, so a dangling
+   link or an unreadable entry counts): that file.
+3. **Otherwise:** the `UT_*` variables.
+
+A configuration file that fails its checks is **refused**, the conventional file
+included: the session runs watch-only and key-less, and the `UT_*` variables are never
+used in its place. When a file wins and some `UT_*` variables are set too, SessionStart
+says once which file it read and names the variables it ignored (names only, never
+their values).
+
+**With a configuration file, `UT_CC_CONFIG` set even to an empty string, the session is configured:**
 every setting comes from the file, and no `UT_*` variable is read, nor
 `CLAUDE_CONFIG_DIR` or `HOME` for the state dir. Fields the plugin does not know
 are ignored. The file is accepted only if all of these hold:
@@ -255,6 +275,62 @@ under your home as the passwd database gives it.
   at or after that removal, or whose pin you delete, is pinned again from the
   settings then current.
 - A config file that is refused is not pinned: the next hook reads it again.
+- **One exception: a DEAD environment pin is re-pinned at SessionStart.** A session
+  pinned from the environment before the conventional file existed would otherwise
+  stay unconfigured for its life, resumes included. Its pin is dead, and SessionStart
+  re-pins it to the conventional file, only when ALL of these hold:
+  - it was pinned with no key (`UT_SERVER_KEY` empty or unset);
+  - `UT_CC_CONFIG` is unset and the conventional file is accepted now;
+  - the session moved no money under it: in its state dir, there is no hold of the
+    session, every one of its transcript cursors records nothing posted, accounted,
+    unresolved or assigned, and `watch.jsonl` holds no record of it but `gap`,
+    `pre-metering` and `no-transcript-agent`. Anything unreadable or of a shape not
+    known counts as money that may have moved. A health answer
+    (`capabilities/`) is not counted: it moves no money;
+  - the file's `stateDir` is not the pin's own state dir, links resolved. The pin's own
+    dir already records when the unconfigured session was first metered, so a re-pin
+    there would post that session's earlier usage under the new key. This is the case
+    with the quickstart file above whenever `HOME` is your account's home and
+    `CLAUDE_CONFIG_DIR` is unset: such a session is warned, not re-pinned;
+  - the file's `stateDir` holds nothing of the session yet: no `transcripts/since-session/<id>`
+    stamp, no cursor of it under `transcripts/` and no hold of it. Such a stamp is older than
+    the re-pin, so that dir would post the session's earlier usage under the new key, as the
+    pin's own dir would. A dir that does not exist holds nothing; one that cannot be read
+    counts as holding it.
+
+  In order: the session's job log (`<stateDir>/jobs/<id>.jsonl`) is copied to the new
+  state dir, so `usertrust-job` keeps its open job, and so are its `gap` records in
+  `watch.jsonl`, each once, so `usertrust-job coverage` still lists a gap from before the
+  re-pin. A line of the old `watch.jsonl` that cannot be read keeps the old pin, with that
+  reason in the warning (never the line). That file is shared by every session pinned to that
+  state dir and only grows, so one such line keeps every later re-pin from that state dir from
+  happening, not just this session's: each such session is warned instead, and a new session
+  uses the configuration file. Then the re-pin is appended to
+  `.local/state/usertrust/repins/repins.jsonl` (the old pin, the new pin with its key
+  hashed, the reason) while the old pin is still in place; then the old pin is kept
+  aside under a second name, a hard link (`<id>.json.repinned.<time>.<random>`), and one rename puts the
+  new pin in its place, so every other hook of the session reads a pin throughout. Then any job
+  change appended to the old job log meanwhile (a `usertrust-job start` or `stop` that read the old
+  pin) is copied too, whole lines only, and only while the new log holds nothing else. When it
+  cannot be, a line the reader rejects is appended to the new log, so the session's calls from
+  then on are recorded with `jobState: "invalid"` and `usertrust-job coverage` names the gap, and
+  SessionStart warns: labelling jobs again takes a new session. If even that line cannot be
+  written, SessionStart warns to run `usertrust-job.mjs start <job-id>` (or `stop`) again. The
+  command itself reads the pin again after it writes, and exits 1, saying to run it again, when
+  the pin moved. A hook already running under the old pin when the re-pin happens keeps writing
+  to the old state dir: a gap, a deferral, a refusal, a job change. So `usertrust-job coverage`
+  also reads each state dir a session was re-pinned from, through the re-pin's record, as it is
+  when coverage runs. The session's gaps, deferrals and refusals there are placed like the pinned
+  dir's own, and a job log there that gained a line after the re-pin, or a file there that cannot
+  be read, is a named known gap.
+  SessionStart says so once. The old state dir is left as it was. Nothing is posted
+  twice: the new state dir starts metering at the session's next hook, and nothing
+  the transcript holds from before it is posted there. If a step fails, the old pin
+  stays, and SessionStart warns that the session is UNCONFIGURED and why; a re-pin
+  that fails after its record is followed by a record naming it abandoned.
+- **Any other environment pin is kept**, and while a configuration file would now be
+  read SessionStart warns, first: `usertrust: WARNING: this session is UNCONFIGURED.`
+  with the reason it is not re-pinned. Start a new session (not a resume) to use the file.
 
 **A pin that cannot be used runs the hook key-less: it sends nothing, and records a
 gap.** That covers a session id that is not a safe file name, a passwd home that
@@ -688,7 +764,9 @@ are opaque: 1-128 characters of `[A-Za-z0-9._:-]`.
   no usable log; a denied request of the job; a `would_block`, an unmetered `gap` or a breaker's `deferred`
   record (read from `watch.jsonl`, or `--watch FILE`, placed by when its call STARTED); a transfer known only through its
   settlement metadata; a released hold whose usage is unconfirmed; an evidence line that could not be
-  parsed. A watch file that exists but cannot be read gives no verdict. An interval is (start, stop]:
+  parsed. A watch file that exists but cannot be read gives no verdict. Run outside a session, it reads
+  the state dir a new session would use now, the conventional configuration file included; a refused
+  file gives no verdict unless `--jobs` and `--watch` are both given. An interval is (start, stop]:
   usage at exactly the start belongs to the earlier job. Separately, `beforeMetering` reports the
   responses a session of the job wrote before it was metered (its `pre-metering` records), as
   `{ "responses": 0, "unattributed": { "sessions": { "<session>": N } }, "note": … }`: never billed,
@@ -701,7 +779,7 @@ are opaque: 1-128 characters of `[A-Za-z0-9._:-]`.
 
 The mode — `"mode"` in the configuration file, or `UT_CC_MODE` in a session without
 one — decides what PreToolUse, the one hook that can block, does with the
-server's answer. **With `UT_CC_CONFIG` set, every `UT_*` variable is ignored, `UT_CC_MODE`
+server's answer. **With a configuration file (`UT_CC_CONFIG` set, or the conventional file), every `UT_*` variable is ignored, `UT_CC_MODE`
 and `UT_FAIL_OPEN` included:** set the mode and `failOpen` in the file. Reservations, settlement and everything above work the same in
 both modes.
 

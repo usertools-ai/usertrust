@@ -295,7 +295,7 @@ export function modeAnnouncement() {
 	// from its config file, and no such value is ever echoed: that line names no path.
 	const current = settings();
 	if (current.refused !== null) {
-		const why = refusalNote(current.refused);
+		const why = refusalNote(current.refused, current.configSource);
 		// A session whose mode is known still enforces, with nothing to send with.
 		if (current.mode === "enforce") {
 			return current.failOpen

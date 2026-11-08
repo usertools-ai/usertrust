@@ -23,7 +23,7 @@
 // It records the model Claude Code reports for the session (`model`, which Claude Code may
 // omit): what a hold names before any response of its agent says one (transcript.mjs
 // `holdModelFor`). And it says so when a model is still configured: that is ignored.
-import { ignoredModelNote } from "./config.mjs";
+import { environment, ignoredModelNote, ignoredVariablesNote, settings } from "./config.mjs";
 import { jobTypeInstruction, serverDriftWarning, writeSessionStart } from "./job-log.mjs";
 import { rejectedSinceLastStart, warningText } from "./key-rejected.mjs";
 import {
@@ -36,6 +36,7 @@ import {
 	sweepReleasing,
 } from "./lib.mjs";
 import { takePeerWarning } from "./peer-meter.mjs";
+import { takeSessionNote } from "./session.mjs";
 import { recordSessionModel, stampFirstRun } from "./transcript.mjs";
 
 requireLaunch();
@@ -90,6 +91,13 @@ if (peerWarning !== null) warning = warning === null ? peerWarning : `${peerWarn
 // no second request): what the user loses and the fix, in one line. Null for everything else.
 const driftNote = await serverDriftWarning();
 if (driftNote !== null) warning = warning === null ? driftNote : `${warning} ${driftNote}`;
+// The session's pin, said first of all (session.mjs): UNCONFIGURED while a config file exists, or
+// re-pinned to it. Then a configured session's UT_* variables, named, which it ignored.
+const pinNote = takeSessionNote();
+if (pinNote !== null) warning = warning === null ? pinNote : `${pinNote} ${warning}`;
+const variablesNote = ignoredVariablesNote(environment(), settings());
+if (variablesNote !== null)
+	warning = warning === null ? variablesNote : `${warning} ${variablesNote}`;
 // A model still configured is ignored, and said; after the warnings, which matter more.
 const modelNote = ignoredModelNote();
 if (modelNote !== null) warning = warning === null ? modelNote : `${warning} ${modelNote}`;

@@ -40,6 +40,43 @@
 // A pin deleted mid-session is made again, from the settings then current, by the
 // next hook. A pin idle for 30 days is swept (`sweep`, at SessionStart); a session
 // resumed at or after the sweep is pinned again, from the settings then current.
+//
+// A pin is never changed, with ONE exception, made only at SessionStart (`repin`): a
+// DEAD environment pin is re-pinned to the conventional config file. Such a pin was
+// made before that file was read (config.mjs `configSource`), and it would otherwise
+// keep a session unconfigured for its whole life, resumes included. Dead means ALL of
+// (`deadPin`): it holds the EMPTY key; the conventional file is the source now, and is
+// accepted; the session moved no money under it (`movedNoMoney`); the file names a
+// state dir that is NOT the pin's own, links resolved (`sameStateDir`); and that dir holds
+// no metering state of the session (`heldThere`). Those last two are what keep usage from
+// being posted twice: a new state dir stamps the session's first metered hook there
+// (transcript.mjs `sessionFirstRun`), and nothing the transcript holds from before it is
+// ever posted there, while a dir that already holds the session's stamp, cursors or holds
+// (the pin's own, or one it ran in before) would post its earlier usage. The re-pin, in order:
+// 1. the session's job log is carried to the new state dir (`carryJobLog`), since a
+//    resume or compact writes none there (job-log.mjs `writeSessionStart`), and so are its
+//    `gap` records (`carryGaps`), so the pinned dir holds the gaps from before the re-pin;
+// 2. the re-pin is appended to <private state>/repins/repins.jsonl (old pin, new pin with
+//    the key hashed, reason), synced, while the old pin is still in place;
+// 3. the old pin is kept aside under a second name (a hard link, never a deletion), and
+//    ONE rename puts the new pin in its place (`swapPin`);
+// 4. what was appended to the old job log since step 1 is carried too (`carryJobTail`): the
+//    job-log writers take no lock, so a `usertrust-job start` or `stop` that read the old pin
+//    may append there meanwhile. It is appended only while the new log is still what step 1
+//    carried; otherwise the new log is marked invalid (`markJobLog`), so the session's later
+//    calls carry `jobState: "invalid"` and coverage names the gap, and SessionStart warns. The
+//    CLI reads the pin again after its append and says to run it again when the pin moved
+//    (bin/usertrust-job.mjs).
+// So every other hook of the session reads a pin throughout: the old one, then the new
+// one. A hook fixes its state dir from the pin when it launches, so one still running
+// under the old pin writes to the OLD dir after these carries (a gap, a deferral, a
+// refusal, a job change), and no snapshot taken here can see it. `usertrust-job coverage`
+// reads each dir a session was re-pinned from, through step 2's record, as it is when
+// coverage runs (job-log.mjs `repinnedEvidence`): each such write is placed, or named. A step that fails leaves the old pin in place, and SessionStart warns, loudly, that
+// the session is UNCONFIGURED, with why; a swap that fails after its record is followed by
+// a record naming it abandoned. SessionStart says a re-pin once. The old state dir is left
+// exactly as it was. Any other environment pin is kept, and when a config file would now
+// be read SessionStart warns, loudly, that the session is UNCONFIGURED.
 import { randomBytes } from "node:crypto";
 import {
 	closeSync,
@@ -53,21 +90,29 @@ import {
 	readdirSync,
 	readFileSync,
 	realpathSync,
+	renameSync,
 	unlinkSync,
 	utimesSync,
 	writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
+	CONVENTIONAL_NAME,
+	configSource,
 	DEFAULT_HOLD_GRACE_MS,
 	environment,
 	environmentKey,
 	isHoldGrace,
 	keyHash,
-	namesConfig,
+	refusalNote,
 	refusedSettings,
+	repinFailedNote,
+	repinJobLostNote,
+	repinnedNote,
 	resolveSettings,
+	unconfiguredNote,
 } from "./config.mjs";
+import { REPIN_CONFLICT } from "./job-log.mjs";
 import { LINKLESS } from "./lib.mjs";
 import { stateSubdir } from "./private-dir.mjs";
 
@@ -90,6 +135,8 @@ export const PIN_IDLE_MS = 30 * 24 * HOUR_MS;
 
 const MODES = ["watch", "enforce"];
 const USAGES = ["transcript", "estimate"];
+/** Where a configured pin's file was found (config.mjs `configSource`); older pins name none. */
+const CONFIG_SOURCES = ["variable", "conventional"];
 
 const REAL_FS = {
 	closeSync,
@@ -102,6 +149,7 @@ const REAL_FS = {
 	readdirSync,
 	readFileSync,
 	realpathSync,
+	renameSync,
 	unlinkSync,
 	utimesSync,
 	writeFileSync,
@@ -145,6 +193,7 @@ function parsePin(text) {
 		// A pin made before the setting existed has none: the default.
 		(s.holdGraceMs === undefined || isHoldGrace(s.holdGraceMs)) &&
 		(s.jobTypeInstruction === undefined || typeof s.jobTypeInstruction === "boolean") &&
+		(s.configSource === undefined || CONFIG_SOURCES.includes(s.configSource)) &&
 		optionalString(s.unrecognizedMode);
 	if (!valid) return null;
 	if (value.kind === "configured" && typeof s.key === "string" && s.keyHash === undefined) {
@@ -211,12 +260,269 @@ function pinOf(resolved, kind, now) {
 		jobTypeInstruction: resolved.jobTypeInstruction === true,
 		unrecognizedMode,
 	};
+	const configured = { ...shared, configSource: resolved.configSource };
 	return {
 		v: 1,
 		kind,
 		createdAt: new Date(now).toISOString(),
-		settings: kind === "configured" ? { ...shared, key } : { ...shared, keyHash: keyHash(key) },
+		settings: kind === "configured" ? { ...configured, key } : { ...shared, keyHash: keyHash(key) },
 	};
+}
+
+/** A pin as the re-pin record holds it: never a key, only its hash. */
+function recordable(pin) {
+	const { key, ...rest } = pin.settings;
+	return { ...pin, settings: key === undefined ? rest : { ...rest, keyHash: keyHash(key) } };
+}
+
+/** The hash of the empty key: what an environment pin made with no UT_SERVER_KEY holds. */
+const EMPTY_KEY_HASH = keyHash("");
+
+/** The most names `movedNoMoney` reads in one directory, its most cursors, and its largest file. */
+const MAX_DEAD_NAMES = 100_000;
+const MAX_DEAD_CURSORS = 4096;
+const MAX_DEAD_FILE_BYTES = 64 * 1024 * 1024;
+
+/** A cursor's name, under <stateDir>/transcripts: `<session>__<agent>.json` (transcript.mjs). */
+const CURSOR_NAME = /^[A-Za-z0-9_-]+\.json$/;
+
+/**
+ * Watch records that say nothing reached a server: a gap, usage from before metering, an agent
+ * with no transcript. Any other record of the session (a `would_block` is a server's answer)
+ * means one did.
+ */
+const LOCAL_RECORDS = new Set(["gap", "pre-metering", "no-transcript-agent"]);
+
+/**
+ * A file's text, read without following a link, only as a regular file the user owns within
+ * `MAX_DEAD_FILE_BYTES`: null otherwise.
+ */
+function boundedText(path, { uid, fs }) {
+	let fd;
+	try {
+		fd = fs.openSync(
+			path,
+			constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0),
+		);
+	} catch {
+		return null;
+	}
+	try {
+		const info = fs.fstatSync(fd);
+		if (!info.isFile() || info.size > MAX_DEAD_FILE_BYTES) return null;
+		if (uid !== null && info.uid !== uid) return null;
+		return fs.readFileSync(fd, "utf-8");
+	} catch {
+		return null;
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
+/**
+ * Whether a cursor's text is a v2 cursor (transcript.mjs `writeCursor`) holding no id that may
+ * have reached a server: `posted`, `accounted`, `unresolved` and `assigned` all empty.
+ */
+function emptyCursor(text) {
+	let value;
+	try {
+		value = JSON.parse(text);
+	} catch {
+		return false;
+	}
+	return (
+		isObject(value) &&
+		value.v === 2 &&
+		Array.isArray(value.posted) &&
+		value.posted.length === 0 &&
+		Array.isArray(value.accounted) &&
+		value.accounted.length === 0 &&
+		isObject(value.unresolved) &&
+		Object.keys(value.unresolved).length === 0 &&
+		isObject(value.assigned) &&
+		Object.keys(value.assigned).length === 0
+	);
+}
+
+/**
+ * Whether `stateDir` records that session `id` moved NO money: null when it moved none, else
+ * the fixed reason it may have. Read for THIS session only (the dir is shared by every session
+ * pinned to it), and at the strict end: anything unreadable, over a bound or of a shape not
+ * known here counts as money that may have moved.
+ * - No hold file of the session at the top level (`<id>__…`, any suffix, `.settling` and
+ *   `.releasing` included): a hold exists only after a reserve the server accepted.
+ * - Every cursor of the session (`transcripts/<id>__…`) is a v2 cursor whose `posted`,
+ *   `accounted`, `unresolved` and `assigned` are all empty. `accounted` also holds ids that may
+ *   have posted (a settle never seen to end), so a non-empty one is never taken for none.
+ * - No record of the session in `watch.jsonl` but the local ones (`LOCAL_RECORDS`): a settle at
+ *   the estimate that succeeded leaves no hold and no cursor id, but nor does it leave a gap.
+ * A /v1/health answer (`capabilities/`) is NOT counted, ON PURPOSE: it moves no money. Only a
+ * reserve, a settle or a post counts. Do not "fix" this by counting capabilities: a server that
+ * answered health and nothing else would keep a dead pin for the session's life.
+ */
+export function movedNoMoney(stateDir, id, { uid, fs = REAL_FS }) {
+	const prefix = `${id}__`;
+	const names = (dir) => {
+		try {
+			const list = fs.readdirSync(dir);
+			return list.length > MAX_DEAD_NAMES ? null : list;
+		} catch {
+			return null;
+		}
+	};
+	const top = names(stateDir);
+	if (top === null) return "its state dir is unreadable";
+	if (top.some((name) => name.startsWith(prefix))) return "its state dir holds a hold of it";
+	const cursors = names(join(stateDir, "transcripts"));
+	if (cursors === null) return "its transcript state is unreadable";
+	const mine = cursors.filter((name) => name.startsWith(prefix));
+	if (mine.length > MAX_DEAD_CURSORS) return "it has more cursors than are read";
+	for (const name of mine) {
+		const text = CURSOR_NAME.test(name)
+			? boundedText(join(stateDir, "transcripts", name), { uid, fs })
+			: null;
+		if (text === null || !emptyCursor(text)) {
+			return "its cursors record usage that may have been posted";
+		}
+	}
+	if (top.includes("watch.jsonl")) {
+		const text = boundedText(join(stateDir, "watch.jsonl"), { uid, fs });
+		if (text === null) return "its watch records are unreadable";
+		const tag = `"session":${JSON.stringify(id)}`;
+		for (const line of text.split("\n")) {
+			if (!line.includes(tag)) continue;
+			let record;
+			try {
+				record = JSON.parse(line);
+			} catch {
+				return "its watch records are unreadable";
+			}
+			if (!isObject(record) || !LOCAL_RECORDS.has(record.kind)) return "a server answered it";
+		}
+	}
+	return null;
+}
+
+/**
+ * Whether environment pin `pin` of session `id` is DEAD, so SessionStart may re-pin it: null
+ * when it is, else the fixed reason it is kept. `resolved` is what a new session would get now
+ * (config.mjs `resolveSettings`). All five must hold:
+ * 1. it holds the EMPTY key (`EMPTY_KEY_HASH`);
+ * 2. the conventional config file is the source now (UT_CC_CONFIG unset) and is accepted;
+ * 3. the session moved no money under it (`movedNoMoney`);
+ * 4. the file names a state dir that is not the pin's own (`sameStateDir`);
+ * 5. that state dir holds no metering state of the session (`heldThere`).
+ * All are read before the re-pin writes anything.
+ */
+export function deadPin(pin, id, resolved, { uid, fs = REAL_FS }) {
+	if (pin.kind !== "environment") return "it is not an environment pin";
+	if (pin.settings.keyHash !== EMPTY_KEY_HASH) return "it was pinned with a key";
+	if (resolved.configSource !== "conventional") {
+		return `${CONVENTIONAL_NAME} is not where a new session's settings come from`;
+	}
+	if (resolved.refused !== null) return refusalNote(resolved.refused, "conventional");
+	const moved = movedNoMoney(pin.settings.stateDir, id, { uid, fs });
+	if (moved !== null) return moved;
+	if (sameStateDir(pin.settings.stateDir, resolved.stateDir, { fs })) return SAME_STATE_DIR;
+	if (heldThere(resolved.stateDir, id, { fs })) return HELD_THERE;
+	return null;
+}
+
+/** Why a dead pin is kept when the conventional file names its own state dir (`sameStateDir`). */
+const SAME_STATE_DIR =
+	"the conventional file names the state dir it was pinned with, where the usage recorded before the re-pin would be posted under the new key";
+
+/** Why a dead pin is kept when the file's state dir already holds the session's state (`heldThere`). */
+const HELD_THERE =
+	"the conventional file names a state dir that already holds this session's metering state, where the usage recorded before the re-pin would be posted under the new key";
+
+/**
+ * Whether state dir `dir` already holds metering state of session `id`: its first-metered stamp
+ * (`transcripts/since-session/<id>`, lib.mjs `sessionFirstRunAt`), a cursor of it
+ * (`transcripts/<id>__…`) or a hold of it at the top level (`<id>__…`). Such a stamp predates the
+ * re-pin, so the transcript entries written before it would be posted there under the new key;
+ * the clause `sameStateDir` keeps for the pin's own dir, here for any dir. A dir that does not
+ * exist holds none; anything else unreadable, or over a bound, counts as held: the strict side.
+ */
+function heldThere(dir, id, { fs }) {
+	const prefix = `${id}__`;
+	const holds = (path) => {
+		let list;
+		try {
+			list = fs.readdirSync(path);
+		} catch (err) {
+			return err?.code !== "ENOENT";
+		}
+		return list.length > MAX_DEAD_NAMES || list.some((name) => name.startsWith(prefix));
+	};
+	try {
+		fs.lstatSync(join(dir, "transcripts", "since-session", id));
+		return true;
+	} catch (err) {
+		if (err?.code !== "ENOENT") return true;
+	}
+	return holds(join(dir, "transcripts")) || holds(dir);
+}
+
+/**
+ * Whether state dirs `a` and `b` are one directory, links resolved. A dir that does not exist is
+ * compared by its absolute path (it cannot be an existing one; and `deadPin` reads the pin's own
+ * dir first, so that one exists). Any other failure counts as the same: the strict side.
+ */
+function sameStateDir(a, b, { fs }) {
+	const real = (dir) => {
+		try {
+			return fs.realpathSync(dir);
+		} catch (err) {
+			return err?.code === "ENOENT" ? resolve(dir) : null;
+		}
+	};
+	const ra = real(a);
+	const rb = real(b);
+	return ra === null || rb === null || ra === rb;
+}
+
+/** Append the re-pin record, whole and synced, to a regular file the user owns, 0600: its path. */
+function appendRecord(home, record, { uid, fs }) {
+	const where = stateSubdir(home, "repins", { uid, fs });
+	if (where.refused !== undefined) throw new Error("repins dir refused");
+	const path = join(where.dir, "repins.jsonl");
+	const fd = fs.openSync(
+		path,
+		constants.O_WRONLY |
+			constants.O_APPEND |
+			constants.O_CREAT |
+			(constants.O_NOFOLLOW ?? 0) |
+			(constants.O_NONBLOCK ?? 0),
+		0o600,
+	);
+	try {
+		const info = fs.fstatSync(fd);
+		if (!info.isFile()) throw new Error("repins file refused");
+		if (uid !== null && (info.uid !== uid || (info.mode & 0o077) !== 0)) {
+			throw new Error("repins file refused");
+		}
+		fs.writeFileSync(fd, `${JSON.stringify(record)}\n`);
+		fs.fsyncSync(fd);
+	} finally {
+		fs.closeSync(fd);
+	}
+	return path;
+}
+
+/** The note this process's SessionStart shows (`setSessionNote`, `takeSessionNote`). */
+let sessionNote = null;
+
+/** Keep `note` for this process's SessionStart (launch.mjs, from `sessionSettings`). */
+export function setSessionNote(note) {
+	sessionNote = typeof note === "string" ? note : null;
+}
+
+/** The session's note, once: null after the first take, or when there is none. */
+export function takeSessionNote() {
+	const note = sessionNote;
+	sessionNote = null;
+	return note;
 }
 
 /**
@@ -285,6 +591,285 @@ function publish(path, content, { fs }) {
 }
 
 /**
+ * Write `content` to `path` whole, replacing whatever is there in one rename: a temp file
+ * beside it (O_EXCL, 0600, synced), then renamed over it. Throws when it is not done.
+ */
+function replace(path, content, { fs }) {
+	const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+	const fd = fs.openSync(
+		tmp,
+		constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0),
+		0o600,
+	);
+	try {
+		fs.writeFileSync(fd, content);
+		fs.fsyncSync(fd);
+	} finally {
+		fs.closeSync(fd);
+	}
+	try {
+		fs.renameSync(tmp, path);
+	} catch (err) {
+		try {
+			fs.unlinkSync(tmp);
+		} catch {
+			// Already gone.
+		}
+		throw err;
+	}
+}
+
+/**
+ * Carry session `id`'s job log (job-log.mjs `jobLogPath`, `<stateDir>/jobs/<id>.jsonl`: a valid
+ * session id is its own sanitized name) from the dead pin's state dir to the new one, so
+ * `usertrust-job` keeps working there, an open job included. `{ why: null, text }` when it is
+ * carried (`text` is what was carried, "" when there is no log), else `{ why }`, the fixed reason
+ * it is not. The old log is read, never changed. A log already in the new dir is kept when it is
+ * the same bytes, and replaced when it is a beginning of them (an earlier carry whose re-pin then
+ * failed, while the log grew); any other one refuses the re-pin. The job-log writers take no lock,
+ * so this is one snapshot: `carryJobTail` brings over what was appended after it.
+ */
+function carryJobLog(oldDir, newDir, id, { uid, fs }) {
+	const from = join(oldDir, "jobs", `${id}.jsonl`);
+	try {
+		fs.lstatSync(from);
+	} catch (err) {
+		return err?.code === "ENOENT"
+			? { why: null, text: "" }
+			: { why: "the session's job log is unreadable" };
+	}
+	const text = boundedText(from, { uid, fs });
+	if (text === null) return { why: "the session's job log is unreadable" };
+	const dir = join(newDir, "jobs");
+	const to = join(dir, `${id}.jsonl`);
+	try {
+		fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+		const outcome = publish(to, text, { fs });
+		if (outcome === "won") return { why: null, text };
+		if (outcome === "nolink") {
+			return { why: "the session's job log could not be carried (no hard links)" };
+		}
+		const there = boundedText(to, { uid, fs });
+		if (there === text) return { why: null, text };
+		if (there === null || !text.startsWith(there)) {
+			return { why: "the new state dir already holds another job log of this session" };
+		}
+		replace(to, text, { fs });
+		return { why: null, text };
+	} catch {
+		return { why: "the session's job log could not be written to the new state dir" };
+	}
+}
+
+/**
+ * After the swap, carry the lines appended to the old job log since `carried` (what `carryJobLog`
+ * copied): a `usertrust-job start` or `stop` that read the old pin, before the swap or just after
+ * it, appends there, and the re-pinned session would otherwise keep the job it had. Null when
+ * nothing is left behind. Otherwise the new log can no longer say which job a call is for, so a
+ * line its reader rejects is appended to it (`markJobLog`): from then on every call of the
+ * session is labelled `jobState: "invalid"` and coverage names the gap, rather than the wrong job
+ * for as long as nobody acts on a warning. Returns `{ why, marked }`, for `repinJobLostNote`.
+ */
+function carryJobTail(oldDir, newDir, id, carried, { uid, fs }) {
+	const why = tailLost(oldDir, newDir, id, carried, { uid, fs });
+	if (why === null) return null;
+	return { why, marked: markJobLog(newDir, id, why, { uid, fs }) };
+}
+
+/**
+ * Append the re-pin's conflict line (job-log.mjs `REPIN_CONFLICT`) to the new job log, whole and
+ * synced, on a line of its own, creating the log (0600) when there is none: true when written. A
+ * torn last line there is ended first, so the marker is never joined to it and read as part of it.
+ */
+function markJobLog(newDir, id, why, { uid, fs }) {
+	const to = join(newDir, "jobs", `${id}.jsonl`);
+	const there = boundedText(to, { uid, fs });
+	const lead = there === null || there === "" || there.endsWith("\n") ? "" : "\n";
+	const line = JSON.stringify({ sid: id, ts: new Date().toISOString(), op: REPIN_CONFLICT, why });
+	try {
+		const fd = fs.openSync(
+			to,
+			constants.O_WRONLY |
+				constants.O_APPEND |
+				constants.O_CREAT |
+				(constants.O_NOFOLLOW ?? 0) |
+				(constants.O_NONBLOCK ?? 0),
+			0o600,
+		);
+		try {
+			const info = fs.fstatSync(fd);
+			if (!info.isFile() || (uid !== null && info.uid !== uid)) throw new Error("refused");
+			fs.writeFileSync(fd, `${lead}${line}\n`);
+			fs.fsyncSync(fd);
+		} finally {
+			fs.closeSync(fd);
+		}
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Whether the lines appended to the old job log since `carried` reached the new one: null when
+ * they did (or there are none), else the fixed reason they may not have.
+ * - Only whole lines are carried. A last line still being written is the CLI's to report: after
+ *   its append it reads the pin again, and finds it moved (bin/usertrust-job.mjs).
+ * - The lines are appended only while the new log is still exactly `carried`. A line of the new
+ *   dir's own (a CLI that read the new pin) comes after the old ones in time, and lines apply in
+ *   file order (job-log.mjs), so an old line is never placed after it: nothing is appended. After
+ *   the append the new log must begin with `carried` and the lines: one appended between that
+ *   check and this append would have the older line applied after it.
+ */
+function tailLost(oldDir, newDir, id, carried, { uid, fs }) {
+	const from = join(oldDir, "jobs", `${id}.jsonl`);
+	try {
+		fs.lstatSync(from);
+	} catch (err) {
+		if (err?.code === "ENOENT" && carried === "") return null;
+		return "the old job log could not be read again";
+	}
+	const now = boundedText(from, { uid, fs });
+	if (now === null) return "the old job log could not be read again";
+	if (now === carried) return null;
+	if (!now.startsWith(carried)) return "the old job log changed other than by an append";
+	const tail = now.slice(carried.length);
+	const lines = tail.slice(0, tail.lastIndexOf("\n") + 1);
+	if (lines === "") return null;
+	const to = join(newDir, "jobs", `${id}.jsonl`);
+	const there = boundedText(to, { uid, fs });
+	if (there !== carried) return "the new state dir's job log was written meanwhile";
+	try {
+		const fd = fs.openSync(
+			to,
+			constants.O_WRONLY |
+				constants.O_APPEND |
+				(constants.O_NOFOLLOW ?? 0) |
+				(constants.O_NONBLOCK ?? 0),
+		);
+		try {
+			const info = fs.fstatSync(fd);
+			if (!info.isFile() || (uid !== null && info.uid !== uid)) throw new Error("refused");
+			fs.writeFileSync(fd, lines);
+			fs.fsyncSync(fd);
+		} finally {
+			fs.closeSync(fd);
+		}
+	} catch {
+		return "the new state dir's job log could not be appended to";
+	}
+	const after = boundedText(to, { uid, fs });
+	if (after === null || !after.startsWith(carried + lines)) {
+		return "the new state dir's job log was written meanwhile";
+	}
+	return null;
+}
+
+/**
+ * Carry session `id`'s `gap` records from the dead pin's `watch.jsonl` to the new state dir's, so
+ * the pinned dir holds every gap the session had before the re-pin, wherever the old dir goes later:
+ * `usertrust-job coverage` places each by its own time against the carried job log. A gap written to
+ * the old file after this read (a hook still running under the old pin) is not carried: coverage
+ * reads it in the old dir (job-log.mjs `repinnedEvidence`).
+ * Each line is carried as it was written, its times with it, and only once: a line the new file
+ * already holds (an earlier carry whose re-pin then failed) is not appended again. Null when they
+ * are carried, or there are none; else the fixed reason they are not. The old file is read, never
+ * changed, and read at the strict end: any line of it that cannot be parsed may be the session's
+ * own gap, and refuses the re-pin, as does a record of the session that is not a local one.
+ * The session's other local records stay behind ON PURPOSE. `pre-metering`: the new dir's first
+ * hook declares the transcript's earlier usage itself, so a carried one would count it twice.
+ * `no-transcript-agent`: its once-per-agent marker stays in the old dir, so the agent would be
+ * counted again.
+ */
+function carryGaps(oldDir, newDir, id, { uid, fs }) {
+	const from = join(oldDir, "watch.jsonl");
+	try {
+		fs.lstatSync(from);
+	} catch (err) {
+		return err?.code === "ENOENT" ? null : "its watch records are unreadable";
+	}
+	const text = boundedText(from, { uid, fs });
+	if (text === null) return "its watch records are unreadable";
+	const gaps = [];
+	for (const line of text.split("\n")) {
+		if (line === "") continue;
+		let record;
+		try {
+			record = JSON.parse(line);
+		} catch {
+			return "the old watch records hold a line that cannot be read";
+		}
+		if (!isObject(record) || record.session !== id) continue;
+		if (!LOCAL_RECORDS.has(record.kind)) return "a server answered it";
+		if (record.kind === "gap") gaps.push(line);
+	}
+	if (gaps.length === 0) return null;
+	const to = join(newDir, "watch.jsonl");
+	let there = "";
+	try {
+		fs.lstatSync(to);
+		there = boundedText(to, { uid, fs });
+	} catch (err) {
+		if (err?.code !== "ENOENT") there = null;
+	}
+	if (there === null) return "the new state dir's watch records are unreadable";
+	const have = new Set(there.split("\n"));
+	const carry = gaps.filter((line) => !have.has(line));
+	if (carry.length === 0) return null;
+	// A torn last line (a write cut short, by an earlier carry or any other writer) is ended first,
+	// so a carried line never joins it: the fragment stays a line of its own, which coverage reports
+	// as unreadable evidence, and every carried line stays whole.
+	const head = there === "" || there.endsWith("\n") ? "" : "\n";
+	try {
+		fs.mkdirSync(newDir, { recursive: true, mode: 0o700 });
+		const fd = fs.openSync(
+			to,
+			constants.O_WRONLY |
+				constants.O_APPEND |
+				constants.O_CREAT |
+				(constants.O_NOFOLLOW ?? 0) |
+				(constants.O_NONBLOCK ?? 0),
+			0o600,
+		);
+		try {
+			const info = fs.fstatSync(fd);
+			if (!info.isFile() || (uid !== null && info.uid !== uid)) throw new Error("refused");
+			fs.writeFileSync(fd, head + carry.map((line) => `${line}\n`).join(""));
+			fs.fsyncSync(fd);
+		} finally {
+			fs.closeSync(fd);
+		}
+		return null;
+	} catch {
+		return "the session's gap records could not be written to the new state dir";
+	}
+}
+
+/**
+ * Put pin `content` at `path` in place of the old pin `old`, in one step: the old pin is first
+ * kept aside as `aside` (a second name for the same file, so the old pin is kept), checked to be
+ * `old` still, and then ONE rename replaces it. Null when done, else the fixed reason it is not;
+ * until the rename, the old pin is at `path`.
+ */
+function swapPin(path, aside, old, content, { uid, fs }) {
+	try {
+		fs.linkSync(path, aside);
+	} catch {
+		return "the old pin could not be kept aside";
+	}
+	const kept = readPin(aside, { uid, fs });
+	if (kept.pin === undefined || JSON.stringify(kept.pin) !== JSON.stringify(old)) {
+		return "the pin changed meanwhile";
+	}
+	try {
+		replace(path, content, { fs });
+	} catch {
+		return "the new pin could not be published";
+	}
+	return null;
+}
+
+/**
  * This hook's session: its settings from the session's pin, made now when the
  * session has none; the pin's `kind` ("configured" or "environment", null when there
  * is no usable pin); and the pin's path. `payload` is the hook's input, which names
@@ -308,6 +893,7 @@ export function sessionSettings({
 	uid,
 	now = Date.now(),
 	fs = REAL_FS,
+	repin = false,
 }) {
 	/** The mode and failOpen the session means to have, as resolved now: none for a refused file. */
 	const intended = () => {
@@ -316,15 +902,24 @@ export function sessionSettings({
 	};
 	/** Refused settings, in `known`'s mode and failOpen when this hook resolved them, else as now. */
 	const refuse = (reason, known = intended()) => ({
-		settings: refusedSettings(reason, passwdHome, { configured: namesConfig(env), ...known }),
+		settings: refusedSettings(reason, passwdHome, {
+			configured: configSource({ env, passwdHome, fs }) !== "environment",
+			...known,
+		}),
 		kind: null,
 		path: null,
+		note: null,
 	});
 	/** The session of the pin `read` at `path`, refused as `known` says when it is not usable. */
 	const use = (read, path, known) => {
 		if (read.refused !== undefined) return refuse(read.refused, known);
 		if (read.missing) return refuse("pin: unreadable", known);
-		return { settings: pinnedSettings(read.pin, env, passwdHome), kind: read.pin.kind, path };
+		return {
+			settings: pinnedSettings(read.pin, env, passwdHome),
+			kind: read.pin.kind,
+			path,
+			note: null,
+		};
 	};
 	const id = isObject(payload) ? payload.session_id : undefined;
 	if (typeof id !== "string" || !SESSION_ID.test(id)) return refuse("pin: session id refused");
@@ -332,23 +927,111 @@ export function sessionSettings({
 	const where = pinDir(passwdHome, { uid, fs });
 	if (where.refused !== undefined) return refuse(where.refused);
 	const path = join(where.dir, `${id}.json`);
+	/** Publish `pin`, made from `resolved`, at `path`, and use the pin then there. */
+	const pinWith = (resolved, pin) => {
+		const known = { mode: resolved.mode, failOpen: resolved.failOpen };
+		let outcome;
+		try {
+			outcome = publish(path, JSON.stringify(pin), { fs });
+		} catch {
+			return refuse("pin: unwritable", known);
+		}
+		if (outcome === "nolink") return refuse("pin: no hard links", known);
+		// Won or lost, the pin is the one now there.
+		return use(readPin(path, { uid, fs }), path, known);
+	};
+	/** No pin yet: resolve now, and pin that. */
+	const pinNew = () => {
+		const resolved = resolveSettings({ env, passwdHome, uid, fs });
+		// A refused config file is not pinned: the next hook resolves again.
+		if (resolved.refused !== null) {
+			return { settings: resolved, kind: null, path: null, note: null };
+		}
+		return pinWith(
+			resolved,
+			pinOf(resolved, resolved.configured ? "configured" : "environment", now),
+		);
+	};
 	const read = readPin(path, { uid, fs });
-	// A pin, or one that cannot be read: never taken for none, so no pin is made for it.
-	if (!read.missing) return use(read, path);
+	// None, which only ENOENT says.
+	if (read.missing) return pinNew();
+	// A pin, or one that cannot be read: never taken for none, so no pin is made for it. The one
+	// exception is a DEAD environment pin at SessionStart (`deadPin`): it is re-pinned.
+	if (!repin || read.pin?.kind !== "environment") return use(read, path);
 	const resolved = resolveSettings({ env, passwdHome, uid, fs });
-	// A refused config file is not pinned: the next hook resolves again.
-	if (resolved.refused !== null) return { settings: resolved, kind: null, path: null };
-	const known = { mode: resolved.mode, failOpen: resolved.failOpen };
-	const kind = resolved.configured ? "configured" : "environment";
-	let outcome;
-	try {
-		outcome = publish(path, JSON.stringify(pinOf(resolved, kind, now)), { fs });
-	} catch {
-		return refuse("pin: unwritable", known);
+	const kept = deadPin(read.pin, id, resolved, { uid, fs });
+	if (kept !== null) {
+		const session = use(read, path);
+		// Unconfigured while a new session would read a config file: say so, loudly.
+		const source = configSource({ env, passwdHome, fs });
+		if (source === "environment") return session;
+		return {
+			...session,
+			note: unconfiguredNote({ createdAt: read.pin.createdAt, source, why: kept }),
+		};
 	}
-	if (outcome === "nolink") return refuse("pin: no hard links", known);
-	// Won or lost, the pin is the one now there.
-	return use(readPin(path, { uid, fs }), path, known);
+	/**
+	 * The re-pin did not complete: use the pin now at `path` (still the old one, unless another
+	 * hook replaced it meanwhile), and say UNCONFIGURED only when it is an environment pin.
+	 */
+	const failed = (why) => {
+		const there = readPin(path, { uid, fs });
+		if (there.missing) return pinNew();
+		const session = use(there, path);
+		return { ...session, note: there.pin?.kind === "environment" ? repinFailedNote(why) : null };
+	};
+	const carried = carryJobLog(read.pin.settings.stateDir, resolved.stateDir, id, { uid, fs });
+	if (carried.why !== null) return failed(carried.why);
+	const gapsCarried = carryGaps(read.pin.settings.stateDir, resolved.stateDir, id, { uid, fs });
+	if (gapsCarried !== null) return failed(gapsCarried);
+	const next = pinOf(resolved, "configured", now);
+	const record = randomBytes(8).toString("hex");
+	const aside = `${path}.repinned.${now}.${randomBytes(6).toString("hex")}`;
+	const at = new Date(now).toISOString();
+	let recorded;
+	try {
+		recorded = appendRecord(
+			passwdHome,
+			{
+				v: 1,
+				id: record,
+				at,
+				session: id,
+				reason:
+					"dead environment pin: the empty key, the conventional config file accepted, no money moved for this session in its state dir, and a state dir of its own",
+				old: { ...recordable(read.pin), movedTo: aside },
+				new: recordable(next),
+			},
+			{ uid, fs },
+		);
+	} catch {
+		// No record, no re-pin: the old pin was never touched.
+		return failed("the re-pin record could not be written");
+	}
+	const swapped = swapPin(path, aside, read.pin, JSON.stringify(next), { uid, fs });
+	if (swapped !== null) {
+		try {
+			appendRecord(
+				passwdHome,
+				{ v: 1, at, session: id, abandoned: record, why: swapped },
+				{ uid, fs },
+			);
+		} catch {
+			// The record above stands alone; the pin at `path` says the re-pin did not happen.
+		}
+		return failed(swapped);
+	}
+	const lost = carryJobTail(read.pin.settings.stateDir, resolved.stateDir, id, carried.text, {
+		uid,
+		fs,
+	});
+	const session = use(readPin(path, { uid, fs }), path, {
+		mode: resolved.mode,
+		failOpen: resolved.failOpen,
+	});
+	if (session.kind !== "configured") return { ...session, note: null };
+	const said = repinnedNote({ createdAt: read.pin.createdAt, record: recorded });
+	return { ...session, note: lost === null ? said : `${said} ${repinJobLostNote(lost)}` };
 }
 
 /** Mark a pin used now, so `sweep` keeps it while its session lives. Best effort. */

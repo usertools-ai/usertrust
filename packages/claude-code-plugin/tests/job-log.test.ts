@@ -10,6 +10,8 @@ import {
 	mkdtemp,
 	readdir,
 	readFile,
+	realpath,
+	rename,
 	stat,
 	truncate,
 	utimes,
@@ -199,6 +201,19 @@ describe("test 3 — stale, foreign or corrupt state is invalid, never a guess",
 		await writeLog(text);
 		const { resolveJob } = await lib();
 		expect((await resolveJob(SID)).at(T0 + 1000)).toEqual({ jobState: "invalid" });
+	});
+	it("a re-pin's conflict marker makes the log invalid with a reason of its own, and the CLI then appends nothing", async () => {
+		const text = `${start(SID, T0)}${op(SID, T0 + 1, "start", "job-a")}${line({ sid: SID, ts: iso(T0 + 2), op: "repin-conflict", why: "the new state dir's job log was written meanwhile" })}`;
+		await writeLog(text);
+		const { appendJobOp, parseJobLog, resolveJob } = await lib();
+		// mutant: the marker read as just another unknown op → a gap that does not say why
+		expect(parseJobLog(text, SID)).toEqual({
+			state: "invalid",
+			reason: "line 3 marks a job change the re-pin could not carry",
+		});
+		expect((await resolveJob(SID)).at(T0 + 1000)).toEqual({ jobState: "invalid" });
+		expect(await appendJobOp(SID, "stop", null, { waitMs: 0 })).toMatchObject({ ok: false });
+		expect(await readFile(logFile(), "utf-8")).toBe(text);
 	});
 	it("a log for ANOTHER session — even a newer file — is never read", async () => {
 		await writeLog(start(SID, T0) + op(SID, T0 + 1, "start", "job-a"));
@@ -457,6 +472,176 @@ describe("usertrust-job in a session: its paths come from the session's pin, as 
 		// The job is open in the pinned log only. mutant: the current state dir's logs are
 		// read, which hold no interval of it, and no such gap
 		expect(r.stdout).toContain("job still running");
+	});
+});
+
+describe("usertrust-job while its session is re-pinned: a change written under the old pin is never silently left there", () => {
+	it("the pin moves to another state dir while start runs: it exits 1 and says to run it again", async () => {
+		const home = await realpath(await mkdtemp(join(tmpdir(), "utcc-job-home-")));
+		const pin = join(home, ".local", "state", "usertrust", "sessions", `${SID}.json`);
+		const other = await mkdtemp(join(tmpdir(), "utcc-job-other-"));
+		await mkdir(join(other, "jobs"), { recursive: true });
+		const otherLog = start(SID, Date.now() - 5000);
+		await writeFile(join(other, "jobs", `${SID}.jsonl`), otherLog);
+		// No log in `state` yet: the CLI pins the session there, then waits for the log.
+		const child = spawnCli(["start", "bug-2"], {
+			CLAUDE_CODE_SESSION_ID: SID,
+			UT_CC_JOB_WAIT_MS: "20000",
+			TEST_PASSWD_HOME: home,
+		});
+		let stderr = "";
+		child.stderr.on("data", (c) => {
+			stderr += c;
+		});
+		const closed = new Promise<number>((resolve) =>
+			child.on("close", (code) => resolve(code ?? 1)),
+		);
+		const until = Date.now() + 20_000;
+		const made = () =>
+			stat(pin).then(
+				() => true,
+				() => false,
+			);
+		// timing: polls every 20 ms for the pin, up to 20 s (the file's 30 s test budget); a missed bound fails the asserts below, never passes them. The row took 561-599 ms in 5 local runs
+		while (!(await made()) && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
+		// It read the pin as it made it, and is waiting for the log: the re-pin happens now.
+		// timing: a 400 ms pause for the CLI's own synchronous step after it publishes the pin (it reads
+		// the state dir before it waits, up to 20 s, for the log). A CLI slower than that reads the moved
+		// pin first and exits 0, so the row fails, never passes; it took 561-599 ms in 5 local runs
+		await new Promise((r) => setTimeout(r, 400));
+		const moved = JSON.parse(await readFile(pin, "utf-8")) as { settings: { stateDir: string } };
+		moved.settings.stateDir = other;
+		await writeFile(`${pin}.tmp`, JSON.stringify(moved), { mode: 0o600 });
+		await rename(`${pin}.tmp`, pin);
+		await mkdir(join(state, "jobs"), { recursive: true });
+		await writeFile(join(state, "jobs", `${SID}.jsonl`), start(SID, Date.now() - 4000));
+		const code = await closed;
+		// mutant: no second read of the pin → exit 0, and bug-2 is open only in the old dir's log
+		expect(code).toBe(1);
+		expect(stderr).toContain("this session was re-pinned while it ran");
+		expect(stderr).toContain("run it again");
+		expect(await readFile(join(state, "jobs", `${SID}.jsonl`), "utf-8")).toContain('"job":"bug-2"');
+		expect(await readFile(join(other, "jobs", `${SID}.jsonl`), "utf-8")).toBe(otherLog);
+	});
+
+	it("coverage reads the state dir the session was re-pinned from, through the re-pin's record: a gap written there late is listed", async () => {
+		const home = await realpath(await mkdtemp(join(tmpdir(), "utcc-job-home-")));
+		const old = await mkdtemp(join(tmpdir(), "utcc-job-old-"));
+		const carried = start(SID, T0) + op(SID, T0 + 1000, "start", "bug-1");
+		await mkdir(join(old, "jobs"), { recursive: true });
+		await writeFile(join(old, "jobs", `${SID}.jsonl`), carried);
+		await writeLog(carried + op(SID, T0 + 5000, "stop", null));
+		// The record a re-pin writes before its swap (hooks/session.mjs `appendRecord`), in a 0700 dir.
+		const records = join(home, ".local", "state", "usertrust", "repins");
+		await mkdir(records, { recursive: true, mode: 0o700 });
+		for (const dir of [
+			".local",
+			".local/state",
+			".local/state/usertrust",
+			".local/state/usertrust/repins",
+		]) {
+			await chmod(join(home, dir), 0o700);
+		}
+		const pinned = (stateDir: string) => ({
+			v: 1,
+			kind: "environment",
+			createdAt: iso(T0),
+			settings: { stateDir },
+		});
+		await writeFile(
+			join(records, "repins.jsonl"),
+			line({
+				v: 1,
+				id: "0123456789abcdef",
+				at: iso(T0 + 500),
+				session: SID,
+				old: pinned(old),
+				new: pinned(state),
+			}),
+			{ mode: 0o600 },
+		);
+		// A hook launched under the old pin writes its gap there after the re-pin.
+		await writeFile(
+			join(old, "watch.jsonl"),
+			line({
+				at: iso(T0 + 2000),
+				started: iso(T0 + 2000),
+				kind: "gap",
+				mode: "watch",
+				session: SID,
+				agent: "main",
+			}),
+		);
+		const vault = await mkdtemp(join(tmpdir(), "utcc-job-vault-"));
+		await mkdir(join(vault, "audit"));
+		const r = await cliOut(["coverage", "bug-1", "--vault", vault], { TEST_PASSWD_HOME: home });
+		expect(r.code).toBe(0);
+		// mutant: the CLI reads the pinned dir's watch records only → the late gap is missed
+		expect(gapText(JSON.parse(r.stdout))).toContain(
+			`session ${SID}: a gap fell inside an interval of bug-1`,
+		);
+	});
+});
+
+describe("usertrust-job outside a session: its paths come from what a new session would read, the conventional file included", () => {
+	/** A passwd home whose conventional file (0600, in a 0700 anchor) names `stateDir`, with `mode`. */
+	async function conventionalHome(stateDir: string, mode = 0o600): Promise<string> {
+		// realpath: the anchor is refused when it resolves elsewhere (macOS's tmpdir is a link)
+		const home = await realpath(await mkdtemp(join(tmpdir(), "utcc-job-home-")));
+		const anchor = join(home, ".config", "usertrust");
+		await mkdir(anchor, { recursive: true });
+		await chmod(anchor, 0o700);
+		const file = join(anchor, "claude-code.json");
+		await writeFile(
+			file,
+			JSON.stringify({
+				url: "http://127.0.0.1:4520",
+				key: "file-key-0123",
+				mode: "watch",
+				stateDir,
+			}),
+		);
+		await chmod(file, mode);
+		return home;
+	}
+
+	it("coverage with no session reads the job logs and watch records in the conventional file's state dir", async () => {
+		const custom = await mkdtemp(join(tmpdir(), "utcc-job-custom-"));
+		await mkdir(join(custom, "jobs"), { recursive: true });
+		await writeFile(
+			join(custom, "jobs", `${SID}.jsonl`),
+			start(SID, T0) + op(SID, T0 + 1000, "start", "bug-1") + op(SID, T0 + 5000, "stop", null),
+		);
+		await writeFile(
+			join(custom, "watch.jsonl"),
+			`${JSON.stringify({ at: iso(T0 + 2000), started: iso(T0 + 2000), kind: "gap", mode: "watch", session: SID, agent: "main" })}\n`,
+		);
+		const vault = await mkdtemp(join(tmpdir(), "utcc-job-vault-"));
+		await mkdir(join(vault, "audit"));
+		// UT_CC_STATE_DIR names `state`, which holds neither: the file wins, as it does for a new session.
+		const r = await cliOut(["coverage", "bug-1", "--vault", vault], {
+			TEST_PASSWD_HOME: await conventionalHome(custom),
+		});
+		expect(r.code).toBe(0);
+		// mutant: settings() alone (never the conventional file) → the UT_* dir's empty logs, no gap
+		expect(r.stdout).toContain(`session ${SID}: a gap fell inside an interval of bug-1`);
+		expect(r.stdout).not.toContain("job still running");
+	});
+
+	it("a refused conventional file is no verdict: never the UT_* or default state dir in its place", async () => {
+		const custom = await mkdtemp(join(tmpdir(), "utcc-job-custom-"));
+		const vault = await mkdtemp(join(tmpdir(), "utcc-job-vault-"));
+		await mkdir(join(vault, "audit"));
+		const r = await cliOut(["coverage", "bug-1", "--vault", vault], {
+			TEST_PASSWD_HOME: await conventionalHome(custom, 0o644),
+		});
+		// mutant: use the refused settings → a report over the default state dir, exit 0
+		expect(r.code).toBe(1);
+		expect(r.stderr).toContain(
+			"~/.config/usertrust/claude-code.json was refused (config: file refused (mode))",
+		);
+		expect(r.stderr).toContain("no verdict");
+		expect(r.stdout).toBe("");
 	});
 });
 

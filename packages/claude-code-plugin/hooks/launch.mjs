@@ -61,7 +61,14 @@ import {
 	settingsDirs,
 	unknownWarning,
 } from "./peer-meter.mjs";
-import { pinnedSettings, readPin, sessionSettings, sweep, touchPin } from "./session.mjs";
+import {
+	pinnedSettings,
+	readPin,
+	sessionSettings,
+	setSessionNote,
+	sweep,
+	touchPin,
+} from "./session.mjs";
 
 const STARTED = Date.now();
 const LAUNCH = fileURLToPath(import.meta.url);
@@ -344,7 +351,10 @@ async function parent(hook) {
 	const home = passwdHome();
 	if (hook === "session-start") await warnOfPeer(input);
 	const uid = currentUid();
-	const session = sessionSettings({ payload: input, passwdHome: home, uid });
+	// Only SessionStart may re-pin a dead environment pin (session.mjs `deadPin`), and say so.
+	const starting = hook === "session-start";
+	const session = sessionSettings({ payload: input, passwdHome: home, uid, repin: starting });
+	if (starting) setSessionNote(session.note);
 	useSession(session.settings);
 	known.settings = session.settings;
 	if (session.path !== null) touchPin(session.path);
