@@ -641,6 +641,22 @@ describe("a resend after a refused pair", () => {
 		expect(balance(WALLET).debits_pending).toBe(0n);
 	});
 
+	it("a re-mint sends the accounts the call started with, even if the caller changes its params meanwhile", async () => {
+		await ledgers(1_000n, 100n);
+		const params = pairFor(400);
+		// After the first send commits (and its reply is lost), the caller reuses and edits the object it
+		// passed. The re-mint runs after that, so it must not read the object again.
+		loseFirstReply(() => {
+			params.payer.debitAccountId = 9_901n;
+			params.limit.debitAccountId = 9_902n;
+		});
+		const err = await settle(client.createLinkedPendingPair(params));
+		expect(err).toBeInstanceOf(TaskLimitLegError);
+		const remint = sentBatch(2);
+		expect(remint.map((t) => t.debit_account_id)).toEqual([WALLET, TASK]);
+		expect(remint.map((t) => t.credit_account_id)).toEqual([TREASURY, OPERATOR]);
+	});
+
 	it("a resend after a limit-leg refusal is admitted under new ids once the task has room again", async () => {
 		await ledgers(1_000n, 400n);
 		const first = await client.createLinkedPendingPair(pairFor(300));
