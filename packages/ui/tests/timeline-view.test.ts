@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import type { AtPayload } from "../src/shared/api.js";
 import {
 	atFailureText,
+	goLiveKeepingFocus,
 	newSince,
 	stepFor,
 	timelineLabel,
@@ -172,5 +173,19 @@ describe("timelineTexts", () => {
 		expect(
 			timelineTexts({ value: 99, head: 99, past: false, at: null, error: null, nowIso: NOW }),
 		).toEqual({ label: "Live", valueText: "Live" });
+	});
+});
+
+describe("goLiveKeepingFocus", () => {
+	it("goes live, then moves focus to the Live button, so the pressed button can unmount without dropping focus to the page", () => {
+		const calls: string[] = [];
+		goLiveKeepingFocus(() => calls.push("live"), { focus: () => calls.push("focus") });
+		expect(calls).toEqual(["live", "focus"]);
+	});
+
+	it("still goes live when the Live button is not there", () => {
+		const calls: string[] = [];
+		goLiveKeepingFocus(() => calls.push("live"), null);
+		expect(calls).toEqual(["live"]);
 	});
 });

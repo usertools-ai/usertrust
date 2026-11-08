@@ -4,7 +4,13 @@
 import { useEffect, useRef, useState } from "react";
 import type { AtPayload } from "../shared/api.js";
 import { Scrubber, type ScrubIo } from "../shared/scrub.js";
-import { isStepKey, newSince, stepFor, timelineTexts } from "../shared/timeline-view.js";
+import {
+	goLiveKeepingFocus,
+	isStepKey,
+	newSince,
+	stepFor,
+	timelineTexts,
+} from "../shared/timeline-view.js";
 
 const browserFrames: ScrubIo = {
 	frame(fn) {
@@ -120,6 +126,9 @@ export function Timeline(props: {
 		setThumb(null);
 		props.onLive();
 	};
+	// The "N new since" button unmounts once the count is zero; pressing it hands focus to the Live button.
+	const liveBtn = useRef<HTMLButtonElement | null>(null);
+	const pressNewSince = (): void => goLiveKeepingFocus(live, liveBtn.current);
 
 	return (
 		<section className="ut-tl" aria-label="Timeline" data-past={past}>
@@ -149,7 +158,7 @@ export function Timeline(props: {
 						type="button"
 						className="ut-tl-btn ut-tl-new"
 						title={`${fresh.toLocaleString()} ${fresh === 1 ? "record was" : "records were"} added after this point was chosen: go live to see them`}
-						onClick={live}
+						onClick={pressNewSince}
 					>
 						{`${fresh.toLocaleString()} new since`}
 					</button>
@@ -158,6 +167,7 @@ export function Timeline(props: {
 				    page. While live it is aria-disabled (not disabled, which cannot hold focus) and does nothing. */}
 				<button
 					type="button"
+					ref={liveBtn}
 					className="ut-tl-btn"
 					title={past ? "Show the vault as it is now" : "Already showing the vault as it is now"}
 					aria-disabled={past ? undefined : true}

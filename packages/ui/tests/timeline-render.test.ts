@@ -577,6 +577,15 @@ describe("the timeline", () => {
 		expect(render({ at: at({ head: 99 }), wanted: 40, head: 99 })).not.toContain("new since");
 	});
 
+	it("the new-since button hands focus to the always-mounted Live button as it goes live, because it unmounts when the count reaches zero", () => {
+		const src = readFileSync(join(import.meta.dirname, "..", "src", "app", "timeline.tsx"), "utf8");
+		// The new-since button's press goes through the focus-keeping helper, not the bare live action.
+		expect(src).toMatch(/ut-tl-new"[^>]*onClick=\{pressNewSince\}/s);
+		// The Live button is the one the helper focuses.
+		expect(src).toMatch(/<button[^>]*ref=\{liveBtn\}[^>]*>\s*Live/s);
+		expect(src).toContain("goLiveKeepingFocus(live, liveBtn.current)");
+	});
+
 	it("while the first answer loads, it says so and never claims Live", () => {
 		const html = render({ wanted: 40, loading: true });
 		expect(html).not.toMatch(/aria-valuetext="Live"/);

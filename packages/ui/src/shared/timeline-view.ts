@@ -142,3 +142,13 @@ export function timelineTexts(input: {
 		valueText: `Record ${(value + 1).toLocaleString()} of ${(head + 1).toLocaleString()} · ${label}`,
 	};
 }
+
+/**
+ * Go live from the "N new since" button. That button exists only while records are new, so going live unmounts it; a
+ * button that unmounts under keyboard focus drops focus to the page. Focus moves to the Live button (always mounted)
+ * as the action runs. A press with a pointer is unaffected: it moves focus to Live too, which is where the eye goes.
+ */
+export function goLiveKeepingFocus(live: () => void, liveButton: { focus(): void } | null): void {
+	live();
+	liveButton?.focus();
+}
