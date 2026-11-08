@@ -821,10 +821,15 @@ describe("a past view and the vault it comes from", () => {
 		await h.flush();
 		expect(h.last().at?.epoch).toBe(1);
 		expect(drawn(h)).toEqual({ kind: "held", rows: [] });
-		// The resync lands.
+		// The resync lands: the rows are the answer's vault, but the answer was read against the old ones.
 		h.page.rows = reloaded;
 		h.page.rowsVault = "boot-a:1";
 		h.page.resyncs += 1;
+		expect(drawn(h)).toEqual({ kind: "held", rows: [] });
+		// The resync's summary asks for a re-read, sent with the reloaded rows: once it lands, the view is answered.
+		h.follower.refresh();
+		h.calls[2]?.resolve(at({ pos: 1, epoch: 1, boot: "boot-a" }));
+		await h.flush();
 		const p = drawn(h);
 		expect(p.kind).toBe("answered");
 		expect(p.rows.map((r) => r.id)).toEqual(["a", "b2"]);

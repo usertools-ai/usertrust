@@ -144,11 +144,13 @@ function sameVault(a: string | null, b: string | null): boolean {
  * The rows a past view draws, paired with the answer by the epoch of the vault they come from (the counter `/api/at`
  * reports and `/api/events` repeats, with the server's `boot`), whichever of a reload's rows and answer lands first.
  * - Live: the page's rows.
- * - The page's rows are the answer's vault: they, with the statuses the answer was read against (`view.rows`) when
- *   that snapshot is the same vault too.
- * - Otherwise the snapshot taken when the request was sent, if it is the answer's vault (the rows came first).
- * - Otherwise none: no rows of the answer's vault are held yet (the answer came first, an unrelated reload landed in
- *   between, or the server sends no epoch). Nothing is drawn rather than another vault's rows under this answer.
+ * - The page's rows AND the snapshot the answer was read against (`view.rows`) are the answer's vault: the page's rows,
+ *   with each row's status as the answer was read (`rowsAsAnswered`).
+ * - Otherwise the snapshot itself, if it is the answer's vault (the rows came first).
+ * - Otherwise none (held): no rows of the answer's vault to read its statuses against are held yet (the answer came
+ *   first, a request was sent while a resync was on its way, an unrelated reload landed in between, or the server
+ *   sends no epoch). The re-read the resync asks for brings them. Nothing is drawn rather than rows the answer cannot
+ *   speak for.
  */
 export function pastRows(
 	rows: LedgerRow[],
@@ -158,14 +160,11 @@ export function pastRows(
 ): PastRows {
 	if (at === null) return { kind: "live", rows };
 	const answerVault = vaultKey(at.boot, at.epoch);
-	if (sameVault(liveVault, answerVault)) {
-		const answered =
-			sameVault(view.rowsVault, answerVault) && view.rows !== null ? view.rows : rows;
-		return { kind: "answered", rows: rowsAsAnswered(rows, answered, at) };
-	}
-	if (view.rows !== null && sameVault(view.rowsVault, answerVault))
-		return { kind: "snapshot", rows: [...view.rows] };
-	return { kind: "held", rows: [] };
+	const snapshot = view.rows !== null && sameVault(view.rowsVault, answerVault) ? view.rows : null;
+	if (snapshot === null) return { kind: "held", rows: [] };
+	if (sameVault(liveVault, answerVault))
+		return { kind: "answered", rows: rowsAsAnswered(rows, snapshot, at) };
+	return { kind: "snapshot", rows: [...snapshot] };
 }
 
 /** A position as the page prints it: counted from 1, as the integrity texts count chain positions. */

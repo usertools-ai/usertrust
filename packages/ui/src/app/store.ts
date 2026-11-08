@@ -88,6 +88,8 @@ export function useLedger(): LedgerData {
 		// Resyncs begun so far: a snapshot labels its rows with its vault only if it is still the newest one begun, so a
 		// slower, older snapshot never labels rows a newer resync has made unknown. A failed fetch is tried again.
 		let resyncsBegun = 0;
+		// The newest resync whose snapshot was installed: an older one's response is dropped, even at the same version.
+		let installedResync = 0;
 		let failures = 0;
 		let retry: ReturnType<typeof setTimeout> | undefined;
 		const resync = (): void => {
@@ -100,25 +102,26 @@ export function useLedger(): LedgerData {
 			fetchAll()
 				.then(({ rows, summary, version, vault }) => {
 					failures = 0;
+					// An older resync's snapshot, landing after a newer one installed, is dropped (even at the same version).
+					if (cancelled || mine < installedResync) return;
 					// liveIds is flash state for SSE arrivals only — a resync
 					// replaces the row set wholesale, so it starts clean (after
 					// the replay too: a re-applied frame is not a new arrival).
-					if (!cancelled) {
-						// Undefined: a newer snapshot, or a newer connection's, is already installed.
-						const install = replay.land(generation, version, (d) => ({
-							...d,
-							rows,
-							summary,
-							rowsVault: mine === resyncsBegun ? vault : null,
-							phase: "loaded" as const,
-						}));
-						if (install !== undefined)
-							setData((d) => ({
-								...install(d),
-								liveIds: new Set<string>(),
-								resyncs: d.resyncs + 1,
-							}));
-					}
+					// Undefined: a newer snapshot, or a newer connection's, is already installed.
+					const install = replay.land(generation, version, (d) => ({
+						...d,
+						rows,
+						summary,
+						rowsVault: mine === resyncsBegun ? vault : null,
+						phase: "loaded" as const,
+					}));
+					if (install === undefined) return;
+					installedResync = mine;
+					setData((d) => ({
+						...install(d),
+						liveIds: new Set<string>(),
+						resyncs: d.resyncs + 1,
+					}));
 				})
 				.catch((err: unknown) => {
 					// Amendment A6: never leave an unhandled rejection; drop the

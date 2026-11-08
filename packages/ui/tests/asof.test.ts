@@ -355,11 +355,29 @@ describe("pastRows: the rows a past view draws, paired with its answer by the va
 		expect(view.filtered.length).toBe(0);
 	});
 
-	it("answer first, after its resync: the page's rows are the answer's vault", () => {
+	it("answer first, after its resync: still held, the answer was read against another vault's rows", () => {
+		// The live rows are the answer's vault, but its statuses were read against the old rows: no evidence to read the
+		// live rows' statuses at the point, so the view waits for a read against the reloaded rows.
 		const a = answer(1);
-		const past = pastRows(reloaded, V1, { rows: old, rowsVault: V0 }, a);
+		expect(pastRows(reloaded, V1, { rows: old, rowsVault: V0 }, a)).toEqual({
+			kind: "held",
+			rows: [],
+		});
+	});
+
+	it("answer first, once a read against the reloaded rows has landed: answered", () => {
+		const a = answer(1);
+		const past = pastRows(reloaded, V1, { rows: reloaded, rowsVault: V1 }, a);
 		expect(past.kind).toBe("answered");
 		expect(draw(past.rows, a).shownRows.map((r) => r.id)).toEqual(["a", "b2"]);
+	});
+
+	it("a request sent during a resync (its rows' vault unknown) never draws the live rows", () => {
+		const a = answer(1);
+		expect(pastRows(reloaded, V1, { rows: reloaded, rowsVault: null }, a)).toEqual({
+			kind: "held",
+			rows: [],
+		});
 	});
 
 	it("an unrelated resync mid-reload (rows re-fetched for the old vault while the answer is the new one's) is held", () => {
@@ -412,10 +430,10 @@ describe("pastRows: the rows a past view draws, paired with its answer by the va
 		expect(past.rows).toEqual(rowsAsAnswered(live, old, a));
 	});
 
-	it("the snapshot is used for statuses only if it is the answer's vault too", () => {
+	it("the live rows are drawn only with a snapshot of the same vault to read their statuses against", () => {
 		const a = answer(1);
-		const past = pastRows(reloaded, V1, { rows: old, rowsVault: V0 }, a);
-		expect(past.rows).toBe(reloaded);
+		expect(pastRows(reloaded, V1, { rows: old, rowsVault: V0 }, a).kind).toBe("held");
+		expect(pastRows(reloaded, V1, { rows: reloaded, rowsVault: V1 }, a).kind).toBe("answered");
 	});
 
 	it("live (no answer) is the live rows themselves", () => {

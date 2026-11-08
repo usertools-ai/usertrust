@@ -44,4 +44,11 @@ describe("the store's rows and the vault they come from", () => {
 		const cleanup = store.slice(store.lastIndexOf("return () => {"));
 		expect(cleanup).toMatch(/clearTimeout\(retry\)/);
 	});
+
+	it("a superseded snapshot is dropped: one older than the newest installed never installs, even at the same version", () => {
+		const fn = /const resync = \(\): void => \{([\s\S]*?)\n\t\t\};\n/.exec(store)?.[1] ?? "";
+		expect(fn).toMatch(/if \(cancelled \|\| mine < installedResync\) return;/);
+		expect(fn).toMatch(/installedResync = mine;/);
+		expect(fn.indexOf("mine < installedResync")).toBeLessThan(fn.indexOf("replay.land("));
+	});
 });
