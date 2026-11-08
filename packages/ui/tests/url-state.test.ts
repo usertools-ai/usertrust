@@ -23,6 +23,8 @@ const FULL: UrlState = {
 	open: H,
 	at: 4182,
 	fill: "share",
+	range: "ytd",
+	dim: "model",
 	filters: {
 		search: "gpt 4 & co",
 		kinds: ["llm_call", "tool_use"],
@@ -87,6 +89,8 @@ describe("encodeUrlState / decodeUrlState", () => {
 			open: H,
 			at: null,
 			fill: null,
+			range: "1w",
+			dim: "lane",
 			filters: {
 				...EMPTY_FILTERS,
 				statuses: ["failed", "denied"],
@@ -358,7 +362,12 @@ describe("addressHolds: what is written decodes to the same state", () => {
 	const notHeld = (s: UrlState): void => {
 		expect(addressHolds(s)).toBe(false);
 		// Nothing is written for it: a reload opens a clean page, never a different filter set.
-		expect(planHistory(EMPTY_URL_STATE, s, "#q=old")).toEqual({ kind: "replace", hash: "" });
+		// A facet value set that changed is a chip: Back undoes it, so it pushes (the empty hash is what it writes).
+		const chips = Object.values(s.filters).some((v) => Array.isArray(v) && v.length > 0);
+		expect(planHistory(EMPTY_URL_STATE, s, "#q=old")).toEqual({
+			kind: chips ? "push" : "replace",
+			hash: "",
+		});
 		expect(planHistory(EMPTY_URL_STATE, s, "").kind).toBe("none");
 	};
 
@@ -496,11 +505,11 @@ describe("planHistory", () => {
 		expect(planHistory(share, none, "#fill=share")).toEqual({ kind: "push", hash: "" });
 	});
 
-	it("replaces the entry when one fill window gives way to another", () => {
+	it("pushes when one fill window gives way to another, so Back returns to the first", () => {
 		const share = { ...none, fill: "share" as const };
 		const spend = { ...none, fill: "spend" as const };
 		expect(planHistory(share, spend, "#fill=share")).toEqual({
-			kind: "replace",
+			kind: "push",
 			hash: "#fill=spend",
 		});
 	});
@@ -590,5 +599,141 @@ describe("the at field", () => {
 			kind: "replace",
 			hash: "#at=6",
 		});
+	});
+});
+
+describe("range and dim in the address", () => {
+	it("writes range and dim only away from their defaults", () => {
+		expect(encodeUrlState(EMPTY_URL_STATE)).toBe("");
+		expect(encodeUrlState({ ...EMPTY_URL_STATE, range: "3m" })).toBe("#range=3m");
+		expect(encodeUrlState({ ...EMPTY_URL_STATE, dim: "role" })).toBe("#dim=role");
+		expect(encodeUrlState({ ...EMPTY_URL_STATE, range: "1w", dim: "lane" })).toBe("");
+		expect(EMPTY_URL_STATE.range).toBe("1w");
+		expect(EMPTY_URL_STATE.dim).toBe("lane");
+	});
+
+	it("reads an unknown range, dimension or fill as the default", () => {
+		const s = decodeUrlState("#range=bogus&dim=bogus&fill=bogus");
+		expect(s.range).toBe("1w");
+		expect(s.dim).toBe("lane");
+		expect(s.fill).toBeNull();
+		for (const v of ["", "__proto__", "toString", "1W", "1d,1w"]) {
+			expect(decodeUrlState(`#range=${encodeURIComponent(v)}`).range, `range=${v}`).toBe("1w");
+			expect(decodeUrlState(`#dim=${encodeURIComponent(v)}`).dim, `dim=${v}`).toBe("lane");
+		}
+	});
+
+	it("reads every range and every dimension", () => {
+		for (const r of ["1d", "1w", "1m", "3m", "ytd", "1y"]) {
+			expect(decodeUrlState(`#range=${r}`).range).toBe(r);
+		}
+		for (const d of ["lane", "role", "model", "kind", "provider"]) {
+			expect(decodeUrlState(`#dim=${d}`).dim).toBe(d);
+		}
+	});
+
+	it("reads an old link as before, and writes the same hash back", () => {
+		const hash = "#actor=a&job=b&view=trends";
+		const s = decodeUrlState(hash);
+		expect(s.filters).toEqual({ ...EMPTY_FILTERS, actors: ["a"], jobTypes: ["b"] });
+		expect(s.range).toBe("1w");
+		expect(s.dim).toBe("lane");
+		expect(s.fill).toBeNull();
+		expect(s.view).toBe("trends");
+		expect(encodeUrlState(s)).toBe("#actor=a&job=b&view=trends");
+	});
+
+	it("round-trips #dim=model&fill=share&provider=xAI&range=ytd", () => {
+		const s = decodeUrlState("#dim=model&fill=share&provider=xAI&range=ytd");
+		expect(s.dim).toBe("model");
+		expect(s.range).toBe("ytd");
+		expect(s.fill).toBe("share");
+		expect(s.filters.providers).toEqual(["xAI"]);
+		expect(encodeUrlState(s)).toBe("#dim=model&fill=share&provider=xAI&range=ytd");
+		expect(addressHolds(s)).toBe(true);
+	});
+
+	it("sameUrlState sees a range or a dim difference alone", () => {
+		expect(sameUrlState(EMPTY_URL_STATE, { ...EMPTY_URL_STATE, range: "1d" })).toBe(false);
+		expect(sameUrlState(EMPTY_URL_STATE, { ...EMPTY_URL_STATE, dim: "kind" })).toBe(false);
+		expect(
+			sameUrlState({ ...EMPTY_URL_STATE, dim: "kind" }, { ...EMPTY_URL_STATE, dim: "kind" }),
+		).toBe(true);
+	});
+});
+
+describe("planHistory: which changes push", () => {
+	const none = EMPTY_URL_STATE;
+	const next = (prev: UrlState, over: Partial<UrlState>): UrlState => ({ ...prev, ...over });
+	const kindOf = (prev: UrlState, to: UrlState, current?: string): string =>
+		planHistory(prev, to, current ?? encodeUrlState(prev)).kind;
+
+	it("a fill, and leaving it, push", () => {
+		const filled = next(none, { fill: "share" });
+		expect(planHistory(none, filled, "").kind).toBe("push");
+		expect(planHistory(filled, none, "#fill=share").kind).toBe("push");
+		expect(planHistory(filled, next(none, { fill: "ledger" }), "#fill=share").kind).toBe("push");
+	});
+
+	it("adding or removing a value of any facet pushes", () => {
+		const fields = [
+			"actors",
+			"jobTypes",
+			"kinds",
+			"models",
+			"typeSources",
+			"statuses",
+			"providers",
+		] as const;
+		for (const field of fields) {
+			const on = withFilters({ [field]: ["a"] });
+			expect(kindOf(none, on), `add ${field}`).toBe("push");
+			expect(kindOf(on, none), `remove ${field}`).toBe("push");
+			expect(kindOf(on, withFilters({ [field]: ["a", "b"] })), `grow ${field}`).toBe("push");
+			expect(kindOf(on, withFilters({ [field]: ["b"] })), `swap ${field}`).toBe("push");
+		}
+	});
+
+	it("search, cost, dates, range and dim replace", () => {
+		expect(kindOf(none, withFilters({ search: "g" }))).toBe("replace");
+		expect(kindOf(none, withFilters({ costMax: 5 }))).toBe("replace");
+		expect(kindOf(none, withFilters({ costMin: 1 }))).toBe("replace");
+		expect(kindOf(none, withFilters({ from: "2026-11-01" }))).toBe("replace");
+		expect(kindOf(none, withFilters({ to: "2026-11-02" }))).toBe("replace");
+		expect(kindOf(none, next(none, { range: "1d" }))).toBe("replace");
+		expect(kindOf(none, next(none, { dim: "role" }))).toBe("replace");
+	});
+
+	it("a move between positions replaces, and a facet reorder alone writes nothing", () => {
+		const at5 = next(none, { at: 5 });
+		expect(planHistory(at5, next(at5, { at: 6 }), "#at=5").kind).toBe("replace");
+		const ab = withFilters({ actors: ["a", "b"] });
+		const ba = withFilters({ actors: ["b", "a"] });
+		expect(planHistory(ab, ba, encodeUrlState(ab)).kind).toBe("none");
+	});
+
+	it("a facet change that comes with a search tweak still pushes", () => {
+		const both = withFilters({ actors: ["a"], search: "x" });
+		expect(kindOf(none, both)).toBe("push");
+	});
+
+	it("a repeated value in a facet is the same set, so it does not push", () => {
+		const a = withFilters({ actors: ["a"] });
+		const dup = withFilters({ actors: ["a", "a"], search: "x" });
+		expect(planHistory(a, dup, encodeUrlState(a)).kind).toBe("replace");
+	});
+});
+
+describe("the hook's range, dim and fill", () => {
+	const hook = readFileSync(new URL("../src/app/use-url-state.ts", import.meta.url), "utf-8");
+	it("returns range, dim and fill with setters that ignore a no-op, and no view", () => {
+		expect(hook).toMatch(/setRange/);
+		expect(hook).toMatch(/setDim/);
+		expect(hook).toMatch(/setFill/);
+		expect(hook).toMatch(/s\.range === r/);
+		expect(hook).toMatch(/s\.dim === d/);
+		expect(hook).toMatch(/s\.fill === f/);
+		expect(hook).not.toMatch(/setView/);
+		expect(hook).not.toMatch(/\bview: state\.view/);
 	});
 });

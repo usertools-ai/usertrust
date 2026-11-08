@@ -8,14 +8,11 @@ import {
 	AddressSync,
 	addressNoteFor,
 } from "../shared/address-sync.js";
+import type { Dimension } from "../shared/breakdown.js";
+import type { WindowId } from "../shared/desk-layout.js";
 import type { FilterState } from "../shared/filters.js";
-import {
-	addressHolds,
-	decodeUrlState,
-	sameUrlState,
-	type UrlState,
-	type ViewId,
-} from "../shared/url-state.js";
+import type { RangeId } from "../shared/spend-series.js";
+import { addressHolds, decodeUrlState, sameUrlState, type UrlState } from "../shared/url-state.js";
 
 const browserAddress: AddressIo = {
 	hash: () => window.location.hash,
@@ -31,15 +28,14 @@ const browserAddress: AddressIo = {
 };
 
 /**
- * The view, the filters, the open record and the position shown, kept in the page address (`location.hash`). Starts from the hash; a
- * change writes it back (replace for a filter tweak, push for a view or record change, see `planHistory`); a hash the
+ * The filters, the open record, the position shown, the spend range, the dimension and the window that fills the desk,
+ * kept in the page address (`location.hash`). Starts from the hash; a change writes it back (replace for a search,
+ * range or dimension tweak, push for a fill, a chip or a record change, see `planHistory`); a hash the
  * user edits or navigates to (Back, Forward, a pasted link) is applied. The hash stays in the browser: nothing is sent.
  * When the address does not describe the page (a state it cannot hold, or a write the browser refused and that is being
  * retried), `addressNote` says why, and the page shows it.
  */
 export function useUrlState(): {
-	view: ViewId;
-	setView(view: ViewId): void;
 	filters: FilterState;
 	setFilters(filters: FilterState): void;
 	openHash: string | null;
@@ -49,6 +45,13 @@ export function useUrlState(): {
 	setAt(at: number | null): void;
 	/** How many navigations the user made (not the page's own writes): a change means every pending gesture is stale. */
 	navigation: number;
+	range: RangeId;
+	setRange(range: RangeId): void;
+	dim: Dimension;
+	setDim(dim: Dimension): void;
+	/** The window that fills the desk, or null. */
+	fill: WindowId | null;
+	setFill(fill: WindowId | null): void;
 	/** Why the address does not describe the page right now, or null; the page shows it. */
 	addressNote: AddressNote;
 } {
@@ -83,7 +86,6 @@ export function useUrlState(): {
 		};
 	}, []);
 
-	const setView = useCallback((view: ViewId) => setState((s) => ({ ...s, view })), []);
 	const setFilters = useCallback(
 		(filters: FilterState) => setState((s) => ({ ...s, filters })),
 		[],
@@ -94,11 +96,21 @@ export function useUrlState(): {
 		(at: number | null) => setState((s) => (s.at === at ? s : { ...s, at })),
 		[],
 	);
+	const setRange = useCallback(
+		(r: RangeId) => setState((s) => (s.range === r ? s : { ...s, range: r })),
+		[],
+	);
+	const setDim = useCallback(
+		(d: Dimension) => setState((s) => (s.dim === d ? s : { ...s, dim: d })),
+		[],
+	);
+	const setFill = useCallback(
+		(f: WindowId | null) => setState((s) => (s.fill === f ? s : { ...s, fill: f })),
+		[],
+	);
 	const holds = useMemo(() => addressHolds(state), [state]);
 	const addressNote: AddressNote = addressNoteFor(holds, behind);
 	return {
-		view: state.view,
-		setView,
 		filters: state.filters,
 		setFilters,
 		openHash: state.open,
@@ -106,6 +118,12 @@ export function useUrlState(): {
 		at: state.at,
 		setAt,
 		navigation,
+		range: state.range,
+		setRange,
+		dim: state.dim,
+		setDim,
+		fill: state.fill,
+		setFill,
 		addressNote,
 	};
 }
