@@ -156,6 +156,18 @@ describe("the header at a past position", () => {
 		expect(text(intact)).not.toContain("broken");
 	});
 
+	it("the past chained pill's hover text claims only the links up to that point", () => {
+		const html = strip(at());
+		const m = /<span class="ut-pill" data-tone="approve" title="([^"]*)"/.exec(html);
+		expect(m).not.toBeNull();
+		const title = m?.[1] ?? "";
+		expect(title).toContain("up to this point");
+		expect(title).not.toContain("in the vault");
+		// Live, the same pill speaks for the whole vault.
+		const live = /<span class="ut-pill" data-tone="approve" title="([^"]*)"/.exec(strip(null));
+		expect(live?.[1]).toContain("in the vault");
+	});
+
 	it("counts the records up to the position", () => {
 		expect(text(strip(at({ pos: 40 })))).toContain("41 events");
 	});

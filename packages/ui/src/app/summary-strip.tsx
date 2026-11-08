@@ -9,6 +9,7 @@ import { budgetAsOf, budgetDisplay, budgetSourceWord } from "../shared/budget-di
 import {
 	ANCHOR_VERIFY_COMMAND,
 	anchorView,
+	CHAINED_PAST_TITLE,
 	CHAINED_TITLE,
 	chainStatus,
 	NOT_ANCHORED_NOTE,
@@ -435,7 +436,7 @@ function PastIntegrityFact(props: {
 			<b>Integrity</b>
 			{chain.valid ? (
 				<>
-					<span className="ut-pill" data-tone="approve" title={CHAINED_TITLE}>
+					<span className="ut-pill" data-tone="approve" title={CHAINED_PAST_TITLE}>
 						<i />
 						chained
 					</span>

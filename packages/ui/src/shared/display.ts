@@ -47,6 +47,13 @@ export function verifiedAsOf(
 export const CHAINED_TITLE =
 	"Every hash link in the vault is intact. This is not an anchored check.";
 
+/**
+ * The same pill at a past position: it speaks for the records up to that point only, not for the vault as it stands
+ * now.
+ */
+export const CHAINED_PAST_TITLE =
+	"Every hash link up to this point is intact: hash links only, not an anchor.";
+
 /** Under the "chained" pill when the vault has no anchor file: the links are all there is. */
 export const NOT_ANCHORED_NOTE = "hash links only · not anchored";
 
