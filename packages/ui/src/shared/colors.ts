@@ -3,7 +3,9 @@
 
 /**
  * Stable colours. A category keeps one colour in every view, whatever the filter and whatever the time: the colour
- * comes from the category's rank by spend over ALL records for its dimension, never from the filtered view.
+ * comes from the category's rank by spend over the records the page holds (at most `ROW_CAP`), never from the filtered
+ * view. That held-rows rank is the FALLBACK: the whole-vault ranking comes from the server's totals endpoint once it
+ * exists, and the caller should read that first (`colorsFromRanking` takes any ranking of keys, highest first).
  *
  * The top five categories take the series slots in order; the rest, "untyped" and "Other" take the muted tone, and a
  * muted category does not use up a slot. Providers keep a fixed colour each. A key that first appears on the live
@@ -46,10 +48,23 @@ function isNamedProvider(key: string): key is Exclude<ProviderName, "Other"> {
 }
 
 /**
- * Rank every key of `dim` by spend over `allRows` (ties A to Z) and fix its colour. Pass every record, never a
- * filtered subset: a map built from a filter would repaint the categories the filter leaves.
+ * Rank every key of `dim` by spend over the rows the page holds (`allRows`, at most `ROW_CAP`; ties A to Z) and fix
+ * its colour. This is the FALLBACK ranking: the whole-vault ranking comes from the server's totals endpoint once it
+ * exists, and the caller should read that first and pass it to `colorsFromRanking`. Pass every held record, never a
+ * filtered subset: a map built from a filter would repaint the categories the filter leaves. On a vault larger than
+ * the cap, an actor whose spend sits in older records is ranked here only by the records the page holds.
  */
 export function rankColors(allRows: readonly LedgerRow[], dim: Dimension): ColorMap {
+	const keys =
+		dim === "provider" ? [] : breakdown(allRows, { startMs: -Infinity, endMs: Infinity }, dim).keys;
+	return colorsFromRanking(dim, keys);
+}
+
+/**
+ * Fix the colours of a ranking: `keys` ordered by spend, highest first, as `Breakdown.keys` is (from the server's
+ * whole-vault totals, or from `rankColors` over the held rows). Providers keep their fixed colours and ignore `keys`.
+ */
+export function colorsFromRanking(dim: Dimension, keys: readonly string[]): ColorMap {
 	const assigned = new Map<string, string>();
 	let used = 0;
 	const give = (key: string): string => {
@@ -64,10 +79,7 @@ export function rankColors(allRows: readonly LedgerRow[], dim: Dimension): Color
 		return color;
 	};
 
-	if (dim !== "provider") {
-		const ranked = breakdown(allRows, { startMs: -Infinity, endMs: Infinity }, dim);
-		for (const key of ranked.keys) give(key);
-	}
+	if (dim !== "provider") for (const key of keys) give(key);
 
 	const providerColor = (key: string): string =>
 		isNamedProvider(key) ? PROVIDER_COLOR[key] : MUTED;

@@ -3,7 +3,13 @@
 
 import { describe, expect, it } from "vitest";
 import { breakdown } from "../src/shared/breakdown.js";
-import { MUTED, PROVIDER_COLOR, rankColors, SERIES } from "../src/shared/colors.js";
+import {
+	colorsFromRanking,
+	MUTED,
+	PROVIDER_COLOR,
+	rankColors,
+	SERIES,
+} from "../src/shared/colors.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 
 const T0 = Date.parse("2026-07-27T00:00:00.000Z");
@@ -134,5 +140,24 @@ describe("rankColors", () => {
 
 	it("records the dimension it was built for", () => {
 		expect(rankColors([], "kind").dim).toBe("kind");
+	});
+});
+
+describe("colorsFromRanking", () => {
+	it("gives a ranking from anywhere the colours rankColors gives the same order", () => {
+		const rows = actors({ a: 9, b: 8, c: 7, d: 6, e: 5, f: 4, untyped: 3 });
+		const held = rankColors(rows, "lane");
+		const open = { startMs: -Infinity, endMs: Infinity };
+		const ranked = colorsFromRanking("lane", breakdown(rows, open, "lane").keys);
+		for (const key of ["a", "b", "c", "d", "e", "f", "untyped", "nobody"])
+			expect(ranked.of(key)).toBe(held.of(key));
+	});
+
+	it("does not repaint a key it already ranked when another is added", () => {
+		const map = colorsFromRanking("lane", ["x", "y"]);
+		const before = map.of("x");
+		map.add("z");
+		expect(map.of("x")).toBe(before);
+		expect(map.of("z")).toBe(SERIES[2]);
 	});
 });
