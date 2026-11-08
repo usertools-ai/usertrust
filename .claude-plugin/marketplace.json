@@ -2,13 +2,13 @@
 	"name": "usertrust",
 	"owner": { "name": "usertrust" },
 	"description": "usertrust governance plugins for Claude Code",
-	"version": "3.1.0",
+	"version": "3.2.0",
 	"plugins": [
 		{
 			"name": "usertrust",
 			"source": "./packages/claude-code-plugin",
 			"description": "Spend governance for Claude Code: a spend hold on every tool call, settled at the real usage from Claude Code's transcripts. Watch-only by default: nothing is blocked unless you opt in to enforcement.",
-			"version": "3.1.0",
+			"version": "3.2.0",
 			"license": "Apache-2.0",
 			"category": "security",
 			"tags": ["governance", "budget", "audit", "claude-code", "security"]
