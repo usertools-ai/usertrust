@@ -133,17 +133,15 @@ export function Timeline(props: {
 
 	return (
 		<section className="ut-tl" aria-label="Timeline" data-past={past}>
-			{(props.error !== null || props.reloaded) && (
-				<p className="ut-tl-msg" role="status">
-					{props.error !== null &&
-						(at !== null
-							? `Could not show that point: ${props.error}. Still showing the last point loaded.`
-							: `Could not show that point: ${props.error}; showing the live vault.`)}
-					{props.error !== null && props.reloaded && " "}
-					{props.reloaded &&
-						"Read again because the vault was reloaded: this position may now name another record."}
-				</p>
-			)}
+			<p className="ut-tl-msg" role="status">
+				{props.error !== null &&
+					(at !== null
+						? `Could not show that point: ${props.error}. Still showing the last point loaded.`
+						: `Could not show that point: ${props.error}; showing the live vault.`)}
+				{props.error !== null && props.reloaded && " "}
+				{props.reloaded &&
+					"Read again because the vault was reloaded: this position may now name another record."}
+			</p>
 			<div className="ut-tl-head">
 				<span className="ut-tl-label" data-past={at !== null}>
 					{label}

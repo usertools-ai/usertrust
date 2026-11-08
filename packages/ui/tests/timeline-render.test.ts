@@ -652,6 +652,23 @@ describe("the timeline", () => {
 		expect(later).toMatch(/<input[^>]*value="99"/);
 	});
 
+	it("the status note is in the markup with no error too, so a note that arrives is announced as a change, not an insertion", () => {
+		const html = render();
+		expect(html).toMatch(/<p[^>]*class="ut-tl-msg"[^>]*role="status"[^>]*><\/p>/);
+		const failed = render({ at: at(), wanted: 41, error: "the dashboard did not answer" });
+		expect(failed).toMatch(/<p[^>]*class="ut-tl-msg"[^>]*role="status"[^>]*>Could not show/);
+		// One note, not one per state.
+		expect(failed.match(/ut-tl-msg/g)).toHaveLength(1);
+	});
+
+	it("the status note floats above the bar, so a note appearing does not resize the work area", () => {
+		const css = readFileSync(join(import.meta.dirname, "..", "src", "app", "styles.css"), "utf-8");
+		expect(css).toMatch(/\.ut-tl-msg \{[^}]*position: absolute;[^}]*bottom: 100%;/);
+		// Empty, it takes no room but stays rendered (display: none would take it out of the accessibility tree).
+		expect(css).toMatch(/\.ut-tl-msg:empty \{[^}]*height: 0;/);
+		expect(css).not.toMatch(/\.ut-tl-msg:empty \{[^}]*display: none/);
+	});
+
 	it("an error is a short inline note beside the last good view", () => {
 		const html = render({ at: at(), wanted: 41, error: "the dashboard did not answer" });
 		expect(text(html)).toContain("the dashboard did not answer");
@@ -722,7 +739,9 @@ describe("the timeline", () => {
 		expect(held).toMatch(
 			/<span class="ut-tl-held" aria-hidden="true">Updating to record 62…<\/span>/,
 		);
-		expect(held.match(/role="status"/g)).toHaveLength(1);
+		// Two regions: the always-there note for a failed point (empty here) and this one.
+		expect(held.match(/role="status"/g)).toHaveLength(2);
+		expect(held.match(/role="status"[^>]*>[^<]+</g)).toHaveLength(1);
 	});
 
 	it("an epoch change says the vault was reloaded", () => {

@@ -1596,6 +1596,7 @@ body {
 	   A native range along the bottom, the label for what the screen shows, and the Live and "N new since" buttons. Their
 	   hit areas are in the hit-area block at the end. Nothing here moves: no animation, no transition. */
 	.ut-tl {
+		position: relative;
 		flex: 0 0 auto;
 		display: flex;
 		flex-direction: column;
@@ -1644,9 +1645,28 @@ body {
 	.ut-tl-count {
 		display: none;
 	}
+	/* The note for a point that did not load, or a vault that was reloaded. One element, always there (a note inserted
+	   with its text already in it is often not announced), floated above the bar so it never resizes the work area. */
 	.ut-tl-msg {
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: 100%;
+		margin: 0 0 6px;
+		padding: 8px 14px;
+		border: 1px solid var(--line);
+		border-radius: 12px;
+		background: var(--surface);
 		font: 400 12px/1.45 var(--sans);
 		color: #ededf2;
+	}
+	/* Empty it takes no room, and stays rendered: display: none would take it out of the accessibility tree. */
+	.ut-tl-msg:empty {
+		height: 0;
+		margin: 0;
+		padding: 0;
+		border: 0;
+		overflow: hidden;
 	}
 	.ut-tl-btn {
 		border: 1px solid var(--control-line);
