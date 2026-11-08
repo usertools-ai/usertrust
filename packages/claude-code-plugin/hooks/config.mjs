@@ -593,8 +593,13 @@ export function repinnedNote({ createdAt, record }) {
 	return `usertrust: this session was RE-PINNED to ${CONVENTIONAL_NAME}. Its old pin (made ${createdAt} from the UT_* variables, with no key) never moved any money; its state dir is left as it was, and the re-pin is recorded in ${record}. Nothing from before this point is posted again.`;
 }
 
-/** SessionStart's warning for a dead pin left in place because its re-pin record could not be written. */
-export const REPIN_UNRECORDED_NOTE = `usertrust: WARNING: this session is UNCONFIGURED, and could not be re-pinned to ${CONVENTIONAL_NAME}: the re-pin record could not be written. Start a new session (not a resume) to use it.`;
+/**
+ * SessionStart's warning for a dead pin still in place because its re-pin did not complete: `why`
+ * is the fixed reason (the record could not be written, the job log could not be carried, ...).
+ */
+export function repinFailedNote(why) {
+	return `usertrust: WARNING: this session is UNCONFIGURED, and could not be re-pinned to ${CONVENTIONAL_NAME}: ${why}. Start a new session (not a resume) to use it.`;
+}
 
 /**
  * The session-start line for a configured session whose environment ALSO sets UT_*

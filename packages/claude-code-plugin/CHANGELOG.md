@@ -40,11 +40,14 @@ npm, and its version is its own: the `usertrust` packages and their
 - **A session pinned unconfigured before that file existed is re-pinned once, or warned about.** At
   SessionStart, an environment pin made with no key, for a session that moved no money in its state dir
   (no hold; no cursor id posted, accounted, unresolved or assigned; no watch record but a gap), is
-  re-pinned to the conventional file: the old pin is moved aside, the change is appended to
-  `.local/state/usertrust/repins/repins.jsonl` (key hashed) first, and SessionStart says so. Usage from
-  before the re-pin is never posted. Any other environment pin is kept, and SessionStart now opens with
-  `usertrust: WARNING: this session is UNCONFIGURED.` and the reason, while a configuration file would be
-  read.
+  re-pinned to the conventional file when the file names a different state dir: the session's job log
+  is copied there, the change is appended to `.local/state/usertrust/repins/repins.jsonl` (key hashed)
+  while the old pin is still in place, one rename then puts the new pin in its place (the old one is
+  kept aside), and SessionStart says so. Usage from before the re-pin is never posted. A file naming
+  the pin's own state dir (the README's quickstart layout, in the usual case) does not re-pin, since
+  that dir already holds the session's earlier usage. Any other environment pin is kept, and
+  SessionStart now opens with `usertrust: WARNING: this session is UNCONFIGURED.` and the reason, while
+  a configuration file would be read.
 - **Behaviour change: the job-type instruction is now off by default.** SessionStart no longer asks
   the agent to type its jobs unless you say so. To keep job-type labels, set `"jobTypeInstruction": true`
   in the configuration file (or `UT_CC_JOB_TYPE_INSTRUCTION=1`). Only the exact value `1` turns it on in

@@ -53,6 +53,7 @@ interface SessionModule {
 		uid: number | null;
 		now?: number;
 		repin?: boolean;
+		fs?: typeof nodeFs;
 	}): Session;
 	movedNoMoney(stateDir: string, id: string, options: { uid: number | null }): string | null;
 }
@@ -94,6 +95,7 @@ const pinOf = (home: string, session = SESSION) =>
 	join(home, ".local", "state", "usertrust", "sessions", `${session}.json`);
 const recordsOf = (home: string) =>
 	join(home, ".local", "state", "usertrust", "repins", "repins.jsonl");
+const PINS = (home: string) => join(home, ".local", "state", "usertrust", "sessions");
 
 /** The conventional config file under `home`, 0600 in a 0700 anchor, holding `fields`. */
 async function writeConventional(home: string, fields: Record<string, unknown>): Promise<string> {
@@ -580,8 +582,182 @@ describe("session.mjs: SessionStart re-pins a DEAD environment pin to the conven
 		});
 		// mutant: publish the new pin whether or not the record was written
 		expect(session.kind).toBe("environment");
+		expect(session.note).toMatch(
+			/^usertrust: WARNING: this session is UNCONFIGURED, and could not/,
+		);
 		expect(session.note).toContain("the re-pin record could not be written");
 		expect((JSON.parse(await readFile(pinOf(home), "utf-8")) as Pin).kind).toBe("environment");
+		// The record comes first: the old pin was never touched, not even kept aside.
+		expect((await readdir(PINS(home))).filter((n) => n.includes(".repinned."))).toEqual([]);
+	});
+
+	/** A job log of the session: its session-start, and a job still open. */
+	const JOB_LOG = [
+		{ sid: SESSION, ts: "2026-11-07T23:50:00.000Z", op: "session-start", job: null },
+		{ sid: SESSION, ts: "2026-11-07T23:51:00.000Z", op: "start", job: "job-1" },
+	]
+		.map((line) => `${JSON.stringify(line)}\n`)
+		.join("");
+
+	/** A dead pin whose old state dir holds `JOB_LOG`, and the conventional file naming `fresh`. */
+	async function deadWithJobLog(home: string, fresh: string): Promise<string> {
+		const old = await oldStateDir();
+		await pinFromEnvironment(home, unconfigured(old));
+		await mkdir(join(old, "jobs"), { mode: 0o700 });
+		await writeFile(join(old, "jobs", `${SESSION}.jsonl`), JOB_LOG, { mode: 0o600 });
+		await writeConventional(home, FILE(fresh));
+		return old;
+	}
+
+	it("the job log is carried to the new state dir byte for byte, its open job with it; the old one is only read", async () => {
+		const { sessionSettings } = await sessionModule();
+		const home = await makeHome();
+		const fresh = await makeDir("utcc-conv-new-");
+		const old = await deadWithJobLog(home, fresh);
+		const untouched = snapshot(old);
+		const session = sessionSettings({
+			env: unconfigured(old),
+			payload: { session_id: SESSION },
+			passwdHome: home,
+			uid: UID,
+			repin: true,
+		});
+		expect(session.kind).toBe("configured");
+		// mutant: no carry → usertrust-job finds no log in the new dir, and job-1 loses its attribution
+		const carried = join(fresh, "jobs", `${SESSION}.jsonl`);
+		expect(await readFile(carried, "utf-8")).toBe(JOB_LOG);
+		expect(nodeFs.statSync(carried).mode & 0o777).toBe(0o600);
+		expect(snapshot(old)).toEqual(untouched);
+	});
+
+	it("an earlier carry, a beginning of the log, is brought up to date", async () => {
+		const { sessionSettings } = await sessionModule();
+		const home = await makeHome();
+		const fresh = await makeDir("utcc-conv-new-");
+		const old = await deadWithJobLog(home, fresh);
+		await mkdir(join(fresh, "jobs"), { mode: 0o700 });
+		const first = `${JOB_LOG.split("\n")[0]}\n`;
+		await writeFile(join(fresh, "jobs", `${SESSION}.jsonl`), first, { mode: 0o600 });
+		const session = sessionSettings({
+			env: unconfigured(old),
+			payload: { session_id: SESSION },
+			passwdHome: home,
+			uid: UID,
+			repin: true,
+		});
+		expect(session.kind).toBe("configured");
+		expect(await readFile(join(fresh, "jobs", `${SESSION}.jsonl`), "utf-8")).toBe(JOB_LOG);
+	});
+
+	it("another job log of the session already in the new state dir refuses the re-pin, before any record", async () => {
+		const { sessionSettings } = await sessionModule();
+		const home = await makeHome();
+		const fresh = await makeDir("utcc-conv-new-");
+		const old = await deadWithJobLog(home, fresh);
+		await mkdir(join(fresh, "jobs"), { mode: 0o700 });
+		const other = `${JSON.stringify({ sid: SESSION, op: "session-start", job: null })}\n`;
+		await writeFile(join(fresh, "jobs", `${SESSION}.jsonl`), other, { mode: 0o600 });
+		const session = sessionSettings({
+			env: unconfigured(old),
+			payload: { session_id: SESSION },
+			passwdHome: home,
+			uid: UID,
+			repin: true,
+		});
+		// mutant: overwrite the log that is there
+		expect(session.kind).toBe("environment");
+		expect(session.note).toContain(
+			"could not be re-pinned to ~/.config/usertrust/claude-code.json: the new state dir already holds another job log of this session.",
+		);
+		expect(await readFile(join(fresh, "jobs", `${SESSION}.jsonl`), "utf-8")).toBe(other);
+		expect(nodeFs.existsSync(recordsOf(home))).toBe(false);
+		expect((JSON.parse(await readFile(pinOf(home), "utf-8")) as Pin).kind).toBe("environment");
+	});
+
+	it("a hook that runs inside the re-pin reads the OLD pin, never none: the record is written before the pin is touched", async () => {
+		const { sessionSettings } = await sessionModule();
+		const home = await makeHome();
+		const old = await oldStateDir();
+		await pinFromEnvironment(home, unconfigured(old));
+		await writeConventional(home, FILE(await makeDir("utcc-conv-new-")));
+		let recordFd: number | undefined;
+		let inside: Session | undefined;
+		// The other hook runs at the record's fsync: after the record is written, before it returns.
+		const fs = {
+			...nodeFs,
+			openSync: (path: nodeFs.PathLike, flags?: nodeFs.OpenMode, mode?: nodeFs.Mode | null) => {
+				const fd = nodeFs.openSync(path, flags, mode);
+				if (String(path).endsWith("repins.jsonl")) recordFd = fd;
+				return fd;
+			},
+			fsyncSync: (fd: number) => {
+				nodeFs.fsyncSync(fd);
+				if (fd !== recordFd || inside !== undefined) return;
+				inside = sessionSettings({
+					env: unconfigured(old),
+					payload: { session_id: SESSION },
+					passwdHome: home,
+					uid: UID,
+				});
+			},
+		} as typeof nodeFs;
+		const session = sessionSettings({
+			env: unconfigured(old),
+			payload: { session_id: SESSION },
+			passwdHome: home,
+			uid: UID,
+			repin: true,
+			fs,
+		});
+		// mutant: move the old pin aside before the record → the hook inside finds none, and pins anew
+		expect(inside).toMatchObject({ kind: "environment" });
+		expect(session.kind).toBe("configured");
+		expect(session.note).toContain("this session was RE-PINNED");
+		const lines = (await readFile(recordsOf(home), "utf-8")).split("\n").filter((l) => l !== "");
+		expect(lines).toHaveLength(1);
+	});
+
+	it("a swap that fails after its record: the old pin stays, an abandoned record names the first, and SessionStart says UNCONFIGURED", async () => {
+		const { sessionSettings } = await sessionModule();
+		const home = await makeHome();
+		const old = await oldStateDir();
+		await pinFromEnvironment(home, unconfigured(old));
+		await writeConventional(home, FILE(await makeDir("utcc-conv-new-")));
+		const fs = {
+			...nodeFs,
+			renameSync: (from: nodeFs.PathLike, to: nodeFs.PathLike) => {
+				if (String(to) === pinOf(home)) {
+					throw Object.assign(new Error("injected"), { code: "EIO" });
+				}
+				nodeFs.renameSync(from, to);
+			},
+		} as typeof nodeFs;
+		const session = sessionSettings({
+			env: unconfigured(old),
+			payload: { session_id: SESSION },
+			passwdHome: home,
+			uid: UID,
+			repin: true,
+			fs,
+		});
+		expect(session.kind).toBe("environment");
+		expect(session.note).toContain(
+			"could not be re-pinned to ~/.config/usertrust/claude-code.json: the new pin could not be published.",
+		);
+		expect((JSON.parse(await readFile(pinOf(home), "utf-8")) as Pin).kind).toBe("environment");
+		const [first, second, ...rest] = (await readFile(recordsOf(home), "utf-8"))
+			.split("\n")
+			.filter((l) => l !== "")
+			.map((l) => JSON.parse(l) as { id?: string; abandoned?: string; why?: string });
+		expect(rest).toEqual([]);
+		expect(first?.id).toMatch(/^[0-9a-f]{16}$/);
+		// mutant: no follow-up record → the first reads as a re-pin that happened
+		expect(second).toMatchObject({
+			abandoned: first?.id,
+			why: "the new pin could not be published",
+		});
+		// No temp file is left among the pins.
+		expect((await readdir(PINS(home))).filter((n) => n.endsWith(".tmp"))).toEqual([]);
 	});
 });
 
@@ -638,8 +814,12 @@ async function recordingServer() {
 	};
 }
 
-function responseEntries(id: string, input: number, output: number): string[] {
-	const timestamp = new Date().toISOString();
+function responseEntries(
+	id: string,
+	input: number,
+	output: number,
+	timestamp = new Date().toISOString(),
+): string[] {
 	return [0, 1].map((final) =>
 		JSON.stringify({
 			type: "assistant",
@@ -666,7 +846,21 @@ function responseEntries(id: string, input: number, output: number): string[] {
 
 const systemMessage = (stdout: string) =>
 	(JSON.parse(stdout) as { systemMessage: string }).systemMessage;
-const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The old state dir's stamps, written ahead of the hooks at fixed times (lib.mjs
+ * `sessionFirstRunAt` keeps a stamp it finds): the clock the test injects, so that the old stamp
+ * < `OLD_ENTRY_AT` < the new dir's stamp (made at SessionStart, now) <= the next entry (made after
+ * SessionStart returned) holds by construction, with no sleep.
+ */
+const OLD_STAMP_AT = "2026-11-01T00:00:00.000Z";
+const OLD_ENTRY_AT = "2026-11-01T01:00:00.000Z";
+async function stampOld(stateDir: string): Promise<void> {
+	const dir = join(stateDir, "transcripts");
+	await mkdir(join(dir, "since-session"), { recursive: true, mode: 0o700 });
+	await writeFile(join(dir, "since"), OLD_STAMP_AT, { mode: 0o600 });
+	await writeFile(join(dir, "since-session", SESSION), OLD_STAMP_AT, { mode: 0o600 });
+}
 
 describe("through the hooks: (b) the warning, the ignored UT_* note, and a re-pinned session that posts nothing old", () => {
 	it("a re-pinned session posts NOTHING older than its first metered hook: the old usage stays the backfill's", async () => {
@@ -683,8 +877,9 @@ describe("through the hooks: (b) the warning, the ignored UT_* note, and a re-pi
 				{ ...env, ...more },
 			);
 		// Unconfigured, with no server: every response a gap, never posted.
+		await stampOld(old);
 		expect((await stop()).code).toBe(0);
-		await append(transcript, [...responseEntries("msg_old", 100, 20)]);
+		await append(transcript, [...responseEntries("msg_old", 100, 20, OLD_ENTRY_AT)]);
 		expect((await stop()).code).toBe(0);
 		const pinned = JSON.parse(await readFile(pinOf(home), "utf-8")) as Pin;
 		expect(pinned).toMatchObject({ kind: "environment", settings: { keyHash: EMPTY } });
@@ -692,7 +887,6 @@ describe("through the hooks: (b) the warning, the ignored UT_* note, and a re-pi
 		const server = await recordingServer();
 		const fresh = await makeDir("utcc-conv-new-");
 		await writeConventional(home, { ...FILE(fresh), url: server.url });
-		await pause(5);
 		const start = await runHook(
 			hook("session-start"),
 			{ session_id: SESSION, source: "resume" },
@@ -701,7 +895,12 @@ describe("through the hooks: (b) the warning, the ignored UT_* note, and a re-pi
 		expect(start.code).toBe(0);
 		// mutant: no re-pin at SessionStart → "UNCONFIGURED" instead
 		expect(systemMessage(start.stdout)).toContain("this session was RE-PINNED");
-		await pause(5);
+		// The old stamp is the injected one; the new dir's is its own, later than msg_old.
+		expect(await readFile(join(old, "transcripts", "since-session", SESSION), "utf-8")).toBe(
+			OLD_STAMP_AT,
+		);
+		const stamped = await readFile(join(fresh, "transcripts", "since-session", SESSION), "utf-8");
+		expect(Date.parse(stamped)).toBeGreaterThan(Date.parse(OLD_ENTRY_AT));
 		await append(transcript, [...responseEntries("msg_new", 300, 60)]);
 		expect((await stop()).code).toBe(0);
 		// Only what came after the re-pin: 360, never msg_old's 120 too.

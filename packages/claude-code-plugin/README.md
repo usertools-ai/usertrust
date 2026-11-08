@@ -286,15 +286,24 @@ under your home as the passwd database gives it.
     unresolved or assigned, and `watch.jsonl` holds no record of it but `gap`,
     `pre-metering` and `no-transcript-agent`. Anything unreadable or of a shape not
     known counts as money that may have moved. A health answer
-    (`capabilities/`) is not counted: it moves no money.
+    (`capabilities/`) is not counted: it moves no money;
+  - the file's `stateDir` is not the pin's own state dir, links resolved. The pin's own
+    dir already records when the unconfigured session was first metered, so a re-pin
+    there would post that session's earlier usage under the new key. This is the case
+    with the quickstart file above whenever `HOME` is your account's home and
+    `CLAUDE_CONFIG_DIR` is unset: such a session is warned, not re-pinned.
 
-  The old pin is moved aside (`<id>.json.repinned.<time>.<random>`, never deleted), the
-  re-pin is appended to `.local/state/usertrust/repins/repins.jsonl` (the old pin, the
-  new pin with its key hashed, the reason) before the new pin is published, and
+  In order: the session's job log (`<stateDir>/jobs/<id>.jsonl`) is copied to the new
+  state dir, so `usertrust-job` keeps its open job; the re-pin is appended to
+  `.local/state/usertrust/repins/repins.jsonl` (the old pin, the new pin with its key
+  hashed, the reason) while the old pin is still in place; then the old pin is kept
+  aside (`<id>.json.repinned.<time>.<random>`, never deleted) and one rename puts the
+  new pin in its place, so every other hook of the session reads a pin throughout.
   SessionStart says so once. The old state dir is left as it was. Nothing is posted
   twice: the new state dir starts metering at the session's next hook, and nothing
-  the transcript holds from before it is posted there. If the record cannot be
-  written, the pin is not changed, and SessionStart says so.
+  the transcript holds from before it is posted there. If a step fails, the old pin
+  stays, and SessionStart warns that the session is UNCONFIGURED and why; a re-pin
+  that fails after its record is followed by a record naming it abandoned.
 - **Any other environment pin is kept**, and while a configuration file would now be
   read SessionStart warns, first: `usertrust: WARNING: this session is UNCONFIGURED.`
   with the reason it is not re-pinned. Start a new session (not a resume) to use the file.

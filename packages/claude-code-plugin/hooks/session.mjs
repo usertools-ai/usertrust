@@ -45,16 +45,25 @@
 // DEAD environment pin is re-pinned to the conventional config file. Such a pin was
 // made before that file was read (config.mjs `configSource`), and it would otherwise
 // keep a session unconfigured for its whole life, resumes included. Dead means ALL of
-// (`deadPin`): it holds the EMPTY key; the session moved no money under it
-// (`movedNoMoney`); and the conventional file is the source now, and is accepted. The
-// old pin is moved aside, never deleted; the re-pin is appended to
-// <private state>/repins/repins.jsonl (old pin, new pin with the key hashed, reason)
-// BEFORE the new pin is published; and SessionStart says so once. The old state dir is
-// left exactly as it was. No usage is posted twice: the new state dir stamps the
-// session's first metered hook (transcript.mjs `sessionFirstRun`), and nothing the
-// transcript holds from before it is ever posted there. Any other environment pin is
-// kept, and when a config file would now be read SessionStart warns, loudly, that the
-// session is UNCONFIGURED.
+// (`deadPin`): it holds the EMPTY key; the conventional file is the source now, and is
+// accepted; the session moved no money under it (`movedNoMoney`); and the file names a
+// state dir that is NOT the pin's own, links resolved (`sameStateDir`). That last one is
+// what keeps usage from being posted twice: a new state dir stamps the session's first
+// metered hook there (transcript.mjs `sessionFirstRun`), and nothing the transcript holds
+// from before it is ever posted there, while the pin's own dir already holds the stamp and
+// cursors of the unconfigured session. The re-pin, in order:
+// 1. the session's job log is carried to the new state dir (`carryJobLog`), since a
+//    resume or compact writes none there (job-log.mjs `writeSessionStart`);
+// 2. the re-pin is appended to <private state>/repins/repins.jsonl (old pin, new pin with
+//    the key hashed, reason), synced, while the old pin is still in place;
+// 3. the old pin is kept aside under a second name (a hard link, never a deletion), and
+//    ONE rename puts the new pin in its place (`swapPin`).
+// So every other hook of the session reads a pin throughout: the old one, then the new
+// one. A step that fails leaves the old pin in place, and SessionStart warns, loudly, that
+// the session is UNCONFIGURED, with why; a swap that fails after its record is followed by
+// a record naming it abandoned. SessionStart says a re-pin once. The old state dir is left
+// exactly as it was. Any other environment pin is kept, and when a config file would now
+// be read SessionStart warns, loudly, that the session is UNCONFIGURED.
 import { randomBytes } from "node:crypto";
 import {
 	closeSync,
@@ -73,7 +82,7 @@ import {
 	utimesSync,
 	writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
 	CONVENTIONAL_NAME,
 	configSource,
@@ -82,9 +91,9 @@ import {
 	environmentKey,
 	isHoldGrace,
 	keyHash,
-	REPIN_UNRECORDED_NOTE,
 	refusalNote,
 	refusedSettings,
+	repinFailedNote,
 	repinnedNote,
 	resolveSettings,
 	unconfiguredNote,
@@ -382,10 +391,11 @@ export function movedNoMoney(stateDir, id, { uid, fs = REAL_FS }) {
 /**
  * Whether environment pin `pin` of session `id` is DEAD, so SessionStart may re-pin it: null
  * when it is, else the fixed reason it is kept. `resolved` is what a new session would get now
- * (config.mjs `resolveSettings`). All three must hold:
+ * (config.mjs `resolveSettings`). All four must hold:
  * 1. it holds the EMPTY key (`EMPTY_KEY_HASH`);
  * 2. the conventional config file is the source now (UT_CC_CONFIG unset) and is accepted;
- * 3. the session moved no money under it (`movedNoMoney`).
+ * 3. the session moved no money under it (`movedNoMoney`);
+ * 4. the file names a state dir that is not the pin's own (`sameStateDir`).
  */
 export function deadPin(pin, id, resolved, { uid, fs = REAL_FS }) {
 	if (pin.kind !== "environment") return "it is not an environment pin";
@@ -394,7 +404,32 @@ export function deadPin(pin, id, resolved, { uid, fs = REAL_FS }) {
 		return `${CONVENTIONAL_NAME} is not where a new session's settings come from`;
 	}
 	if (resolved.refused !== null) return refusalNote(resolved.refused, "conventional");
-	return movedNoMoney(pin.settings.stateDir, id, { uid, fs });
+	const moved = movedNoMoney(pin.settings.stateDir, id, { uid, fs });
+	if (moved !== null) return moved;
+	if (sameStateDir(pin.settings.stateDir, resolved.stateDir, { fs })) return SAME_STATE_DIR;
+	return null;
+}
+
+/** Why a dead pin is kept when the conventional file names its own state dir (`sameStateDir`). */
+const SAME_STATE_DIR =
+	"the conventional file names the state dir it was pinned with, where the usage recorded before the re-pin would be posted under the new key";
+
+/**
+ * Whether state dirs `a` and `b` are one directory, links resolved. A dir that does not exist is
+ * compared by its absolute path (it cannot be an existing one; and `deadPin` reads the pin's own
+ * dir first, so that one exists). Any other failure counts as the same: the strict side.
+ */
+function sameStateDir(a, b, { fs }) {
+	const real = (dir) => {
+		try {
+			return fs.realpathSync(dir);
+		} catch (err) {
+			return err?.code === "ENOENT" ? resolve(dir) : null;
+		}
+	};
+	const ra = real(a);
+	const rb = real(b);
+	return ra === null || rb === null || ra === rb;
 }
 
 /** Append the re-pin record, whole and synced, to a regular file the user owns, 0600: its path. */
@@ -506,6 +541,95 @@ function publish(path, content, { fs }) {
 }
 
 /**
+ * Write `content` to `path` whole, replacing whatever is there in one rename: a temp file
+ * beside it (O_EXCL, 0600, synced), then renamed over it. Throws when it is not done.
+ */
+function replace(path, content, { fs }) {
+	const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+	const fd = fs.openSync(
+		tmp,
+		constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0),
+		0o600,
+	);
+	try {
+		fs.writeFileSync(fd, content);
+		fs.fsyncSync(fd);
+	} finally {
+		fs.closeSync(fd);
+	}
+	try {
+		fs.renameSync(tmp, path);
+	} catch (err) {
+		try {
+			fs.unlinkSync(tmp);
+		} catch {
+			// Already gone.
+		}
+		throw err;
+	}
+}
+
+/**
+ * Carry session `id`'s job log (job-log.mjs `jobLogPath`, `<stateDir>/jobs/<id>.jsonl`: a valid
+ * session id is its own sanitized name) from the dead pin's state dir to the new one, so
+ * `usertrust-job` keeps working there, an open job included. Null when it is carried, or there is
+ * none; else the fixed reason it is not. The old log is read, never changed. A log already in the
+ * new dir is kept when it is the same bytes, and replaced when it is a beginning of them (an
+ * earlier carry whose re-pin then failed, while the log grew); any other one refuses the re-pin.
+ */
+function carryJobLog(oldDir, newDir, id, { uid, fs }) {
+	const from = join(oldDir, "jobs", `${id}.jsonl`);
+	try {
+		fs.lstatSync(from);
+	} catch (err) {
+		return err?.code === "ENOENT" ? null : "the session's job log is unreadable";
+	}
+	const text = boundedText(from, { uid, fs });
+	if (text === null) return "the session's job log is unreadable";
+	const dir = join(newDir, "jobs");
+	const to = join(dir, `${id}.jsonl`);
+	try {
+		fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+		const outcome = publish(to, text, { fs });
+		if (outcome === "won") return null;
+		if (outcome === "nolink") return "the session's job log could not be carried (no hard links)";
+		const there = boundedText(to, { uid, fs });
+		if (there === text) return null;
+		if (there === null || !text.startsWith(there)) {
+			return "the new state dir already holds another job log of this session";
+		}
+		replace(to, text, { fs });
+		return null;
+	} catch {
+		return "the session's job log could not be written to the new state dir";
+	}
+}
+
+/**
+ * Put pin `content` at `path` in place of the old pin `old`, in one step: the old pin is first
+ * kept aside as `aside` (a second name for the same file, so it is never deleted), checked to be
+ * `old` still, and then ONE rename replaces it. Null when done, else the fixed reason it is not;
+ * until the rename, the old pin is at `path`.
+ */
+function swapPin(path, aside, old, content, { uid, fs }) {
+	try {
+		fs.linkSync(path, aside);
+	} catch {
+		return "the old pin could not be kept aside";
+	}
+	const kept = readPin(aside, { uid, fs });
+	if (kept.pin === undefined || JSON.stringify(kept.pin) !== JSON.stringify(old)) {
+		return "the pin changed meanwhile";
+	}
+	try {
+		replace(path, content, { fs });
+	} catch {
+		return "the new pin could not be published";
+	}
+	return null;
+}
+
+/**
  * This hook's session: its settings from the session's pin, made now when the
  * session has none; the pin's `kind` ("configured" or "environment", null when there
  * is no usable pin); and the pin's path. `payload` is the hook's input, which names
@@ -606,48 +730,65 @@ export function sessionSettings({
 			note: unconfiguredNote({ createdAt: read.pin.createdAt, source, why: kept }),
 		};
 	}
+	/**
+	 * The re-pin did not complete: use the pin now at `path` (still the old one, unless another
+	 * hook replaced it meanwhile), and say UNCONFIGURED only when it is an environment pin.
+	 */
+	const failed = (why) => {
+		const there = readPin(path, { uid, fs });
+		if (there.missing) return pinNew();
+		const session = use(there, path);
+		return { ...session, note: there.pin?.kind === "environment" ? repinFailedNote(why) : null };
+	};
+	const carried = carryJobLog(read.pin.settings.stateDir, resolved.stateDir, id, { uid, fs });
+	if (carried !== null) return failed(carried);
 	const next = pinOf(resolved, "configured", now);
+	const record = randomBytes(8).toString("hex");
 	const aside = `${path}.repinned.${now}.${randomBytes(6).toString("hex")}`;
-	try {
-		fs.renameSync(path, aside);
-	} catch (err) {
-		if (err?.code !== "ENOENT") return use(read, path);
-		// Another hook of this session moved it first: use whatever pin is there, or pin now.
-		const again = readPin(path, { uid, fs });
-		return again.missing ? pinNew() : use(again, path);
-	}
+	const at = new Date(now).toISOString();
 	let recorded;
 	try {
 		recorded = appendRecord(
 			passwdHome,
 			{
 				v: 1,
-				at: new Date(now).toISOString(),
+				id: record,
+				at,
 				session: id,
 				reason:
-					"dead environment pin: the empty key, the conventional config file accepted, and no money moved for this session in its state dir",
+					"dead environment pin: the empty key, the conventional config file accepted, no money moved for this session in its state dir, and a state dir of its own",
 				old: { ...recordable(read.pin), movedTo: aside },
 				new: recordable(next),
 			},
 			{ uid, fs },
 		);
 	} catch {
-		// No record, no re-pin: link the old pin back (a pin made meanwhile wins), and use what is
-		// there. The copy moved aside stays where it is.
-		try {
-			fs.linkSync(aside, path);
-		} catch {
-			// A pin is there already, or the link failed: the read below decides.
-		}
-		const back = readPin(path, { uid, fs });
-		return {
-			...(back.missing ? pinNew() : use(back, path)),
-			note: REPIN_UNRECORDED_NOTE,
-		};
+		// No record, no re-pin: the old pin was never touched.
+		return failed("the re-pin record could not be written");
 	}
+	const swapped = swapPin(path, aside, read.pin, JSON.stringify(next), { uid, fs });
+	if (swapped !== null) {
+		try {
+			appendRecord(
+				passwdHome,
+				{ v: 1, at, session: id, abandoned: record, why: swapped },
+				{ uid, fs },
+			);
+		} catch {
+			// The record above stands alone; the pin at `path` says the re-pin did not happen.
+		}
+		return failed(swapped);
+	}
+	const session = use(readPin(path, { uid, fs }), path, {
+		mode: resolved.mode,
+		failOpen: resolved.failOpen,
+	});
 	return {
-		...pinWith(resolved, next),
-		note: repinnedNote({ createdAt: read.pin.createdAt, record: recorded }),
+		...session,
+		note:
+			session.kind === "configured"
+				? repinnedNote({ createdAt: read.pin.createdAt, record: recorded })
+				: null,
 	};
 }
 
