@@ -86,10 +86,13 @@ export function useLedger(): LedgerData {
 			setData(apply);
 		};
 		// Resyncs begun so far: a snapshot labels its rows with its vault only if it is still the newest one begun, so a
-		// slower, older snapshot never labels rows a newer resync has made unknown. A failed fetch is tried again.
+		// slower, older snapshot never labels rows a newer resync has made unknown. A failed fetch is tried again, and so
+		// is the newest resync whose snapshot is dropped as older than one installed.
 		let resyncsBegun = 0;
 		// The newest resync whose snapshot was installed: an older one's response is dropped, even at the same version.
 		let installedResync = 0;
+		// Resyncs in a row that installed nothing (a failed fetch, or a snapshot answered older than one installed): the
+		// backoff's count, reset once a snapshot installs.
 		let failures = 0;
 		let retry: ReturnType<typeof setTimeout> | undefined;
 		const resync = (): void => {
@@ -101,7 +104,6 @@ export function useLedger(): LedgerData {
 			if (!cancelled) setData((d) => ({ ...d, rowsVault: null }));
 			fetchAll()
 				.then(({ rows, summary, version, vault }) => {
-					failures = 0;
 					// An older resync's snapshot, landing after a newer one installed, is dropped (even at the same version).
 					if (cancelled || mine < installedResync) return;
 					// liveIds is flash state for SSE arrivals only — a resync
@@ -115,7 +117,18 @@ export function useLedger(): LedgerData {
 						rowsVault: mine === resyncsBegun ? vault : null,
 						phase: "loaded" as const,
 					}));
-					if (install === undefined) return;
+					if (install === undefined) {
+						// Dropped as older than a snapshot already installed on this connection: the server answered an
+						// earlier resync after this one, and that snapshot was installed with its vault unknown. The newest
+						// resync asks again with the backoff of a failed fetch, so a server that keeps answering stale is
+						// never asked in a loop; asked after that answer arrived, the server answers at least its version.
+						if (mine === resyncsBegun) {
+							failures += 1;
+							retry = setTimeout(resync, resyncRetryDelay(failures));
+						}
+						return;
+					}
+					failures = 0;
 					installedResync = mine;
 					setData((d) => ({
 						...install(d),

@@ -51,4 +51,24 @@ describe("the store's rows and the vault they come from", () => {
 		expect(fn).toMatch(/installedResync = mine;/);
 		expect(fn.indexOf("mine < installedResync")).toBeLessThan(fn.indexOf("replay.land("));
 	});
+
+	it("the newest resync, its snapshot dropped as older than one installed, asks again through the backoff; a newer resync or leaving the page cancels it", () => {
+		const fn = /const resync = \(\): void => \{([\s\S]*?)\n\t\t\};\n/.exec(store)?.[1] ?? "";
+		// The branch where `land` drops the snapshot: only the newest resync begun asks again, with the same backoff as a
+		// failed fetch (`resyncRetryDelay`, doubling to 30 s), never at a fixed delay.
+		const branch = fn.indexOf("if (install === undefined) {");
+		expect(branch).toBeGreaterThanOrEqual(0);
+		const dropped = /if \(install === undefined\) \{([\s\S]*?)\breturn;\s*\}/.exec(fn)?.[1] ?? "";
+		expect(dropped).toMatch(
+			/if \(mine === resyncsBegun\) \{\s*failures \+= 1;\s*retry = setTimeout\(resync, resyncRetryDelay\(failures\)\);\s*\}/,
+		);
+		// The count is reset only once a snapshot installs, so a server that keeps answering stale is asked ever more slowly.
+		expect(fn.indexOf("failures = 0;")).toBeGreaterThan(branch);
+		expect(fn.match(/failures = 0;/g)?.length).toBe(1);
+		// A newer resync clears the timer before it fetches, and so does leaving the page.
+		expect(fn.indexOf("clearTimeout(retry)")).toBeGreaterThanOrEqual(0);
+		expect(fn.indexOf("clearTimeout(retry)")).toBeLessThan(fn.indexOf("fetchAll()"));
+		const cleanup = store.slice(store.lastIndexOf("return () => {"));
+		expect(cleanup).toMatch(/clearTimeout\(retry\)/);
+	});
 });
