@@ -4047,7 +4047,15 @@ describe("estimate mode is inherited by a fork only; a subagent's missing transc
 			expect(pre.stderr).toContain("no transcript path; this agent now settles at the ESTIMATE");
 			await run("post-tool-use.mjs", postInput("tu_w1", wfInput));
 			// mutant: no lstat in subagentIds → the agents outside are listed as this session's
-			const { subagentIds, transcriptPathFor } = await import("../hooks/transcript.mjs");
+			const { subagentIds, transcriptPathFor } = (await import(
+				/* @vite-ignore */ TRANSCRIPT_HOOK
+			)) as {
+				subagentIds: (input: { transcript_path: string }) => Promise<string[]>;
+				transcriptPathFor: (
+					input: { transcript_path: string },
+					agentId: string,
+				) => string | undefined;
+			};
 			const main = { transcript_path: mainTranscript };
 			expect(await subagentIds(main)).toEqual([]);
 			expect(transcriptPathFor(main, "x9")).toBeUndefined();
