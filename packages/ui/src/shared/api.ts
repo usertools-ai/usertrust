@@ -6,6 +6,7 @@
  * from `../shared/api.js` — never from server code (Amendment A2).
  */
 
+import type { Dimension } from "./breakdown.js";
 import type { RowStatus } from "./rows.js";
 
 export interface SummaryPayload {
@@ -156,4 +157,23 @@ export interface AtPayload {
 	 * before `pos` whose transfer has a record after it. Every other row at or before `pos` has its current status.
 	 */
 	statusAt: Record<string, RowStatus>;
+}
+
+/** One key's spend (usertokens) and spend-bearing call count over every record of the vault. */
+export interface KeyTotal {
+	key: string;
+	spendUt: number;
+	calls: number;
+}
+
+/**
+ * `GET /api/totals`: per dimension, the keys over EVERY record of the vault, ranked as `breakdown` ranks them (spend,
+ * highest first, ties A to Z) and cut at `TOTALS_KEYS_MAX`; `more` counts the keys left out. `records` counts every
+ * record read, spend or not. `epoch` is the one `/api/at` reports: it moves when a reload replaces the records.
+ */
+export interface TotalsPayload {
+	epoch: number;
+	records: number;
+	dims: Record<Dimension, KeyTotal[]>;
+	more: Record<Dimension, number>;
 }
