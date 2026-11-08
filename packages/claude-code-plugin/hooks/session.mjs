@@ -60,7 +60,12 @@
 // 2. the re-pin is appended to <private state>/repins/repins.jsonl (old pin, new pin with
 //    the key hashed, reason), synced, while the old pin is still in place;
 // 3. the old pin is kept aside under a second name (a hard link, never a deletion), and
-//    ONE rename puts the new pin in its place (`swapPin`).
+//    ONE rename puts the new pin in its place (`swapPin`);
+// 4. what was appended to the old job log since step 1 is carried too (`carryJobTail`): the
+//    job-log writers take no lock, so a `usertrust-job start` or `stop` that read the old pin
+//    may append there meanwhile. It is appended only while the new log is still what step 1
+//    carried; otherwise SessionStart warns to run it again. The CLI reads the pin again after
+//    its append and says the same when the pin moved (bin/usertrust-job.mjs).
 // So every other hook of the session reads a pin throughout: the old one, then the new
 // one. A step that fails leaves the old pin in place, and SessionStart warns, loudly, that
 // the session is UNCONFIGURED, with why; a swap that fails after its record is followed by
@@ -97,6 +102,7 @@ import {
 	refusalNote,
 	refusedSettings,
 	repinFailedNote,
+	repinJobLostNote,
 	repinnedNote,
 	resolveSettings,
 	unconfiguredNote,
@@ -610,37 +616,100 @@ function replace(path, content, { fs }) {
 /**
  * Carry session `id`'s job log (job-log.mjs `jobLogPath`, `<stateDir>/jobs/<id>.jsonl`: a valid
  * session id is its own sanitized name) from the dead pin's state dir to the new one, so
- * `usertrust-job` keeps working there, an open job included. Null when it is carried, or there is
- * none; else the fixed reason it is not. The old log is read, never changed. A log already in the
- * new dir is kept when it is the same bytes, and replaced when it is a beginning of them (an
- * earlier carry whose re-pin then failed, while the log grew); any other one refuses the re-pin.
+ * `usertrust-job` keeps working there, an open job included. `{ why: null, text }` when it is
+ * carried (`text` is what was carried, "" when there is no log), else `{ why }`, the fixed reason
+ * it is not. The old log is read, never changed. A log already in the new dir is kept when it is
+ * the same bytes, and replaced when it is a beginning of them (an earlier carry whose re-pin then
+ * failed, while the log grew); any other one refuses the re-pin. The job-log writers take no lock,
+ * so this is one snapshot: `carryJobTail` brings over what was appended after it.
  */
 function carryJobLog(oldDir, newDir, id, { uid, fs }) {
 	const from = join(oldDir, "jobs", `${id}.jsonl`);
 	try {
 		fs.lstatSync(from);
 	} catch (err) {
-		return err?.code === "ENOENT" ? null : "the session's job log is unreadable";
+		return err?.code === "ENOENT"
+			? { why: null, text: "" }
+			: { why: "the session's job log is unreadable" };
 	}
 	const text = boundedText(from, { uid, fs });
-	if (text === null) return "the session's job log is unreadable";
+	if (text === null) return { why: "the session's job log is unreadable" };
 	const dir = join(newDir, "jobs");
 	const to = join(dir, `${id}.jsonl`);
 	try {
 		fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 		const outcome = publish(to, text, { fs });
-		if (outcome === "won") return null;
-		if (outcome === "nolink") return "the session's job log could not be carried (no hard links)";
+		if (outcome === "won") return { why: null, text };
+		if (outcome === "nolink") {
+			return { why: "the session's job log could not be carried (no hard links)" };
+		}
 		const there = boundedText(to, { uid, fs });
-		if (there === text) return null;
+		if (there === text) return { why: null, text };
 		if (there === null || !text.startsWith(there)) {
-			return "the new state dir already holds another job log of this session";
+			return { why: "the new state dir already holds another job log of this session" };
 		}
 		replace(to, text, { fs });
-		return null;
+		return { why: null, text };
 	} catch {
-		return "the session's job log could not be written to the new state dir";
+		return { why: "the session's job log could not be written to the new state dir" };
 	}
+}
+
+/**
+ * After the swap, carry the lines appended to the old job log since `carried` (what `carryJobLog`
+ * copied): a `usertrust-job start` or `stop` that read the old pin, before the swap or just after
+ * it, appends there, and the re-pinned session would otherwise keep the job it had. Null when
+ * nothing is left behind, else the fixed reason SessionStart warns about (`repinJobLostNote`).
+ * - Only whole lines are carried. A last line still being written is the CLI's to report: after
+ *   its append it reads the pin again, and finds it moved (bin/usertrust-job.mjs).
+ * - The lines are appended only while the new log is still exactly `carried`. A line of the new
+ *   dir's own (a CLI that read the new pin) comes after the old ones in time, and lines apply in
+ *   file order (job-log.mjs), so an old line is never placed after it: nothing is appended, and
+ *   SessionStart says so. After the append the new log must begin with `carried` and the lines;
+ *   one appended between that check and this append is said the same way.
+ */
+function carryJobTail(oldDir, newDir, id, carried, { uid, fs }) {
+	const from = join(oldDir, "jobs", `${id}.jsonl`);
+	try {
+		fs.lstatSync(from);
+	} catch (err) {
+		if (err?.code === "ENOENT" && carried === "") return null;
+		return "the old job log could not be read again";
+	}
+	const now = boundedText(from, { uid, fs });
+	if (now === null) return "the old job log could not be read again";
+	if (now === carried) return null;
+	if (!now.startsWith(carried)) return "the old job log changed other than by an append";
+	const tail = now.slice(carried.length);
+	const lines = tail.slice(0, tail.lastIndexOf("\n") + 1);
+	if (lines === "") return null;
+	const to = join(newDir, "jobs", `${id}.jsonl`);
+	const there = boundedText(to, { uid, fs });
+	if (there !== carried) return "the new state dir's job log was written meanwhile";
+	try {
+		const fd = fs.openSync(
+			to,
+			constants.O_WRONLY |
+				constants.O_APPEND |
+				(constants.O_NOFOLLOW ?? 0) |
+				(constants.O_NONBLOCK ?? 0),
+		);
+		try {
+			const info = fs.fstatSync(fd);
+			if (!info.isFile() || (uid !== null && info.uid !== uid)) throw new Error("refused");
+			fs.writeFileSync(fd, lines);
+			fs.fsyncSync(fd);
+		} finally {
+			fs.closeSync(fd);
+		}
+	} catch {
+		return "the new state dir's job log could not be appended to";
+	}
+	const after = boundedText(to, { uid, fs });
+	if (after === null || !after.startsWith(carried + lines)) {
+		return "the new state dir's job log was written meanwhile";
+	}
+	return null;
 }
 
 /**
@@ -857,7 +926,7 @@ export function sessionSettings({
 		return { ...session, note: there.pin?.kind === "environment" ? repinFailedNote(why) : null };
 	};
 	const carried = carryJobLog(read.pin.settings.stateDir, resolved.stateDir, id, { uid, fs });
-	if (carried !== null) return failed(carried);
+	if (carried.why !== null) return failed(carried.why);
 	const gapsCarried = carryGaps(read.pin.settings.stateDir, resolved.stateDir, id, { uid, fs });
 	if (gapsCarried !== null) return failed(gapsCarried);
 	const next = pinOf(resolved, "configured", now);
@@ -897,17 +966,17 @@ export function sessionSettings({
 		}
 		return failed(swapped);
 	}
+	const lost = carryJobTail(read.pin.settings.stateDir, resolved.stateDir, id, carried.text, {
+		uid,
+		fs,
+	});
 	const session = use(readPin(path, { uid, fs }), path, {
 		mode: resolved.mode,
 		failOpen: resolved.failOpen,
 	});
-	return {
-		...session,
-		note:
-			session.kind === "configured"
-				? repinnedNote({ createdAt: read.pin.createdAt, record: recorded })
-				: null,
-	};
+	if (session.kind !== "configured") return { ...session, note: null };
+	const said = repinnedNote({ createdAt: read.pin.createdAt, record: recorded });
+	return { ...session, note: lost === null ? said : `${said} ${repinJobLostNote(lost)}` };
 }
 
 /** Mark a pin used now, so `sweep` keeps it while its session lives. Best effort. */

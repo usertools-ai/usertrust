@@ -11,6 +11,7 @@ import {
 	readdir,
 	readFile,
 	realpath,
+	rename,
 	stat,
 	truncate,
 	utimes,
@@ -458,6 +459,52 @@ describe("usertrust-job in a session: its paths come from the session's pin, as 
 		// The job is open in the pinned log only. mutant: the current state dir's logs are
 		// read, which hold no interval of it, and no such gap
 		expect(r.stdout).toContain("job still running");
+	});
+});
+
+describe("usertrust-job while its session is re-pinned: a change written under the old pin is never silently left there", () => {
+	it("the pin moves to another state dir while start runs: it exits 1 and says to run it again", async () => {
+		const home = await realpath(await mkdtemp(join(tmpdir(), "utcc-job-home-")));
+		const pin = join(home, ".local", "state", "usertrust", "sessions", `${SID}.json`);
+		const other = await mkdtemp(join(tmpdir(), "utcc-job-other-"));
+		await mkdir(join(other, "jobs"), { recursive: true });
+		const otherLog = start(SID, Date.now() - 5000);
+		await writeFile(join(other, "jobs", `${SID}.jsonl`), otherLog);
+		// No log in `state` yet: the CLI pins the session there, then waits for the log.
+		const child = spawnCli(["start", "bug-2"], {
+			CLAUDE_CODE_SESSION_ID: SID,
+			UT_CC_JOB_WAIT_MS: "20000",
+			TEST_PASSWD_HOME: home,
+		});
+		let stderr = "";
+		child.stderr.on("data", (c) => {
+			stderr += c;
+		});
+		const closed = new Promise<number>((resolve) =>
+			child.on("close", (code) => resolve(code ?? 1)),
+		);
+		const until = Date.now() + 20_000;
+		const made = () =>
+			stat(pin).then(
+				() => true,
+				() => false,
+			);
+		while (!(await made()) && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
+		// It read the pin as it made it, and is waiting for the log: the re-pin happens now.
+		await new Promise((r) => setTimeout(r, 400));
+		const moved = JSON.parse(await readFile(pin, "utf-8")) as { settings: { stateDir: string } };
+		moved.settings.stateDir = other;
+		await writeFile(`${pin}.tmp`, JSON.stringify(moved), { mode: 0o600 });
+		await rename(`${pin}.tmp`, pin);
+		await mkdir(join(state, "jobs"), { recursive: true });
+		await writeFile(join(state, "jobs", `${SID}.jsonl`), start(SID, Date.now() - 4000));
+		const code = await closed;
+		// mutant: no second read of the pin → exit 0, and bug-2 is open only in the old dir's log
+		expect(code).toBe(1);
+		expect(stderr).toContain("this session was re-pinned while it ran");
+		expect(stderr).toContain("run it again");
+		expect(await readFile(join(state, "jobs", `${SID}.jsonl`), "utf-8")).toContain('"job":"bug-2"');
+		expect(await readFile(join(other, "jobs", `${SID}.jsonl`), "utf-8")).toBe(otherLog);
 	});
 });
 

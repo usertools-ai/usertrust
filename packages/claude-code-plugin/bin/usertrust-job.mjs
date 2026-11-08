@@ -20,7 +20,10 @@
 // In a session, every path comes from the session's pin, as every hook's settings do: a
 // state dir changed since the session began is not where its hooks keep its log. A
 // session with no pin yet is pinned now (hooks/session.mjs), as its next hook would be:
-// the one write outside the state dir, and `coverage`'s only one. Outside a session, the
+// the one write outside the state dir, and `coverage`'s only one. After `start` or `stop`
+// appends, the pin is read again: when the session was re-pinned to another state dir
+// meanwhile, the change may be only in the old dir's log, and it exits 1 saying to run it
+// again (a second `start` of the same job, or a second `stop`, changes nothing). Outside a session, the
 // paths come from what a new session would read now, the conventional config file included,
 // and a refused file is no verdict unless `--jobs` and `--watch` are both given.
 //
@@ -180,6 +183,7 @@ try {
 			say("usertrust-job: CLAUDE_CODE_SESSION_ID is not set, so there is no session to label");
 			process.exit(2);
 		}
+		const before = jobsDir();
 		const result = await appendJobOp(sessionId, command, started?.job ?? null, {
 			waitMs: waitMs(),
 			...(started?.type === undefined
@@ -188,6 +192,18 @@ try {
 		});
 		if (!result.ok) {
 			say(`usertrust-job: ${result.reason}`);
+			process.exit(1);
+		}
+		// The job-log writers take no lock, and a resume or compact can re-pin the session to
+		// another state dir while this runs (hooks/session.mjs `repin`). So the pin is read again
+		// after the append: when it moved, the change went to the old dir's log, and that dir's
+		// session no longer reads it. The re-pin carries what it finds there after its swap
+		// (`carryJobTail`), but a change written after that is left behind: said, never silent.
+		usePinnedSession();
+		if (jobsDir() !== before) {
+			say(
+				"usertrust-job: this session was re-pinned while it ran, so the change may be only in the old state dir's job log: run it again",
+			);
 			process.exit(1);
 		}
 		if (result.noop) say("usertrust-job: no job is open");

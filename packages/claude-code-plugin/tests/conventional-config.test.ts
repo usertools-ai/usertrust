@@ -676,6 +676,171 @@ describe("session.mjs: SessionStart re-pins a DEAD environment pin to the conven
 		expect(await readFile(join(fresh, "jobs", `${SESSION}.jsonl`), "utf-8")).toBe(JOB_LOG);
 	});
 
+	/** A `usertrust-job stop` as the CLI writes it: one whole line, appended (job-log.mjs `appendLine`). */
+	const STOP = `${JSON.stringify({ sid: SESSION, ts: "2026-11-07T23:52:00.000Z", op: "stop", job: null })}\n`;
+
+	/**
+	 * `fs`, with `inside` run once inside the re-pin: at the record's fsync (after the job log is
+	 * carried, before the swap), or at the pin's rename (the swap, done: a CLI that read the old pin
+	 * before it and writes after it).
+	 */
+	const opInside = (at: "record" | "swap", inside: () => void) => {
+		let recordFd: number | undefined;
+		let done = false;
+		const once = () => {
+			if (done) return;
+			done = true;
+			inside();
+		};
+		return {
+			...nodeFs,
+			openSync: (
+				path: nodeFs.PathLike,
+				flags: nodeFs.OpenMode = "r",
+				mode?: nodeFs.Mode | null,
+			) => {
+				const fd = nodeFs.openSync(path, flags, mode);
+				if (String(path).endsWith("repins.jsonl")) recordFd = fd;
+				return fd;
+			},
+			fsyncSync: (fd: number) => {
+				nodeFs.fsyncSync(fd);
+				if (at === "record" && fd === recordFd) once();
+			},
+			renameSync: (from: nodeFs.PathLike, to: nodeFs.PathLike) => {
+				nodeFs.renameSync(from, to);
+				if (at === "swap" && String(to).endsWith(`${SESSION}.json`)) once();
+			},
+		} as typeof nodeFs;
+	};
+
+	for (const at of ["record", "swap"] as const) {
+		it(`a job op written to the old log inside the re-pin (at the ${at}) is carried after the swap: the new log ends with it`, async () => {
+			const { sessionSettings } = await sessionModule();
+			const home = await makeHome();
+			const fresh = await makeDir("utcc-conv-new-");
+			const old = await deadWithJobLog(home, fresh);
+			const fs = opInside(at, () =>
+				nodeFs.appendFileSync(join(old, "jobs", `${SESSION}.jsonl`), STOP),
+			);
+			const session = sessionSettings({
+				env: unconfigured(old),
+				payload: { session_id: SESSION },
+				passwdHome: home,
+				uid: UID,
+				repin: true,
+				fs,
+			});
+			expect(session.kind).toBe("configured");
+			// mutant: one snapshot of the old log → job-1 stays open in the new dir, and later spend is its
+			expect(await readFile(join(fresh, "jobs", `${SESSION}.jsonl`), "utf-8")).toBe(JOB_LOG + STOP);
+			expect(session.note).toContain("this session was RE-PINNED");
+			expect(session.note).not.toContain("WARNING");
+		});
+	}
+
+	it("only whole lines are carried after the swap: a last line still being written stays behind (its CLI reads the pin again)", async () => {
+		const { sessionSettings } = await sessionModule();
+		const home = await makeHome();
+		const fresh = await makeDir("utcc-conv-new-");
+		const old = await deadWithJobLog(home, fresh);
+		const fs = opInside("record", () =>
+			nodeFs.appendFileSync(
+				join(old, "jobs", `${SESSION}.jsonl`),
+				`${STOP}{"sid":"${SESSION}","ts"`,
+			),
+		);
+		const session = sessionSettings({
+			env: unconfigured(old),
+			payload: { session_id: SESSION },
+			passwdHome: home,
+			uid: UID,
+			repin: true,
+			fs,
+		});
+		expect(session.kind).toBe("configured");
+		// mutant: the fragment carried too → a torn last line, and the new log is invalid
+		expect(await readFile(join(fresh, "jobs", `${SESSION}.jsonl`), "utf-8")).toBe(JOB_LOG + STOP);
+		expect(session.note).not.toContain("WARNING");
+	});
+
+	it("a line of the new dir's own appended between the check and the carry: SessionStart says to run it again", async () => {
+		const { sessionSettings } = await sessionModule();
+		const home = await makeHome();
+		const fresh = await makeDir("utcc-conv-new-");
+		const old = await deadWithJobLog(home, fresh);
+		const newLog = join(fresh, "jobs", `${SESSION}.jsonl`);
+		const theirs = `${JSON.stringify({ sid: SESSION, ts: "2026-11-07T23:53:00.000Z", op: "start", job: "job-2" })}\n`;
+		const record = opInside("record", () =>
+			nodeFs.appendFileSync(join(old, "jobs", `${SESSION}.jsonl`), STOP),
+		);
+		let raced = false;
+		const fs = {
+			...record,
+			// The carry's own open of the new log, to append: another writer gets there first.
+			openSync: (
+				path: nodeFs.PathLike,
+				flags: nodeFs.OpenMode = "r",
+				mode?: nodeFs.Mode | null,
+			) => {
+				const fd = record.openSync(path, flags, mode);
+				if (
+					!raced &&
+					String(path) === newLog &&
+					typeof flags === "number" &&
+					flags & nodeFs.constants.O_APPEND
+				) {
+					raced = true;
+					nodeFs.appendFileSync(newLog, theirs);
+				}
+				return fd;
+			},
+		} as typeof nodeFs;
+		const session = sessionSettings({
+			env: unconfigured(old),
+			payload: { session_id: SESSION },
+			passwdHome: home,
+			uid: UID,
+			repin: true,
+			fs,
+		});
+		expect(raced).toBe(true);
+		expect(session.kind).toBe("configured");
+		// mutant: no check after the append → the older stop lands after job-2's start, silently
+		expect(session.note).toContain(
+			"usertrust: WARNING: a job change made during the re-pin may be only in the old state dir's job log",
+		);
+	});
+
+	it("a job op in the old log after the swap while the new log was written too: nothing is appended, and SessionStart says to run it again", async () => {
+		const { sessionSettings } = await sessionModule();
+		const home = await makeHome();
+		const fresh = await makeDir("utcc-conv-new-");
+		const old = await deadWithJobLog(home, fresh);
+		const theirs = `${JSON.stringify({ sid: SESSION, ts: "2026-11-07T23:53:00.000Z", op: "start", job: "job-2" })}\n`;
+		const fs = opInside("swap", () => {
+			nodeFs.appendFileSync(join(old, "jobs", `${SESSION}.jsonl`), STOP);
+			nodeFs.appendFileSync(join(fresh, "jobs", `${SESSION}.jsonl`), theirs);
+		});
+		const session = sessionSettings({
+			env: unconfigured(old),
+			payload: { session_id: SESSION },
+			passwdHome: home,
+			uid: UID,
+			repin: true,
+			fs,
+		});
+		expect(session.kind).toBe("configured");
+		// The old op is never placed after a newer one: the new log is left as its writer made it.
+		expect(await readFile(join(fresh, "jobs", `${SESSION}.jsonl`), "utf-8")).toBe(JOB_LOG + theirs);
+		// mutant: the tail appended anyway, or no warning → the older stop closes job-2, silently
+		expect(session.note).toContain("this session was RE-PINNED");
+		expect(session.note).toContain(
+			"usertrust: WARNING: a job change made during the re-pin may be only in the old state dir's job log",
+		);
+		expect(session.note).toContain("run usertrust-job.mjs start <job-id> (or stop) again");
+	});
+
 	it("another job log of the session already in the new state dir refuses the re-pin, before any record", async () => {
 		const { sessionSettings } = await sessionModule();
 		const home = await makeHome();

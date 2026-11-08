@@ -594,6 +594,14 @@ export function repinnedNote({ createdAt, record }) {
 }
 
 /**
+ * SessionStart's warning, after a re-pin, that a job change made while it ran may be in the old state
+ * dir's job log only (session.mjs `carryJobTail`): `why` is the fixed reason it was not carried.
+ */
+export function repinJobLostNote(why) {
+	return `usertrust: WARNING: a job change made during the re-pin may be only in the old state dir's job log (${why}): run usertrust-job.mjs start <job-id> (or stop) again.`;
+}
+
+/**
  * SessionStart's warning for a dead pin still in place because its re-pin did not complete: `why`
  * is the fixed reason (the record could not be written, the job log could not be carried, ...).
  */
