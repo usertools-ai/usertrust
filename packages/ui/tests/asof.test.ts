@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { AtPayload, SummaryPayload } from "../src/shared/api.js";
-import { chainAt, cutRows, windowNote, windowNoteAt } from "../src/shared/asof.js";
+import { chainAt, cutRows, rowsAsAnswered, windowNote, windowNoteAt } from "../src/shared/asof.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 
 function row(pos: number, overrides: Partial<LedgerRow> = {}): LedgerRow {
@@ -71,6 +71,19 @@ describe("cutRows", () => {
 		expect(cutRows(held, payload)).toEqual([]);
 		expect(windowNoteAt(payload)).toBe(
 			"The list holds records from position 101; earlier records still count in the totals above.",
+		);
+	});
+
+	it("rows the server no longer holds are not drawn: it has no statuses for them (a later record may have changed theirs)", () => {
+		// The page kept rows 0 and 1 after the server's window moved to 2; a later ambiguity changed row 1 just before it
+		// was evicted, so its live status is not the one it had at 3.
+		const kept = [row(0), row(1, { status: "ambiguous" }), row(2), row(3), row(4)];
+		const out = cutRows(kept, at({ pos: 3, head: 4, windowStartPos: 2 }));
+		expect(out.map((r) => r.pos)).toEqual([2, 3]);
+		// Out of order (never expected) is cut the same way.
+		const shuffled = [kept[3], kept[1], kept[2], kept[0]] as LedgerRow[];
+		expect(cutRows(shuffled, at({ pos: 3, head: 4, windowStartPos: 2 })).map((r) => r.pos)).toEqual(
+			[3, 2],
 		);
 	});
 
@@ -181,5 +194,48 @@ describe("cutRows on a large, position-ordered window", () => {
 	it("rows that are not in position order are still cut right (no prefix assumed)", () => {
 		const shuffled = [row(3), row(1), row(4), row(0), row(2)];
 		expect(cutRows(shuffled, at({ pos: 2 })).map((r) => r.pos)).toEqual([1, 0, 2]);
+	});
+});
+
+describe("rowsAsAnswered", () => {
+	// A row's status changed live (an ambiguity after an optimistic settlement) after the answer for position 2 was read:
+	// the answer has no statusAt for it, and the row at 2 was settled then.
+	const answered = [row(0), row(1), row(2), row(3)];
+	const changed = (rows: LedgerRow[], pos: number): LedgerRow[] =>
+		rows.map((r) => (r.pos === pos ? { ...r, status: "ambiguous" as const } : r));
+
+	it("keeps the status a row had when the answer was read, until an answer that covers the change lands", () => {
+		const now = changed(answered, 1);
+		const out = rowsAsAnswered(now, answered, at({ pos: 2 }));
+		expect(out[1]?.status).toBe("settled");
+		expect(out[1]).toBe(answered[1]);
+		// A row after the position is not the answer's to hold.
+		expect(rowsAsAnswered(changed(answered, 3), answered, at({ pos: 2 }))[3]?.status).toBe(
+			"ambiguous",
+		);
+		// And cut at the position it reads settled, as it was.
+		expect(cutRows(out, at({ pos: 2 })).map((r) => r.status)).toEqual([
+			"settled",
+			"settled",
+			"settled",
+		]);
+	});
+
+	it("leaves a row the answer has a status for to the answer", () => {
+		const now = changed(answered, 1);
+		const payload = at({ pos: 2, statusAt: { [answered[1]?.hash ?? ""]: "settled" } });
+		expect(rowsAsAnswered(now, answered, payload)).toBe(now);
+	});
+
+	it("is the rows themselves when nothing changed, live, or no row was held when the answer was read", () => {
+		expect(rowsAsAnswered(answered, answered, at({ pos: 2 }))).toBe(answered);
+		const copy = [...answered];
+		expect(rowsAsAnswered(copy, answered, at({ pos: 2 }))).toBe(copy);
+		const now = changed(answered, 1);
+		expect(rowsAsAnswered(now, answered, null)).toBe(now);
+		expect(rowsAsAnswered(now, [], at({ pos: 2 }))).toBe(now);
+		// Rows that arrived after the answer was read are shown as they are.
+		const more = [...now, row(4)];
+		expect(rowsAsAnswered(more, answered, at({ pos: 4 }))[4]).toBe(more[4]);
 	});
 });

@@ -43,7 +43,11 @@ function prefixLength(rows: readonly LedgerRow[], pos: number): number {
  * The rows at positions `0..at.pos`, with `status` taken from `at.statusAt` (by event hash) where it has one. A
  * replaced row is a new object; every other row keeps its identity, so a list keyed on rows redraws only what changed.
  *
- * The rows are held in position order, so the cut is a prefix: found by binary search and copied, then the few rows
+ * Only rows the server still holds (`windowStartPos` and after) are drawn: the page keeps rows the server has since
+ * evicted, and `statusAt` has nothing for them, so a later record's change to one would show as its status at the
+ * position.
+ *
+ * The rows are held in position order, so the cut is a range: found by binary search and copied, then the few rows
  * `statusAt` names are replaced, looked for from the cut's end back (they are the rows whose transfer is still open at
  * the position, so they sit near it), stopping once all are found. Rows out of order (never expected) are cut one by
  * one, as before.
@@ -55,10 +59,10 @@ export function cutRows(rows: LedgerRow[], at: AtPayload): LedgerRow[] {
 	};
 	if (!inPositionOrder(rows)) {
 		const out: LedgerRow[] = [];
-		for (const r of rows) if (r.pos <= at.pos) out.push(status(r));
+		for (const r of rows) if (r.pos >= at.windowStartPos && r.pos <= at.pos) out.push(status(r));
 		return out;
 	}
-	const out = rows.slice(0, prefixLength(rows, at.pos));
+	const out = rows.slice(prefixLength(rows, at.windowStartPos - 1), prefixLength(rows, at.pos));
 	let left = Object.keys(at.statusAt).length;
 	for (let i = out.length - 1; i >= 0 && left > 0; i--) {
 		const r = out[i] as LedgerRow;
@@ -67,6 +71,44 @@ export function cutRows(rows: LedgerRow[], at: AtPayload): LedgerRow[] {
 		out[i] = status(r);
 	}
 	return out;
+}
+
+/** The rows by event hash, per array: rows are replaced, never mutated. */
+const byHash = new WeakMap<readonly LedgerRow[], Map<string, LedgerRow>>();
+function indexByHash(rows: readonly LedgerRow[]): Map<string, LedgerRow> {
+	let index = byHash.get(rows);
+	if (index === undefined) {
+		index = new Map(rows.map((r) => [r.hash, r]));
+		byHash.set(rows, index);
+	}
+	return index;
+}
+
+/**
+ * `rows` with each row at or before the answer's position given the status it had when the answer was read
+ * (`answeredRows`: the rows the page held then), unless the answer names one for it. A live `status` frame can change an
+ * earlier row between an answer and its re-read; the answer has no status for that row yet, and the row is no later
+ * than the position, so the change is not what the position recorded. The re-read takes it up (`statusAt`), and
+ * until it lands the list keeps what the answer was read against. `rows` itself when nothing differs.
+ */
+export function rowsAsAnswered(
+	rows: LedgerRow[],
+	answeredRows: readonly LedgerRow[],
+	at: AtPayload | null,
+): LedgerRow[] {
+	if (at === null || rows === answeredRows) return rows;
+	let index: Map<string, LedgerRow> | undefined;
+	let out: LedgerRow[] | undefined;
+	for (let i = 0; i < rows.length; i++) {
+		const r = rows[i] as LedgerRow;
+		if (r.pos > at.pos || Object.hasOwn(at.statusAt, r.hash)) continue;
+		index ??= indexByHash(answeredRows);
+		const was = index.get(r.hash);
+		if (was === undefined || was === r || was.status === r.status) continue;
+		out ??= rows.slice();
+		out[i] = was;
+	}
+	return out ?? rows;
 }
 
 /** A position as the page prints it: counted from 1, as the integrity texts count chain positions. */

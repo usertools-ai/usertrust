@@ -66,7 +66,8 @@ export function listView(input: ListInput): ListView {
 }
 
 function beforeWindowAt(rows: LedgerRow[], at: AtPayload): BeforeWindow {
-	const first = rows[0];
+	// The first row the server still holds: the page keeps rows it has since evicted, and those are not drawn.
+	const first = rows.find((r) => r.pos >= at.windowStartPos);
 	return first !== undefined && at.pos < at.windowStartPos
 		? { kind: "before", firstHeld: first.pos, upTo: at.pos }
 		: { kind: "not-held", upTo: at.pos };

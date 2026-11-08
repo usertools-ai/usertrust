@@ -227,6 +227,40 @@ describe("AtFollower", () => {
 		expect(h.views.length).toBe(published);
 	});
 
+	it("a re-read that changes where the budget came from or when is shown, though its figure is the same", async () => {
+		const budget = (over: Partial<AtPayload["budget"]>): AtPayload["budget"] => ({
+			ut: 1_000_000,
+			source: "config",
+			writtenAt: null,
+			provenance: "from the vault config",
+			note: "today's budget",
+			...over,
+		});
+		const h = harness();
+		h.follower.want(40);
+		h.calls[0]?.resolve(at({ pos: 40, budget: budget({}) }));
+		await h.flush();
+		const variants: Array<Partial<AtPayload["budget"]>> = [
+			{ source: "governor", writtenAt: "2026-11-07T00:00:00.000Z", provenance: "enforced" },
+			{ source: "governor", writtenAt: "2026-11-08T00:00:00.000Z", provenance: "enforced" },
+			{
+				source: "governor",
+				writtenAt: "2026-11-08T00:00:00.000Z",
+				provenance: "enforced, as recorded",
+			},
+		];
+		let n = 1;
+		for (const v of variants) {
+			const before = h.last().at;
+			h.follower.refresh();
+			h.calls[n]?.resolve(at({ pos: 40, budget: budget(v) }));
+			n += 1;
+			await h.flush();
+			expect(h.last().at).not.toBe(before);
+			expect(h.last().at?.budget).toMatchObject(v);
+		}
+	});
+
 	describe("a request that never answers", () => {
 		afterEach(() => {
 			vi.useRealTimers();

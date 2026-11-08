@@ -62,6 +62,9 @@ function sameReading(a: AtPayload, b: AtPayload): boolean {
 		a.chain.valid === b.chain.valid &&
 		a.chain.breakIndex === b.chain.breakIndex &&
 		a.budget.ut === b.budget.ut &&
+		a.budget.source === b.budget.source &&
+		a.budget.writtenAt === b.budget.writtenAt &&
+		a.budget.provenance === b.budget.provenance &&
 		a.budget.note === b.budget.note &&
 		a.counts.llm_call === b.counts.llm_call &&
 		a.counts.denied === b.counts.denied &&

@@ -2,6 +2,8 @@
 // Copyright 2026 Usertools, Inc.
 
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import type { AtPayload } from "../shared/api.js";
+import { rowsAsAnswered } from "../shared/asof.js";
 import { csvFilename, toCsv } from "../shared/csv.js";
 import { EMPTY_FILTERS, isFiltering } from "../shared/filters.js";
 import {
@@ -46,14 +48,26 @@ export function App(): React.JSX.Element {
 	// only ever drawn from its own answer.
 	const { view: atView, preview } = useAt(at, summary, live);
 	const shownAt = atView.at;
+	// The rows the page held when the answer was read. A live `status` frame can change an earlier row before the
+	// answer is read again; until then the past view keeps the status the answer was read against (`rowsAsAnswered`).
+	// Set while rendering, from state, when the answer is a new one.
+	const [answered, setAnswered] = useState<{ at: AtPayload | null; rows: LedgerRow[] }>({
+		at: shownAt,
+		rows,
+	});
+	if (answered.at !== shownAt) setAnswered({ at: shownAt, rows });
+	const pastRows = useMemo(
+		() => rowsAsAnswered(rows, answered.rows, shownAt),
+		[rows, answered.rows, shownAt],
+	);
 	const head = summary === null ? -1 : summary.chain.events - 1;
 	// What the list, the facets, Trends and Export draw: ONE input, deferred, so a timeline drag paints the thumb, its
 	// label and the header first and the rest follows when there is time, never mixing one position's rows with
 	// another moment's phase or chain (`listView`). The rows are cut at the position before the filters, so all of them
 	// see the vault then.
 	const listInput = useMemo<ListInput>(
-		() => ({ rows, at: shownAt, filters, phase, summary }),
-		[rows, shownAt, filters, phase, summary],
+		() => ({ rows: pastRows, at: shownAt, filters, phase, summary }),
+		[pastRows, shownAt, filters, phase, summary],
 	);
 	// While a timeline drag is on, the list keeps the input it had when the drag began (`heldInput`): only the thumb,
 	// its label and the header follow the drag, and the list renders once on release or after the drag sits still. The
