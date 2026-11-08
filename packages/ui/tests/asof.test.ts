@@ -221,6 +221,17 @@ describe("rowsAsAnswered", () => {
 		]);
 	});
 
+	it("holds nothing when the answer is for a record the page had not yet received: a change that arrives after it may be from a record at or before it", () => {
+		// The answer for position 4 overtook the live stream: the page held records 0..3. Record 4 turns row 1 ambiguous
+		// (a record AT the position, so `statusAt` has nothing for it), and its frame arrives after the answer.
+		const now = changed(answered, 1);
+		const out = rowsAsAnswered(now, answered, at({ pos: 4, head: 4 }));
+		expect(out).toBe(now);
+		expect(out[1]?.status).toBe("ambiguous");
+		// At the last record the page held, every later record is after the position: the change is not the position's.
+		expect(rowsAsAnswered(now, answered, at({ pos: 3, head: 4 }))[1]?.status).toBe("settled");
+	});
+
 	it("leaves a row the answer has a status for to the answer", () => {
 		const now = changed(answered, 1);
 		const payload = at({ pos: 2, statusAt: { [answered[1]?.hash ?? ""]: "settled" } });

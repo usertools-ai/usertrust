@@ -89,7 +89,8 @@ function indexByHash(rows: readonly LedgerRow[]): Map<string, LedgerRow> {
  * (`answeredRows`: the rows the page held then), unless the answer names one for it. A live `status` frame can change an
  * earlier row between an answer and its re-read; the answer has no status for that row yet, and the row is no later
  * than the position, so the change is not what the position recorded. The re-read takes it up (`statusAt`), and
- * until it lands the list keeps what the answer was read against. `rows` itself when nothing differs.
+ * until it lands the list keeps what the answer was read against. Only for a position the page had already
+ * received: for a later one, nothing is held. `rows` itself when nothing differs.
  */
 export function rowsAsAnswered(
 	rows: LedgerRow[],
@@ -97,6 +98,10 @@ export function rowsAsAnswered(
 	at: AtPayload | null,
 ): LedgerRow[] {
 	if (at === null || rows === answeredRows) return rows;
+	// A record that arrives after the page's last one is after the position only when the position is no later than it.
+	// An answer for a record the page had not received yet (it overtook the live stream) can be changed by one at or
+	// before that position, which `statusAt` does not carry: nothing is held then.
+	if ((answeredRows.at(-1)?.pos ?? -1) < at.pos) return rows;
 	let index: Map<string, LedgerRow> | undefined;
 	let out: LedgerRow[] | undefined;
 	for (let i = 0; i < rows.length; i++) {
