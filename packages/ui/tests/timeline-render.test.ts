@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * The header and the timeline at a past position, rendered as the browser gets them. The past view says what it is
+ * The header at a past position, rendered as the browser gets them. The past view says what it is
  * ("As recorded at"), reads every figure from `/api/at` and never today's budget as the budget then, and never says
  * "verified".
  */
@@ -15,7 +15,6 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import type { AtPayload, SummaryPayload } from "../src/shared/api.js";
 import { budgetSourceWord } from "../src/shared/budget-display.js";
 import { formatUsdTotal } from "../src/shared/format.js";
-import { timelineLabel } from "../src/shared/timeline-view.js";
 
 // The components are .tsx files, which the tests' tsconfig (no `jsx`) cannot resolve statically: load them by a
 // computed path, typed here by what the tests use.
@@ -24,27 +23,11 @@ async function app<T>(file: string): Promise<T> {
 	return (await import(/* @vite-ignore */ `../src/app/${file}.js`)) as T;
 }
 
-interface TimelineProps {
-	at: AtPayload | null;
-	wanted: number | null;
-	resolved: number | null;
-	head: number;
-	loading: boolean;
-	error: string | null;
-	reloaded: boolean;
-	holdNote?: string | null;
-	announce?: string;
-	onPreview(pos: number): void;
-	onCommit(pos: number): void;
-	onLive(): void;
-}
-
 let SummaryStrip: Component<{
 	summary: SummaryPayload | null;
 	live: "live";
 	at?: AtPayload | null;
 }>;
-let Timeline: Component<TimelineProps>;
 let Trends: Component<{
 	rows: never[];
 	newestOf: number | undefined;
@@ -54,7 +37,6 @@ let Trends: Component<{
 beforeAll(async () => {
 	Trends = (await app<{ Trends: typeof Trends }>("trends")).Trends;
 	SummaryStrip = (await app<{ SummaryStrip: typeof SummaryStrip }>("summary-strip")).SummaryStrip;
-	Timeline = (await app<{ Timeline: typeof Timeline }>("timeline")).Timeline;
 });
 
 /** The text a reader sees: tags removed, and the entities React escapes read back. */
@@ -543,220 +525,5 @@ describe("the list at a past position before the first row held", () => {
 		expect(html).toContain("The 11 records up to this point count in the totals above");
 		expect(html).not.toMatch(/The list starts at position|Before the first record/);
 		expect(html).not.toMatch(/failed verification/i);
-	});
-});
-
-describe("the timeline", () => {
-	const props = (over: Partial<TimelineProps> = {}): TimelineProps => ({
-		at: null,
-		wanted: null,
-		resolved: null,
-		head: 99,
-		loading: false,
-		error: null,
-		reloaded: false,
-		onPreview: () => {},
-		onCommit: () => {},
-		onLive: () => {},
-		...over,
-	});
-	const render = (over: Partial<TimelineProps> = {}): string =>
-		renderToStaticMarkup(createElement(Timeline, props(over)));
-
-	it("is a native range over 0..head whose aria-valuetext says Live when live", () => {
-		const html = render();
-		expect(html).toMatch(/<input[^>]*type="range"/);
-		expect(html).toMatch(/<input[^>]*min="0"/);
-		expect(html).toMatch(/<input[^>]*max="99"/);
-		expect(html).toMatch(/<input[^>]*aria-valuetext="Live"/);
-		expect(html).toMatch(/<input[^>]*value="99"/);
-	});
-
-	it("while live, the Live button is still mounted, marked aria-disabled, so keyboard focus has nowhere to fall from", () => {
-		const html = render();
-		const btn = /<button[^>]*>Live<\/button>/.exec(html)?.[0] ?? "";
-		expect(btn).toMatch(/aria-disabled="true"/);
-		expect(btn).toMatch(/type="button"/);
-		// Not the native attribute: a disabled button cannot hold focus, and the press would drop it to the body.
-		expect(btn).not.toMatch(/\sdisabled(=|>|\s)/);
-		// In the past it is the live action, with no aria-disabled.
-		const past = /<button[^>]*>Live[^<]*(?:<span[\s\S]*?<\/span>)?<\/button>/.exec(
-			render({ at: at(), wanted: 40 }),
-		)?.[0];
-		expect(past).toBeDefined();
-		expect(past).not.toContain("aria-disabled");
-		// One Live button either way.
-		expect(html.match(/>Live<\/button>/g)).toHaveLength(1);
-		expect(render({ at: at(), wanted: 40 }).match(/>Live</g)).toHaveLength(1);
-	});
-
-	it("at a past position, aria-valuetext gives the record and the visible label, and Live is a real button", () => {
-		const a = at();
-		const label = timelineLabel(a, new Date().toISOString());
-		const html = render({ at: a, wanted: 40 });
-		expect(label).toContain("As recorded at");
-		expect(html).toContain(`aria-valuetext="Record 41 of 100 · ${label}"`);
-		expect(text(html)).toContain(label);
-		expect(html).toMatch(/<input[^>]*value="40"/);
-		expect(html).toMatch(/<button type="button"[^>]*>Live<\/button>/);
-	});
-
-	it("records added since the position was chosen show as a real button", () => {
-		const html = render({ at: at({ head: 99 }), wanted: 40, head: 120 });
-		expect(html).toMatch(/<button type="button"[^>]*>21 new since<\/button>/);
-		expect(html).toMatch(/<input[^>]*max="120"/);
-		expect(render({ at: at({ head: 99 }), wanted: 40, head: 99 })).not.toContain("new since");
-	});
-
-	it("the new-since button hands focus to the always-mounted Live button as it goes live, because it unmounts when the count reaches zero", () => {
-		const src = readFileSync(join(import.meta.dirname, "..", "src", "app", "timeline.tsx"), "utf8");
-		// The new-since button's press goes through the focus-keeping helper, not the bare live action.
-		expect(src).toMatch(/ut-tl-new"[^>]*onClick=\{pressNewSince\}/s);
-		// The Live button is the one the helper focuses.
-		expect(src).toMatch(/<button[^>]*ref=\{liveBtn\}[^>]*>\s*Live/s);
-		expect(src).toContain("goLiveKeepingFocus(live, liveBtn.current)");
-	});
-
-	it("with no records the range is disabled and the Live button is still there, so going live from an unreachable point leaves focus somewhere", () => {
-		const html = render({ head: -1 });
-		expect(html).toMatch(/<input[^>]*disabled/);
-		expect(html).toMatch(/<button[^>]*>Live<\/button>/);
-	});
-
-	it("the page renders the Timeline whether or not there are records or a position, so it never unmounts under focus", () => {
-		const src = readFileSync(join(import.meta.dirname, "..", "src", "app", "app.tsx"), "utf8");
-		const at = src.indexOf("<Timeline");
-		expect(at).toBeGreaterThan(0);
-		// Not behind a condition: the text before it, back to the previous tag, holds no `&&` or `?`.
-		const before = src.slice(src.lastIndexOf(">", at - 1) + 1, at);
-		expect(before).not.toMatch(/&&|\?/);
-	});
-
-	it("while the first answer loads, it says so and never claims Live", () => {
-		const html = render({ wanted: 40, loading: true });
-		expect(html).not.toMatch(/aria-valuetext="Live"/);
-		expect(html).toContain('aria-valuetext="Record 41 of 100 · loading"');
-	});
-
-	it("a position the answer has not caught up with never announces the old time", () => {
-		// The thumb is at 41, the screen still shows 40's answer.
-		const html = render({ at: at({ pos: 40 }), wanted: 41 });
-		expect(html).toContain('aria-valuetext="Record 42 of 100 · loading"');
-	});
-
-	it("a clamped position puts the thumb on the record answered, and stops calling it the latest once more arrive", () => {
-		const a = at({ pos: 99, head: 99, clamped: true });
-		const html = render({ at: a, wanted: 500, resolved: 99 });
-		expect(html).toMatch(/<input[^>]*value="99"/);
-		expect(text(html)).toContain("(latest record)");
-		const later = render({ at: a, wanted: 500, resolved: 99, head: 120 });
-		expect(text(later)).not.toContain("(latest record)");
-		expect(later).toMatch(/<input[^>]*value="99"/);
-	});
-
-	it("after a reconnect re-reads the clamped record (clamped: false), the thumb, the spoken value and the keys stay on it, not on the advancing head", () => {
-		const reread = at({ pos: 99, head: 120, clamped: false });
-		const html = render({ at: reread, wanted: 500, resolved: 99, head: 120 });
-		expect(html).toMatch(/<input[^>]*value="99"/);
-		expect(html).toMatch(/<input[^>]*aria-valuetext="Record 100 of 121/);
-		expect(html).not.toMatch(/<input[^>]*value="120"/);
-	});
-
-	it("the status note is in the markup with no error too, so a note that arrives is announced as a change, not an insertion", () => {
-		const html = render();
-		expect(html).toMatch(/<p[^>]*class="ut-tl-msg"[^>]*role="status"[^>]*><\/p>/);
-		const failed = render({ at: at(), wanted: 41, error: "the dashboard did not answer" });
-		expect(failed).toMatch(/<p[^>]*class="ut-tl-msg"[^>]*role="status"[^>]*>Could not show/);
-		// One note, not one per state.
-		expect(failed.match(/ut-tl-msg/g)).toHaveLength(1);
-	});
-
-	it("the status note floats above the bar, so a note appearing does not resize the work area", () => {
-		const css = readFileSync(join(import.meta.dirname, "..", "src", "app", "styles.css"), "utf-8");
-		expect(css).toMatch(/\.ut-tl-msg \{[^}]*position: absolute;[^}]*bottom: 100%;/);
-		// Empty, it takes no room but stays rendered (display: none would take it out of the accessibility tree).
-		expect(css).toMatch(/\.ut-tl-msg:empty \{[^}]*height: 0;/);
-		expect(css).not.toMatch(/\.ut-tl-msg:empty \{[^}]*display: none/);
-	});
-
-	it("an error is a short inline note beside the last good view", () => {
-		const html = render({ at: at(), wanted: 41, error: "the dashboard did not answer" });
-		expect(text(html)).toContain("the dashboard did not answer");
-		expect(text(html)).toContain("As recorded at");
-	});
-
-	it("an error with nothing loaded says the live vault is shown", () => {
-		const html = text(render({ wanted: 41, error: "the vault has no records" }));
-		expect(html).toContain("the vault has no records");
-		expect(html).toContain("showing the live vault");
-	});
-
-	it("its head row is one fixed height live and past (on a phone, the label and Live share one row of two lines)", () => {
-		const css = readFileSync(join(import.meta.dirname, "..", "src", "app", "styles.css"), "utf-8");
-		expect(css).toMatch(/\.ut-tl-head \{[^}]*\bheight: 26px;/);
-		const phone = css.slice(css.indexOf("@media (max-width: 760px)"));
-		// One row: the label's two lines, Live beside it; the range directly under.
-		const head = /\.ut-tl-head \{([^}]*)\}/.exec(phone)?.[1] ?? "";
-		expect(head).toMatch(/flex-wrap: nowrap;/);
-		expect(head).toMatch(/[^-]height: calc\(2 \* 12px \* 1\.4\);/);
-		expect(head).not.toMatch(/36px|min-height/);
-		const label = /\.ut-tl-label \{([^}]*)\}/.exec(phone)?.[1] ?? "";
-		expect(label).toMatch(/flex: 1 1 0;/);
-		expect(label).not.toMatch(/flex-basis: 100%/);
-		expect(label).toMatch(/[^-]height: calc\(2 \* 12px \* 1\.4\);/);
-		// A long past label ("As recorded at … (latest record)") wraps; it is never cut.
-		expect(label).toMatch(/white-space: normal;/);
-		expect(label).toMatch(/overflow: visible;/);
-		// At most one button beside it: "N new since" is folded into Live, and the visible note has no room.
-		expect(phone).toMatch(/\.ut-tl-held,\s*\.ut-tl-new \{\s*display: none;\s*\}/);
-		expect(phone).toMatch(/\.ut-tl-count \{\s*display: inline;\s*\}/);
-		const wide = css.slice(0, css.indexOf("@media (max-width: 900px)"));
-		expect(wide).toMatch(/\.ut-tl-count \{\s*display: none;\s*\}/);
-		// A compact box: the top padding and the gap Live's 44px area needs, and little under the range's own 44px box.
-		const tl = /\.ut-tl \{([^}]*)\}/.exec(phone)?.[1] ?? "";
-		expect(tl).toMatch(/gap: 10px;/);
-		expect(tl).toMatch(/padding: 10px 12px;/);
-		expect(tl).toMatch(/padding-bottom: calc\(6px \+ env\(safe-area-inset-bottom\)\);/);
-		// No rule gives a past label a different size from a live one.
-		expect(css).not.toMatch(
-			/\.ut-tl-label\[data-past="true"\] \{[^}]*(flex-basis|white-space|font)/,
-		);
-	});
-
-	it("on a phone the new-since count rides in Live: the same action, one button", () => {
-		const html = render({ at: at({ head: 99 }), wanted: 40, head: 120 });
-		expect(html).toMatch(
-			/<button type="button" class="ut-tl-btn ut-tl-new"[^>]*>21 new since<\/button>/,
-		);
-		// "+21" (short, so a long label keeps its two lines beside it at 320px), "new records" for a screen reader.
-		expect(html).toMatch(
-			/<button type="button" class="ut-tl-btn"[^>]*>Live<span class="ut-tl-count"> \+21<span class="sr-only"> new records<\/span><\/span><\/button>/,
-		);
-		expect(render({ at: at({ head: 99 }), wanted: 40, head: 99 })).not.toContain("ut-tl-count");
-	});
-
-	it("announces the held views once as they start to lag and once as they catch up, in a region there before any text", () => {
-		const idle = render({ at: at(), wanted: 40 });
-		expect(idle).toMatch(/<span class="sr-only" role="status"><\/span>/);
-		const held = render({
-			at: at({ pos: 61 }),
-			wanted: 61,
-			holdNote: "Updating to record 62…",
-			announce: "Updating to record 62…",
-		});
-		expect(held).toMatch(/<span class="sr-only" role="status">Updating to record 62…<\/span>/);
-		// The visible note follows every answer, so it is hidden from the screen reader: only `announce` is read.
-		expect(held).toMatch(
-			/<span class="ut-tl-held" aria-hidden="true">Updating to record 62…<\/span>/,
-		);
-		// Two regions: the always-there note for a failed point (empty here) and this one.
-		expect(held.match(/role="status"/g)).toHaveLength(2);
-		expect(held.match(/role="status"[^>]*>[^<]+</g)).toHaveLength(1);
-	});
-
-	it("an epoch change says the vault was reloaded", () => {
-		expect(text(render({ at: at(), wanted: 40, reloaded: true }))).toContain(
-			"the vault was reloaded",
-		);
 	});
 });

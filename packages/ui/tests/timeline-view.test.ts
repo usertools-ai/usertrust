@@ -3,16 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { AtPayload } from "../src/shared/api.js";
-import {
-	atFailureText,
-	goLiveKeepingFocus,
-	isStepEvent,
-	newSince,
-	stepFor,
-	timelineLabel,
-	timelineTexts,
-	timelineValueText,
-} from "../src/shared/timeline-view.js";
+import { atFailureText, newSince, shownLabel, timelineLabel } from "../src/shared/timeline-view.js";
 
 const NOW = "2026-11-06T12:00:00.000Z";
 
@@ -67,37 +58,6 @@ describe("timelineLabel", () => {
 	});
 });
 
-describe("stepFor", () => {
-	it("keys step within 0..head", () => {
-		// The arrows move one position.
-		expect(stepFor("ArrowLeft", 40, 99)).toBe(39);
-		expect(stepFor("ArrowRight", 40, 99)).toBe(41);
-		expect(stepFor("ArrowLeft", 0, 99)).toBe(0);
-		expect(stepFor("ArrowRight", 99, 99)).toBe(99);
-		// PageUp and PageDown move 5% of head + 1, rounded up: 100 positions, 5.
-		expect(stepFor("PageUp", 40, 99)).toBe(45);
-		expect(stepFor("PageDown", 40, 99)).toBe(35);
-		expect(stepFor("PageUp", 97, 99)).toBe(99);
-		expect(stepFor("PageDown", 3, 99)).toBe(0);
-		// Home and End jump to the ends.
-		expect(stepFor("Home", 40, 99)).toBe(0);
-		expect(stepFor("End", 40, 99)).toBe(99);
-	});
-
-	it("the page step rounds 5% up, in whole numbers (61 positions: 4; 60: exactly 3)", () => {
-		expect(stepFor("PageUp", 0, 60)).toBe(4);
-		// 0.05 * 60 is 3.0000000000000004 in floating point; rounded up that would be 4.
-		expect(stepFor("PageUp", 0, 59)).toBe(3);
-		// A short vault still moves at least one position.
-		expect(stepFor("PageUp", 0, 4)).toBe(1);
-	});
-
-	it("a vault of one record has nowhere to go", () => {
-		for (const key of ["ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End"] as const)
-			expect(stepFor(key, 0, 0)).toBe(0);
-	});
-});
-
 describe("newSince", () => {
 	it("live append keeps T: the position stays 40 and 21 records are new since it was chosen", () => {
 		const shown = at({ pos: 40, head: 99 });
@@ -121,102 +81,11 @@ describe("atFailureText", () => {
 	});
 });
 
-describe("timelineValueText", () => {
-	it("names the record, and the time only when the screen shows that record", () => {
-		const shown = at({ pos: 40 });
-		expect(timelineValueText(null, 99, null, NOW)).toBe("Live");
-		expect(timelineValueText(40, 99, shown, NOW)).toBe(
-			"Record 41 of 100 · As recorded at 11-06 10:04:05Z",
-		);
-		expect(timelineValueText(41, 99, shown, NOW)).toBe("Record 42 of 100 · loading");
-		expect(timelineValueText(41, 99, null, NOW)).toBe("Record 42 of 100 · loading");
-	});
-
+describe("shownLabel", () => {
 	it("a clamped answer stops calling itself the latest once records arrive after it", () => {
 		const shown = at({ pos: 99, head: 99, clamped: true });
-		expect(timelineValueText(99, 99, shown, NOW)).toBe(
-			"Record 100 of 100 · As recorded at 11-06 10:04:05Z (latest record)",
-		);
-		expect(timelineValueText(99, 120, shown, NOW)).toBe(
-			"Record 100 of 121 · As recorded at 11-06 10:04:05Z",
-		);
-	});
-});
-
-describe("timelineTexts", () => {
-	it("the first move from live, before anything is asked or answered, is loading, never a failure", () => {
-		const t = timelineTexts({
-			value: 60,
-			head: 99,
-			past: true,
-			at: null,
-			error: null,
-			nowIso: NOW,
-		});
-		expect(t.label).toBe("Loading this point…");
-		expect(t.valueText).toBe("Record 61 of 100 · loading");
-	});
-
-	it("a failure with nothing loaded says so, and that the live vault is shown", () => {
-		const t = timelineTexts({
-			value: 60,
-			head: 99,
-			past: true,
-			at: null,
-			error: "the dashboard did not answer",
-			nowIso: NOW,
-		});
-		expect(t.label).toBe("Live (that point did not load)");
-		expect(t.valueText).toBe("Record 61 of 100 · Live (that point did not load)");
-	});
-
-	it("live is Live", () => {
-		expect(
-			timelineTexts({ value: 99, head: 99, past: false, at: null, error: null, nowIso: NOW }),
-		).toEqual({ label: "Live", valueText: "Live" });
-	});
-});
-
-describe("goLiveKeepingFocus", () => {
-	it("goes live, then moves focus to the Live button, so the pressed button can unmount without dropping focus to the page", () => {
-		const calls: string[] = [];
-		goLiveKeepingFocus(() => calls.push("live"), { focus: () => calls.push("focus") });
-		expect(calls).toEqual(["live", "focus"]);
-	});
-
-	it("still goes live when the Live button is not there", () => {
-		const calls: string[] = [];
-		goLiveKeepingFocus(() => calls.push("live"), null);
-		expect(calls).toEqual(["live"]);
-	});
-});
-
-describe("isStepEvent", () => {
-	const key = (
-		k: string,
-		over: Partial<{ altKey: boolean; ctrlKey: boolean; metaKey: boolean }> = {},
-	) => ({
-		key: k,
-		altKey: false,
-		ctrlKey: false,
-		metaKey: false,
-		...over,
-	});
-	it("a bare step key moves the thumb", () => {
-		for (const k of ["ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End"])
-			expect(isStepEvent(key(k))).toBe(true);
-	});
-	it("Shift alone does not stop it", () => {
-		expect(isStepEvent({ ...key("ArrowLeft"), shiftKey: true } as never)).toBe(true);
-	});
-	it("Alt, Ctrl or Meta with a step key is the browser's (Back, Forward, top, bottom), not the thumb's", () => {
-		expect(isStepEvent(key("ArrowLeft", { altKey: true }))).toBe(false);
-		expect(isStepEvent(key("ArrowRight", { metaKey: true }))).toBe(false);
-		expect(isStepEvent(key("Home", { ctrlKey: true }))).toBe(false);
-		expect(isStepEvent(key("End", { metaKey: true }))).toBe(false);
-	});
-	it("a key that is not a step key is never one", () => {
-		expect(isStepEvent(key("a"))).toBe(false);
-		expect(isStepEvent(key("Tab"))).toBe(false);
+		expect(shownLabel(shown, 99, NOW)).toBe("As recorded at 11-06 10:04:05Z (latest record)");
+		expect(shownLabel(shown, 120, NOW)).toBe("As recorded at 11-06 10:04:05Z");
+		expect(shownLabel(null, 120, NOW)).toBe("Live");
 	});
 });

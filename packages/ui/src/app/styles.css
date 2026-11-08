@@ -323,7 +323,7 @@ body {
 	   held and in-flight states. */
 	/* Its slot is always there, a fixed height (one line; two on a phone, where the label can wrap): live it is hidden
 	   and empty, so entering or leaving the past view moves nothing below it (a line that appeared pushed the header,
-	   the list and the timeline down). */
+	   the list and the status below it down). */
 	.ut-asat {
 		display: flex;
 		align-items: center;
@@ -905,9 +905,9 @@ body {
 		overflow: hidden;
 		border-radius: 0 0 15px 15px;
 	}
-	/* Everything drawn from the list's input while it shows another position than the header (a timeline drag, the
-	   moment after one, Live, Back or Forward): the list or Trends, the count, Export, the facets and the inspector.
-	   Dimmed, so it is plain they have not caught up; the timeline says what is coming (.ut-tl-held). Opacity only:
+	/* Everything drawn from the list's input while it shows another position than the header (the moment after a new
+	   position lands, Back or Forward): the list or Trends, the count, Export, the facets and the inspector.
+	   Dimmed, so it is plain they have not caught up; the status under the header says what is coming (.ut-tl-held). Opacity only:
 	   nothing moves, and nothing animates. The drawer is dimmed inside, so it stays opaque over the page. */
 	.ut-pane[data-held="true"],
 	.ut-head .ut-label[data-held="true"],
@@ -1592,67 +1592,23 @@ body {
 	.ut-range > .to {
 		color: var(--faint-text);
 	}
-	/* ── Timeline: the vault as recorded at a past position ──
-	   A native range along the bottom, the label for what the screen shows, and the Live and "N new since" buttons. Their
-	   hit areas are in the hit-area block at the end. Nothing here moves: no animation, no transition. */
-	.ut-tl {
-		position: relative;
+	/* ── The status under the header's as-at line ──
+	   The note for a point that did not load, or a vault that was reloaded, and "Updating to record N…" while the views
+	   below catch up. Always there (a note inserted with its text already in it is often not announced), a normal block
+	   in the page's column, no height at all when everything is idle. Nothing here moves. */
+	.ut-at-status {
 		flex: 0 0 auto;
 		display: flex;
 		flex-direction: column;
 		gap: 6px;
-		padding: 8px 14px;
-		border: 1px solid var(--line);
-		border-radius: 14px;
-		background: var(--surface);
-	}
-	.ut-tl[data-past="true"] {
-		border-color: rgba(232, 181, 75, 0.45);
-	}
-	/* One row, the same height live (the label alone) and past (the label and its buttons), so the timeline never
-	   changes height when the view does. */
-	.ut-tl-head {
-		display: flex;
-		align-items: center;
-		gap: 6px 10px;
 		min-width: 0;
-		height: 26px;
 	}
-	.ut-tl-label {
-		min-width: 0;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		font: 500 12px/1.4 var(--mono);
-		font-variant-numeric: tabular-nums;
-		color: var(--body);
+	/* Idle, it also gives back the page's 10px gap, so a live page is where it was before the status was there. */
+	.ut-at-status:not(:has(.ut-tl-msg:not(:empty), .ut-tl-held:not(:empty))) {
+		margin-top: -10px;
 	}
-	.ut-tl-label[data-past="true"] {
-		color: var(--accent);
-	}
-	/* "Updating to record N…" while the views below still show another position. Always there (a live region, empty
-	   when nothing is held), taking the room between the label and the buttons; two short lines fit the row. */
-	.ut-tl-held {
-		flex: 1 1 auto;
-		min-width: 0;
-		max-height: 26px;
-		overflow: hidden;
-		text-align: right;
-		font: 400 11px/13px var(--sans);
-		color: var(--body);
-	}
-	/* Folded into Live on a phone only (the "N new since" button is shown everywhere else). */
-	.ut-tl-count {
-		display: none;
-	}
-	/* The note for a point that did not load, or a vault that was reloaded. One element, always there (a note inserted
-	   with its text already in it is often not announced), floated above the bar so it never resizes the work area. */
 	.ut-tl-msg {
-		position: absolute;
-		left: 0;
-		right: 0;
-		bottom: 100%;
-		margin: 0 0 6px;
+		margin: 0;
 		padding: 8px 14px;
 		border: 1px solid var(--line);
 		border-radius: 12px;
@@ -1668,47 +1624,15 @@ body {
 		border: 0;
 		overflow: hidden;
 	}
-	.ut-tl-btn {
-		border: 1px solid var(--control-line);
-		background: transparent;
-		color: var(--ink);
-		font: 500 11.5px/1 var(--sans);
-		padding: 6px 10px;
-		border-radius: 999px;
-		cursor: pointer;
-		white-space: nowrap;
-		flex: 0 0 auto;
+	/* "Updating to record N…" while the views below still show another position. Always there (empty when nothing is
+	   held); empty it has no height, so the column does not move. */
+	.ut-tl-held {
+		min-width: 0;
+		font: 400 11px/13px var(--sans);
+		color: var(--body);
 	}
-	.ut-tl-btn:hover {
-		border-color: var(--accent);
-	}
-	/* Live while already live: still a focusable button (so focus stays put after pressing it), but it reads as at rest.
-	   The colours are dimmed, not the element: opacity would fade its focus outline too, and this is where focus rests. */
-	.ut-tl-btn[aria-disabled="true"] {
-		color: var(--faint-text);
-		border-color: var(--line);
-		cursor: default;
-	}
-	.ut-tl-btn[aria-disabled="true"]:hover {
-		border-color: var(--line);
-	}
-	/* The browser's own slider, in gold. Its box is its hit area (a press anywhere on it moves the thumb there): the
-	   hit-area block sets its height. No margin or border, so the box is exactly that height. */
-	.ut-tl-range {
-		display: block;
-		width: 100%;
-		margin: 0;
-		accent-color: var(--accent);
-		cursor: pointer;
-	}
-	.ut-tl-range:disabled {
-		opacity: 0.4;
-		cursor: default;
-	}
-	.ut-tl-range:focus-visible {
-		outline: 2px solid var(--words);
-		outline-offset: 2px;
-		border-radius: 6px;
+	.ut-tl-held:empty {
+		display: none;
 	}
 	@media (max-width: 900px) {
 		.ut-facts {
@@ -1940,44 +1864,6 @@ body {
 			box-shadow: 0 -20px 60px rgba(0, 0, 0, 0.6);
 			animation-name: ut-sheet-in;
 		}
-
-		/* The timeline stays at the bottom of the screen while the page scrolls past the records, clear of the home
-		   indicator. One row (the label, then Live) and the range directly under it, the same height live and past. The
-		   top padding and the gap are the room Live's 44px area needs above and below it (tests/hit-areas.test.ts); the
-		   range's box is its own 44px area, so little is needed under it. */
-		.ut-tl {
-			position: sticky;
-			bottom: 0;
-			z-index: 6;
-			gap: 10px;
-			padding: 10px 12px;
-			padding-bottom: calc(6px + env(safe-area-inset-bottom));
-		}
-		/* The label and Live share the row. The row holds the label's two lines whether or not it wraps, and whether or not
-		   Live is there, so entering or leaving the past view changes nothing's size. */
-		.ut-tl-head {
-			flex-wrap: nowrap;
-			height: calc(2 * 12px * 1.4);
-		}
-		/* It wraps in its two lines, never cut. "N new since" is folded into Live here (.ut-tl-count), so one button at
-		   most sits beside it. */
-		.ut-tl-label {
-			flex: 1 1 0;
-			display: flex;
-			align-items: center;
-			height: calc(2 * 12px * 1.4);
-			white-space: normal;
-			overflow-wrap: anywhere;
-			overflow: visible;
-		}
-		/* No room beside the label for the visible note: the dimmed views and the announcement carry it. */
-		.ut-tl-held,
-		.ut-tl-new {
-			display: none;
-		}
-		.ut-tl-count {
-			display: inline;
-		}
 	}
 
 	/* ── Hit areas ──
@@ -1993,8 +1879,7 @@ body {
 	.ut-cap button,
 	.ut-seg button,
 	.ut-btn,
-	.ut-ghost,
-	.ut-tl-btn {
+	.ut-ghost {
 		position: relative;
 	}
 	.ut-info-btn::after,
@@ -2003,8 +1888,7 @@ body {
 	.ut-cap button::after,
 	.ut-seg button::after,
 	.ut-btn::after,
-	.ut-ghost::after,
-	.ut-tl-btn::after {
+	.ut-ghost::after {
 		content: "";
 		position: absolute;
 	}
@@ -2046,15 +1930,6 @@ body {
 	.ut-ghost::after {
 		inset: -3.5px -2px;
 	}
-	/* The timeline's Live and "N new since": padding box 23.5px high (11.5px text, 6px padding, 1px border): 32.5px,
-	   inside the timeline's 8px padding above and its 6px gap to the range below. The 10px gap between them is split. */
-	.ut-tl-btn::after {
-		inset: -4.5px -3px;
-	}
-	/* The timeline's range takes no ::after: its own box is the area. */
-	.ut-tl-range {
-		height: 32px;
-	}
 
 	@media (max-width: 760px) {
 		/* Each chip owns its 44.5px band alone: its area reaches 9.5px past the border, so rows are 19px apart (two
@@ -2093,13 +1968,6 @@ body {
 		}
 		.ut-ghost::after {
 			inset: -9.5px -2px;
-		}
-		/* 44.5px, inside the phone timeline's 10px top padding and its 10px gap to the range. */
-		.ut-tl-btn::after {
-			inset: -10.5px -3px;
-		}
-		.ut-tl-range {
-			height: 44px;
 		}
 		/* The filter sheet stacks one full-width chip per facet (33.5px with the sheet's 10px padding, a 31.5px padding box):
 		   each chip's area reaches 44px with 6.25px above and below, inside a row gap widened to 13px, and the head (its Done

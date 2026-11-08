@@ -116,7 +116,7 @@ function Tile(props: {
 	);
 }
 
-/** Memoized: the page re-renders on every timeline answer, and the rows it draws (deferred) change only after it. */
+/** Memoized: the page re-renders on every answer, and the rows it draws (deferred) change only after it. */
 export const Trends = memo(function Trends(props: {
 	/** The rows in view, after the filters. */
 	rows: LedgerRow[];
@@ -166,7 +166,7 @@ export const Trends = memo(function Trends(props: {
 				<Tile
 					label="Cost in view"
 					value={
-						// A scrub jumps from recorded value to recorded value; the switch between live and past remounts it.
+						// A move between positions jumps from recorded value to recorded value; the switch between live and past remounts it.
 						<TickingFigure
 							key={at === null ? "live" : "past"}
 							ut={tiles.totalCostUt}

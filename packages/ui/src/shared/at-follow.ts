@@ -5,13 +5,13 @@
  * Keeps the page's past view in step with the position it wants. No `fetch` and no `window`: the loader is passed in,
  * so every path is tested with a stub.
  *
- * - One request in flight at a time, and the latest wanted position wins: a drag that moves faster than the server
+ * - One request in flight at a time, and the latest wanted position wins: a preview that moves faster than the server
  *   answers asks only for where it ended up, and each answer that lands on the way is shown, so the screen follows.
- * - A navigation (Back, Forward, a link: `navigated()`) cancels the drag: an answer to a request sent before it is no
+ * - A navigation (Back, Forward, a link: `navigated()`) cancels the preview: an answer to a request sent before it is no
  *   longer shown on the way, so the screen never moves to a point the user navigated away from, also when the
  *   destination's own read then fails. An answer for the position wanted next is still the destination's.
  * - A request that has not answered in `timeoutMs` is aborted (its signal) and goes down the failure path, so a hung
- *   server never freezes the timeline: the next move or refresh asks again.
+ *   server never freezes the view: the next move or refresh asks again.
  * - A refresh (the live vault changed) re-reads the position answered, not the one asked for, so a position asked
  *   for past the head stays the record the reader was shown. A later record can change the status a row had there
  *   (a hold settled after it), so the answer is taken again; its `head` and `clamped` stay those of the answer the
@@ -41,7 +41,7 @@ import type { AtPayload } from "./api.js";
 import type { LedgerRow } from "./rows.js";
 
 export interface AtView {
-	/** The position wanted (a preview during a drag, or the address's), or null for live. */
+	/** The position wanted (a preview, or the address's), or null for live. */
 	wanted: number | null;
 	/** The answer shown, or null: live, or nothing has loaded for the wanted position yet. */
 	at: AtPayload | null;
@@ -166,7 +166,7 @@ export class AtFollower {
 
 	/**
 	 * The user navigated (Back, Forward, a link, a typed address). Call it before `want` with the address's position.
-	 * An answer to a request sent before this is no longer shown on the way: the drag that asked for it was cancelled,
+	 * An answer to a request sent before this is no longer shown on the way: the preview that asked for it was cancelled,
 	 * and the screen must never move to a point the user navigated away from. An answer for the position wanted next is
 	 * still taken: it is the destination's own.
 	 */
@@ -253,8 +253,8 @@ export class AtFollower {
 		navigations: number,
 	): void {
 		if (this.wanted === null || generation !== this.generation) return;
-		// Sent before a navigation, for a position other than the one wanted now: the drag that asked for it was
-		// cancelled, so it is not shown on the way. The position is compared, not the choice: a drag in between moves
+		// Sent before a navigation, for a position other than the one wanted now: the preview that asked for it was
+		// cancelled, so it is not shown on the way. The position is compared, not the choice: a preview in between moves
 		// the choice on, and an answer for the destination itself is still the destination's.
 		if (navigations !== this.navigations && sentFor !== this.wanted) return;
 		if (this.epoch !== null && answer.epoch !== this.epoch) {
@@ -265,7 +265,7 @@ export class AtFollower {
 		this.epoch = answer.epoch;
 		this.error = null;
 		if (choice !== this.choice) {
-			// An answer for a position the drag has moved past: shown on the way; the latest is already due.
+			// An answer for a position the preview has moved past: shown on the way; the latest is already due.
 			this.shown = answer;
 			this.shownRows = rows;
 			this.shownResyncs = resyncs;

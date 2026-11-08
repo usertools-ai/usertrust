@@ -15,14 +15,11 @@ import { listState } from "../src/shared/display.js";
 import { EMPTY_FILTERS } from "../src/shared/filters.js";
 import {
 	type HoldAnnouncement,
-	heldInput,
 	heldNote,
 	holdAnnouncement,
-	type ListInput,
 	listView,
 } from "../src/shared/list-view.js";
 import type { LedgerRow } from "../src/shared/rows.js";
-import { Scrubber } from "../src/shared/scrub.js";
 
 function row(pos: number): LedgerRow {
 	return {
@@ -172,72 +169,18 @@ describe("listView", () => {
 
 	it("the page draws the list from listView over ONE deferred input, phase included", () => {
 		const app = readFileSync(join(import.meta.dirname, "..", "src", "app", "app.tsx"), "utf-8");
-		expect(app).toMatch(/useDeferredValue\(/);
+		expect(app).toContain("useDeferredValue(listInput)");
+		expect(app).not.toContain("heldInput");
 		expect(app).toContain("listView(drawn)");
 		expect(app).toContain("phase={list.phase}");
 		expect(app).not.toMatch(/phase=\{phase\}/);
-	});
-
-	it("while dragging, the list's input does not change; on release it takes the latest, once", () => {
-		// The page's own wiring, without React: the Scrubber says when a drag is on, the input is frozen then (from the
-		// last one committed), and heldInput keeps it while it is.
-		let frozen: ListInput | null = null;
-		let committed: ListInput;
-		const frames: Array<() => void> = [];
-		const scrub = new Scrubber(
-			{
-				frame: (fn) => {
-					frames.push(fn);
-					return () => {};
-				},
-				later: () => () => {},
-			},
-			() => {},
-			() => {},
-			(a) => {
-				frozen = a ? committed : null;
-			},
-		);
-		const input = (pos: number | null): ListInput => ({
-			rows: held,
-			at: pos === null ? null : at({ pos }),
-			filters: EMPTY_FILTERS,
-			phase: "loaded",
-			summary: summary(),
-		});
-		let drawn = input(null);
-		committed = drawn;
-		const render = (next: ListInput): void => {
-			drawn = heldInput(frozen, next);
-			committed = next;
-		};
-		const before = drawn;
-		scrub.move(60);
-		for (const pos of [60, 61, 62, 63]) render(input(pos));
-		expect(drawn).toBe(before);
-		scrub.release();
-		const last = input(63);
-		render(last);
-		expect(drawn).toBe(last);
-	});
-
-	it("the page holds the list while the timeline says a drag is on, frozen in the drag's event, not while rendering", () => {
-		const app = readFileSync(join(import.meta.dirname, "..", "src", "app", "app.tsx"), "utf-8");
-		expect(app).toContain("useDeferredValue(heldInput(frozen, listInput))");
-		expect(app).toContain("onHold={onHold}");
-		expect(app).toMatch(/setFrozen\(on \? committed\.current : null\)/);
-		// No ref is written during render: the committed input is recorded in an effect.
-		expect(app).toMatch(
-			/useEffect\(\(\) => \{\s*committed\.current = listInput;\s*\}, \[listInput\]\);/,
-		);
-		expect(app).not.toMatch(/^\t[a-z]+\.current = /m);
 	});
 
 	it("every view drawn from the list's input is marked from the drawn position, not from the drag", () => {
 		const app = readFileSync(join(import.meta.dirname, "..", "src", "app", "app.tsx"), "utf-8");
 		expect(app).toContain("const holdNote = heldNote(list.at, shownAt);");
 		expect(app).not.toMatch(/setHolding|data-holding|aria-busy=\{holding\}/);
-		// The list or Trends, the count, Export, the facets, both inspectors, and the note in the timeline.
+		// The list or Trends, the count, Export, the facets, both inspectors, and the status under the header.
 		expect(app).toMatch(/className="ut-pane"[\s\S]{0,200}data-held=\{held\}\s*aria-busy=\{held\}/);
 		expect(app).toContain('<span className="ut-label" role="status" data-held={held}>');
 		expect(app).toMatch(/<ExportButton[\s\S]{0,120}held=\{held\}/);

@@ -43,8 +43,8 @@ function Facet(props: {
 }): React.JSX.Element {
 	const { label, rows, valueFor, selected, onChange } = props;
 	const [open, setOpen] = useState(false);
-	// A pass over every row, so never while closed: a timeline drag changes the rows on every answer, and six closed
-	// facets counting 100,000 rows each time held the drag up for nothing anyone could see.
+	// A pass over every row, so never while closed: a moving position changes the rows on every answer, and six closed
+	// facets counting 100,000 rows each time held the page up for nothing anyone could see.
 	const options = useMemo(() => (open ? counted(rows.map(valueFor)) : []), [open, rows, valueFor]);
 	// Placed when it opens: a fixed width, its left edge clamped 16 px inside BOTH window edges (aligning to the trigger's
 	// right edge alone pushed a narrow screen's first facet off the left), and no taller than the room below the trigger.
@@ -139,12 +139,12 @@ function Facet(props: {
 	);
 }
 
-/** Memoized: the page re-renders on every timeline answer, and the bar's rows (deferred) change only after it. */
+/** Memoized: the page re-renders on every answer, and the bar's rows (deferred) change only after it. */
 export const FilterBar = memo(function FilterBar(props: {
 	rows: LedgerRow[];
 	filters: FilterState;
 	onChange(f: FilterState): void;
-	/** The rows are a held view (a timeline drag, or the moment after one): the facets' counts are dimmed and busy. */
+	/** The rows are a held view (the moment after a new position lands): the facets' counts are dimmed and busy. */
 	held?: boolean;
 }): React.JSX.Element {
 	const { rows, filters, onChange } = props;

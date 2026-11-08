@@ -3,8 +3,7 @@
 
 /**
  * What the list (and Trends) draw, derived in one place from ONE input. The page defers that input
- * (`useDeferredValue`), so a timeline drag paints the thumb, the label and the header first and the list follows;
- * because the rows, the position, the filters, the load phase and the summary travel together, the list never pairs
+ * (`useDeferredValue`), so a new position paints the header first and the list follows; because the rows, the position, the filters, the load phase and the summary travel together, the list never pairs
  * one position's rows with another moment's phase or chain. Pure.
  */
 
@@ -74,19 +73,10 @@ function beforeWindowAt(rows: LedgerRow[], at: AtPayload): BeforeWindow {
 }
 
 /**
- * The list's input: the one frozen when a timeline drag began, while it is on, else the latest. Only the thumb, its
- * label and the header follow a drag; the list, the facets, Trends, the inspector and Export keep their last view and
- * render once when the drag is released or sits still, so no pass over the rows runs while the thumb moves.
- */
-export function heldInput(frozen: ListInput | null, next: ListInput): ListInput {
-	return frozen ?? next;
-}
-
-/**
  * What the views drawn from the list's input say while they show another position than the header, or null when
  * they show the same one. Positions are compared, not answers: a re-read of the same position is not a held view.
- * It holds during a drag (the input is frozen), after one until the deferred render lands, and after Live, Back,
- * Forward or a link too. Counted from 1, as the other position texts are.
+ * It holds from the moment a new position is shown until the deferred render lands, after Back, Forward or a link
+ * too. Counted from 1, as the other position texts are.
  */
 export function heldNote(drawnAt: AtPayload | null, shownAt: AtPayload | null): string | null {
 	const drawn = drawnAt?.pos ?? null;
@@ -97,7 +87,7 @@ export function heldNote(drawnAt: AtPayload | null, shownAt: AtPayload | null): 
 		: `Updating to record ${(shown + 1).toLocaleString()}…`;
 }
 
-/** What the timeline's live region says about the held views, and whether they were held when it last changed. */
+/** What the status's live region says about the held views, and whether they were held when it last changed. */
 export interface HoldAnnouncement {
 	held: boolean;
 	text: string;
@@ -106,7 +96,7 @@ export interface HoldAnnouncement {
 /**
  * The live region's text moves only when the held state flips: once when the views start to lag the header ("Updating to
  * record N…"), once when they catch up ("Showing record N", or the live vault). In between it keeps its text, so a
- * screen reader hears two announcements per drag, not one per answer. Returns `prev` itself when nothing flips.
+ * screen reader hears two announcements per change of position, not one per answer. Returns `prev` itself when nothing flips.
  */
 export function holdAnnouncement(
 	prev: HoldAnnouncement,

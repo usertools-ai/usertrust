@@ -7,7 +7,6 @@ import { csvFilename, toCsv } from "../shared/csv.js";
 import { EMPTY_FILTERS, isFiltering } from "../shared/filters.js";
 import {
 	type HoldAnnouncement,
-	heldInput,
 	heldNote,
 	holdAnnouncement,
 	type ListInput,
@@ -15,13 +14,13 @@ import {
 } from "../shared/list-view.js";
 import type { LedgerRow } from "../shared/rows.js";
 import { MAX_SEARCH_LENGTH, type ViewId } from "../shared/url-state.js";
+import { AtStatus } from "./at-status.js";
 import { AuditTable } from "./audit-table.js";
 import { ExportButton } from "./export-button.js";
 import { FilterBar } from "./filter-bar.js";
 import { InspectorHint, RowPanel } from "./row-panel.js";
 import { useLedger } from "./store.js";
 import { SummaryStrip } from "./summary-strip.js";
-import { Timeline } from "./timeline.js";
 import { Trends } from "./trends.js";
 import { useAt } from "./use-at.js";
 import { useMediaQuery } from "./use-media-query.js";
@@ -40,22 +39,12 @@ const DOCK_QUERY = "(min-width: 1100px)";
 export function App(): React.JSX.Element {
 	const { rows, summary, phase, live, liveIds, resyncs } = useLedger();
 	// The view, filters and open record live in the page address (`location.hash`): a reload keeps them, a link shares them.
-	const {
-		view,
-		setView,
-		filters,
-		setFilters,
-		openHash,
-		setOpenHash,
-		at,
-		setAt,
-		navigation,
-		addressNote,
-	} = useUrlState();
-	// The past position shown (`#at=N`, or a drag's preview before it is written there), from /api/at. Until its first
-	// answer lands, or when it fails with nothing loaded, the screen stays live and the timeline says so: a past view is
+	const { view, setView, filters, setFilters, openHash, setOpenHash, at, navigation, addressNote } =
+		useUrlState();
+	// The past position shown (`#at=N`, or a preview before it is written there), from /api/at. Until its first
+	// answer lands, or when it fails with nothing loaded, the screen stays live and the status under the header says so: a past view is
 	// only ever drawn from its own answer.
-	const { view: atView, preview } = useAt(at, summary, live, rows, resyncs, navigation);
+	const { view: atView } = useAt(at, summary, live, rows, resyncs, navigation);
 	const shownAt = atView.at;
 	// The past view reads each row's status against the rows the page held when the answer's request was SENT
 	// (`atView.rows`), not the rows held when the answer renders: a live `status` frame for a record after the
@@ -66,29 +55,20 @@ export function App(): React.JSX.Element {
 		[rows, atView.rows, shownAt],
 	);
 	const head = summary === null ? -1 : summary.chain.events - 1;
-	// What the list, the facets, Trends and Export draw: ONE input, deferred, so a timeline drag paints the thumb, its
-	// label and the header first and the rest follows when there is time, never mixing one position's rows with
+	// What the list, the facets, Trends and Export draw: ONE input, deferred, so a new position paints the header
+	// first and the rest follows when there is time, never mixing one position's rows with
 	// another moment's phase or chain (`listView`). The rows are cut at the position before the filters, so all of them
 	// see the vault then.
 	const listInput = useMemo<ListInput>(
 		() => ({ rows: pastRows, at: shownAt, filters, phase, summary }),
 		[pastRows, shownAt, filters, phase, summary],
 	);
-	// While a timeline drag is on, the list keeps the input it had when the drag began (`heldInput`): only the thumb,
-	// its label and the header follow the drag, and the list renders once on release or after the drag sits still. The
-	// input is frozen in the drag's own event (state, never a ref written while rendering), from the last committed one.
-	const [frozen, setFrozen] = useState<ListInput | null>(null);
-	const committed = useRef(listInput);
-	useEffect(() => {
-		committed.current = listInput;
-	}, [listInput]);
-	const onHold = useCallback((on: boolean) => setFrozen(on ? committed.current : null), []);
-	const drawn = useDeferredValue(heldInput(frozen, listInput));
+	const drawn = useDeferredValue(listInput);
 	const list = useMemo(() => listView(drawn), [drawn]);
 	const { shownRows, filtered } = list;
 	// Whether what the list's input draws (the list, the facets, Trends, the inspector, the count and Export) shows
-	// another position than the header: during a drag, and after it until the deferred render lands (or after Live,
-	// Back, Forward or a link). Those views are dimmed and busy meanwhile, and the timeline says what is coming.
+	// another position than the header: until the deferred render lands (after Back, Forward
+	// or a link). Those views are dimmed and busy meanwhile, and the status under the header says what is coming.
 	const holdNote = heldNote(list.at, shownAt);
 	const held = holdNote !== null;
 	// What a screen reader hears about it: once when the views start to lag, once when they catch up, never per answer.
@@ -117,7 +97,7 @@ export function App(): React.JSX.Element {
 		},
 		[openHash, setOpenHash],
 	);
-	// Stable, so the memoized list does not re-render for a new callback on every timeline answer.
+	// Stable, so the memoized list does not re-render for a new callback on every answer.
 	const openRow = useCallback(
 		(r: LedgerRow, viaKeyboard: boolean) => {
 			setOpenHash(r.hash);
@@ -157,6 +137,13 @@ export function App(): React.JSX.Element {
 	return (
 		<div className="ut-app">
 			<SummaryStrip summary={summary} live={live} at={shownAt} />
+			<AtStatus
+				at={shownAt}
+				error={atView.error}
+				reloaded={atView.reloaded}
+				holdNote={holdNote}
+				announce={announce.text}
+			/>
 			<main className="ut-work">
 				<div className="ut-head">
 					<div className="ut-seg" role="tablist" aria-label="View" onKeyDown={onTabKey}>
@@ -257,25 +244,6 @@ export function App(): React.JSX.Element {
 						))}
 				</div>
 			</main>
-			<Timeline
-				at={shownAt}
-				wanted={atView.wanted}
-				resolved={atView.resolved}
-				committed={at}
-				navigation={navigation}
-				head={head}
-				error={atView.error}
-				reloaded={atView.reloaded}
-				holdNote={holdNote}
-				announce={announce.text}
-				onPreview={preview}
-				onHold={onHold}
-				onCommit={setAt}
-				onLive={() => {
-					preview(null);
-					setAt(null);
-				}}
-			/>
 			{!dock && view === "audit" && open && (
 				<RowPanel
 					key={open.hash}

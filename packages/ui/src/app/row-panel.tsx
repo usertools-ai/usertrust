@@ -149,7 +149,7 @@ export function RowPanel(props: {
 	 * view and back) does not replay it and take focus from wherever the reader is. */
 	onFocusHandled?: () => void;
 	/**
-	 * Set while the row comes from a held view (a timeline drag, or the moment after one): the header already shows
+	 * Set while the row comes from a held view (the moment after a new position lands): the header already shows
 	 * another position, so the panel is dimmed and busy, and the status, which depends on the position, is not shown
 	 * as that position's: it reads "updating…" until the view catches up.
 	 */

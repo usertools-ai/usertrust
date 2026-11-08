@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * The views drawn from the list's input, while that is held (a timeline drag, or the moment after one): the inspector,
+ * The views drawn from the list's input, while that is held (the moment after a new position lands): the inspector,
  * Export and the facets are marked, dimmed and busy, like the list, and the inspector never presents the position's
  * status as the one the header names.
  */

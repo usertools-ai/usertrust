@@ -92,7 +92,7 @@ function haystack(r: LedgerRow): string {
 }
 
 export function applyFilters(rows: LedgerRow[], f: FilterState): LedgerRow[] {
-	// Nothing to filter by: the rows themselves, with no pass over them (a timeline drag recomputes this per answer).
+	// Nothing to filter by: the rows themselves, with no pass over them (a moving position recomputes this per answer).
 	if (!isFiltering(f)) return rows;
 	const q = f.search.trim().toLowerCase();
 	return rows.filter((r) => {
@@ -141,7 +141,7 @@ export function sortRows(rows: readonly LedgerRow[], key: SortKey, desc: boolean
 		return [...costed, ...uncosted];
 	}
 	// A list already in order (the held rows are, by position, and so is any cut or filter of them) is copied, not
-	// sorted: one pass to check, one to copy, in place of n log n comparisons on every timeline answer.
+	// sorted: one pass to check, one to copy, in place of n log n comparisons on every answer.
 	if (key === "seq" && inSeqOrder(rows)) return desc ? rows.slice().reverse() : rows.slice();
 	const copy = [...rows].sort((a, b) => compare(a, b, key));
 	return desc ? copy.reverse() : copy;

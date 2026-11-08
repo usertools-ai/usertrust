@@ -252,7 +252,7 @@ function Empty(props: {
 	}
 }
 
-/** Memoized: the page re-renders on every timeline answer, and the rows it draws (deferred) change only after it. */
+/** Memoized: the page re-renders on every answer, and the rows it draws (deferred) change only after it. */
 export const AuditTable = memo(function AuditTable(props: {
 	/** The rows in view, after the filters. */
 	rows: LedgerRow[];

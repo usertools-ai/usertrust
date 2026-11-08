@@ -5,7 +5,7 @@ import type { AtPayload } from "../shared/api.js";
 
 /**
  * Export: the records in view, as CSV. Its count and the file it writes come from the list's input, so while that is
- * a held view (`held`: a timeline drag, or the moment after one) the button is dimmed and busy like the list, and its
+ * a held view (`held`: the moment after a new position lands) the button is dimmed and busy like the list, and its
  * title names the position it would export, which is the list's, not the header's.
  */
 export function ExportButton(props: {
