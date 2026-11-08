@@ -27,6 +27,10 @@
  *   superseded request's answer goes with its snapshot.
  * - `resolved` is the record the wanted position was answered with, kept across reconnects: the re-read of a clamped
  *   position is asked for by the record answered and comes back unclamped, but the selection stays on that record.
+ * - A resync replaces the page's rows wholesale (a reload with other records, a reconnect that missed frames), and an
+ *   answer can land before its rows do. Each request also notes how many resyncs the page had installed when it was
+ *   sent; an identical re-read sent after another resync replaces the kept snapshot, so rows from before a resync
+ *   never outlast the one that corrected them.
  * - A failure keeps the last good view and says why. It is not retried on its own.
  */
 
@@ -111,6 +115,8 @@ export class AtFollower {
 	private shown: AtPayload | null = null;
 	/** The rows held when the request for `shown` was sent. */
 	private shownRows: readonly LedgerRow[] | null = null;
+	/** How many resyncs the page had installed when `shownRows` were taken. */
+	private shownResyncs = 0;
 	private epoch: number | null = null;
 	private inFlight = false;
 	private due = false;
@@ -126,6 +132,8 @@ export class AtFollower {
 		private readonly timeoutMs: number = AT_TIMEOUT_MS,
 		/** The rows the page holds right now: read in the tick a request is sent. */
 		private readonly heldRows: () => readonly LedgerRow[] = () => [],
+		/** How many resyncs (wholesale replacements of the rows) the page has installed: read with the rows. */
+		private readonly resyncs: () => number = () => 0,
 	) {}
 
 	/** Show the vault at `pos`, or live (null). */
@@ -139,6 +147,7 @@ export class AtFollower {
 		if (pos === null) {
 			this.shown = null;
 			this.shownRows = null;
+			this.shownResyncs = 0;
 			this.error = null;
 			this.epoch = null;
 			this.due = false;
@@ -192,6 +201,7 @@ export class AtFollower {
 		const chosen = this.chosen;
 		// Taken in this tick, with the request: see the header.
 		const rows = this.heldRows();
+		const resyncs = this.resyncs();
 		const abort = new AbortController();
 		// The timeout settles the request whether or not the loader honours the signal.
 		const timedOut = new Promise<never>((_, reject) => {
@@ -200,7 +210,7 @@ export class AtFollower {
 		const timer = setTimeout(() => abort.abort(), this.timeoutMs);
 		Promise.race([this.load(chosen?.pos ?? this.reread ?? wanted, abort.signal), timedOut])
 			.then(
-				(answer) => this.take(answer, rows, choice, generation),
+				(answer) => this.take(answer, rows, resyncs, choice, generation),
 				(err: unknown) => {
 					if (this.wanted === null || generation !== this.generation) return;
 					// A failure for a position the user has left says nothing about the one they are on now.
@@ -219,6 +229,7 @@ export class AtFollower {
 	private take(
 		answer: AtPayload,
 		rows: readonly LedgerRow[],
+		resyncs: number,
 		choice: number,
 		generation: number,
 	): void {
@@ -234,18 +245,26 @@ export class AtFollower {
 			// An answer for a position the drag has moved past: shown on the way; the latest is already due.
 			this.shown = answer;
 			this.shownRows = rows;
+			this.shownResyncs = resyncs;
 		} else if (this.chosen === null || this.chosen === answer) {
 			this.chosen = answer;
 			this.shown = answer;
 			this.shownRows = rows;
+			this.shownResyncs = resyncs;
 			this.reread = null;
 		} else if (this.shown === null || !sameReading(this.shown, answer)) {
 			this.shown = { ...answer, head: this.chosen.head, clamped: this.chosen.clamped };
 			this.shownRows = rows;
-		} else if ((this.shownRows?.at(-1)?.pos ?? -1) < this.shown.pos) {
-			// The same reading, but the kept snapshot was taken before the page held the position (the address's, on
-			// load): the snapshot of this request, sent later and before this answer, is as valid and holds more.
+			this.shownResyncs = resyncs;
+		} else if (
+			resyncs !== this.shownResyncs ||
+			(this.shownRows?.at(-1)?.pos ?? -1) < this.shown.pos
+		) {
+			// The same reading, but the kept snapshot was taken before a resync replaced the rows (an answer can land
+			// before its rows do), or before the page held the position (the address's, on load): the snapshot of this
+			// request, sent later and before this answer, is as valid and is the one the page holds now.
 			this.shownRows = rows;
+			this.shownResyncs = resyncs;
 		}
 	}
 

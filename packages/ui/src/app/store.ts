@@ -27,6 +27,11 @@ export interface LedgerData {
 	 * cannot re-trigger the flash.
 	 */
 	liveIds: Set<string>;
+	/**
+	 * How many snapshots have replaced the rows wholesale (the first load, a reload with other records, a reconnect):
+	 * the past view uses it to tell rows from before a replacement from the rows that corrected them.
+	 */
+	resyncs: number;
 }
 
 async function fetchAll(): Promise<{
@@ -53,6 +58,7 @@ export function useLedger(): LedgerData {
 		phase: "loading",
 		live: "connecting",
 		liveIds: new Set(),
+		resyncs: 0,
 	});
 
 	useEffect(() => {
@@ -80,7 +86,11 @@ export function useLedger(): LedgerData {
 							phase: "loaded" as const,
 						}));
 						if (install !== undefined)
-							setData((d) => ({ ...install(d), liveIds: new Set<string>() }));
+							setData((d) => ({
+								...install(d),
+								liveIds: new Set<string>(),
+								resyncs: d.resyncs + 1,
+							}));
 					}
 				})
 				.catch((err: unknown) => {

@@ -34,25 +34,33 @@ async function loadAt(pos: number, signal: AbortSignal): Promise<AtPayload> {
  * the status a row had there, and a reload can change what the position names. When the live stream comes back after
  * dropping, the server may have restarted and restarted its epochs, so the follower forgets the epoch and re-reads.
  *
- * `rows` are the rows the page holds. Each request is sent with the rows held at that moment, and its answer is shown
- * with those rows (`view.rows`), never with the rows held when it lands (`AtFollower`).
+ * `rows` are the rows the page holds, `resyncs` how many times they have been replaced wholesale. Each request is sent
+ * with the rows held at that moment, and its answer is shown with those rows (`view.rows`), never with the rows held
+ * when it lands; a later request that reads the same replaces them once a resync has landed (`AtFollower`).
  */
 export function useAt(
 	pos: number | null,
 	summary: SummaryPayload | null,
 	live: LiveState,
 	rows: readonly LedgerRow[],
+	resyncs: number,
 ): { view: AtView; preview(pos: number | null): void } {
 	const [view, setView] = useState<AtView>(LIVE_VIEW);
 	const follower = useRef<AtFollower | null>(null);
 	// The rows as of the last commit, for the follower to read when it sends a request. Written in an effect, never
 	// while rendering, and declared before the effects below so a request they send reads this commit's rows.
-	const held = useRef(rows);
+	const held = useRef({ rows, resyncs });
 	useEffect(() => {
-		held.current = rows;
-	}, [rows]);
+		held.current = { rows, resyncs };
+	}, [rows, resyncs]);
 	if (follower.current === null)
-		follower.current = new AtFollower(loadAt, setView, undefined, () => held.current);
+		follower.current = new AtFollower(
+			loadAt,
+			setView,
+			undefined,
+			() => held.current.rows,
+			() => held.current.resyncs,
+		);
 
 	useEffect(() => {
 		follower.current?.want(pos);

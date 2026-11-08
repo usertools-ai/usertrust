@@ -51,7 +51,7 @@ function row(pos: number, overrides: Partial<LedgerRow> = {}): LedgerRow {
 /** A loader whose answers the test gives by hand, in any order. */
 function harness() {
 	// The rows the page holds right now: the test replaces them as live frames arrive.
-	const page = { rows: [] as LedgerRow[] };
+	const page = { rows: [] as LedgerRow[], resyncs: 0 };
 	const calls: Array<{
 		pos: number;
 		signal: AbortSignal;
@@ -67,6 +67,7 @@ function harness() {
 		(v) => views.push(v),
 		undefined,
 		() => page.rows,
+		() => page.resyncs,
 	);
 	const last = (): AtView => {
 		const v = views.at(-1);
@@ -501,6 +502,51 @@ describe("AtFollower", () => {
 			await h.flush();
 			expect(h.views).toHaveLength(published);
 			expect(h.last().rows).toBe(sent);
+		});
+
+		it("an identical re-read adopts the rows of a later resync: a reload's answer that overtook them", async () => {
+			const h = harness();
+			// The page holds rows of the old vault: row 0 reads ambiguous there.
+			const old = [row(0, { status: "ambiguous" }), row(1)];
+			h.page.rows = old;
+			h.follower.want(0);
+			h.calls[0]?.resolve(at({ pos: 0, head: 1, statusAt: { [row(0).hash]: "settled" } }));
+			await h.flush();
+			// The vault is reloaded with other records: the answer for the new epoch lands before the rows are resynced.
+			h.follower.refresh();
+			h.calls[1]?.resolve(at({ pos: 0, head: 0, epoch: 1 }));
+			await h.flush();
+			expect(h.last().rows).toBe(old);
+			// The resync lands the new vault's rows (row 0 settled), and the summary refresh reads the same.
+			const fresh = [row(0)];
+			h.page.rows = fresh;
+			h.page.resyncs = 1;
+			h.follower.refresh();
+			h.calls[2]?.resolve(at({ pos: 0, head: 0, epoch: 1 }));
+			await h.flush();
+			expect(h.last().rows).toBe(fresh);
+			expect(statusesAt(h.last(), fresh)).toEqual(["settled"]);
+		});
+
+		it("an identical re-read adopts the rows of a resync that landed after a reconnect's answer", async () => {
+			const h = harness();
+			const old = [row(0, { status: "ambiguous" }), row(1)];
+			h.page.rows = old;
+			h.follower.want(0);
+			h.calls[0]?.resolve(at({ pos: 0, head: 1 }));
+			await h.flush();
+			// The stream comes back; the answer to the re-read lands before the resync's rows.
+			h.follower.reconnected();
+			h.calls[1]?.resolve(at({ pos: 0, head: 0, epoch: 1 }));
+			await h.flush();
+			const fresh = [row(0)];
+			h.page.rows = fresh;
+			h.page.resyncs = 1;
+			h.follower.refresh();
+			h.calls[2]?.resolve(at({ pos: 0, head: 0, epoch: 1 }));
+			await h.flush();
+			expect(h.last().rows).toBe(fresh);
+			expect(statusesAt(h.last(), fresh)).toEqual(["settled"]);
 		});
 
 		it("an answer that landed on the way is paired with its own request's rows", async () => {
