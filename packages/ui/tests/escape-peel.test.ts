@@ -6,6 +6,8 @@
  * never acts on Escape that something else owns (a search box, a select, a dialog, an open popover).
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 interface PeelState {
@@ -97,6 +99,23 @@ describe("shouldPeel", () => {
 	it("ignores an Escape something already handled", async () => {
 		const { shouldPeel } = await peel();
 		expect(shouldPeel(esc({ defaultPrevented: true }))).toBe(false);
+	});
+
+	it("red-first: the record panel marks the Escape it closes on, so one keypress never peels a second layer", () => {
+		// The panel listens in the capture phase and the peel in the bubble phase of the SAME keydown; the page re-renders
+		// in between, so an unmarked Escape reached the peel with the record already closed, and it took the fill too.
+		const src = readFileSync(
+			join(import.meta.dirname, "..", "src", "app", "row-panel.tsx"),
+			"utf-8",
+		);
+		const branch =
+			/if \(e\.key === "Escape"\) \{([\s\S]*?)\n\t\t\t\treturn;\n\t\t\t\}/.exec(src)?.[1] ?? "";
+		expect(branch).toContain("onClose(");
+		expect(branch).toMatch(/e\.preventDefault\(\);[\s\S]*onClose\(/);
+		// A popover's Escape is the popover's: the panel leaves it unmarked and open.
+		expect(branch.indexOf("e.preventDefault()")).toBeGreaterThan(
+			branch.indexOf("if (popoverOwnsEscape(document)) return;"),
+		);
 	});
 
 	it("ignores an Escape typed in a search box, a select or a popover", async () => {

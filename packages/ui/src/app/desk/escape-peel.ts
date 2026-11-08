@@ -43,8 +43,9 @@ export function shouldPeel(e: {
 }
 
 /**
- * One document listener (bubble phase). The record panel closes itself in the capture phase, so by the time this runs
- * its state may already be closed: the "record" step only has to be safe to repeat.
+ * One document listener (bubble phase). The record panel closes itself in the capture phase and marks that Escape
+ * handled (`preventDefault`), so this listener leaves it alone: the page re-renders between the two phases, and an
+ * unmarked Escape would reach this one with the record already closed and take the fill as well.
  */
 export function useEscapePeel(state: PeelState, act: Record<Peel, () => void>): void {
 	const latest = useRef({ state, act });

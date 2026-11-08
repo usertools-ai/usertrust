@@ -202,6 +202,9 @@ export function RowPanel(props: {
 					active === null ||
 					active === document.body ||
 					panelRef.current?.contains(active) === true;
+				// This Escape is handled here: marked, so a listener later in the same keypress (the desk's Escape peel, in the
+				// bubble phase, after the page has re-rendered with the panel closed) does not take a second layer with it.
+				e.preventDefault();
 				// A modal panel returns focus on its own (below); a docked one hands it back to its row. Focus in the search box
 				// or elsewhere stays there: closing must not take it.
 				onClose(docked && inside);
