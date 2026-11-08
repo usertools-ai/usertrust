@@ -14,9 +14,11 @@ import {
 	JOB_TYPE_CAVEAT,
 	jobTypeOf,
 	type LedgerRow,
+	type RowStatus,
 	statusOf,
 	typeSourceOf,
 } from "../shared/rows.js";
+import { statusWord } from "../shared/status-word.js";
 
 /** Each distinct value with the number of rows carrying it, by value. */
 function counted(values: Array<string | undefined>): Array<{ value: string; n: number }> {
@@ -32,16 +34,21 @@ const KIND = (r: LedgerRow): string => r.kind;
 const MODEL = (r: LedgerRow): string | undefined => r.model;
 const ACTOR = (r: LedgerRow): string => r.actor;
 const STATUS = (r: LedgerRow): string => statusOf(r);
+/** What a status value reads as: `ambiguous` is "unresolved" (the value, in the address, stays `ambiguous`). */
+const STATUS_TEXT = (v: string): string => statusWord(v as RowStatus);
 
 function Facet(props: {
 	label: string;
 	/** The rows the values are counted over, and each row's value. Counted only while the list is open. */
 	rows: LedgerRow[];
 	valueFor(r: LedgerRow): string | undefined;
+	/** How a value reads on screen, when it is not the value itself. */
+	text?(value: string): string;
 	selected: string[];
 	onChange(next: string[]): void;
 }): React.JSX.Element {
 	const { label, rows, valueFor, selected, onChange } = props;
+	const text = props.text ?? ((v: string): string => v);
 	const [open, setOpen] = useState(false);
 	// A pass over every row, so never while closed: a moving position changes the rows on every answer, and six closed
 	// facets counting 100,000 rows each time held the page up for nothing anyone could see.
@@ -95,7 +102,7 @@ function Facet(props: {
 				aria-haspopup="true"
 				aria-expanded={open}
 				onClick={toggle}
-				title={active ? `${label}: ${selected.join(", ")}` : `filter by ${label}`}
+				title={active ? `${label}: ${selected.map(text).join(", ")}` : `filter by ${label}`}
 				className={`ut-chip${active ? " on" : ""}`}
 			>
 				<span className="t">{label}</span>
@@ -126,8 +133,8 @@ function Facet(props: {
 										)
 									}
 								/>
-								<span className="t" title={o.value}>
-									{o.value}
+								<span className="t" title={text(o.value)}>
+									{text(o.value)}
 								</span>
 								<span className="n">{o.n}</span>
 							</label>
@@ -231,7 +238,7 @@ export const FilterBar = memo(function FilterBar(props: {
 		});
 	for (const s of filters.statuses)
 		chips.push({
-			label: `status: ${s}`,
+			label: `status: ${STATUS_TEXT(s)}`,
 			clear: () => onChange({ ...filters, statuses: filters.statuses.filter((x) => x !== s) }),
 		});
 	for (const t of filters.jobTypes)
@@ -338,6 +345,7 @@ export const FilterBar = memo(function FilterBar(props: {
 					label="status"
 					rows={rows}
 					valueFor={STATUS}
+					text={STATUS_TEXT}
 					selected={filters.statuses}
 					onChange={(v) => onChange({ ...filters, statuses: v })}
 				/>

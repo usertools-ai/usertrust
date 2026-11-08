@@ -191,6 +191,16 @@ describe("the header at a past position", () => {
 		expect(trends(119)).toContain("As recorded at");
 	});
 
+	it("Trends names the ambiguous tile 'unresolved', in a past view too, and never 'Ambiguous'", () => {
+		for (const a of [null, at()]) {
+			const shown = text(
+				renderToStaticMarkup(createElement(Trends, { rows: [], newestOf: undefined, at: a })),
+			);
+			expect(shown).toContain("unresolved");
+			expect(shown).not.toMatch(/ambiguous/i);
+		}
+	});
+
 	it("never says verified", () => {
 		for (const a of [at(), at({ chain: { valid: false, breakIndex: 3 } }), at({ clamped: true })])
 			expect(text(strip(a))).not.toMatch(/verif/i);

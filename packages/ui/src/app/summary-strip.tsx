@@ -607,12 +607,20 @@ function LoadingFacts(): React.JSX.Element {
 	);
 }
 
+/** Which part of the strip to draw: the page bar (header, alarm, as-at line, notice), the facts grid, or both. */
+export type SummaryStripPart = "bar" | "facts" | "all";
+
 export function SummaryStrip(props: {
 	summary: SummaryPayload | null;
 	live: LiveState;
 	/** The vault as recorded at a past position, or null (or absent) for live. */
 	at?: AtPayload | null;
+	/** The bar, the facts, or both (the default). The desk puts them in different places. */
+	part?: SummaryStripPart;
 }): React.JSX.Element {
+	const part = props.part ?? "all";
+	const showBar = part !== "facts";
+	const showFacts = part !== "bar";
 	const s = props.summary;
 	const at = props.at ?? null;
 	// Phone only: the Chain and Anchor facts sit behind a button. Elsewhere every fact shows and the button does not.
@@ -630,9 +638,13 @@ export function SummaryStrip(props: {
 	if (!s)
 		return (
 			<>
-				<TopBar vaultPath={null} live={props.live} kit={false} />
-				<AsAtLine at={null} head={-1} />
-				<LoadingFacts />
+				{showBar && (
+					<>
+						<TopBar vaultPath={null} live={props.live} kit={false} />
+						<AsAtLine at={null} head={-1} />
+					</>
+				)}
+				{showFacts && <LoadingFacts />}
 			</>
 		);
 	const status = chainStatus(s.chain);
@@ -642,103 +654,109 @@ export function SummaryStrip(props: {
 
 	return (
 		<>
-			<TopBar vaultPath={s.vaultPath} live={props.live} kit={s.remote.kit} />
-			{status === "broken" && (
-				<div className="ut-alarm" role="alert">
-					<b>Chain integrity failure</b>
-					<p>
-						{s.chain.breakIndex !== null
-							? `Tampering or corruption detected at chain position ${s.chain.breakIndex + 1}. Rows from there on are marked after break.`
-							: "The vault failed verification: tampering, corruption or deletion."}
-					</p>
-					{s.chain.errors.length > 0 && (
-						<ul>
-							{s.chain.errors.slice(0, 3).map((err) => (
-								<li key={err}>{err}</li>
-							))}
-							{s.chain.errors.length > 3 && <li>…and {s.chain.errors.length - 3} more</li>}
-						</ul>
+			{showBar && (
+				<>
+					<TopBar vaultPath={s.vaultPath} live={props.live} kit={s.remote.kit} />
+					{status === "broken" && (
+						<div className="ut-alarm" role="alert">
+							<b>Chain integrity failure</b>
+							<p>
+								{s.chain.breakIndex !== null
+									? `Tampering or corruption detected at chain position ${s.chain.breakIndex + 1}. Rows from there on are marked after break.`
+									: "The vault failed verification: tampering, corruption or deletion."}
+							</p>
+							{s.chain.errors.length > 0 && (
+								<ul>
+									{s.chain.errors.slice(0, 3).map((err) => (
+										<li key={err}>{err}</li>
+									))}
+									{s.chain.errors.length > 3 && <li>…and {s.chain.errors.length - 3} more</li>}
+								</ul>
+							)}
+						</div>
 					)}
-				</div>
+					{/* The live alarm above stays: it is the vault now. Everything below this line is the vault then. */}
+					<AsAtLine at={at} head={s.chain.events - 1} />
+					{notice !== null && (
+						<div className="ut-notice" role="status">
+							<b>Window</b>
+							{notice}
+						</div>
+					)}
+				</>
 			)}
-			{/* The live alarm above stays: it is the vault now. Everything below this line is the vault then. */}
-			<AsAtLine at={at} head={s.chain.events - 1} />
-			{notice !== null && (
-				<div className="ut-notice" role="status">
-					<b>Window</b>
-					{notice}
-				</div>
-			)}
-			<section
-				className="ut-facts"
-				aria-label="vault summary"
-				data-details={detailsOpen}
-				onKeyDown={onKeyDown}
-			>
-				<SpendFact spentUt={at === null ? s.spentUt : at.spentUt} past={at !== null} />
-				{at === null ? <BudgetFact s={s} /> : <PastBudgetFact at={at} />}
-				<button
-					ref={detailsRef}
-					type="button"
-					className="ut-more"
-					aria-expanded={detailsOpen}
-					aria-controls="ut-fact-chain ut-fact-anchor"
-					onClick={() => setDetailsOpen((o) => !o)}
+			{showFacts && (
+				<section
+					className="ut-facts"
+					aria-label="vault summary"
+					data-details={detailsOpen}
+					onKeyDown={onKeyDown}
 				>
-					<span>{detailsOpen ? "Hide details" : "Details"}</span>
-					<span className="chev" aria-hidden="true">
-						▾
-					</span>
-				</button>
-				<div className="ut-fact detail" id="ut-fact-chain">
-					<b>Chain</b>
-					<span className="v">
-						<Fit text={`${events.toLocaleString()} ${events === 1 ? "event" : "events"}`}>
-							{events.toLocaleString()} <small>{events === 1 ? "event" : "events"}</small>
-						</Fit>
-					</span>
-				</div>
-				{at !== null ? (
-					<PastIntegrityFact at={at} anchorFile={s.anchorFile} />
-				) : (
-					<div className="ut-fact">
-						<b>Integrity</b>
-						{/* "chained", never "verified": this is the hash links re-checked by the dashboard, not an explicit,
-					    anchored check. Without an anchor file it says so under the pill. */}
-						{status === "verified" && (
-							<span className="ut-pill" data-tone="approve" title={CHAINED_TITLE}>
-								<i />
-								chained
-							</span>
-						)}
-						{status === "broken" && (
-							<span className="ut-pill" data-tone="stakes">
-								<i />
-								broken
-							</span>
-						)}
-						{status === "empty" && (
-							<span className="ut-pill" title="No events yet: nothing to verify, nothing wrong">
-								<i />
-								no events
-							</span>
-						)}
-						{/* The pill's line under it, in every state (held empty when it has nothing to say), so the fact keeps its
-						    height. */}
-						{status === "verified" && s.anchorFile !== "present" ? (
-							<FactLine className="ut-sub" text={NOT_ANCHORED_NOTE} />
-						) : (
-							<Reserve line="sub" />
-						)}
-						<FactLine
-							className="ut-why"
-							text={verifiedAsOf(s.verifiedAt)}
-							title={`${verifiedAsOf(s.verifiedAt)}. The dashboard is a monitor: usertrust verify is the authoritative check of a vault`}
-						/>
+					<SpendFact spentUt={at === null ? s.spentUt : at.spentUt} past={at !== null} />
+					{at === null ? <BudgetFact s={s} /> : <PastBudgetFact at={at} />}
+					<button
+						ref={detailsRef}
+						type="button"
+						className="ut-more"
+						aria-expanded={detailsOpen}
+						aria-controls="ut-fact-chain ut-fact-anchor"
+						onClick={() => setDetailsOpen((o) => !o)}
+					>
+						<span>{detailsOpen ? "Hide details" : "Details"}</span>
+						<span className="chev" aria-hidden="true">
+							▾
+						</span>
+					</button>
+					<div className="ut-fact detail" id="ut-fact-chain">
+						<b>Chain</b>
+						<span className="v">
+							<Fit text={`${events.toLocaleString()} ${events === 1 ? "event" : "events"}`}>
+								{events.toLocaleString()} <small>{events === 1 ? "event" : "events"}</small>
+							</Fit>
+						</span>
 					</div>
-				)}
-				<AnchorFact anchorFile={s.anchorFile} past={at !== null} />
-			</section>
+					{at !== null ? (
+						<PastIntegrityFact at={at} anchorFile={s.anchorFile} />
+					) : (
+						<div className="ut-fact">
+							<b>Integrity</b>
+							{/* "chained", never "verified": this is the hash links re-checked by the dashboard, not an explicit,
+					    anchored check. Without an anchor file it says so under the pill. */}
+							{status === "verified" && (
+								<span className="ut-pill" data-tone="approve" title={CHAINED_TITLE}>
+									<i />
+									chained
+								</span>
+							)}
+							{status === "broken" && (
+								<span className="ut-pill" data-tone="stakes">
+									<i />
+									broken
+								</span>
+							)}
+							{status === "empty" && (
+								<span className="ut-pill" title="No events yet: nothing to verify, nothing wrong">
+									<i />
+									no events
+								</span>
+							)}
+							{/* The pill's line under it, in every state (held empty when it has nothing to say), so the fact keeps its
+						    height. */}
+							{status === "verified" && s.anchorFile !== "present" ? (
+								<FactLine className="ut-sub" text={NOT_ANCHORED_NOTE} />
+							) : (
+								<Reserve line="sub" />
+							)}
+							<FactLine
+								className="ut-why"
+								text={verifiedAsOf(s.verifiedAt)}
+								title={`${verifiedAsOf(s.verifiedAt)}. The dashboard is a monitor: usertrust verify is the authoritative check of a vault`}
+							/>
+						</div>
+					)}
+					<AnchorFact anchorFile={s.anchorFile} past={at !== null} />
+				</section>
+			)}
 		</>
 	);
 }
