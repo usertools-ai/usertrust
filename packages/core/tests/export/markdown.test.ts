@@ -51,6 +51,23 @@ describe("exportMarkdown", () => {
 		expect(readdirSync(join(outDir, "receipts", dates[0] as string))).toHaveLength(2);
 	});
 
+	it("a grok model's note names its provider as xai, as the receipt and the dashboard do", async () => {
+		const writer = createAuditWriter(tempDir);
+		await writer.appendEvent({
+			kind: "llm_call",
+			actor: "local",
+			data: { model: "grok-4.7", cost: 2, settled: true, transferId: "tx_test_grok" },
+		});
+		writer.release();
+		exportMarkdown(vaultPath, outDir);
+		const dates = readdirSync(join(outDir, "receipts"));
+		const dir = join(outDir, "receipts", dates[0] as string);
+		const notes = readdirSync(dir).map((f) => readFileSync(join(dir, f), "utf-8"));
+		const note = notes.find((n) => n.includes("transfer_id: tx_test_grok")) as string;
+		expect(note).toContain("model: grok-4.7");
+		expect(note).toContain("provider: xai");
+	});
+
 	it("frontmatter carries the Bases-driving properties", () => {
 		exportMarkdown(vaultPath, outDir);
 		const dates = readdirSync(join(outDir, "receipts"));
