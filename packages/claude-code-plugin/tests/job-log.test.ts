@@ -502,8 +502,12 @@ describe("usertrust-job while its session is re-pinned: a change written under t
 				() => true,
 				() => false,
 			);
+		// timing: polls every 20 ms for the pin, up to 20 s (the file's 30 s test budget); a missed bound fails the asserts below, never passes them. The row took 561-599 ms in 5 local runs
 		while (!(await made()) && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
 		// It read the pin as it made it, and is waiting for the log: the re-pin happens now.
+		// timing: a 400 ms pause for the CLI's own synchronous step after it publishes the pin (it reads
+		// the state dir before it waits, up to 20 s, for the log). A CLI slower than that reads the moved
+		// pin first and exits 0, so the row fails, never passes; it took 561-599 ms in 5 local runs
 		await new Promise((r) => setTimeout(r, 400));
 		const moved = JSON.parse(await readFile(pin, "utf-8")) as { settings: { stateDir: string } };
 		moved.settings.stateDir = other;
