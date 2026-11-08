@@ -731,7 +731,7 @@ describe("session.mjs: SessionStart re-pins a DEAD environment pin to the conven
 		// Another session's gap stays in the old dir: the carry is of THIS session's records.
 		await appendFile(
 			join(old, "watch.jsonl"),
-			`${JSON.stringify({ at: "2026-11-07T23:55:00.000Z", kind: "gap", mode: "watch", session: "sess-other", agent: "main" })}\n`,
+			`${JSON.stringify({ at: "2026-11-07T23:55:00.000Z", kind: "gap", mode: "watch", session: "sess-other", agent: "main" })}\n${JSON.stringify({ at: "2026-11-07T23:55:30.000Z", kind: "gap", mode: "watch", session: `${SESSION}-2`, agent: "main" })}\n`,
 		);
 		const untouched = snapshot(old);
 		const session = sessionSettings({
@@ -797,6 +797,27 @@ describe("session.mjs: SessionStart re-pins a DEAD environment pin to the conven
 		expect(session.kind).toBe("configured");
 		// mutant: carry every gap whatever is there → the session's gap twice
 		expect(await readFile(join(fresh, "watch.jsonl"), "utf-8")).toBe(earlier);
+	});
+
+	it("a carry cut short leaves a torn line: the next carry ends it first, so the gap is whole and the fragment a line of its own", async () => {
+		const { sessionSettings } = await sessionModule();
+		const home = await makeHome();
+		const fresh = await makeDir("utcc-conv-new-");
+		const old = await deadWithJobLog(home, fresh);
+		const gap = (await gapLines(old))[0];
+		if (gap === undefined) throw new Error("oldStateDir holds no gap of the session");
+		const torn = gap.slice(0, 20);
+		await writeFile(join(fresh, "watch.jsonl"), torn, { mode: 0o600 });
+		const session = sessionSettings({
+			env: unconfigured(old),
+			payload: { session_id: SESSION },
+			passwdHome: home,
+			uid: UID,
+			repin: true,
+		});
+		expect(session.kind).toBe("configured");
+		// mutant: append without ending the torn line → one unparseable line, and the gap gone
+		expect(await readFile(join(fresh, "watch.jsonl"), "utf-8")).toBe(`${torn}\n${gap}\n`);
 	});
 
 	it("a line of the old watch records that cannot be read refuses the re-pin, before any record: it may be the session's gap", async () => {

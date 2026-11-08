@@ -656,6 +656,10 @@ function carryGaps(oldDir, newDir, id, { uid, fs }) {
 	const have = new Set(there.split("\n"));
 	const carry = gaps.filter((line) => !have.has(line));
 	if (carry.length === 0) return null;
+	// A torn last line (a write cut short, by an earlier carry or any other writer) is ended first,
+	// so a carried line never joins it: the fragment stays a line of its own, which coverage reports
+	// as unreadable evidence, and every carried line stays whole.
+	const head = there === "" || there.endsWith("\n") ? "" : "\n";
 	try {
 		fs.mkdirSync(newDir, { recursive: true, mode: 0o700 });
 		const fd = fs.openSync(
@@ -670,7 +674,7 @@ function carryGaps(oldDir, newDir, id, { uid, fs }) {
 		try {
 			const info = fs.fstatSync(fd);
 			if (!info.isFile() || (uid !== null && info.uid !== uid)) throw new Error("refused");
-			fs.writeFileSync(fd, carry.map((line) => `${line}\n`).join(""));
+			fs.writeFileSync(fd, head + carry.map((line) => `${line}\n`).join(""));
 			fs.fsyncSync(fd);
 		} finally {
 			fs.closeSync(fd);
