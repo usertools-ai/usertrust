@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AtPayload, SummaryPayload, TotalsPayload } from "../src/shared/api.js";
 import { breakdown, WHOLE_VAULT } from "../src/shared/breakdown.js";
 import { colorsFromRanking, rankColors, SERIES } from "../src/shared/colors.js";
@@ -31,15 +31,23 @@ describe("GET /api/totals", () => {
 		return (await res.json()) as TotalsPayload;
 	}
 
-	/** Polls `/api/totals` every 50 ms for at most 5 s until `done` holds; fails with the last payload it saw. */
+	/** Polls `/api/totals` (vi.waitFor: every 50 ms, for at most 5 s) until `done` holds; fails with the last payload. */
 	async function until(done: (p: TotalsPayload) => boolean): Promise<TotalsPayload> {
-		const deadline = Date.now() + 5000;
 		let last = await totals();
-		while (!done(last) && Date.now() < deadline) {
-			await new Promise((r) => setTimeout(r, 50));
-			last = await totals();
+		if (done(last)) return last;
+		try {
+			await vi.waitFor(
+				async () => {
+					last = await totals();
+					if (!done(last)) throw new Error("not settled yet");
+				},
+				// timing: 5 s bound on the server folding an append or a reload in; on a laptop the slowest whole test that
+				// waits here took 686 ms in 5 runs (about 7x headroom). Not yet timed on CI.
+				{ timeout: 5000, interval: 50 },
+			);
+		} catch {
+			throw new Error(`totals never settled; last payload: ${JSON.stringify(last)}`);
 		}
-		if (!done(last)) throw new Error(`totals never settled; last payload: ${JSON.stringify(last)}`);
 		return last;
 	}
 
