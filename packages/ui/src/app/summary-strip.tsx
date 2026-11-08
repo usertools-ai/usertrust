@@ -14,7 +14,14 @@ import {
 	NOT_ANCHORED_NOTE,
 	verifiedAsOf,
 } from "../shared/display.js";
-import { formatUsd, formatUsdTotal, formatUt, middleTruncate, UT_KEY } from "../shared/format.js";
+import {
+	formatUsd,
+	formatUsdTotal,
+	formatUt,
+	formatUtcMinute,
+	middleTruncate,
+	UT_KEY,
+} from "../shared/format.js";
 import { KIT_MARK_URL, KIT_TIMEOUT_MS } from "../shared/kit.js";
 import { timelineLabel } from "../shared/timeline-view.js";
 import type { LiveState } from "./store.js";
@@ -351,11 +358,21 @@ function FactLine(props: {
 }
 
 /**
- * The Budget fact at a past position. There is no budget history yet, so there is no budget then to show: the server's
- * note says so, and today's budget is named as today's, never shown as the budget at that point.
+ * The Budget fact at a past position. There is no budget history yet, so there is no budget then to show: today's
+ * budget is named as today's, never shown as the budget at that point. Where it came from is shown as it is live: the
+ * source word (a controller's record reads `enforced` only while it is fresh) and, for a controller's record, the time
+ * it was written; any other source has the provenance sentence in the line's tooltip. A budget that is unknown
+ * (`several`, `unreadable`, `unpublished`) shows its reason and no figure.
  */
 function PastBudgetFact(props: { at: AtPayload }): React.JSX.Element {
 	const { budget } = props.at;
+	const now = useNow();
+	const word = budgetSourceWord(budget.source, budget.writtenAt, now).word;
+	const from =
+		budget.source === "governor" && budget.writtenAt !== null
+			? `${word}, as of ${formatUtcMinute(budget.writtenAt)}`
+			: word;
+	const line = budget.ut !== null ? `${from}. ${budget.note}` : budget.note;
 	return (
 		<div className="ut-fact budget" title={budget.note}>
 			<b>Budget</b>
@@ -379,11 +396,22 @@ function PastBudgetFact(props: { at: AtPayload }): React.JSX.Element {
 			) : (
 				<>
 					<Reserve line="amts" />
-					<Reserve line="sub" />
+					{/* The reason in place of a figure, in the line a figure would have used. */}
+					<FactLine
+						className="ut-sub"
+						text={budget.provenance.replace(/^unknown: /, "")}
+						title={budget.provenance}
+					/>
 				</>
 			)}
-			{/* Two lines (clamped): the whole note is in the title, and a cut note opens in full from its line. */}
-			<FactLine className="ut-why" text={budget.note} />
+			{/* Two lines (clamped): where the figure came from, then the whole note. The whole line is in its title, and a
+			    cut line opens in full. The provenance sentence calls a controller's budget "enforced", so as live, a
+			    controller's record never shows it: its words are the source word and the time. */}
+			<FactLine
+				className="ut-why"
+				text={line}
+				title={budget.source === "governor" ? line : `${budget.provenance}. ${line}`}
+			/>
 		</div>
 	);
 }

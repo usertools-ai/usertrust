@@ -13,6 +13,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AtPayload, SummaryPayload } from "../src/shared/api.js";
+import { budgetSourceWord } from "../src/shared/budget-display.js";
 import { formatUsdTotal } from "../src/shared/format.js";
 import { timelineLabel } from "../src/shared/timeline-view.js";
 
@@ -343,14 +344,92 @@ describe("the header at a past position", () => {
 
 	it("a clamped line keeps its full text in a title", () => {
 		const html = strip(at());
-		expect(html).toMatch(
-			new RegExp(`<span class="ut-why" title="${NOTE.replace("'", "&#x27;")}">`),
-		);
+		const why = /<span class="ut-why" title="([^"]*)">([\s\S]*?)<\/span>/.exec(html);
+		expect(why).not.toBeNull();
+		expect(why?.[1]).toContain(NOTE.replace("'", "&#x27;"));
+		expect(why?.[1]).toBe(why?.[2]);
 	});
 
 	it("the anchor file at T is today's, and says so", () => {
 		expect(text(strip(at()))).toMatch(/today: not set up/);
 		expect(text(strip(null))).not.toMatch(/today:/);
+	});
+});
+
+describe("past budget provenance", () => {
+	// The clock the header reads, fixed so the source word (which depends on the record's age) is known.
+	const NOW = Date.parse("2026-11-01T10:05:00.000Z");
+	beforeEach(() => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		vi.setSystemTime(NOW);
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("a controller's record: the source word and the time it was written", () => {
+		const html = text(strip(at({ budget: pastBudget() })));
+		expect(html).toContain(budgetSourceWord("governor", "2026-11-01T10:00:00.000Z", NOW).word);
+		expect(html).toContain("2026-11-01 10:00Z");
+	});
+
+	it("a controller's record gone stale reads as recorded, never enforced", () => {
+		const old = "2026-10-01T10:00:00.000Z";
+		const html = text(
+			strip(at({ budget: pastBudget({ writtenAt: old, provenance: "the enforced budget" }) })),
+		);
+		expect(html).toContain("recorded");
+		expect(html).toContain("2026-10-01 10:00Z");
+		expect(html).not.toContain("enforced");
+	});
+
+	it("the config's budget: the config source word, never enforced", () => {
+		const html = text(
+			strip(
+				at({
+					budget: pastBudget({
+						source: "config",
+						writtenAt: null,
+						provenance: "from usertrust.config.json; not confirmed as enforced",
+					}),
+				}),
+			),
+		);
+		expect(html).toContain(budgetSourceWord("config", null, NOW).word);
+		expect(html).not.toContain("enforced");
+	});
+
+	it("a source that is not a controller's record: the provenance sentence is in the line's title", () => {
+		const html = strip(
+			at({
+				budget: pastBudget({
+					source: "config",
+					writtenAt: null,
+					provenance: "a sentence from the server",
+				}),
+			}),
+		);
+		expect(html).toMatch(/<span class="ut-why" title="a sentence from the server\. /);
+	});
+
+	it("an unknown budget shows its reason and no figure", () => {
+		const reason = "the enforced-budget record could not be read; permission denied";
+		const html = text(
+			strip(
+				at({
+					budget: pastBudget({
+						ut: null,
+						source: "unreadable",
+						writtenAt: null,
+						provenance: `unknown: ${reason}`,
+					}),
+				}),
+			),
+		);
+		// The Budget fact alone: the Spend fact beside it shows a figure.
+		const fact = html.slice(html.indexOf("Budget"), html.indexOf("Chain"));
+		expect(fact).toContain(reason);
+		expect(fact).not.toContain("$");
 	});
 });
 
