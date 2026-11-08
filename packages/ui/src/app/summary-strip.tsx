@@ -24,7 +24,7 @@ import {
 	UT_KEY,
 } from "../shared/format.js";
 import { KIT_MARK_URL, KIT_TIMEOUT_MS } from "../shared/kit.js";
-import { timelineLabel } from "../shared/timeline-view.js";
+import { shownLabel } from "../shared/timeline-view.js";
 import type { LiveState } from "./store.js";
 import { TickingFigure } from "./ticking-figure.js";
 import { useNow } from "./use-now.js";
@@ -219,27 +219,27 @@ function SpendFact(props: { spentUt: number; past: boolean }): React.JSX.Element
 	);
 }
 
-/** The past view's own line. It alone reads the clock (for the year), so a live header never re-renders on its tick. */
 /**
  * The past view's own line. Its slot is always there: live it is empty and hidden (`visibility: hidden`, out of the
  * accessibility tree), so entering or leaving the past view moves nothing below it. Only the past line reads the
  * clock (for the year), so the live header never re-renders on its tick.
  */
-function AsAtLine(props: { at: AtPayload | null }): React.JSX.Element {
+function AsAtLine(props: { at: AtPayload | null; head: number }): React.JSX.Element {
 	if (props.at === null)
 		return (
 			<p className="ut-asat" data-live="true" aria-hidden="true">
 				{"\u00a0"}
 			</p>
 		);
-	return <PastAsAtLine at={props.at} />;
+	return <PastAsAtLine at={props.at} head={props.head} />;
 }
 
-function PastAsAtLine(props: { at: AtPayload }): React.JSX.Element {
+/** `head`: the live vault's last position, so a clamped answer stops saying "latest record" once records follow it. */
+function PastAsAtLine(props: { at: AtPayload; head: number }): React.JSX.Element {
 	const now = useNow();
 	return (
 		<p className="ut-asat" data-live="false">
-			{timelineLabel(props.at, new Date(now).toISOString())}
+			{shownLabel(props.at, props.head, new Date(now).toISOString())}
 		</p>
 	);
 }
@@ -626,7 +626,7 @@ export function SummaryStrip(props: {
 		return (
 			<>
 				<TopBar vaultPath={null} live={props.live} kit={false} />
-				<AsAtLine at={null} />
+				<AsAtLine at={null} head={-1} />
 				<LoadingFacts />
 			</>
 		);
@@ -657,7 +657,7 @@ export function SummaryStrip(props: {
 				</div>
 			)}
 			{/* The live alarm above stays: it is the vault now. Everything below this line is the vault then. */}
-			<AsAtLine at={at} />
+			<AsAtLine at={at} head={s.chain.events - 1} />
 			{notice !== null && (
 				<div className="ut-notice" role="status">
 					<b>Window</b>

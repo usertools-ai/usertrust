@@ -22,7 +22,7 @@ import {
 	Y_AXIS_ALLOW_DECIMALS,
 } from "../shared/format.js";
 import { JOB_TYPE_CAVEAT, type LedgerRow } from "../shared/rows.js";
-import { timelineLabel } from "../shared/timeline-view.js";
+import { shownLabel } from "../shared/timeline-view.js";
 import { BarList } from "./bar-list.js";
 import { TickingFigure } from "./ticking-figure.js";
 
@@ -124,6 +124,8 @@ export const Trends = memo(function Trends(props: {
 	newestOf: number | undefined;
 	/** The past position the rows are cut at (`cutRows`), or null (or absent) for live. */
 	at?: AtPayload | null;
+	/** The live vault's last position: a clamped answer stops saying "latest record" once records follow it. */
+	head?: number;
 }): React.JSX.Element {
 	const at = props.at ?? null;
 	const [granularity, setGranularity] = useState<Granularity>("day");
@@ -313,7 +315,7 @@ export const Trends = memo(function Trends(props: {
 			<div className="ut-sub mono">
 				{props.rows.length.toLocaleString()} records {scope}
 				{window && ` · ${formatUtcMinute(window.first)} to ${formatUtcMinute(window.last)}`}
-				{at !== null && ` · ${timelineLabel(at, new Date().toISOString())}`}
+				{at !== null && ` · ${shownLabel(at, props.head ?? at.head, new Date().toISOString())}`}
 			</div>
 			<div className="ut-sub mono">{UT_KEY}</div>
 		</div>

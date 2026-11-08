@@ -217,7 +217,7 @@ export function App(): React.JSX.Element {
 								onClearFilters={clearFilters}
 							/>
 						) : (
-							<Trends rows={list.filtered} newestOf={newestOf} at={list.at} />
+							<Trends rows={list.filtered} newestOf={newestOf} at={list.at} head={head} />
 						)}
 					</section>
 					{dock &&

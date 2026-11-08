@@ -44,7 +44,14 @@ let SummaryStrip: Component<{
 	at?: AtPayload | null;
 }>;
 let Timeline: Component<TimelineProps>;
+let Trends: Component<{
+	rows: never[];
+	newestOf: number | undefined;
+	at?: AtPayload | null;
+	head?: number;
+}>;
 beforeAll(async () => {
+	Trends = (await app<{ Trends: typeof Trends }>("trends")).Trends;
 	SummaryStrip = (await app<{ SummaryStrip: typeof SummaryStrip }>("summary-strip")).SummaryStrip;
 	Timeline = (await app<{ Timeline: typeof Timeline }>("timeline")).Timeline;
 });
@@ -170,6 +177,28 @@ describe("the header at a past position", () => {
 
 	it("counts the records up to the position", () => {
 		expect(text(strip(at({ pos: 40 })))).toContain("41 events");
+	});
+
+	it("a clamped answer stops saying '(latest record)' in the header once more records have arrived, as the timeline label does", () => {
+		const a = at({ pos: 99, head: 99, clamped: true });
+		const live = (events: number): SummaryPayload =>
+			summary({ chain: { events, valid: true, empty: false, breakIndex: null, errors: [] } });
+		// Positive control: with no record after it, the answer is the latest and says so.
+		expect(text(strip(a, live(100)))).toContain("(latest record)");
+		// 120 records now: the answer at record 100 is no longer the latest.
+		expect(text(strip(a, live(120)))).not.toContain("(latest record)");
+		expect(text(strip(a, live(120)))).toContain("As recorded at");
+	});
+
+	it("Trends' footer drops '(latest record)' too once records follow a clamped answer", () => {
+		const a = at({ pos: 99, head: 99, clamped: true });
+		const trends = (head: number): string =>
+			text(
+				renderToStaticMarkup(createElement(Trends, { rows: [], newestOf: undefined, at: a, head })),
+			);
+		expect(trends(99)).toContain("(latest record)");
+		expect(trends(119)).not.toContain("(latest record)");
+		expect(trends(119)).toContain("As recorded at");
 	});
 
 	it("never says verified", () => {
