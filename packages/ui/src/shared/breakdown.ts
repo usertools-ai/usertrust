@@ -12,7 +12,7 @@
 import { isHeaderSpend } from "./aggregate.js";
 import { type ProviderName, providerOf } from "./provider.js";
 import { jobTypeOf, type LedgerRow } from "./rows.js";
-import { bucketTotals } from "./spend-series.js";
+import { bucketCount, bucketIndex, canBucket } from "./spend-series.js";
 
 export type Dimension = "lane" | "role" | "model" | "kind" | "provider";
 
@@ -68,18 +68,26 @@ export function breakdown(rows: readonly LedgerRow[], win: SpendWindow, dim: Dim
 		totalUt += row.costUt;
 		calls += 1;
 	}
-	const keys = [...byKey.keys()].sort((a, b) => {
-		const d = (byKey.get(b)?.spendUt ?? 0) - (byKey.get(a)?.spendUt ?? 0);
-		if (d !== 0) return d;
-		return a < b ? -1 : a > b ? 1 : 0;
-	});
+	const spend = new Map<string, number>();
+	for (const [key, entry] of byKey) spend.set(key, entry.spendUt);
+	const keys = byTotalDesc(spend);
 	return { dim, keys, byKey, totalUt, calls };
 }
 
+/** Keys ordered by spend, highest first; ties A to Z. The order `breakdown` uses. */
+function byTotalDesc(totals: ReadonlyMap<string, number>): string[] {
+	return [...totals.keys()].sort((a, b) => {
+		const d = (totals.get(b) ?? 0) - (totals.get(a) ?? 0);
+		if (d !== 0) return d;
+		return a < b ? -1 : a > b ? 1 : 0;
+	});
+}
+
 /**
- * Spend per bucket for every key, UNSMOOTHED, in `breakdown().keys` order. Bucketed by `bucketTotals`, the one
- * bucketing the line uses, so a key's row adds up to that key's number in `breakdown` over the same window. The
- * window must be finite: buckets are for drawing, and an unbounded window has none.
+ * Spend per bucket for every key, UNSMOOTHED, in `breakdown().keys` order. One pass over the records, bucketed by
+ * `bucketIndex`, the one bucketing the line uses (`bucketTotals`), so a key's row adds up to that key's number in
+ * `breakdown` over the same window. The window must be finite: buckets are for drawing, and an unbounded window has
+ * none (each key then has a single empty bucket).
  */
 export function categoryRows(
 	rows: readonly LedgerRow[],
@@ -87,12 +95,30 @@ export function categoryRows(
 	dim: Dimension,
 	bucketMs: number,
 ): Map<string, Float64Array> {
+	if (!canBucket(win, bucketMs)) {
+		const out = new Map<string, Float64Array>();
+		for (const key of breakdown(rows, win, dim).keys) out.set(key, new Float64Array(1));
+		return out;
+	}
+	const n = bucketCount(win, bucketMs);
+	const cells = new Map<string, Float64Array>();
+	const totals = new Map<string, number>();
+	for (const row of rows) {
+		const i = bucketIndex(row, win, bucketMs, n);
+		if (i < 0) continue;
+		const key = keyOf(dim, row);
+		let cell = cells.get(key);
+		if (cell === undefined) {
+			cell = new Float64Array(n);
+			cells.set(key, cell);
+			totals.set(key, 0);
+		}
+		const cost = row.costUt as number;
+		cell[i] = (cell[i] as number) + cost;
+		totals.set(key, (totals.get(key) as number) + cost);
+	}
 	const out = new Map<string, Float64Array>();
-	for (const key of breakdown(rows, win, dim).keys)
-		out.set(
-			key,
-			bucketTotals(rows, win, bucketMs, (r) => keyOf(dim, r) === key),
-		);
+	for (const key of byTotalDesc(totals)) out.set(key, cells.get(key) as Float64Array);
 	return out;
 }
 
@@ -115,8 +141,11 @@ export function shareBands(
 	const out = new Map<string, Float64Array>();
 	if (cats.size === 0) return out;
 	const keys = [...cats.keys()];
-	const totals = bucketTotals(rows, win, bucketMs);
-	const n = totals.length;
+	const n = (cats.values().next().value as Float64Array).length;
+	// The bucket totals are the columns of the rows above: one pass, and exact for whole usertokens.
+	const totals = new Float64Array(n);
+	for (const v of cats.values())
+		for (let i = 0; i < n; i++) totals[i] = (totals[i] as number) + (v[i] as number);
 	const r = Math.max(0, Math.floor(radius));
 	const shares = keys.map((k) => {
 		const v = cats.get(k) as Float64Array;

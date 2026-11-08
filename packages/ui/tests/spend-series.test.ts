@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 import { breakdown } from "../src/shared/breakdown.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 import {
+	bucketCount,
+	bucketIndex,
 	bucketTotals,
 	DEFAULT_RANGE,
 	LANE_BUCKET_MS,
@@ -165,5 +167,40 @@ describe("bucketTotals", () => {
 		const out = bucketTotals([row(START + 1, { kind: "info", costUt: 5 })], win, HOUR);
 		expect(Array.from(out)).toEqual([0, 0, 0]);
 		expect(out.every((v) => !Number.isNaN(v))).toBe(true);
+	});
+});
+
+describe("bucketIndex", () => {
+	const START = Date.UTC(2026, 10, 1);
+	const win = { startMs: START, endMs: START + 4 * HOUR };
+	const n = bucketCount(win, HOUR);
+
+	it("names the bucket bucketTotals puts the record in, half-open at both ends", () => {
+		expect(n).toBe(4);
+		expect(bucketIndex(row(START - 1), win, HOUR, n)).toBe(-1);
+		expect(bucketIndex(row(START), win, HOUR, n)).toBe(0);
+		expect(bucketIndex(row(START + HOUR - 1), win, HOUR, n)).toBe(0);
+		expect(bucketIndex(row(START + HOUR), win, HOUR, n)).toBe(1);
+		expect(bucketIndex(row(START + 4 * HOUR - 1), win, HOUR, n)).toBe(3);
+		expect(bucketIndex(row(START + 4 * HOUR), win, HOUR, n)).toBe(-1);
+	});
+
+	it("says -1 for what is not spend or has no readable time", () => {
+		expect(bucketIndex(row(START + 1, { kind: "info" }), win, HOUR, n)).toBe(-1);
+		const { costUt: _omit, ...noCost } = row(START + 1);
+		expect(bucketIndex(noCost, win, HOUR, n)).toBe(-1);
+		expect(bucketIndex(row(START + 1, { ts: "not a time" }), win, HOUR, n)).toBe(-1);
+	});
+
+	it("puts a record in the final partial bucket", () => {
+		const partial = { startMs: START, endMs: START + 3 * HOUR + 10 * 60_000 };
+		expect(bucketCount(partial, HOUR)).toBe(4);
+		expect(bucketIndex(row(START + 3 * HOUR + 5 * 60_000), partial, HOUR, 4)).toBe(3);
+	});
+
+	it("counts one bucket for a window that cannot be bucketed", () => {
+		expect(bucketCount({ startMs: -Infinity, endMs: Infinity }, HOUR)).toBe(1);
+		expect(bucketCount({ startMs: START, endMs: START }, HOUR)).toBe(1);
+		expect(bucketCount(win, 0)).toBe(1);
 	});
 });

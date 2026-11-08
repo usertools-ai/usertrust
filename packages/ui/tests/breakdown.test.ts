@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { isHeaderSpend } from "../src/shared/aggregate.js";
 import {
 	type Breakdown,
@@ -203,6 +203,46 @@ describe("categoryRows", () => {
 	it("is empty, never NaN, for a vault with no spend", () => {
 		const rows = [row({ kind: "info", costUt: 3 })];
 		expect(categoryRows(rows, WIN, "lane", BUCKET).size).toBe(0);
+	});
+
+	it("reads each record's time once, however many keys there are", () => {
+		const KEYS = 200;
+		const rows: LedgerRow[] = [];
+		for (let i = 0; i < 2000; i++)
+			rows.push(
+				row({
+					pos: i,
+					actor: `lane-${i % KEYS}`,
+					ts: new Date(T0 + (i % 23) * HOUR + i).toISOString(),
+					costUt: 1 + (i % 5),
+				}),
+			);
+		const spy = vi.spyOn(Date, "parse");
+		try {
+			const out = categoryRows(rows, WIN, "lane", BUCKET);
+			expect(out.size).toBe(KEYS);
+			expect(spy.mock.calls.length).toBeLessThanOrEqual(rows.length);
+			spy.mockClear();
+			shareBands(rows, WIN, "lane", BUCKET);
+			expect(spy.mock.calls.length).toBeLessThanOrEqual(rows.length);
+		} finally {
+			spy.mockRestore();
+		}
+		const b = breakdown(rows, WIN, "lane");
+		const out = categoryRows(rows, WIN, "lane", BUCKET);
+		expect([...out.keys()]).toEqual(b.keys);
+		for (const key of b.keys) {
+			let sum = 0;
+			for (const v of out.get(key) as Float64Array) sum += v;
+			expect(sum).toBe(b.byKey.get(key)?.spendUt);
+		}
+	});
+
+	it("keeps a key's row of zeros when the window cannot be bucketed", () => {
+		const open = { startMs: -Infinity, endMs: Infinity };
+		const out = categoryRows(fixture(), open, "lane", BUCKET);
+		expect([...out.keys()]).toEqual(breakdown(fixture(), open, "lane").keys);
+		for (const v of out.values()) expect(Array.from(v)).toEqual([0]);
 	});
 });
 

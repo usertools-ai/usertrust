@@ -54,6 +54,30 @@ export function lineBucketMs(win: SpendWindow, widthPx: number): number {
 	return Math.max(1, Math.ceil(span / px / MINUTE)) * MINUTE;
 }
 
+/** Whether the window is finite and the bucket positive: buckets are for drawing, and an unbounded window has none. */
+export function canBucket(win: SpendWindow, bucketMs: number): boolean {
+	const span = win.endMs - win.startMs;
+	return bucketMs > 0 && span > 0 && Number.isFinite(span);
+}
+
+/** How many buckets cover the window: `max(1, ceil((endMs - startMs) / bucketMs))`; 1 when it cannot be bucketed. */
+export function bucketCount(win: SpendWindow, bucketMs: number): number {
+	if (!canBucket(win, bucketMs)) return 1;
+	return Math.max(1, Math.ceil((win.endMs - win.startMs) / bucketMs));
+}
+
+/**
+ * The bucket a record's spend falls in, or -1 when it is not spend (`isHeaderSpend`), has no readable time, or lies
+ * outside the half-open window. The one bucketing every view uses: `floor((t - startMs) / bucketMs)`, the last bucket
+ * taking the final partial one. `n` is `bucketCount(win, bucketMs)` for a window that can be bucketed.
+ */
+export function bucketIndex(row: LedgerRow, win: SpendWindow, bucketMs: number, n: number): number {
+	if (!isHeaderSpend(row.kind, row.costUt)) return -1;
+	const t = Date.parse(row.ts);
+	if (!(t >= win.startMs && t < win.endMs)) return -1;
+	return Math.min(n - 1, Math.floor((t - win.startMs) / bucketMs));
+}
+
 /**
  * Spend per bucket over the half-open window. A record goes in bucket `floor((t - startMs) / bucketMs)`. The length is
  * exactly `max(1, ceil((endMs - startMs) / bucketMs))`: a final partial bucket is kept, never dropped. `pick` narrows
@@ -65,17 +89,14 @@ export function bucketTotals(
 	bucketMs: number,
 	pick?: (r: LedgerRow) => boolean,
 ): Float64Array {
-	const span = win.endMs - win.startMs;
-	if (!(bucketMs > 0) || !(span > 0) || !Number.isFinite(span)) return new Float64Array(1);
-	const n = Math.max(1, Math.ceil(span / bucketMs));
+	const n = bucketCount(win, bucketMs);
 	const out = new Float64Array(n);
+	if (!canBucket(win, bucketMs)) return out;
 	for (const row of rows) {
-		if (!isHeaderSpend(row.kind, row.costUt)) continue;
-		const t = Date.parse(row.ts);
-		if (!(t >= win.startMs && t < win.endMs)) continue;
+		const i = bucketIndex(row, win, bucketMs, n);
+		if (i < 0) continue;
 		if (pick !== undefined && !pick(row)) continue;
-		const i = Math.min(n - 1, Math.floor((t - win.startMs) / bucketMs));
-		out[i] = (out[i] as number) + row.costUt;
+		out[i] = (out[i] as number) + (row.costUt as number);
 	}
 	return out;
 }
