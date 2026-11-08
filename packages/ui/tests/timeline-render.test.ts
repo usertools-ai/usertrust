@@ -593,12 +593,25 @@ describe("Trends while the point's records are reloading", () => {
 		);
 		expect(html).toContain("Updating to the reloaded vault…");
 		expect(html).not.toContain("No records in view");
+		// The lists are hidden too: each would print its own empty sentence.
+		expect(html).not.toContain("Cost by kind");
+		expect(html).not.toContain("Cost by model");
 	});
 
-	it("CONTROL: not reloading, an empty Trends says so", () => {
+	it("with no note given, says the default held words, never an empty bold line", () => {
+		const html = text(
+			renderToStaticMarkup(
+				createElement(TrendsReloading, { rows: [], newestOf: undefined, reloading: true }),
+			),
+		);
+		expect(html).toContain("Loading this point's records…");
+	});
+
+	it("CONTROL: not reloading, an empty Trends says so and shows its lists", () => {
 		const html = text(
 			renderToStaticMarkup(createElement(TrendsReloading, { rows: [], newestOf: undefined })),
 		);
 		expect(html).toContain("No records in view");
+		expect(html).toContain("Cost by kind");
 	});
 });

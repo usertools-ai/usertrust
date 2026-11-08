@@ -830,3 +830,18 @@ describe("a past view and the vault it comes from", () => {
 		expect(p.rows.map((r) => r.id)).toEqual(["a", "b2"]);
 	});
 });
+
+describe("an answer from another server start", () => {
+	it("with the same epoch is a reload, never the same reading", async () => {
+		const h = harness();
+		h.follower.want(1);
+		h.calls[0]?.resolve(at({ pos: 1, epoch: 0, boot: "A" }));
+		await h.flush();
+		expect(h.last().reloaded).toBe(false);
+		h.follower.refresh();
+		h.calls[1]?.resolve(at({ pos: 1, epoch: 0, boot: "B" }));
+		await h.flush();
+		expect(h.last().reloaded).toBe(true);
+		expect(h.last().at?.boot).toBe("B");
+	});
+});

@@ -6,7 +6,7 @@ import type { SummaryPayload } from "../shared/api.js";
 import { vaultKey } from "../shared/asof.js";
 import type { LoadPhase } from "../shared/display.js";
 import { applyStatusChanges, novelRows, type StatusChange } from "../shared/live.js";
-import { frameVersion, SnapshotReplay, type Update } from "../shared/replay.js";
+import { frameVersion, resyncRetryDelay, SnapshotReplay, type Update } from "../shared/replay.js";
 import type { LedgerRow } from "../shared/rows.js";
 
 /**
@@ -85,13 +85,21 @@ export function useLedger(): LedgerData {
 			replay.record(frameVersion((e as MessageEvent).lastEventId), apply);
 			setData(apply);
 		};
+		// Resyncs begun so far: a snapshot labels its rows with its vault only if it is still the newest one begun, so a
+		// slower, older snapshot never labels rows a newer resync has made unknown. A failed fetch is tried again.
+		let resyncsBegun = 0;
+		let failures = 0;
+		let retry: ReturnType<typeof setTimeout> | undefined;
 		const resync = (): void => {
+			clearTimeout(retry);
+			const mine = ++resyncsBegun;
 			const generation = replay.begin();
 			// The rows held are about to be replaced: until the snapshot lands their vault is unknown, so a frame that
 			// arrives meanwhile is never taken for the old vault's (the server sends `resync` before any later append).
 			if (!cancelled) setData((d) => ({ ...d, rowsVault: null }));
 			fetchAll()
 				.then(({ rows, summary, version, vault }) => {
+					failures = 0;
 					// liveIds is flash state for SSE arrivals only — a resync
 					// replaces the row set wholesale, so it starts clean (after
 					// the replay too: a re-applied frame is not a new arrival).
@@ -101,7 +109,7 @@ export function useLedger(): LedgerData {
 							...d,
 							rows,
 							summary,
-							rowsVault: vault,
+							rowsVault: mine === resyncsBegun ? vault : null,
 							phase: "loaded" as const,
 						}));
 						if (install !== undefined)
@@ -116,6 +124,12 @@ export function useLedger(): LedgerData {
 					// Amendment A6: never leave an unhandled rejection; drop the
 					// live indicator so the UI shows the data may be stale.
 					console.error("usertrust-ui: ledger fetch failed", err);
+					// Tried again with backoff: until a snapshot lands the rows' vault is unknown and a past view waits.
+					// Only the newest resync begun retries: an older one that fails after a newer one began is moot.
+					if (!cancelled && mine === resyncsBegun) {
+						failures += 1;
+						retry = setTimeout(resync, resyncRetryDelay(failures));
+					}
 					// A snapshot already held stays "loaded": its rows are still shown, and the next resync replaces them.
 					if (!cancelled)
 						setData((d) => ({
@@ -180,6 +194,7 @@ export function useLedger(): LedgerData {
 		source.addEventListener("resync", resync);
 
 		return () => {
+			clearTimeout(retry);
 			cancelled = true;
 			for (const timer of flashTimers) clearTimeout(timer);
 			source.close();

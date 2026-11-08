@@ -21,6 +21,7 @@ import {
 	UT_KEY,
 	Y_AXIS_ALLOW_DECIMALS,
 } from "../shared/format.js";
+import { pastHeldNote } from "../shared/list-view.js";
 import { JOB_TYPE_CAVEAT, type LedgerRow } from "../shared/rows.js";
 import { shownLabel } from "../shared/timeline-view.js";
 import { BarList } from "./bar-list.js";
@@ -235,7 +236,11 @@ export const Trends = memo(function Trends(props: {
 				</div>
 				{series.length === 0 ? (
 					<div className="ut-empty">
-						<b>{props.reloading === true ? props.reloadingNote : "No records in view"}</b>
+						<b>
+							{props.reloading === true
+								? (props.reloadingNote ?? pastHeldNote(false))
+								: "No records in view"}
+						</b>
 					</div>
 				) : (
 					// The container is the chart's image: the label states the series, and the table below lists every

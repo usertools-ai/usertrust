@@ -103,6 +103,7 @@ function sameReading(a: AtPayload, b: AtPayload): boolean {
 		a.pos === b.pos &&
 		a.ts === b.ts &&
 		a.epoch === b.epoch &&
+		a.boot === b.boot &&
 		a.spentUt === b.spentUt &&
 		a.plan === b.plan &&
 		a.windowStartPos === b.windowStartPos &&
@@ -143,7 +144,8 @@ export class AtFollower {
 	private shownResyncs = 0;
 	/** The vault key of the vault `shownRows` came from. */
 	private shownRowsVault: string | null = null;
-	private epoch: number | null = null;
+	/** The server start and reload the last answer came from (`boot` and `epoch`): another one is a reload. */
+	private epoch: string | null = null;
 	private inFlight = false;
 	private due = false;
 	private error: string | null = null;
@@ -283,12 +285,13 @@ export class AtFollower {
 		// cancelled, so it is not shown on the way. The position is compared, not the choice: a preview in between moves
 		// the choice on, and an answer for the destination itself is still the destination's.
 		if (navigations !== this.navigations && sentFor !== this.wanted) return;
-		if (this.epoch !== null && answer.epoch !== this.epoch) {
+		const seen = `${answer.boot ?? ""}#${answer.epoch}`;
+		if (this.epoch !== null && seen !== this.epoch) {
 			this.reloaded = true;
 			// The records changed under the position: this answer is the new baseline.
 			if (choice === this.choice) this.chosen = answer;
 		}
-		this.epoch = answer.epoch;
+		this.epoch = seen;
 		this.error = null;
 		if (choice !== this.choice) {
 			// An answer for a position the preview has moved past: shown on the way; the latest is already due.

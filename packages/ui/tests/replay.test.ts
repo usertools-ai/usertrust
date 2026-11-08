@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { describe, expect, it } from "vitest";
-import { frameVersion, SnapshotReplay } from "../src/shared/replay.js";
+import { frameVersion, resyncRetryDelay, SnapshotReplay } from "../src/shared/replay.js";
 
 type D = { status: Record<string, string> };
 const set =
@@ -116,5 +116,14 @@ describe("SnapshotReplay: a snapshot never loses a frame that overtook it", () =
 		expect(frameVersion("0")).toBe(0);
 		for (const id of ["", "x", "1.5", "-", "1e400"])
 			expect(frameVersion(id), id).toBe(Number.POSITIVE_INFINITY);
+	});
+});
+
+describe("resyncRetryDelay: a failed snapshot fetch is tried again, sooner first, never slower than 30 s", () => {
+	it("doubles from one second and stops at thirty", () => {
+		expect([1, 2, 3, 4, 5, 6, 12].map(resyncRetryDelay)).toEqual([
+			1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000,
+		]);
+		expect(resyncRetryDelay(0)).toBe(1_000);
 	});
 });

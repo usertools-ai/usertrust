@@ -14,7 +14,7 @@ import {
 import { type SortKey, sortRows } from "../shared/filters.js";
 import { compactActor, formatUtc, UT_KEY } from "../shared/format.js";
 import { PHONE_QUERY } from "../shared/layout.js";
-import type { BeforeWindow } from "../shared/list-view.js";
+import { type BeforeWindow, pastHeldNote } from "../shared/list-view.js";
 import {
 	nextRowIndex,
 	pageSizeFromItems,
@@ -474,7 +474,7 @@ export const AuditTable = memo(function AuditTable(props: {
 						state={state}
 						hidden={props.total - sorted.length}
 						before={props.beforeWindow ?? null}
-						reloadingNote={props.reloadingNote ?? ""}
+						reloadingNote={props.reloadingNote ?? pastHeldNote(false)}
 						onClearFilters={props.onClearFilters}
 					/>
 				) : (

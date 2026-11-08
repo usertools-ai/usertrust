@@ -16,7 +16,7 @@ describe("the store's rows and the vault they come from", () => {
 		expect(unknown).toBeGreaterThanOrEqual(0);
 		expect(fetch).toBeGreaterThan(unknown);
 		// The install: the same update that sets the rows sets the vault they come from.
-		expect(fn).toMatch(/rows,\s*summary,\s*rowsVault: vault\b/);
+		expect(fn).toMatch(/rows,\s*summary,\s*rowsVault: mine === resyncsBegun \? vault : null\b/);
 	});
 
 	it("frames never change the vault: no row, status or summary frame writes rowsVault", () => {
@@ -27,5 +27,21 @@ describe("the store's rows and the vault they come from", () => {
 	it("fetchAll builds the key from the boot and the epoch the snapshot carries", () => {
 		expect(store).toMatch(/vault: vaultKey\(boot, epoch\)/);
 		expect(store).not.toMatch(/snapshotEpoch|rowsEpoch/);
+	});
+
+	it("a snapshot labels its rows with its vault only if no newer resync has begun since it was fetched", () => {
+		const fn = /const resync = \(\): void => \{([\s\S]*?)\n\t\t\};\n/.exec(store)?.[1] ?? "";
+		expect(fn).toMatch(/const mine = \+\+resyncsBegun;/);
+		expect(fn).toMatch(/rowsVault: mine === resyncsBegun \? vault : null/);
+	});
+
+	it("a failed fetch is tried again with backoff; a newer resync, or leaving the page, cancels the retry", () => {
+		const fn = /const resync = \(\): void => \{([\s\S]*?)\n\t\t\};\n/.exec(store)?.[1] ?? "";
+		expect(fn.indexOf("clearTimeout(retry)")).toBeGreaterThanOrEqual(0);
+		expect(fn.indexOf("clearTimeout(retry)")).toBeLessThan(fn.indexOf("fetchAll()"));
+		expect(fn).toMatch(/retry = setTimeout\(resync, resyncRetryDelay\(failures\)\)/);
+		expect(fn).toMatch(/failures = 0;/);
+		const cleanup = store.slice(store.lastIndexOf("return () => {"));
+		expect(cleanup).toMatch(/clearTimeout\(retry\)/);
 	});
 });
