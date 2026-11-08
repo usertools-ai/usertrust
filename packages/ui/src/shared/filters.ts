@@ -7,12 +7,15 @@
  */
 
 import { utcDay } from "./format.js";
+import { providerOf } from "./provider.js";
 import { jobTypeOf, type LedgerRow, statusOf, typeSourceOf } from "./rows.js";
 
 export interface FilterState {
 	search: string;
 	kinds: string[];
 	models: string[];
+	/** Providers by display name (`xAI`, `Anthropic`, ...), as `providerOf` names them. */
+	providers: string[];
 	actors: string[];
 	statuses: string[];
 	/** Job types as declared (`untyped` selects records with none). */
@@ -31,6 +34,7 @@ export const EMPTY_FILTERS: FilterState = {
 	search: "",
 	kinds: [],
 	models: [],
+	providers: [],
 	actors: [],
 	statuses: [],
 	jobTypes: [],
@@ -42,6 +46,7 @@ export function isFiltering(f: FilterState): boolean {
 		f.search.trim() !== "" ||
 		f.kinds.length > 0 ||
 		f.models.length > 0 ||
+		f.providers.length > 0 ||
 		f.actors.length > 0 ||
 		f.statuses.length > 0 ||
 		f.jobTypes.length > 0 ||
@@ -62,6 +67,7 @@ export function activeFilterCount(f: FilterState): number {
 	return (
 		f.kinds.length +
 		f.models.length +
+		f.providers.length +
 		f.actors.length +
 		f.statuses.length +
 		f.jobTypes.length +
@@ -99,6 +105,7 @@ export function applyFilters(rows: LedgerRow[], f: FilterState): LedgerRow[] {
 		if (q && !haystack(r).includes(q)) return false;
 		if (f.kinds.length > 0 && !f.kinds.includes(r.kind)) return false;
 		if (f.models.length > 0 && (r.model === undefined || !f.models.includes(r.model))) return false;
+		if (f.providers.length > 0 && !f.providers.includes(providerOf(r))) return false;
 		if (f.actors.length > 0 && !f.actors.includes(r.actor)) return false;
 		if (f.statuses.length > 0 && !f.statuses.includes(statusOf(r))) return false;
 		if (f.jobTypes.length > 0 && !f.jobTypes.includes(jobTypeOf(r))) return false;

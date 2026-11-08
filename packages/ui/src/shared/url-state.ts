@@ -21,6 +21,9 @@ export type ViewId = "audit" | "trends";
 
 export const DEFAULT_VIEW: ViewId = "audit";
 
+/** The windows that can fill the desk. */
+export type FillId = "spend" | "share" | "ledger" | "now";
+
 export interface UrlState {
 	view: ViewId;
 	filters: FilterState;
@@ -28,6 +31,8 @@ export interface UrlState {
 	open: string | null;
 	/** The position the page shows the vault as recorded at, or null for live. */
 	at: number | null;
+	/** Which window fills the desk, or null for the default. */
+	fill: FillId | null;
 }
 
 export const EMPTY_URL_STATE: UrlState = {
@@ -35,6 +40,7 @@ export const EMPTY_URL_STATE: UrlState = {
 	filters: EMPTY_FILTERS,
 	open: null,
 	at: null,
+	fill: null,
 };
 
 /** The longest search text kept (UTF-16 code units, as `String.length` and an input's `maxLength` count them). */
@@ -50,6 +56,7 @@ const MAX_VALUES_PER_KEY = 100;
 const MAX_VALUE_LENGTH = 256;
 
 const VIEWS: readonly ViewId[] = ["audit", "trends"];
+const FILLS: readonly FillId[] = ["spend", "share", "ledger", "now"];
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 /**
  * Canonical non-negative decimal text: no sign, no leading zeros, no exponent, no trailing zeros in a fraction (`0`,
@@ -69,6 +76,7 @@ const FACETS = [
 	["job", "jobTypes"],
 	["kind", "kinds"],
 	["model", "models"],
+	["provider", "providers"],
 	["source", "typeSources"],
 	["status", "statuses"],
 ] as const;
@@ -114,6 +122,7 @@ export function encodeUrlState(state: UrlState): string {
 	if (min !== null) pairs.push(["min", min]);
 	const at = positionText(state.at);
 	if (at !== null) pairs.push(["at", at]);
+	if (state.fill !== null && FILLS.includes(state.fill)) pairs.push(["fill", state.fill]);
 	if (state.open !== null && EVENT_HASH.test(state.open)) pairs.push(["open", state.open]);
 	if (f.search !== "") pairs.push(["q", f.search]);
 	if (state.view !== DEFAULT_VIEW) pairs.push(["view", state.view]);
@@ -170,6 +179,8 @@ export function decodeUrlState(hash: string): UrlState {
 
 		const view = params.get("view");
 		const open = params.get("open");
+		const fills = params.getAll("fill");
+		const fillText = fills.length === 1 ? fills[0] : undefined;
 		const atTexts = params.getAll("at");
 		const atText = atTexts.length === 1 ? atTexts[0] : undefined;
 		const at = atText !== undefined && INTEGER.test(atText) ? Number(atText) : null;
@@ -178,6 +189,7 @@ export function decodeUrlState(hash: string): UrlState {
 			filters,
 			open: open !== null && EVENT_HASH.test(open) ? open : null,
 			at: at !== null && Number.isSafeInteger(at) ? at : null,
+			fill: FILLS.find((f) => f === fillText) ?? null,
 		};
 	} catch {
 		return EMPTY_URL_STATE;
@@ -193,6 +205,7 @@ function described(s: UrlState): string {
 		s.view,
 		s.open,
 		s.at === null ? null : String(s.at),
+		s.fill,
 		f.search,
 		opt(f.from),
 		opt(f.to),

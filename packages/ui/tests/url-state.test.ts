@@ -22,10 +22,12 @@ const FULL: UrlState = {
 	view: "trends",
 	open: H,
 	at: 4182,
+	fill: "share",
 	filters: {
 		search: "gpt 4 & co",
 		kinds: ["llm_call", "tool_use"],
 		models: ["claude-sonnet-4-6"],
+		providers: ["Anthropic", "xAI"],
 		actors: ["agent-7"],
 		statuses: ["denied", "failed"],
 		jobTypes: ["review", "untyped"],
@@ -53,6 +55,8 @@ describe("encodeUrlState / decodeUrlState", () => {
 			withFilters({ search: "gpt" }),
 			withFilters({ kinds: ["llm_call"] }),
 			withFilters({ models: ["m"] }),
+			withFilters({ providers: ["xAI"] }),
+			{ ...EMPTY_URL_STATE, fill: "spend" },
 			withFilters({ actors: ["a"] }),
 			withFilters({ statuses: ["failed"] }),
 			withFilters({ jobTypes: ["review"] }),
@@ -82,6 +86,7 @@ describe("encodeUrlState / decodeUrlState", () => {
 			view: "trends",
 			open: H,
 			at: null,
+			fill: null,
 			filters: {
 				...EMPTY_FILTERS,
 				statuses: ["failed", "denied"],
@@ -116,6 +121,48 @@ describe("encodeUrlState / decodeUrlState", () => {
 		const s = withFilters({ costMin: 0 });
 		expect(encodeUrlState(s)).toBe("#min=0");
 		expect(decodeUrlState("#min=0").filters.costMin).toBe(0);
+	});
+});
+
+describe("the provider filter and the fill window in the address", () => {
+	it("reads an old link (#actor=a&job=b) as before, with no provider filter and no fill", () => {
+		const s = decodeUrlState("#actor=a&job=b");
+		expect(s).toEqual({
+			...EMPTY_URL_STATE,
+			filters: { ...EMPTY_FILTERS, actors: ["a"], jobTypes: ["b"] },
+		});
+		expect(s.filters.providers).toEqual([]);
+		expect(s.fill).toBeNull();
+	});
+
+	it("round-trips #provider=xAI&fill=share, and writes it in sorted key order", () => {
+		const s = decodeUrlState("#provider=xAI&fill=share");
+		expect(s.filters.providers).toEqual(["xAI"]);
+		expect(s.fill).toBe("share");
+		expect(encodeUrlState(s)).toBe("#fill=share&provider=xAI");
+		expect(decodeUrlState(encodeUrlState(s))).toEqual(s);
+		expect(addressHolds(s)).toBe(true);
+	});
+
+	it("reads each fill value, and an unknown or repeated one as null", () => {
+		for (const f of ["spend", "share", "ledger", "now"]) {
+			expect(decodeUrlState(`#fill=${f}`).fill).toBe(f);
+		}
+		for (const f of ["bogus", "", "Share", "SPEND", "__proto__", "share,spend"]) {
+			expect(decodeUrlState(`#fill=${encodeURIComponent(f)}`).fill, `fill=${f}`).toBeNull();
+		}
+		expect(decodeUrlState("#fill=share&fill=spend").fill).toBeNull();
+	});
+
+	it("tells a state with a provider or a fill from one without (sameUrlState)", () => {
+		expect(sameUrlState(EMPTY_URL_STATE, withFilters({ providers: ["xAI"] }))).toBe(false);
+		expect(sameUrlState(EMPTY_URL_STATE, { ...EMPTY_URL_STATE, fill: "now" })).toBe(false);
+	});
+
+	it("a clean page still has an empty hash", () => {
+		expect(encodeUrlState(EMPTY_URL_STATE)).toBe("");
+		expect(EMPTY_URL_STATE.fill).toBeNull();
+		expect(EMPTY_FILTERS.providers).toEqual([]);
 	});
 });
 
