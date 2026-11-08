@@ -25,7 +25,7 @@
  * GET /api/at answers the vault as recorded at a past position (`AtPayload`).
  */
 
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { realpathSync, statSync, unwatchFile, watchFile } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname, join, resolve, sep } from "node:path";
@@ -268,6 +268,9 @@ export async function createUiServer(
 	const root = resolveProjectRoot(rootDir);
 	const vaultPath = join(root, VAULT_DIR);
 	const token = randomBytes(32).toString("hex");
+	// Names this server process, derived from nothing (no token, path, host or time): `epoch` starts at 0 in every
+	// process, so a page tells one server's vault from another's by the boot and the epoch together.
+	const boot = randomUUID();
 	// Settings are off, with this reason, when the workspace would sit inside the project or its vault (by
 	// default, a project rooted at or above the home directory). The rest of the dashboard serves as before.
 	let settingsDir: string | null = null;
@@ -691,6 +694,7 @@ export async function createUiServer(
 			head,
 			clamped,
 			epoch,
+			boot,
 			spentUt: positions.spentUtAt(pos),
 			counts: positions.countsAt(pos),
 			chain: {
@@ -832,7 +836,14 @@ export async function createUiServer(
 			return;
 		}
 		if (url.pathname === "/api/events") {
-			sendJson(res, 200, { rows: state.rows, summary: state.summary, version });
+			// State and epoch in one synchronous step, as `answerAt` reads them: no reload lands between them.
+			sendJson(res, 200, {
+				rows: state.rows,
+				summary: state.summary,
+				version,
+				epoch,
+				boot,
+			});
 			return;
 		}
 		if (url.pathname === "/api/at") {

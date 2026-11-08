@@ -26,9 +26,16 @@ export interface UrlState {
 	filters: FilterState;
 	/** The open record's event hash, or null. */
 	open: string | null;
+	/** The position the page shows the vault as recorded at, or null for live. */
+	at: number | null;
 }
 
-export const EMPTY_URL_STATE: UrlState = { view: DEFAULT_VIEW, filters: EMPTY_FILTERS, open: null };
+export const EMPTY_URL_STATE: UrlState = {
+	view: DEFAULT_VIEW,
+	filters: EMPTY_FILTERS,
+	open: null,
+	at: null,
+};
 
 /** The longest search text kept (UTF-16 code units, as `String.length` and an input's `maxLength` count them). */
 export const MAX_SEARCH_LENGTH = 512;
@@ -50,6 +57,8 @@ const DAY = /^\d{4}-\d{2}-\d{2}$/;
  * included.
  */
 const DECIMAL = /^(0|[1-9]\d*)(\.\d*[1-9])?$/;
+/** Canonical non-negative integer text: no sign, no leading zeros, no fraction or exponent. */
+const INTEGER = /^(0|[1-9]\d*)$/;
 const EVENT_HASH = /^[0-9a-f]{64}$/;
 /** Control, format (zero-width and bidirectional marks) and line/paragraph separator characters. */
 const INVISIBLE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
@@ -81,6 +90,11 @@ function costText(n: number | undefined): string | null {
 	return DECIMAL.test(t) ? t : null;
 }
 
+/** The position text for `at`, or null when it is not a safe non-negative integer. */
+function positionText(n: number | null): string | null {
+	return n !== null && Number.isSafeInteger(n) && n >= 0 ? String(n) : null;
+}
+
 function cleanText(s: string, max: number): string | null {
 	return s.length > 0 && s.length <= max && !INVISIBLE.test(s) ? s : null;
 }
@@ -98,6 +112,8 @@ export function encodeUrlState(state: UrlState): string {
 	const min = costText(f.costMin);
 	if (max !== null) pairs.push(["max", max]);
 	if (min !== null) pairs.push(["min", min]);
+	const at = positionText(state.at);
+	if (at !== null) pairs.push(["at", at]);
 	if (state.open !== null && EVENT_HASH.test(state.open)) pairs.push(["open", state.open]);
 	if (f.search !== "") pairs.push(["q", f.search]);
 	if (state.view !== DEFAULT_VIEW) pairs.push(["view", state.view]);
@@ -154,10 +170,14 @@ export function decodeUrlState(hash: string): UrlState {
 
 		const view = params.get("view");
 		const open = params.get("open");
+		const atTexts = params.getAll("at");
+		const atText = atTexts.length === 1 ? atTexts[0] : undefined;
+		const at = atText !== undefined && INTEGER.test(atText) ? Number(atText) : null;
 		return {
 			view: VIEWS.find((v) => v === view) ?? DEFAULT_VIEW,
 			filters,
 			open: open !== null && EVENT_HASH.test(open) ? open : null,
+			at: at !== null && Number.isSafeInteger(at) ? at : null,
 		};
 	} catch {
 		return EMPTY_URL_STATE;
@@ -172,6 +192,7 @@ function described(s: UrlState): string {
 	return JSON.stringify([
 		s.view,
 		s.open,
+		s.at === null ? null : String(s.at),
 		f.search,
 		opt(f.from),
 		opt(f.to),
@@ -193,8 +214,9 @@ export function addressHolds(state: UrlState): boolean {
 
 /**
  * What to do with the address when the state changes from `prev` to `next` while the address reads `currentHash`.
- * Changing the view or the open record pushes an entry, so Back returns to the previous view or record; a filter
- * tweak replaces the current one, so typing in the search box does not flood the back button. Nothing is written when
+ * Changing the view or the open record, or entering or leaving a position, pushes an entry, so Back returns to the
+ * previous view or record; a filter tweak or a move between positions replaces the current one, so typing in the
+ * search box or a preview moving along the chart does not flood the back button. Nothing is written when
  * the address already describes `next` (the state came from the address, or a write already landed). A state the
  * address cannot hold (`addressHolds`) writes the empty hash: a reload or a copied link opens a clean page, never a
  * different filter set, and the page tells the user.
@@ -206,7 +228,9 @@ export function planHistory(
 ): { kind: "push" | "replace" | "none"; hash: string } {
 	const hash = addressHolds(next) ? encodeUrlState(next) : "";
 	if (encodeUrlState(decodeUrlState(currentHash)) === hash) return { kind: "none", hash };
-	const navigated = prev.view !== next.view || prev.open !== next.open;
+	// Entering or leaving a position is a navigation; moving between positions (a preview) is not.
+	const navigated =
+		prev.view !== next.view || prev.open !== next.open || (prev.at === null) !== (next.at === null);
 	return { kind: navigated ? "push" : "replace", hash };
 }
 

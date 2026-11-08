@@ -144,12 +144,24 @@ export function RowPanel(props: {
 	 * Set (to a number that changes on each request) when the row was opened with the keyboard: a docked inspector then
 	 * takes focus on its heading. Unset for a click, which leaves focus where it is.
 	 */
-	focusNonce?: number;
+	focusNonce?: number | undefined;
 	/** Called once the heading has taken focus for a request, so the request is cleared and a later remount (another
 	 * view and back) does not replay it and take focus from wherever the reader is. */
 	onFocusHandled?: () => void;
+	/**
+	 * Set while the row comes from a held view (the moment after a new position lands): the header already shows
+	 * another position, so the panel is dimmed and busy, and the status, which depends on the position, is not shown
+	 * as that position's: it reads "updating…" until the view catches up.
+	 */
+	held?: boolean;
+	/**
+	 * Set while the header shows a past position. The explicit check always runs on the vault as it is now, so a past
+	 * view labels it as running today; its verdict text is unchanged.
+	 */
+	past: boolean;
 }): React.JSX.Element {
-	const { row, docked, onClose, focusNonce, onFocusHandled } = props;
+	const { row, docked, onClose, focusNonce, onFocusHandled, past } = props;
+	const held = props.held === true;
 	// A verify response is held for the row VERSION it was requested for (the row object: a status correction replaces
 	// it) and shown only while the row is still that version. Clearing the panel when the status changed ran BEFORE an
 	// in-flight response landed, so the earlier status's receipt was then shown beside the corrected status.
@@ -274,10 +286,17 @@ export function RowPanel(props: {
 				</button>
 			</div>
 			<div className="ut-pills">
-				<span className="ut-pill" data-tone={pillTone(STATUS_TONE[status])}>
-					<i />
-					{status}
-				</span>
+				{held ? (
+					<span className="ut-pill">
+						<i />
+						updating…
+					</span>
+				) : (
+					<span className="ut-pill" data-tone={pillTone(STATUS_TONE[status])}>
+						<i />
+						{status}
+					</span>
+				)}
 				{row.integrity === "verified" ? (
 					<span
 						className="ut-pill"
@@ -392,10 +411,11 @@ export function RowPanel(props: {
 				</dl>
 			</section>
 			<section className="ut-sec">
-				<div className="ut-lbl">Explicit check</div>
+				<div className="ut-lbl">{`${past ? "today: " : ""}Explicit check`}</div>
 				{tx.kind === "transfer" ? (
 					<>
 						<span className="ut-why">
+							{past ? "Runs on the vault as it is now, not as it was at this position. " : ""}
 							Runs the usertrust-verify check for this transfer and prints its receipt.
 						</span>
 						<button
@@ -422,6 +442,8 @@ export function RowPanel(props: {
 				ref={panelRef}
 				className="ut-insp"
 				aria-label={`transaction ${row.kind} seq ${row.seq ?? "?"}`}
+				data-held={held}
+				aria-busy={held}
 			>
 				{body}
 			</aside>
@@ -441,6 +463,8 @@ export function RowPanel(props: {
 				role="dialog"
 				aria-modal="true"
 				aria-label={`transaction ${row.kind} seq ${row.seq ?? "?"}`}
+				data-held={held}
+				aria-busy={held}
 			>
 				{body}
 			</aside>

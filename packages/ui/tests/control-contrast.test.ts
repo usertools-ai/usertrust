@@ -221,3 +221,9 @@ describe("the accent stays off the chart marks and the live pill's states stay a
 		expect(decl('.ut-live[data-st="live"] i', "background")).toBe("var(--accent)");
 	});
 });
+
+describe("the focus ring a reader can see", () => {
+	it("the focus ring is the words colour at 2px", () => {
+		expect(decl(":focus-visible", "outline")).toMatch(/^2px solid var\(--words\)$/);
+	});
+});

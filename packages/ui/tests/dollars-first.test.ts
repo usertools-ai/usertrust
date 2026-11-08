@@ -74,6 +74,9 @@ const at = (html: string, needle: string): number => {
 	return i;
 };
 
+/** The markup's text as a reader sees it: tags removed. */
+const plain = (html: string): string => html.replace(/<[^>]*>/g, "");
+
 describe("the Spend fact", () => {
 	it("red-first (UT headline, dollars small): dollars come first, UT second, the exact figure on hover", async () => {
 		const SummaryStrip = await load<{ summary: SummaryPayload | null; live: string }>(
@@ -83,8 +86,11 @@ describe("the Spend fact", () => {
 		const html = renderToStaticMarkup(
 			createElement(SummaryStrip, { summary: summary(), live: "live" }),
 		);
-		// The figure renders through the counter, whose visible span carries the 2 dp total.
-		expect(html).toMatch(/title="\$7\.6045"><span class="ut-tick"[^>]*>\$7\.60<\/span>/);
+		// The figure renders through the counter (inside the span that fits it to its column), whose visible span carries
+		// the 2 dp total.
+		expect(html).toMatch(
+			/title="\$7\.6045"><span class="ut-fit"[^>]*><span class="ut-tick"[^>]*>\$7\.60<\/span>/,
+		);
 		expect(at(html, "$7.60")).toBeLessThan(at(html, "76,045 UT"));
 	});
 
@@ -108,8 +114,11 @@ describe("the Spend fact", () => {
 		const html = renderToStaticMarkup(
 			createElement(SummaryStrip, { summary: summary(), live: "live" }),
 		);
-		expect(html).toContain('title="$4.3955 of $12.0000">$4.40 of $12.00</span>');
-		expect(at(html, "$4.40 of $12.00")).toBeLessThan(at(html, "43,955 UT of 120,000 UT"));
+		// The amounts are two units ("$X", "of $Y"), each fitted to a line: read as the reader does, tags removed.
+		expect(html).toContain('<span class="ut-amts" title="$4.3955 of $12.0000">');
+		expect(at(plain(html), "$4.40 of $12.00")).toBeLessThan(
+			at(plain(html), "43,955 UT of 120,000 UT"),
+		);
 	});
 
 	it("an overspent budget leads in dollars too", async () => {
@@ -123,8 +132,8 @@ describe("the Spend fact", () => {
 				live: "live",
 			}),
 		);
-		expect(at(html, "overspent by $1.00 of $12.00")).toBeLessThan(
-			at(html, "10,000 UT of 120,000 UT"),
+		expect(at(plain(html), "overspent by $1.00 of $12.00")).toBeLessThan(
+			at(plain(html), "10,000 UT of 120,000 UT"),
 		);
 	});
 });

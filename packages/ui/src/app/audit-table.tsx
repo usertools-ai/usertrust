@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { useVirtualizer, useWindowVirtualizer } from "@tanstack/react-virtual";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
 	type ChainStatus,
 	costView,
@@ -14,6 +14,7 @@ import {
 import { type SortKey, sortRows } from "../shared/filters.js";
 import { compactActor, formatUtc, UT_KEY } from "../shared/format.js";
 import { PHONE_QUERY } from "../shared/layout.js";
+import { type BeforeWindow, pastHeldNote } from "../shared/list-view.js";
 import {
 	nextRowIndex,
 	pageSizeFromItems,
@@ -174,9 +175,14 @@ export function AuditRow(props: {
 	);
 }
 
+export type { BeforeWindow };
+
 function Empty(props: {
 	state: Exclude<ReturnType<typeof listState>, "rows">;
+	/** What a reloading list says (`pastHeldNote`). */
+	reloadingNote: string;
 	hidden: number;
+	before: BeforeWindow | null;
 	onClearFilters(): void;
 }): React.JSX.Element {
 	switch (props.state) {
@@ -211,6 +217,35 @@ function Empty(props: {
 					The vault failed verification: see the integrity failure above.
 				</div>
 			);
+		case "before-window": {
+			// Counted from 1, as the window note and the integrity texts count.
+			const before = props.before;
+			const upTo = (before?.upTo ?? 0) + 1;
+			const counted = `The ${upTo.toLocaleString()} ${upTo === 1 ? "record" : "records"} up to this point count in the totals above.`;
+			// Only a record the list holds is named as where it starts; otherwise (a resync gap, or no rows held yet) the
+			// text says the records for this point are not held, and names no position.
+			if (before?.kind !== "before")
+				return (
+					<div className="ut-empty" role="status">
+						<b>No records are held for this point yet</b>
+						{counted}
+					</div>
+				);
+			return (
+				<div className="ut-empty" role="status">
+					<b>Before the first record the list holds</b>
+					{`The list starts at position ${(before.firstHeld + 1).toLocaleString()}, the first record it holds. `}
+					{counted}
+				</div>
+			);
+		}
+		case "reloading":
+			// Plain text, not a status: the status under the header already announces it.
+			return (
+				<div className="ut-empty">
+					<b>{props.reloadingNote}</b>
+				</div>
+			);
 		case "filtered-out":
 			return (
 				<div className="ut-empty" role="status">
@@ -226,13 +261,19 @@ function Empty(props: {
 	}
 }
 
-export function AuditTable(props: {
+/** Memoized: the page re-renders on every answer, and the rows it draws (deferred) change only after it. */
+export const AuditTable = memo(function AuditTable(props: {
 	/** The rows in view, after the filters. */
 	rows: LedgerRow[];
 	/** Every row held, before the filters. */
 	total: number;
 	phase: LoadPhase;
 	chain: ChainStatus | null;
+	/** Set at a past position before the first row held: the list is empty because it starts later. */
+	beforeWindow?: BeforeWindow | null;
+	/** The records of the point's own vault are on their way: the list says so (`reloadingNote`), never that none are held. */
+	reloading?: boolean;
+	reloadingNote?: string;
 	liveIds?: Set<string>;
 	selected: string | null;
 	/** `viaKeyboard`: opened with Enter or Space, so the inspector should take focus. A click leaves focus alone. */
@@ -384,6 +425,8 @@ export function AuditTable(props: {
 		chain: props.chain,
 		total: props.total,
 		shown: sorted.length,
+		beforeWindow: (props.beforeWindow ?? null) !== null,
+		reloading: props.reloading === true,
 	});
 
 	return (
@@ -430,6 +473,8 @@ export function AuditTable(props: {
 					<Empty
 						state={state}
 						hidden={props.total - sorted.length}
+						before={props.beforeWindow ?? null}
+						reloadingNote={props.reloadingNote ?? pastHeldNote(false)}
 						onClearFilters={props.onClearFilters}
 					/>
 				) : (
@@ -475,7 +520,7 @@ export function AuditTable(props: {
 			</div>
 		</>
 	);
-}
+});
 
 /** One ledger row's body as the list draws it, exported so its marks can be rendered in a test. */
 export const Row = RowBody;

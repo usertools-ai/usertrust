@@ -319,6 +319,31 @@ body {
 		font-weight: 600;
 		margin-right: 6px;
 	}
+	/* The past view's own line: everything under it is the vault as recorded then. Gold, the accent: amber is kept for
+	   held and in-flight states. */
+	/* Its slot is always there, a fixed height (one line; two on a phone, where the label can wrap): live it is hidden
+	   and empty, so entering or leaving the past view moves nothing below it (a line that appeared pushed the header,
+	   the list and the status below it down). */
+	.ut-asat {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		height: calc(12px * 1.4);
+		font: 500 12px/1.4 var(--mono);
+		font-variant-numeric: tabular-nums;
+		color: var(--accent);
+	}
+	.ut-asat[data-live="true"] {
+		visibility: hidden;
+	}
+	.ut-asat::before {
+		content: "";
+		flex: 0 0 auto;
+		width: 14px;
+		height: 2px;
+		border-radius: 2px;
+		background: var(--accent);
+	}
 
 	/* ── Header facts ── */
 	.ut-facts {
@@ -389,6 +414,103 @@ body {
 		font: 400 12px/1.45 var(--sans);
 		color: var(--body);
 		overflow-wrap: anywhere;
+	}
+	/* Every line of a header fact has a fixed height, the same in every state, live or past (summary-strip.tsx holds a
+	   line it has nothing for empty and unseen: [data-reserve]), so the facts row is the same height whatever the view
+	   and the data, at every width. Nothing in a fact is cut:
+	   - a value is one line, and shrinks to fit its column instead (.ut-fit);
+	   - an amounts line and a sub line hold two lines: the text wraps there. Amounts are at most two units, each shrunk
+	     to fit a line, so they always fit;
+	   - a "why" line holds two lines, clamped.
+	   A line the box still cuts (a long note in a narrow column) keeps its whole text in a title, and becomes a button
+	   that opens it ([data-cut], summary-strip.tsx FactLine). Popovers open from the fact. */
+	.ut-facts .ut-fact {
+		position: relative;
+	}
+	.ut-facts .ut-fact .v {
+		height: 20px;
+		line-height: 20px;
+		white-space: nowrap;
+		overflow: hidden;
+		container-type: inline-size;
+	}
+	/* Its own font shorthand sets a line-height: the value line's is restated so "no remaining figure" and "87.7% left"
+	   are the same height. */
+	.ut-facts .ut-fact .v.na {
+		line-height: 20px;
+	}
+	/* Smaller words in a value ("left", "events"): a line-height of 1, so their own line box never makes the value's
+	   line taller than its 20px. */
+	.ut-facts .ut-fact .v small {
+		font-size: 0.8125em;
+		line-height: 1;
+	}
+	/* A figure that shrinks to fit: its own size, or the size at which its n characters (--n, set inline) fit the
+	   container's width. 0.62em is a little wider than any monospace advance (0.55-0.6em), and wider than the average
+	   sans letter of the value line's words. The counting figure inside holds its width only where it fits (.ut-tick). */
+	.ut-facts .ut-fit {
+		display: inline-block;
+		vertical-align: top;
+		white-space: nowrap;
+		font-size: min(1em, calc(100cqi / var(--n, 1) / 0.62));
+	}
+	.ut-facts .ut-sub {
+		height: 28px;
+		line-height: 14px;
+		white-space: normal;
+		overflow-wrap: anywhere;
+		display: -webkit-box;
+		-webkit-box-orient: vertical;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
+		overflow: hidden;
+	}
+	.ut-facts .ut-amts {
+		height: 32px;
+		line-height: 16px;
+		white-space: normal;
+		overflow: hidden;
+	}
+	/* The containers the amounts' units fit (the Spend fact's usertoken line sits in a row with its info button, and is
+	   one plain line that wraps). */
+	.ut-facts .ut-amts,
+	.ut-facts .ut-fact > .ut-sub.mono {
+		container-type: inline-size;
+	}
+	.ut-facts .ut-amts.red {
+		color: var(--stakes);
+	}
+	.ut-facts .ut-why {
+		height: 34px;
+		line-height: 17px;
+		display: -webkit-box;
+		-webkit-box-orient: vertical;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
+		overflow: hidden;
+	}
+	.ut-facts [data-cut="true"] {
+		cursor: pointer;
+		text-decoration: underline dotted;
+		text-underline-offset: 3px;
+	}
+	.ut-facts [data-cut="true"]:focus-visible {
+		outline: 2px solid var(--words);
+		outline-offset: 2px;
+		border-radius: 4px;
+	}
+	.ut-facts .ut-fact > .ut-pop.text {
+		width: min(300px, calc(100vw - 32px));
+	}
+	/* The anchor file's tag wraps rather than being cut ("today: not set up" in a narrow column): the Anchor fact is
+	   never the row's tallest, so a second line moves nothing. */
+	.ut-facts .ut-tag {
+		max-width: 100%;
+		min-width: 0;
+		overflow-wrap: anywhere;
+	}
+	.ut-facts [data-reserve="true"] {
+		visibility: hidden;
 	}
 	.ut-why.info {
 		color: var(--info);
@@ -782,6 +904,18 @@ body {
 		min-height: 0;
 		overflow: hidden;
 		border-radius: 0 0 15px 15px;
+	}
+	/* Everything drawn from the list's input while it shows another position than the header (the moment after a new
+	   position lands, Back or Forward): the list or Trends, the count, Export, the facets and the inspector.
+	   Dimmed, so it is plain they have not caught up; the status under the header says what is coming (.ut-tl-held).
+	   Opacity only: nothing moves, and nothing animates. The drawer is dimmed inside, so it stays opaque over the page. */
+	.ut-pane[data-held="true"],
+	.ut-head .ut-label[data-held="true"],
+	.ut-btn[data-held="true"],
+	.ut-bar[data-held="true"] .ut-facet,
+	.ut-insp[data-held="true"] > .ut-insp-in,
+	.ut-drawer[data-held="true"] > .ut-insp-in {
+		opacity: 0.55;
 	}
 	.ut-body[data-docked="true"] {
 		grid-template-columns: minmax(0, 1fr) 380px;
@@ -1458,6 +1592,48 @@ body {
 	.ut-range > .to {
 		color: var(--faint-text);
 	}
+	/* ── The status under the header's as-at line ──
+	   The note for a point that did not load, or a vault that was reloaded, and "Updating to record N…" while the views
+	   below catch up. Always there (a note inserted with its text already in it is often not announced), a normal block
+	   in the page's column, no height at all when everything is idle. Nothing here moves. */
+	.ut-at-status {
+		flex: 0 0 auto;
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		min-width: 0;
+	}
+	/* Idle, it also gives back the page's 10px gap, so a live page is where it was before the status was there. */
+	.ut-at-status:not(:has(.ut-tl-msg:not(:empty), .ut-tl-held:not(:empty))) {
+		margin-top: -10px;
+	}
+	.ut-tl-msg {
+		margin: 0;
+		padding: 8px 14px;
+		border: 1px solid var(--line);
+		border-radius: 12px;
+		background: var(--surface);
+		font: 400 12px/1.45 var(--sans);
+		color: #ededf2;
+	}
+	/* Empty it takes no room, and stays rendered: display: none would take it out of the accessibility tree. */
+	.ut-tl-msg:empty {
+		height: 0;
+		margin: 0;
+		padding: 0;
+		border: 0;
+		overflow: hidden;
+	}
+	/* "Updating to record N…" while the views below still show another position. Always there (empty when nothing is
+	   held); empty it has no height, so the column does not move. */
+	.ut-tl-held {
+		min-width: 0;
+		font: 400 11px/13px var(--sans);
+		color: var(--body);
+	}
+	.ut-tl-held:empty {
+		display: none;
+	}
 	@media (max-width: 900px) {
 		.ut-facts {
 			grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1483,23 +1659,37 @@ body {
 			padding: 0;
 		}
 
-		/* Facts: one row of three (spend, budget, integrity); chain and anchor open under a Details button. */
+		/* Facts: spend and integrity side by side, the budget across the row under them (its amounts, "overspent by $X
+		   of $Y" among them, need the width: a third of a phone cut them); chain and anchor open under a Details
+		   button. */
 		.ut-facts {
-			grid-template-columns: repeat(3, minmax(0, 1fr));
+			grid-template-columns: repeat(2, minmax(0, 1fr));
 			gap: 10px;
 			padding: 12px;
 		}
 		.ut-facts .budget {
-			grid-column: auto;
+			grid-column: 1 / -1;
 		}
+		/* A label may wrap to two lines here (Budget and its source word): each fact's label holds two, so one that does not
+		   wrap is the same height as one that does, live or past. */
 		.ut-facts .ut-fact > b {
 			flex-wrap: wrap;
+			align-content: flex-start;
 			gap: 4px 6px;
+			min-height: 26px;
 			letter-spacing: 1px;
 			white-space: normal;
 		}
 		.ut-facts .ut-fact .v {
 			font-size: 15px;
+		}
+		/* The as-at line can wrap here: its slot holds two lines, live and past. */
+		.ut-asat {
+			height: calc(2 * 12px * 1.4);
+			align-items: flex-start;
+		}
+		.ut-asat::before {
+			margin-top: calc(12px * 0.7 - 1px);
 		}
 		.ut-facts .ut-more {
 			display: flex;
@@ -1560,26 +1750,32 @@ body {
 			z-index: 5;
 		}
 
-		/* Head: the view tabs and the count, then the search and Export on one row. */
+		/* Head: the view tabs and the count, then the search and Export on one row. Two flex rows, never one grid: a grid
+		   sized its first column by the tabs (row one) and its last by Export (row two), so the two had to fit side by
+		   side although they never share a row, and "Export 100,000 rows" made the page wider than a 320px screen. The
+		   spacer between the count and the search takes a whole line of no height: it ends row one. */
 		.ut-head {
-			display: grid;
-			grid-template-columns: auto minmax(0, 1fr) auto;
-			gap: 8px 10px;
+			display: flex;
+			flex-wrap: wrap;
+			/* Rows: 4px, the spacer's empty line, 4px: the 8px the rows always had. */
+			gap: 4px 10px;
 			padding: 10px 12px;
 		}
 		.ut-head .ut-grow {
-			display: none;
+			flex: 0 0 100%;
+			height: 0;
 		}
 		.ut-head .ut-label {
-			grid-column: 2 / 4;
+			flex: 1 1 0;
+			min-width: 0;
 		}
 		.ut-head .ut-search {
-			grid-column: 1 / 3;
+			flex: 1 1 0;
 			min-width: 0;
-			width: 100%;
+			width: auto;
 		}
 		.ut-head .ut-btn {
-			grid-column: 3;
+			flex: 0 0 auto;
 		}
 
 		/* Filters: the bar is one button; the filters open in a sheet over the page. */

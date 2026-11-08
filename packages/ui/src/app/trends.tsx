@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { useId, useMemo, useState } from "react";
+import { memo, useId, useMemo, useState } from "react";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import {
 	costByJobType,
@@ -11,6 +11,7 @@ import {
 	statTiles,
 	timeWindow,
 } from "../shared/aggregate.js";
+import type { AtPayload } from "../shared/api.js";
 import { type ChartSummary, chartSummary } from "../shared/chart-summary.js";
 import {
 	formatUsd,
@@ -20,7 +21,9 @@ import {
 	UT_KEY,
 	Y_AXIS_ALLOW_DECIMALS,
 } from "../shared/format.js";
+import { pastHeldNote } from "../shared/list-view.js";
 import { JOB_TYPE_CAVEAT, type LedgerRow } from "../shared/rows.js";
+import { shownLabel } from "../shared/timeline-view.js";
 import { BarList } from "./bar-list.js";
 import { TickingFigure } from "./ticking-figure.js";
 
@@ -114,12 +117,21 @@ function Tile(props: {
 	);
 }
 
-export function Trends(props: {
+/** Memoized: the page re-renders on every answer, and the rows it draws (deferred) change only after it. */
+export const Trends = memo(function Trends(props: {
 	/** The rows in view, after the filters. */
 	rows: LedgerRow[];
 	/** The server's row window, when it holds only the newest N events. */
 	newestOf: number | undefined;
+	/** The past position the rows are cut at (`cutRows`), or null (or absent) for live. */
+	at?: AtPayload | null;
+	/** The live vault's last position: a clamped answer stops saying "latest record" once records follow it. */
+	head?: number;
+	/** The records of the point's own vault are on their way: the empty state is replaced by `reloadingNote`. */
+	reloading?: boolean;
+	reloadingNote?: string;
 }): React.JSX.Element {
+	const at = props.at ?? null;
 	const [granularity, setGranularity] = useState<Granularity>("day");
 	const [tableShown, setTableShown] = useState(false);
 	const series = useMemo(
@@ -140,6 +152,10 @@ export function Trends(props: {
 	);
 	const tiles = useMemo(() => statTiles(props.rows), [props.rows]);
 	const window = useMemo(() => timeWindow(props.rows), [props.rows]);
+	// Each a pass over every row: computed once per row set, not on every render (a granularity switch, the table).
+	const byKind = useMemo(() => costByKind(props.rows), [props.rows]);
+	const byModel = useMemo(() => costByModel(props.rows), [props.rows]);
+	const byJobType = useMemo(() => costByJobType(props.rows), [props.rows]);
 	// Everything here is the rows in view: never the vault, when the server holds a window of it.
 	const scope =
 		props.newestOf === undefined
@@ -153,7 +169,15 @@ export function Trends(props: {
 				    only, over the whole vault, and is labelled as that: two rules, each named. */}
 				<Tile
 					label="Cost in view"
-					value={<TickingFigure ut={tiles.totalCostUt} />}
+					value={
+						// A move between positions jumps from recorded value to recorded value; the switch between live and past remounts
+						// it.
+						<TickingFigure
+							key={at === null ? "live" : "past"}
+							ut={tiles.totalCostUt}
+							jump={at !== null}
+						/>
+					}
 					valueTitle={formatUsd(tiles.totalCostUt)}
 					sub={`${formatUt(tiles.totalCostUt)} · every costed record`}
 				/>
@@ -212,7 +236,11 @@ export function Trends(props: {
 				</div>
 				{series.length === 0 ? (
 					<div className="ut-empty">
-						<b>No records in view</b>
+						<b>
+							{props.reloading === true
+								? (props.reloadingNote ?? pastHeldNote(false))
+								: "No records in view"}
+						</b>
 					</div>
 				) : (
 					// The container is the chart's image: the label states the series, and the table below lists every
@@ -281,23 +309,29 @@ export function Trends(props: {
 					/>
 				)}
 			</div>
-			<div className="ut-split">
-				<BarList title="Cost by kind" totals={costByKind(props.rows)} />
-				<BarList title="Cost by model" totals={costByModel(props.rows)} />
-			</div>
-			<div className="ut-split">
-				<BarList
-					title={`Cost by job type (${JOB_TYPE_CAVEAT})`}
-					note={`The type each caller declared when it authorized the job. "untyped": no type was declared. Every bucket is listed, and together they add up to the total in view.`}
-					totals={costByJobType(props.rows)}
-					limit={Number.POSITIVE_INFINITY}
-				/>
-			</div>
-			<div className="ut-sub mono">
-				{props.rows.length.toLocaleString()} records {scope}
-				{window && ` · ${formatUtcMinute(window.first)} to ${formatUtcMinute(window.last)}`}
-			</div>
+			{/* While the point's records are on their way the lists would only say "none": they wait, as the chart does. */}
+			{props.reloading !== true && (
+				<>
+					<div className="ut-split">
+						<BarList title="Cost by kind" totals={byKind} />
+						<BarList title="Cost by model" totals={byModel} />
+					</div>
+					<div className="ut-split">
+						<BarList
+							title={`Cost by job type (${JOB_TYPE_CAVEAT})`}
+							note={`The type each caller declared when it authorized the job. "untyped": no type was declared. Every bucket is listed, and together they add up to the total in view.`}
+							totals={byJobType}
+							limit={Number.POSITIVE_INFINITY}
+						/>
+					</div>
+					<div className="ut-sub mono">
+						{props.rows.length.toLocaleString()} records {scope}
+						{window && ` · ${formatUtcMinute(window.first)} to ${formatUtcMinute(window.last)}`}
+						{at !== null && ` · ${shownLabel(at, props.head ?? at.head, new Date().toISOString())}`}
+					</div>
+				</>
+			)}
 			<div className="ut-sub mono">{UT_KEY}</div>
 		</div>
 	);
-}
+});

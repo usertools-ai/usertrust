@@ -20,9 +20,14 @@ function reducedMotion(): boolean {
  * (the final value's width at rest), so nothing beside it moves. The counting span is hidden from assistive tech; a
  * visually hidden span beside it holds the final value, so a screen reader reads that and never the count. With reduced motion asked for, the final
  * value shows at once. The first render shows the value as it is: only a change counts.
+ *
+ * `jump`: show every change at once, never counting. A figure at a past position takes it: moving between positions
+ * is a jump from one recorded value to another, not money arriving, and a count would still be running frames behind
+ * the position.
  */
-export function TickingFigure(props: { ut: number }): React.JSX.Element {
+export function TickingFigure(props: { ut: number; jump?: boolean }): React.JSX.Element {
 	const { ut } = props;
+	const jump = props.jump === true;
 	const [shown, setShown] = useState(ut);
 	const [width, setWidth] = useState(() => formatUsdTotal(ut).length);
 	const [ticking, setTicking] = useState(false);
@@ -38,7 +43,7 @@ export function TickingFigure(props: { ut: number }): React.JSX.Element {
 			setWidth(formatUsdTotal(ut).length);
 			setTicking(false);
 		};
-		if (frames.length === 1 || reducedMotion()) {
+		if (frames.length === 1 || jump || reducedMotion()) {
 			land();
 			return;
 		}
@@ -58,7 +63,7 @@ export function TickingFigure(props: { ut: number }): React.JSX.Element {
 			raf = requestAnimationFrame(step);
 		});
 		return () => cancelAnimationFrame(raf);
-	}, [ut]);
+	}, [ut, jump]);
 
 	const final = formatUsdTotal(ut);
 	return (

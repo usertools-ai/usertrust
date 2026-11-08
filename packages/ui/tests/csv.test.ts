@@ -96,6 +96,17 @@ describe("csvFilename", () => {
 		);
 	});
 
+	it("an export at a past position is named for that point, live exports as before", () => {
+		const now = new Date("2026-11-06T12:00:00Z");
+		expect(csvFilename(now, false, undefined, { pos: 40, windowStartPos: 0 })).toBe(
+			"usertrust-ledger-as-recorded-41.csv",
+		);
+		expect(csvFilename(now, true, 50, { pos: 120, windowStartPos: 100 })).toBe(
+			"usertrust-ledger-as-recorded-121-from-101-filtered.csv",
+		);
+		expect(csvFilename(now, false, 50, null)).toBe("usertrust-ledger-2026-11-06-newest-50.csv");
+	});
+
 	it("writes an ungoverned_call's status as ungoverned", () => {
 		const { settled: _s, costUt: _c, costUsd: _u, ...base } = row({ kind: "ungoverned_call" });
 		const lines = toCsv([base]).split("\r\n");

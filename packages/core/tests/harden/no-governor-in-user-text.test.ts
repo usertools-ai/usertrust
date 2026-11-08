@@ -362,7 +362,7 @@ const ALLOWED_LITERALS: readonly Allowed[] = [
 	{
 		file: "packages/ui/src/shared/budget-display.ts",
 		literal: "governor",
-		count: 2,
+		count: 1,
 		reason: WIRE_VALUE,
 	},
 ];

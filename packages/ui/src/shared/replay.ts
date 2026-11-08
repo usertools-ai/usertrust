@@ -70,3 +70,11 @@ export class SnapshotReplay<D> {
 		this.installed = Number.NEGATIVE_INFINITY;
 	}
 }
+
+/**
+ * How long to wait before trying a failed snapshot fetch again, after `failures` failures in a row: one second, doubling,
+ * never more than thirty. Until a snapshot lands, the vault of the rows held is unknown and a past view waits (held).
+ */
+export function resyncRetryDelay(failures: number): number {
+	return Math.min(30_000, 1_000 * 2 ** Math.max(0, failures - 1));
+}

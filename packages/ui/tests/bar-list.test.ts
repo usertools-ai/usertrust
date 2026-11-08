@@ -87,6 +87,10 @@ describe("the job-type card draws every bucket", () => {
 	it("the trends card passes the unlimited list", async () => {
 		const source = await readFile(new URL("../src/app/trends.tsx", import.meta.url), "utf8");
 		expect(source).toContain("limit={Number.POSITIVE_INFINITY}");
-		expect(source).toContain("totals={costByJobType(props.rows)}");
+		// The job-type totals are computed once per row set (memoized) and passed to the card that has no limit.
+		expect(source).toContain(
+			"const byJobType = useMemo(() => costByJobType(props.rows), [props.rows]);",
+		);
+		expect(source).toMatch(/totals=\{byJobType\}\s+limit=\{Number\.POSITIVE_INFINITY\}/);
 	});
 });

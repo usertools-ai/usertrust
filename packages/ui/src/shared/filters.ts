@@ -92,6 +92,8 @@ function haystack(r: LedgerRow): string {
 }
 
 export function applyFilters(rows: LedgerRow[], f: FilterState): LedgerRow[] {
+	// Nothing to filter by: the rows themselves, with no pass over them (a moving position recomputes this per answer).
+	if (!isFiltering(f)) return rows;
 	const q = f.search.trim().toLowerCase();
 	return rows.filter((r) => {
 		if (q && !haystack(r).includes(q)) return false;
@@ -122,6 +124,12 @@ function compare(a: LedgerRow, b: LedgerRow, key: Exclude<SortKey, "costUt">): n
 	return String(a[key] ?? "").localeCompare(String(b[key] ?? ""));
 }
 
+function inSeqOrder(rows: readonly LedgerRow[]): boolean {
+	for (let i = 1; i < rows.length; i++)
+		if (compare(rows[i - 1] as LedgerRow, rows[i] as LedgerRow, "seq") > 0) return false;
+	return true;
+}
+
 /**
  * A sorted copy. By cost, rows with no cost go last in either direction: an unknown cost is not the cheapest one.
  */
@@ -132,6 +140,9 @@ export function sortRows(rows: readonly LedgerRow[], key: SortKey, desc: boolean
 		costed.sort((a, b) => ((a.costUt as number) - (b.costUt as number)) * (desc ? -1 : 1));
 		return [...costed, ...uncosted];
 	}
+	// A list already in order (the held rows are, by position, and so is any cut or filter of them) is copied, not
+	// sorted: one pass to check, one to copy, in place of n log n comparisons on every answer.
+	if (key === "seq" && inSeqOrder(rows)) return desc ? rows.slice().reverse() : rows.slice();
 	const copy = [...rows].sort((a, b) => compare(a, b, key));
 	return desc ? copy.reverse() : copy;
 }

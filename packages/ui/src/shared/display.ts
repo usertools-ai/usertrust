@@ -47,6 +47,13 @@ export function verifiedAsOf(
 export const CHAINED_TITLE =
 	"Every hash link in the vault is intact. This is not an anchored check.";
 
+/**
+ * The same pill at a past position: it speaks for the records up to that point only, not for the vault as it stands
+ * now.
+ */
+export const CHAINED_PAST_TITLE =
+	"Every hash link up to this point is intact: hash links only, not an anchor.";
+
 /** Under the "chained" pill when the vault has no anchor file: the links are all there is. */
 export const NOT_ANCHORED_NOTE = "hash links only · not anchored";
 
@@ -111,22 +118,38 @@ export function transferView(row: LedgerRow): { kind: "transfer"; id: string } |
 }
 
 export type LoadPhase = "loading" | "loaded" | "failed";
-export type ListState = "loading" | "failed" | "first-run" | "no-rows" | "filtered-out" | "rows";
+export type ListState =
+	| "loading"
+	| "failed"
+	| "first-run"
+	| "no-rows"
+	| "before-window"
+	| "reloading"
+	| "filtered-out"
+	| "rows";
 
 /**
  * What the ledger list shows. Rows start empty while the first snapshot is in flight, and the list printed "no
  * matching transactions — clear filters" for that, for an empty vault, and for filters that hide every row alike.
  * A vault with no rows is a first run only when its chain is empty: a deleted log has no rows either.
+ * `reloading`: a past view waiting for the records of its answer's own vault. They exist and are on their way, so no
+ * empty state is true then: it comes first.
+ * `beforeWindow`: a past position before the first row held. No row is shown because the list starts later, not
+ * because anything is wrong, whatever the chain says.
  */
 export function listState(input: {
 	phase: LoadPhase;
 	chain: ChainStatus | null;
 	total: number;
 	shown: number;
+	beforeWindow?: boolean;
+	reloading?: boolean;
 }): ListState {
+	if (input.reloading === true) return "reloading";
 	if (input.total === 0) {
 		if (input.phase === "failed") return "failed";
 		if (input.phase === "loading" || input.chain === null) return "loading";
+		if (input.beforeWindow === true) return "before-window";
 		return input.chain === "empty" ? "first-run" : "no-rows";
 	}
 	return input.shown === 0 ? "filtered-out" : "rows";

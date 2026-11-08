@@ -129,8 +129,10 @@ describe("phones: the list flows in the page", () => {
 });
 
 describe("phones: the facts collapse to three, with the rest under Details", () => {
-	it("lays the facts out as one row of three", () => {
-		expect(rule(phone.body, ".ut-facts")).toMatch(/repeat\(3,/);
+	it("lays spend and integrity side by side, and the budget across the row under them", () => {
+		// A third of a phone cut the budget's amounts ("overspent by $X of $Y"): the budget takes the row's width.
+		expect(rule(phone.body, ".ut-facts")).toMatch(/repeat\(2,/);
+		expect(rule(phone.body, ".ut-facts .budget")).toMatch(/grid-column: 1 \/ -1;/);
 	});
 
 	it("hides Chain and Anchor until the toggle opens them", () => {
@@ -231,12 +233,34 @@ describe("phones: the filter bar is one Filters button that opens the sheet", ()
 		expect(rule(WIDE, ".ut-bar")).toMatch(/display:\s*flex/);
 	});
 
-	it("puts the search and Export on one row", () => {
-		expect(rule(phone.body, ".ut-head")).toMatch(/display:\s*grid/);
-		const search = rule(phone.body, ".ut-head .ut-search") ?? "";
-		const exportBtn = rule(phone.body, ".ut-head .ut-btn") ?? "";
-		expect(search).toMatch(/grid-column:\s*1 \/ 3/);
-		expect(exportBtn).toMatch(/grid-column:\s*3/);
+	it("puts the tabs and the count on one row, and the search and Export on the next", () => {
+		const head = rule(phone.body, ".ut-head") ?? "";
+		expect(head).toMatch(/display:\s*flex/);
+		expect(head).toMatch(/flex-wrap:\s*wrap/);
+		// The spacer between the count and the search takes a whole line of no height: it ends row one.
+		const spacer = rule(phone.body, ".ut-head .ut-grow") ?? "";
+		expect(spacer).toMatch(/flex:\s*0 0 100%/);
+		expect(spacer).toMatch(/height:\s*0/);
+		expect(spacer).not.toMatch(/display:\s*none/);
+		// The rows keep the 8px between them: 4px, the spacer's empty line, 4px.
+		expect(head).toMatch(/gap:\s*4px 10px/);
+	});
+
+	it("never makes the page wider than a 320px screen, whatever Export's count: its rows do not share columns", () => {
+		// Red-first (a 320px page 5-7px wide with "Export 100,000 rows"): the head was one grid whose first column was the
+		// tabs' width (row one) and last column Export's (row two), so the two had to fit side by side though they never
+		// share a row. Two flex rows: the count and the search give way (no minimum width), the tabs and Export do not.
+		const head = rule(phone.body, ".ut-head") ?? "";
+		expect(head).not.toMatch(/display:\s*grid/);
+		expect(head).not.toMatch(/grid-template-columns/);
+		for (const sel of [".ut-head .ut-label", ".ut-head .ut-search"]) {
+			const r = rule(phone.body, sel) ?? "";
+			expect(r, sel).toMatch(/flex:\s*1 1 0/);
+			expect(r, sel).toMatch(/min-width:\s*0/);
+		}
+		expect(rule(phone.body, ".ut-head .ut-btn")).toMatch(/flex:\s*0 0 auto/);
+		// No phone rule places a head child in a grid column any more.
+		expect(phone.body).not.toMatch(/\.ut-head [^{]*\{[^}]*grid-column/);
 	});
 });
 

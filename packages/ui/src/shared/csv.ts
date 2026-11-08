@@ -11,6 +11,7 @@
  * data. CRLF line endings — Excel's expectation.
  */
 
+import type { AtPayload } from "./api.js";
 import { type LedgerRow, statusOf } from "./rows.js";
 
 export const CSV_HEADERS = [
@@ -89,7 +90,18 @@ export function toCsv(rows: LedgerRow[]): string {
  * `newestOf`: the server's row window, when it holds only the newest N events. The export then covers those only,
  * and its name says so.
  */
-export function csvFilename(now: Date, filtered: boolean, newestOf?: number): string {
+export function csvFilename(
+	now: Date,
+	filtered: boolean,
+	newestOf?: number,
+	at?: Pick<AtPayload, "pos" | "windowStartPos"> | null,
+): string {
+	// At a past position the file is named for that point (counted from 1, as the page counts), and for where the list
+	// starts when it does not start at the first record. Today's date would say nothing about what it holds.
+	if (at !== undefined && at !== null) {
+		const from = at.windowStartPos > 0 ? `-from-${at.windowStartPos + 1}` : "";
+		return `usertrust-ledger-as-recorded-${at.pos + 1}${from}${filtered ? "-filtered" : ""}.csv`;
+	}
 	const day = now.toISOString().slice(0, 10);
 	const window = newestOf === undefined ? "" : `-newest-${newestOf}`;
 	return `usertrust-ledger-${day}${window}${filtered ? "-filtered" : ""}.csv`;

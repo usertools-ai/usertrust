@@ -1,18 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { createCutter, pastRows } from "../shared/asof.js";
+import { pointLoading } from "../shared/at-follow.js";
 import { csvFilename, toCsv } from "../shared/csv.js";
-import { chainStatus } from "../shared/display.js";
-import { applyFilters, EMPTY_FILTERS, isFiltering } from "../shared/filters.js";
+import { EMPTY_FILTERS, isFiltering } from "../shared/filters.js";
+import {
+	type HoldAnnouncement,
+	heldNote,
+	holdAnnouncement,
+	type ListInput,
+	listView,
+	pastHeldNote,
+} from "../shared/list-view.js";
 import type { LedgerRow } from "../shared/rows.js";
 import { MAX_SEARCH_LENGTH, type ViewId } from "../shared/url-state.js";
+import { AtStatus } from "./at-status.js";
 import { AuditTable } from "./audit-table.js";
+import { ExportButton } from "./export-button.js";
 import { FilterBar } from "./filter-bar.js";
 import { InspectorHint, RowPanel } from "./row-panel.js";
 import { useLedger } from "./store.js";
 import { SummaryStrip } from "./summary-strip.js";
 import { Trends } from "./trends.js";
+import { useAt } from "./use-at.js";
 import { useMediaQuery } from "./use-media-query.js";
 import { useUrlState } from "./use-url-state.js";
 
@@ -27,16 +39,59 @@ const VIEWS: Array<{ id: View; label: string }> = [
 const DOCK_QUERY = "(min-width: 1100px)";
 
 export function App(): React.JSX.Element {
-	const { rows, summary, phase, live, liveIds } = useLedger();
+	const { rows, summary, phase, live, liveIds, resyncs, rowsVault } = useLedger();
 	// The view, filters and open record live in the page address (`location.hash`): a reload keeps them, a link shares them.
-	const { view, setView, filters, setFilters, openHash, setOpenHash, addressNote } = useUrlState();
-	// The selected row's event HASH (unique on the chain, where an id can repeat), resolved from the current rows: a
+	const { view, setView, filters, setFilters, openHash, setOpenHash, at, navigation, addressNote } =
+		useUrlState();
+	// The past position shown (`#at=N`, or a preview before it is written there), from /api/at. Until its first answer
+	// lands, or when it fails with nothing loaded, the screen stays live and the status under the header says so: a past
+	// view is only ever drawn from its own answer.
+	const { view: atView } = useAt(at, summary, live, rows, resyncs, rowsVault, navigation);
+	const shownAt = atView.at;
+	// The past view reads each row's status against the rows the page held when the answer's request was SENT
+	// (`atView.rows`), not the rows held when the answer renders: a live `status` frame for a record after the
+	// position, one the server had not seen when it answered, can arrive in between, and `statusAt` cannot correct it
+	// (`rowsAsAnswered`). The rows are paired with the answer by the epoch of the vault they come from (`pastRows`),
+	// whichever of a reload's rows and answer lands first; while none of the answer's own vault is held, nothing is
+	// drawn and the views wait.
+	const past = useMemo(
+		() => pastRows(rows, rowsVault, atView, shownAt),
+		[rows, rowsVault, atView, shownAt],
+	);
+	const pastHeld = past.kind === "held";
+	const head = summary === null ? -1 : summary.chain.events - 1;
+	// What the list, the facets, Trends and Export draw: ONE input, deferred, so a new position paints the header
+	// first and the rest follows when there is time, never mixing one position's rows with
+	// another moment's phase or chain (`listView`). The rows are cut at the position before the filters, so all of them
+	// see the vault then.
+	const listInput = useMemo<ListInput>(
+		() => ({ rows: past.rows, at: shownAt, filters, phase, summary, reloading: pastHeld }),
+		[past.rows, shownAt, filters, phase, summary, pastHeld],
+	);
+	const drawn = useDeferredValue(listInput);
+	// The list's own cut (`createCutter`): a past row keeps its identity from one draw to the next while its record and
+	// its status there are unchanged, so a check's result held for it in the inspector survives an unrelated record.
+	const [cutter] = useState(createCutter);
+	const list = useMemo(() => listView(drawn, cutter), [drawn, cutter]);
+	const { shownRows, filtered } = list;
+	// Whether what the list's input draws (the list, the facets, Trends, the inspector, the count and Export) shows
+	// another position than the header: until the deferred render lands (after Back, Forward
+	// or a link). Those views are dimmed and busy meanwhile, and the status under the header says what is coming.
+	// A past view whose vault's rows are not held yet lags too.
+	const pastNote = pastHeldNote(atView.reloaded);
+	const holdNote = pastHeld ? pastNote : heldNote(list.at, shownAt);
+	const held = holdNote !== null || pastHeld;
+	// What a screen reader hears about it: once when the views start to lag, once when they catch up, never per answer.
+	const [announce, setAnnounce] = useState<HoldAnnouncement>({ held: false, text: "" });
+	useEffect(() => {
+		setAnnounce((prev) => holdAnnouncement(prev, holdNote, shownAt));
+	}, [holdNote, shownAt]);
+	// The selected row's event HASH (unique on the chain, where an id can repeat), resolved from the rows shown: a
 	// `status` correction replaces the row object, and a panel holding the old one kept showing the old status.
 	const open = useMemo(
-		() => (openHash === null ? null : (rows.find((r) => r.hash === openHash) ?? null)),
-		[rows, openHash],
+		() => (openHash === null ? null : (shownRows.find((r) => r.hash === openHash) ?? null)),
+		[shownRows, openHash],
 	);
-	const filtered = useMemo(() => applyFilters(rows, filters), [rows, filters]);
 	const docked = useMediaQuery(DOCK_QUERY);
 	// Enter or Space on a row asks the docked inspector to take focus; a click clears the request. The restore request
 	// sends focus back to the row when the inspector closes. Each carries a counter so a repeat of the same row counts.
@@ -52,16 +107,27 @@ export function App(): React.JSX.Element {
 		},
 		[openHash, setOpenHash],
 	);
+	// Stable, so the memoized list does not re-render for a new callback on every answer.
+	const openRow = useCallback(
+		(r: LedgerRow, viaKeyboard: boolean) => {
+			setOpenHash(r.hash);
+			setKbOpen(viaKeyboard ? ++requests.current : undefined);
+		},
+		[setOpenHash],
+	);
+	const clearFilters = useCallback(() => setFilters(EMPTY_FILTERS), [setFilters]);
 	const newestOf = summary?.truncated ? summary.rowCount : undefined;
 
 	// Export what the operator is looking at — the filtered set, not the vault, and within the server's window: the
 	// filename says both. BOM first: Excel reads UTF-8 CSV as latin-1 without it.
 	function exportCsv(): void {
+		// Never a mix: while the rows of the answer's vault are not held, nothing is written.
+		if (pastHeld) return;
 		const blob = new Blob([`\uFEFF${toCsv(filtered)}`], { type: "text/csv;charset=utf-8" });
 		const url = URL.createObjectURL(blob);
 		const a = document.createElement("a");
 		a.href = url;
-		a.download = csvFilename(new Date(), isFiltering(filters), newestOf);
+		a.download = csvFilename(new Date(), isFiltering(drawn.filters), newestOf, list.at);
 		a.click();
 		URL.revokeObjectURL(url);
 	}
@@ -74,15 +140,22 @@ export function App(): React.JSX.Element {
 	};
 
 	const count =
-		filtered.length === rows.length
-			? `${rows.length.toLocaleString()} ${rows.length === 1 ? "record" : "records"}`
-			: `${filtered.length.toLocaleString()} of ${rows.length.toLocaleString()} records`;
+		filtered.length === shownRows.length
+			? `${shownRows.length.toLocaleString()} ${shownRows.length === 1 ? "record" : "records"}`
+			: `${filtered.length.toLocaleString()} of ${shownRows.length.toLocaleString()} records`;
 	// An empty vault has nothing to select: the list takes the width.
-	const dock = docked && view === "audit" && rows.length > 0;
+	const dock = docked && view === "audit" && shownRows.length > 0;
 
 	return (
 		<div className="ut-app">
-			<SummaryStrip summary={summary} live={live} />
+			<SummaryStrip summary={summary} live={live} at={shownAt} />
+			<AtStatus
+				error={atView.error}
+				loading={pointLoading(atView)}
+				reloaded={atView.reloaded}
+				holdNote={holdNote}
+				announce={announce.text}
+			/>
 			<main className="ut-work">
 				<div className="ut-head">
 					<div className="ut-seg" role="tablist" aria-label="View" onKeyDown={onTabKey}>
@@ -102,7 +175,7 @@ export function App(): React.JSX.Element {
 						))}
 					</div>
 					{/* A live region: a filter that changes how many rows are in view says so to a screen reader. */}
-					<span className="ut-label" role="status">
+					<span className="ut-label" role="status" data-held={held}>
 						{count}
 					</span>
 					<span className="ut-grow" />
@@ -115,21 +188,15 @@ export function App(): React.JSX.Element {
 						value={filters.search}
 						onChange={(e) => setFilters({ ...filters, search: e.currentTarget.value })}
 					/>
-					<button
-						type="button"
-						className="ut-btn"
-						onClick={exportCsv}
-						disabled={filtered.length === 0}
-						title={
-							newestOf === undefined
-								? "Download the records in view as CSV"
-								: `Download the records in view as CSV: these are within the newest ${newestOf.toLocaleString()} events only`
-						}
-					>
-						Export {filtered.length.toLocaleString()} {filtered.length === 1 ? "row" : "rows"}
-					</button>
+					<ExportButton
+						count={filtered.length}
+						at={list.at}
+						newestOf={newestOf}
+						held={held}
+						onExport={exportCsv}
+					/>
 				</div>
-				<FilterBar rows={rows} filters={filters} onChange={setFilters} />
+				<FilterBar rows={shownRows} filters={filters} onChange={setFilters} held={held} />
 				{/* Never a link that opens something else: when the address does not describe this view, we say so. */}
 				{addressNote === "cannot-hold" && (
 					<div className="ut-notice ut-address-note" role="status">
@@ -151,24 +218,33 @@ export function App(): React.JSX.Element {
 						role="tabpanel"
 						id={`panel-${view}`}
 						aria-labelledby={`tab-${view}`}
+						data-held={held}
+						aria-busy={held}
 					>
 						{view === "audit" ? (
 							<AuditTable
-								rows={filtered}
-								total={rows.length}
-								phase={phase}
-								chain={summary === null ? null : chainStatus(summary.chain)}
+								rows={list.filtered}
+								total={list.total}
+								phase={list.phase}
+								chain={list.chain}
+								beforeWindow={list.beforeWindow}
+								reloading={list.reloading}
+								reloadingNote={pastNote}
 								liveIds={liveIds}
 								selected={openHash}
 								restoreFocus={restoreFocus}
-								onOpen={(r: LedgerRow, viaKeyboard: boolean) => {
-									setOpenHash(r.hash);
-									setKbOpen(viaKeyboard ? ++requests.current : undefined);
-								}}
-								onClearFilters={() => setFilters(EMPTY_FILTERS)}
+								onOpen={openRow}
+								onClearFilters={clearFilters}
 							/>
 						) : (
-							<Trends rows={filtered} newestOf={newestOf} />
+							<Trends
+								rows={list.filtered}
+								newestOf={newestOf}
+								at={list.at}
+								head={head}
+								reloading={list.reloading}
+								reloadingNote={pastNote}
+							/>
 						)}
 					</section>
 					{dock &&
@@ -178,6 +254,8 @@ export function App(): React.JSX.Element {
 								key={open.hash}
 								row={open}
 								docked
+								held={held}
+								past={list.at !== null}
 								onClose={close}
 								focusNonce={kbOpen}
 								onFocusHandled={() => setKbOpen(undefined)}
@@ -188,7 +266,14 @@ export function App(): React.JSX.Element {
 				</div>
 			</main>
 			{!dock && view === "audit" && open && (
-				<RowPanel key={open.hash} row={open} docked={false} onClose={close} />
+				<RowPanel
+					key={open.hash}
+					row={open}
+					docked={false}
+					held={held}
+					past={list.at !== null}
+					onClose={close}
+				/>
 			)}
 		</div>
 	);

@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { describe, expect, it } from "vitest";
-import { frameVersion, SnapshotReplay } from "../src/shared/replay.js";
+import { frameVersion, resyncRetryDelay, SnapshotReplay } from "../src/shared/replay.js";
 
 type D = { status: Record<string, string> };
 const set =
@@ -70,6 +70,23 @@ describe("SnapshotReplay: a snapshot never loses a frame that overtook it", () =
 		replay.end();
 	});
 
+	it("a snapshot at the version already installed lands: after two answered out of order, the newest asked again is never dropped", () => {
+		const replay = new SnapshotReplay<D>();
+		const a = replay.begin(); // begun first, answered at version 12
+		const b = replay.begin(); // begun later, answered at version 11
+		expect(replay.land(a, 12, snapshot({ r1: "ambiguous" }))).toBeDefined(); // A's answer arrives first
+		replay.end();
+		expect(replay.land(b, 11, snapshot({ r1: "settled" }))).toBeUndefined(); // B is older than A: dropped
+		replay.end();
+		// Asked again once A's answer has arrived, the server answers at version 12 or later: either lands.
+		const again = replay.begin();
+		expect(replay.land(again, 12, snapshot({ r1: "ambiguous" }))).toBeDefined();
+		replay.end();
+		const later = replay.begin();
+		expect(replay.land(later, 13, snapshot({ r1: "ambiguous" }))).toBeDefined();
+		replay.end();
+	});
+
 	it("red-first (installed settled): a snapshot begun before a reconnect is dropped after the new one lands", () => {
 		const replay = new SnapshotReplay<D>();
 		let d: D = { status: { r1: "settled" } };
@@ -116,5 +133,14 @@ describe("SnapshotReplay: a snapshot never loses a frame that overtook it", () =
 		expect(frameVersion("0")).toBe(0);
 		for (const id of ["", "x", "1.5", "-", "1e400"])
 			expect(frameVersion(id), id).toBe(Number.POSITIVE_INFINITY);
+	});
+});
+
+describe("resyncRetryDelay: a failed snapshot fetch is tried again, sooner first, never slower than 30 s", () => {
+	it("doubles from one second and stops at thirty", () => {
+		expect([1, 2, 3, 4, 5, 6, 12].map(resyncRetryDelay)).toEqual([
+			1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000,
+		]);
+		expect(resyncRetryDelay(0)).toBe(1_000);
 	});
 });

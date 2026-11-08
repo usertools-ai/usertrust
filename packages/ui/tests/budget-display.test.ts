@@ -9,6 +9,7 @@ import {
 	budgetRecordAge,
 	budgetSourceWord,
 	formatRecordAge,
+	isControllerRecord,
 } from "../src/shared/budget-display.js";
 
 /** What the summary strip shows for the budget: an UNKNOWN budget has no remaining figure at all. */
@@ -252,5 +253,15 @@ describe("budgetAsOf", () => {
 		expect(
 			budgetAsOf({ budgetSource: "config", budgetWrittenAt: WRITTEN, budgetProvenance: "P" }, T0),
 		).toEqual({ text: "P", title: null, isRecord: false });
+	});
+});
+
+describe("isControllerRecord", () => {
+	// The one place the display names the controller source's wire value; every check of it goes through here.
+	it("is true only for a controller's own record of the budget it enforces", () => {
+		expect(isControllerRecord("governor")).toBe(true);
+		for (const other of ["config", "several", "unreadable", "unpublished"] as const) {
+			expect(isControllerRecord(other)).toBe(false);
+		}
 	});
 });
