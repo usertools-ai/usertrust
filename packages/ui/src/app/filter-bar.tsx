@@ -219,6 +219,11 @@ export const FilterBar = memo(function FilterBar(props: {
 			label: `model: ${m}`,
 			clear: () => onChange({ ...filters, models: filters.models.filter((x) => x !== m) }),
 		});
+	for (const p of filters.providers)
+		chips.push({
+			label: `provider: ${p}`,
+			clear: () => onChange({ ...filters, providers: filters.providers.filter((x) => x !== p) }),
+		});
 	for (const a of filters.actors)
 		chips.push({
 			label: `actor: ${a}`,
