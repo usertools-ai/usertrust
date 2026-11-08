@@ -606,6 +606,10 @@ describe("settle, void and destroy on a task hold", () => {
 		expect(b).toMatchObject({ amount: 100n, flags: TF.post_pending_transfer });
 		expect(account(holdingWallet())).toMatchObject({ debits_pending: 0n, debits_posted: 100n });
 		expect(account(t.key)).toMatchObject({ debits_pending: 0n, debits_posted: 100n });
+		// A call that cost 140 against a 100 hold adds only the hold to the task's spent: the 40 is the
+		// recorded shortfall, so a task can pass its limit by the sum of its settled calls' shortfalls
+		// (plus the cost of calls whose settlement did not complete).
+		await expect(engine.lookupTaskLimit(t.key)).resolves.toMatchObject({ spent: 100, held: 0 });
 	});
 
 	it("settle below the hold posts that amount on both legs and releases the rest", async () => {

@@ -1485,7 +1485,7 @@ export class TrustTBClient {
 		const amount = BigInt(p.amount);
 		// Minted here, OUTSIDE withReconnect: a retry resubmits these same two ids, which is what
 		// makes a lost reply a replay rather than a second hold.
-		const mint = (): [Transfer, Transfer] => [
+		const first: [Transfer, Transfer] = [
 			{
 				id: tbId(),
 				debit_account_id: p.payer.debitAccountId,
@@ -1517,7 +1517,14 @@ export class TrustTBClient {
 				timestamp: 0n,
 			},
 		];
-		const sent = await this.submitPair(mint(), "Pending transfer", false, mint);
+		// The pair is built ONCE, here, from the params as they are now. A re-mint after an await swaps
+		// only the two ids on copies of these transfers: it never reads `p` again, so a caller that reuses
+		// or edits the object it passed cannot change which accounts or task the second send names.
+		const mint = (): [Transfer, Transfer] => [
+			{ ...first[0], id: tbId() },
+			{ ...first[1], id: tbId() },
+		];
+		const sent = await this.submitPair(first, "Pending transfer", false, mint);
 		return { payerId: sent[0].id, limitId: sent[1].id };
 	}
 

@@ -5451,7 +5451,9 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 				actualAmount != null ? Math.min(actualAmount, entry.heldAmount) : entry.heldAmount;
 			if (entry.limitTbId !== undefined) {
 				// Both legs at one CONCRETE amount, never amount_max: the pair's replay check compares
-				// the amount it sent with the one stored.
+				// the amount it sent with the one stored. The task's leg is capped at the hold like the
+				// payer's, so a call that cost more than its hold adds only the hold to the task's spent:
+				// the excess is the shortfall the caller records, and the task's spent leaves it out.
 				await tbClient.postLinkedPair(entry.tbId, entry.limitTbId, posted);
 			} else {
 				await tbClient.postTransfer(entry.tbId, actualAmount != null ? posted : undefined);
