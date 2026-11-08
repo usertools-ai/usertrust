@@ -178,7 +178,7 @@ describe("listView", () => {
 
 	it("every view drawn from the list's input is marked from the drawn position, not from the drag", () => {
 		const app = readFileSync(join(import.meta.dirname, "..", "src", "app", "app.tsx"), "utf-8");
-		expect(app).toContain("const holdNote = heldNote(list.at, shownAt);");
+		expect(app).toContain("heldNote(list.at, shownAt)");
 		expect(app).not.toMatch(/setHolding|data-holding|aria-busy=\{holding\}/);
 		// The list or Trends, the count, Export, the facets, both inspectors, and the status under the header.
 		expect(app).toMatch(/className="ut-pane"[\s\S]{0,200}data-held=\{held\}\s*aria-busy=\{held\}/);

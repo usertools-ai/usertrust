@@ -534,6 +534,50 @@ describe("GET /api/at", () => {
 		}
 	});
 
+	it("/api/events answers the same epoch /api/at does, and both advance together over a reload", async () => {
+		await seed(5);
+		const other = mkdtempSync(join(tmpdir(), "trust-at-other-"));
+		try {
+			mkdirSync(join(other, ".usertrust", "audit"), { recursive: true });
+			const writer = createAuditWriter(other);
+			for (let i = 0; i < 5; i++) {
+				await writer.appendEvent({ kind: "llm_call", actor: "local", data: { cost: 7 } });
+			}
+			writer.release();
+			const s = await start();
+			const events = async (): Promise<{ epoch?: unknown }> =>
+				(await (await fetch(`http://127.0.0.1:${s.port}/api/events`)).json()) as {
+					epoch?: unknown;
+				};
+			const first = await at("pos=4");
+			expect((await events()).epoch).toBe(first.body.epoch);
+			writeFileSync(logPath, readFileSync(join(other, ".usertrust", "audit", "events.jsonl")));
+			s.reload();
+			const second = await at("pos=4");
+			expect(second.body.epoch).toBeGreaterThan(first.body.epoch);
+			expect((await events()).epoch).toBe(second.body.epoch);
+		} finally {
+			rmSync(other, { recursive: true, force: true });
+		}
+	});
+
+	it("the reload, /api/at and /api/events read state and epoch in one synchronous step", () => {
+		const src = readFileSync(new URL("../src/server/server.ts", import.meta.url), "utf-8");
+		const body = (re: RegExp): string => re.exec(src)?.[1] ?? "";
+		const resync = body(/\tfunction handleResync\(\): void \{([\s\S]*?)\n\t\}\n/);
+		const answer = body(/\tfunction answerAt\([^)]*\): void \{([\s\S]*?)\n\t\}\n/);
+		const events = body(/pathname === "\/api\/events"\) \{([\s\S]*?)\n\t\t\}\n/);
+		for (const part of [resync, answer, events]) {
+			expect(part.length).toBeGreaterThan(20);
+			expect(part).not.toMatch(
+				/\bawait\b|\basync\b|setTimeout|setImmediate|queueMicrotask|\.then\(/,
+			);
+		}
+		expect(resync).toMatch(/epoch \+= 1/);
+		expect(answer).toMatch(/\bepoch,/);
+		expect(events).toMatch(/\bepoch\b/);
+	});
+
 	it("epoch stays the same over a forced reload of an unchanged vault", async () => {
 		await seed(5);
 		const s = await start();

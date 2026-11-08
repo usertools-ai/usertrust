@@ -73,6 +73,9 @@ function beforeWindowAt(rows: LedgerRow[], at: AtPayload): BeforeWindow {
 		: { kind: "not-held", upTo: at.pos };
 }
 
+/** What the status says while a past view waits for the records of its answer's own vault (`pastRows`: held). */
+export const PAST_HELD_NOTE = "Updating to the reloaded vault…";
+
 /**
  * What the views drawn from the list's input say while they show another position than the header, or null when
  * they show the same one. Positions are compared, not answers: a re-read of the same position is not a held view.

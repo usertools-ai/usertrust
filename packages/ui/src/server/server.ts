@@ -832,7 +832,8 @@ export async function createUiServer(
 			return;
 		}
 		if (url.pathname === "/api/events") {
-			sendJson(res, 200, { rows: state.rows, summary: state.summary, version });
+			// State and epoch in one synchronous step, as `answerAt` reads them: no reload lands between them.
+			sendJson(res, 200, { rows: state.rows, summary: state.summary, version, epoch });
 			return;
 		}
 		if (url.pathname === "/api/at") {

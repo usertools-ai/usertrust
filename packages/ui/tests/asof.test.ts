@@ -3,7 +3,15 @@
 
 import { describe, expect, it } from "vitest";
 import type { AtPayload, SummaryPayload } from "../src/shared/api.js";
-import { chainAt, cutRows, rowsAsAnswered, windowNote, windowNoteAt } from "../src/shared/asof.js";
+import {
+	chainAt,
+	cutRows,
+	pastRows,
+	rowsAsAnswered,
+	windowNote,
+	windowNoteAt,
+} from "../src/shared/asof.js";
+import { toCsv } from "../src/shared/csv.js";
 import { EMPTY_FILTERS } from "../src/shared/filters.js";
 import { type ListInput, listView } from "../src/shared/list-view.js";
 import type { LedgerRow } from "../src/shared/rows.js";
@@ -277,5 +285,87 @@ describe("rows older than the window the answer covers", () => {
 		expect(view.shownRows).toEqual([]);
 		expect(view.beforeWindow).toEqual({ kind: "before", firstHeld: 3, upTo: 1 });
 		expect(windowNoteAt(payload)).toContain("from position 4");
+	});
+});
+
+describe("pastRows: the rows a past view draws, paired with its answer by the vault's epoch", () => {
+	// A reload with other records: record 1 (100 UT) is replaced by another record (500 UT) at the same position.
+	const old = [row(0, { id: "a", costUt: 10 }), row(1, { id: "b", costUt: 100 })];
+	const reloaded = [
+		row(0, { id: "a", costUt: 10 }),
+		row(1, { id: "b2", costUt: 500, hash: "f".repeat(64) }),
+	];
+	const answer = (epoch: number) => at({ pos: 1, spentUt: 110, epoch, statusAt: {} });
+	const draw = (rows: LedgerRow[], a: AtPayload) =>
+		listView({ rows, at: a, filters: EMPTY_FILTERS, phase: "loaded", summary: null });
+
+	it("rows first: the live rows are the reloaded vault's, the answer is the old one's, so the answer's own rows are drawn", () => {
+		const a = answer(0);
+		const past = pastRows(reloaded, 1, { rows: old, rowsEpoch: 0 }, a);
+		expect(past.kind).toBe("snapshot");
+		const shown = draw(past.rows, a).shownRows;
+		expect(shown.map((r) => r.id)).toEqual(["a", "b"]);
+		expect(shown.reduce((sum, r) => sum + (r.costUt ?? 0), 0)).toBe(a.spentUt);
+		const csv = toCsv(shown);
+		expect(csv).toContain(",b,");
+		expect(csv).not.toContain("b2");
+	});
+
+	it("answer first, before its resync: nothing of the answer's vault is held, so nothing is drawn", () => {
+		const a = answer(1);
+		const past = pastRows(old, 0, { rows: old, rowsEpoch: 0 }, a);
+		expect(past).toEqual({ kind: "held", rows: [] });
+		const view = draw(past.rows, a);
+		expect(view.shownRows).toEqual([]);
+		expect(view.beforeWindow).toEqual({ kind: "not-held", upTo: 1 });
+		expect(view.filtered.length).toBe(0);
+	});
+
+	it("answer first, after its resync: the page's rows are the answer's vault", () => {
+		const a = answer(1);
+		const past = pastRows(reloaded, 1, { rows: old, rowsEpoch: 0 }, a);
+		expect(past.kind).toBe("answered");
+		expect(draw(past.rows, a).shownRows.map((r) => r.id)).toEqual(["a", "b2"]);
+	});
+
+	it("an unrelated resync mid-reload (rows re-fetched for the old vault while the answer is the new one's) is held", () => {
+		const past = pastRows(old, 0, { rows: old, rowsEpoch: 0 }, answer(1));
+		expect(past).toEqual({ kind: "held", rows: [] });
+	});
+
+	it("a missing epoch never matches, not even another missing one", () => {
+		const a0 = answer(0);
+		const missing = { ...answer(0), epoch: undefined as unknown as number };
+		for (const [liveEpoch, rowsEpoch, a] of [
+			[null, null, a0],
+			[0, null, missing],
+			[null, null, missing],
+			[Number.NaN, Number.NaN, { ...a0, epoch: Number.NaN }],
+		] as const) {
+			expect(pastRows(reloaded, liveEpoch, { rows: old, rowsEpoch }, a)).toEqual({
+				kind: "held",
+				rows: [],
+			});
+		}
+	});
+
+	it("CONTROL: all one epoch gives the same rows as rowsAsAnswered", () => {
+		const a = at({ pos: 1, epoch: 0, statusAt: { [old[0]?.hash ?? ""]: "ambiguous" } });
+		const live = [old[0] as LedgerRow, { ...(old[1] as LedgerRow), status: "ambiguous" as const }];
+		const past = pastRows(live, 0, { rows: old, rowsEpoch: 0 }, a);
+		expect(past.kind).toBe("answered");
+		expect(past.rows).toEqual(rowsAsAnswered(live, old, a));
+	});
+
+	it("the snapshot is used for statuses only if it is the answer's vault too", () => {
+		const a = answer(1);
+		const past = pastRows(reloaded, 1, { rows: old, rowsEpoch: 0 }, a);
+		expect(past.rows).toBe(reloaded);
+	});
+
+	it("live (no answer) is the live rows themselves", () => {
+		const past = pastRows(reloaded, 1, { rows: old, rowsEpoch: 0 }, null);
+		expect(past.kind).toBe("live");
+		expect(past.rows).toBe(reloaded);
 	});
 });

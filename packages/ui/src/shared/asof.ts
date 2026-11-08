@@ -118,6 +118,43 @@ export function rowsAsAnswered(
 	return out ?? rows;
 }
 
+/** The rows a past view draws, and how they were chosen. */
+export interface PastRows {
+	kind: "live" | "answered" | "snapshot" | "held";
+	rows: LedgerRow[];
+}
+
+/** Two epochs name the same vault only when both are whole numbers and equal: a missing one never matches. */
+function sameEpoch(a: unknown, b: unknown): boolean {
+	return typeof a === "number" && Number.isInteger(a) && typeof b === "number" && a === b;
+}
+
+/**
+ * The rows a past view draws, paired with the answer by the epoch of the vault they come from (the counter `/api/at`
+ * reports and `/api/events` repeats), whichever of a reload's rows and answer lands first.
+ * - Live: the page's rows.
+ * - The page's rows are the answer's vault: they, with the statuses the answer was read against (`view.rows`) when
+ *   that snapshot is the same vault too.
+ * - Otherwise the snapshot taken when the request was sent, if it is the answer's vault (the rows came first).
+ * - Otherwise none: no rows of the answer's vault are held yet (the answer came first, an unrelated reload landed in
+ *   between, or the server sends no epoch). Nothing is drawn rather than another vault's rows under this answer.
+ */
+export function pastRows(
+	rows: LedgerRow[],
+	liveEpoch: number | null,
+	view: { rows: readonly LedgerRow[] | null; rowsEpoch: number | null },
+	at: AtPayload | null,
+): PastRows {
+	if (at === null) return { kind: "live", rows };
+	if (sameEpoch(liveEpoch, at.epoch)) {
+		const answered = sameEpoch(view.rowsEpoch, at.epoch) && view.rows !== null ? view.rows : rows;
+		return { kind: "answered", rows: rowsAsAnswered(rows, answered, at) };
+	}
+	if (view.rows !== null && sameEpoch(view.rowsEpoch, at.epoch))
+		return { kind: "snapshot", rows: [...view.rows] };
+	return { kind: "held", rows: [] };
+}
+
 /** A position as the page prints it: counted from 1, as the integrity texts count chain positions. */
 function shownPosition(pos: number): string {
 	return (pos + 1).toLocaleString();

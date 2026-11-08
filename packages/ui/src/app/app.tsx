@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { rowsAsAnswered } from "../shared/asof.js";
+import { pastRows } from "../shared/asof.js";
 import { pointLoading } from "../shared/at-follow.js";
 import { csvFilename, toCsv } from "../shared/csv.js";
 import { EMPTY_FILTERS, isFiltering } from "../shared/filters.js";
@@ -12,6 +12,7 @@ import {
 	holdAnnouncement,
 	type ListInput,
 	listView,
+	PAST_HELD_NOTE,
 } from "../shared/list-view.js";
 import type { LedgerRow } from "../shared/rows.js";
 import { MAX_SEARCH_LENGTH, type ViewId } from "../shared/url-state.js";
@@ -38,31 +39,34 @@ const VIEWS: Array<{ id: View; label: string }> = [
 const DOCK_QUERY = "(min-width: 1100px)";
 
 export function App(): React.JSX.Element {
-	const { rows, summary, phase, live, liveIds, resyncs } = useLedger();
+	const { rows, summary, phase, live, liveIds, resyncs, rowsEpoch } = useLedger();
 	// The view, filters and open record live in the page address (`location.hash`): a reload keeps them, a link shares them.
 	const { view, setView, filters, setFilters, openHash, setOpenHash, at, navigation, addressNote } =
 		useUrlState();
 	// The past position shown (`#at=N`, or a preview before it is written there), from /api/at. Until its first answer
 	// lands, or when it fails with nothing loaded, the screen stays live and the status under the header says so: a past
 	// view is only ever drawn from its own answer.
-	const { view: atView } = useAt(at, summary, live, rows, resyncs, navigation);
+	const { view: atView } = useAt(at, summary, live, rows, resyncs, rowsEpoch, navigation);
 	const shownAt = atView.at;
 	// The past view reads each row's status against the rows the page held when the answer's request was SENT
 	// (`atView.rows`), not the rows held when the answer renders: a live `status` frame for a record after the
 	// position, one the server had not seen when it answered, can arrive in between, and `statusAt` cannot correct it
-	// (`rowsAsAnswered`).
-	const pastRows = useMemo(
-		() => rowsAsAnswered(rows, atView.rows ?? rows, shownAt),
-		[rows, atView.rows, shownAt],
+	// (`rowsAsAnswered`). The rows are paired with the answer by the epoch of the vault they come from (`pastRows`),
+	// whichever of a reload's rows and answer lands first; while none of the answer's own vault is held, nothing is
+	// drawn and the views wait.
+	const past = useMemo(
+		() => pastRows(rows, rowsEpoch, atView, shownAt),
+		[rows, rowsEpoch, atView, shownAt],
 	);
+	const pastHeld = past.kind === "held";
 	const head = summary === null ? -1 : summary.chain.events - 1;
 	// What the list, the facets, Trends and Export draw: ONE input, deferred, so a new position paints the header
 	// first and the rest follows when there is time, never mixing one position's rows with
 	// another moment's phase or chain (`listView`). The rows are cut at the position before the filters, so all of them
 	// see the vault then.
 	const listInput = useMemo<ListInput>(
-		() => ({ rows: pastRows, at: shownAt, filters, phase, summary }),
-		[pastRows, shownAt, filters, phase, summary],
+		() => ({ rows: past.rows, at: shownAt, filters, phase, summary }),
+		[past.rows, shownAt, filters, phase, summary],
 	);
 	const drawn = useDeferredValue(listInput);
 	const list = useMemo(() => listView(drawn), [drawn]);
@@ -70,8 +74,9 @@ export function App(): React.JSX.Element {
 	// Whether what the list's input draws (the list, the facets, Trends, the inspector, the count and Export) shows
 	// another position than the header: until the deferred render lands (after Back, Forward
 	// or a link). Those views are dimmed and busy meanwhile, and the status under the header says what is coming.
-	const holdNote = heldNote(list.at, shownAt);
-	const held = holdNote !== null;
+	// A past view whose vault's rows are not held yet lags too.
+	const holdNote = pastHeld ? PAST_HELD_NOTE : heldNote(list.at, shownAt);
+	const held = holdNote !== null || pastHeld;
 	// What a screen reader hears about it: once when the views start to lag, once when they catch up, never per answer.
 	const [announce, setAnnounce] = useState<HoldAnnouncement>({ held: false, text: "" });
 	useEffect(() => {
@@ -112,6 +117,8 @@ export function App(): React.JSX.Element {
 	// Export what the operator is looking at — the filtered set, not the vault, and within the server's window: the
 	// filename says both. BOM first: Excel reads UTF-8 CSV as latin-1 without it.
 	function exportCsv(): void {
+		// Never a mix: while the rows of the answer's vault are not held, nothing is written.
+		if (pastHeld) return;
 		const blob = new Blob([`\uFEFF${toCsv(filtered)}`], { type: "text/csv;charset=utf-8" });
 		const url = URL.createObjectURL(blob);
 		const a = document.createElement("a");

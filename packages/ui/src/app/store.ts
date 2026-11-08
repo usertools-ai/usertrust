@@ -32,23 +32,40 @@ export interface LedgerData {
 	 * the past view uses it to tell rows from before a replacement from the rows that corrected them.
 	 */
 	resyncs: number;
+	/**
+	 * The epoch of the vault the rows come from, installed with them in each resync (null: not loaded, or a server that
+	 * sends none). Frames never change it.
+	 */
+	rowsEpoch: number | null;
+}
+
+/** The vault epoch a snapshot carries: a non-negative safe integer, else null (an older server sends none). */
+export function snapshotEpoch(v: unknown): number | null {
+	return typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null;
 }
 
 async function fetchAll(): Promise<{
 	rows: LedgerRow[];
 	summary: SummaryPayload;
 	version: number;
+	epoch: number | null;
 }> {
 	// ONE request: the rows and the summary are taken at the same version. Two requests let an append land between
 	// them, and its summary frame (the same version as the newer half) was never re-applied over the stale one.
 	const res = await fetch("/api/events");
-	const { rows, summary, version } = (await res.json()) as {
+	const { rows, summary, version, epoch } = (await res.json()) as {
 		rows: LedgerRow[];
 		summary: SummaryPayload;
 		version?: unknown;
+		epoch?: unknown;
 	};
 	// No version: older than every frame, so every kept frame is re-applied on top.
-	return { rows, summary, version: typeof version === "number" ? version : -1 };
+	return {
+		rows,
+		summary,
+		version: typeof version === "number" ? version : -1,
+		epoch: snapshotEpoch(epoch),
+	};
 }
 
 export function useLedger(): LedgerData {
@@ -59,6 +76,7 @@ export function useLedger(): LedgerData {
 		live: "connecting",
 		liveIds: new Set(),
 		resyncs: 0,
+		rowsEpoch: null,
 	});
 
 	useEffect(() => {
@@ -73,7 +91,7 @@ export function useLedger(): LedgerData {
 		const resync = (): void => {
 			const generation = replay.begin();
 			fetchAll()
-				.then(({ rows, summary, version }) => {
+				.then(({ rows, summary, version, epoch }) => {
 					// liveIds is flash state for SSE arrivals only — a resync
 					// replaces the row set wholesale, so it starts clean (after
 					// the replay too: a re-applied frame is not a new arrival).
@@ -83,6 +101,7 @@ export function useLedger(): LedgerData {
 							...d,
 							rows,
 							summary,
+							rowsEpoch: epoch,
 							phase: "loaded" as const,
 						}));
 						if (install !== undefined)

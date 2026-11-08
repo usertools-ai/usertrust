@@ -229,7 +229,23 @@ describe("the wiring the model mirrors", () => {
 	it("the page hands the count to useAt", () => {
 		const app = read("app.tsx");
 		expect(app).toMatch(/useUrlState\(\)/);
-		expect(app).toMatch(/useAt\(at, summary, live, rows, resyncs, navigation\)/);
+		expect(app).toMatch(/useAt\(at, summary, live, rows, resyncs, rowsEpoch, navigation\)/);
+	});
+
+	it("the page pairs its rows with the answer by epoch: past.rows feed the list, and Export waits while held", () => {
+		const app = read("app.tsx");
+		expect(app).toMatch(/pastRows\(rows, rowsEpoch, atView, shownAt\)/);
+		expect(app).toMatch(/rows: past\.rows,/);
+		expect(app).toMatch(/const pastHeld = past\.kind === "held"/);
+		expect(app).toMatch(/const held = holdNote !== null \|\| pastHeld/);
+		const fn = /function exportCsv\(\): void \{([\s\S]*?)\n\t\}\n/.exec(app)?.[1] ?? "";
+		expect(fn.length).toBeGreaterThan(20);
+		expect(fn.slice(0, fn.indexOf("new Blob"))).toMatch(/if \(pastHeld\) return;/);
+	});
+
+	it("useAt hands the follower the epoch of the rows the page holds", () => {
+		const src = read("use-at.ts");
+		expect(src).toMatch(/\(\) => held\.current\.rowsEpoch/);
 	});
 
 	it("useAt tells the follower of each navigation, then wants the address's position, whenever the count changes", () => {

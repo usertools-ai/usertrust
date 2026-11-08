@@ -4,7 +4,7 @@
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AtPayload } from "../src/shared/api.js";
-import { cutRows, rowsAsAnswered } from "../src/shared/asof.js";
+import { cutRows, pastRows, rowsAsAnswered } from "../src/shared/asof.js";
 import { AtFollower, type AtView, pointLoading } from "../src/shared/at-follow.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 import { newSince } from "../src/shared/timeline-view.js";
@@ -52,7 +52,7 @@ function row(pos: number, overrides: Partial<LedgerRow> = {}): LedgerRow {
 /** A loader whose answers the test gives by hand, in any order. */
 function harness() {
 	// The rows the page holds right now: the test replaces them as live frames arrive.
-	const page = { rows: [] as LedgerRow[], resyncs: 0 };
+	const page = { rows: [] as LedgerRow[], resyncs: 0, rowsEpoch: 0 as number | null };
 	const calls: Array<{
 		pos: number;
 		signal: AbortSignal;
@@ -69,6 +69,7 @@ function harness() {
 		undefined,
 		() => page.rows,
 		() => page.resyncs,
+		() => page.rowsEpoch,
 	);
 	const last = (): AtView => {
 		const v = views.at(-1);
@@ -741,5 +742,91 @@ describe("pointLoading", () => {
 		g.calls[0]?.resolve(at({ pos: 99, clamped: true }));
 		await g.flush();
 		expect(pointLoading(g.last())).toBe(false);
+	});
+});
+
+describe("a past view and the vault's epoch", () => {
+	const old = [row(0, { id: "a", costUt: 10 }), row(1, { id: "b", costUt: 100 })];
+	const reloaded = [
+		row(0, { id: "a", costUt: 10 }),
+		row(1, { id: "b2", costUt: 500, hash: "f".repeat(64) }),
+	];
+	/** What the page would draw for the follower's last view, given the page's rows and epoch now. */
+	const drawn = (h: ReturnType<typeof harness>) =>
+		pastRows(h.page.rows, h.page.rowsEpoch, h.last(), h.last().at);
+
+	it("the stamp is the page's epoch when the request was sent, not when the answer lands", async () => {
+		const h = harness();
+		h.page.rows = old;
+		h.page.rowsEpoch = 0;
+		h.follower.want(1);
+		h.page.rowsEpoch = 5;
+		h.calls[0]?.resolve(at({ pos: 1 }));
+		await h.flush();
+		expect(h.last().rowsEpoch).toBe(0);
+	});
+
+	it("live carries no stamp", async () => {
+		const h = harness();
+		h.page.rowsEpoch = 3;
+		h.follower.want(1);
+		h.follower.want(null);
+		expect(h.last().rowsEpoch).toBeNull();
+	});
+
+	it("rows first: pending, failed, then landed re-read of a reload", async () => {
+		const h = harness();
+		h.page.rows = old;
+		h.page.rowsEpoch = 0;
+		h.follower.want(1);
+		h.calls[0]?.resolve(at({ pos: 1, epoch: 0 }));
+		await h.flush();
+		expect(drawn(h).kind).toBe("answered");
+		// The reload's rows land; the re-read is pending: the old answer is paired with its own rows.
+		h.page.rows = reloaded;
+		h.page.rowsEpoch = 1;
+		h.page.resyncs += 1;
+		h.follower.refresh();
+		expect(h.calls).toHaveLength(2);
+		let p = drawn(h);
+		expect(p.kind).toBe("snapshot");
+		expect(p.rows.map((r) => r.id)).toEqual(["a", "b"]);
+		// The re-read fails: the pairing is unchanged and the error is set.
+		h.calls[1]?.reject(new Error("the dashboard did not answer"));
+		await h.flush();
+		expect(h.last().error).toBe("the dashboard did not answer");
+		p = drawn(h);
+		expect(p.kind).toBe("snapshot");
+		expect(p.rows.map((r) => r.id)).toEqual(["a", "b"]);
+		// A later re-read lands with the new vault's answer: the reloaded rows.
+		h.follower.refresh();
+		h.calls[2]?.resolve(at({ pos: 1, epoch: 1 }));
+		await h.flush();
+		p = drawn(h);
+		expect(p.kind).toBe("answered");
+		expect(p.rows.map((r) => r.id)).toEqual(["a", "b2"]);
+		expect(h.last().reloaded).toBe(true);
+	});
+
+	it("answer first: held until the resync lands, then answered", async () => {
+		const h = harness();
+		h.page.rows = old;
+		h.page.rowsEpoch = 0;
+		h.follower.want(1);
+		h.calls[0]?.resolve(at({ pos: 1, epoch: 0 }));
+		await h.flush();
+		// The summary frame of the reload asks for a re-read before the reloaded rows are installed.
+		h.follower.refresh();
+		h.calls[1]?.resolve(at({ pos: 1, epoch: 1 }));
+		await h.flush();
+		expect(h.last().at?.epoch).toBe(1);
+		expect(drawn(h)).toEqual({ kind: "held", rows: [] });
+		// The resync lands.
+		h.page.rows = reloaded;
+		h.page.rowsEpoch = 1;
+		h.page.resyncs += 1;
+		const p = drawn(h);
+		expect(p.kind).toBe("answered");
+		expect(p.rows.map((r) => r.id)).toEqual(["a", "b2"]);
 	});
 });
