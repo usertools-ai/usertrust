@@ -29,18 +29,44 @@ export function formatUtc(iso: string): string {
 }
 
 /**
+ * A timestamp exactly as `toISOString` writes it, which is how the vault writes every record's. Its own characters
+ * are its UTC date and hour, so reading them takes no Date: the Spend chart buckets every row it draws, once per
+ * filter change, and a Date per row was most of that time on a large vault. Only a date the calendar has and an hour
+ * from 00 to 23 qualify, because `Date.parse` rolls the others over (02-30 to 03-02, hour 24 to the next day) and
+ * both readings must agree.
+ */
+const ISO_UTC = /^(\d{4})-(\d{2})-(\d{2})T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{3}Z$/;
+const MONTH_DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31] as const;
+
+function isUtcIso(iso: string): boolean {
+	const m = ISO_UTC.exec(iso);
+	if (m === null) return false;
+	const year = Number(m[1]);
+	const month = Number(m[2]);
+	const day = Number(m[3]);
+	if (month < 1 || month > 12 || day < 1) return false;
+	const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+	return day <= (month === 2 && leap ? 29 : (MONTH_DAYS[month - 1] ?? 0));
+}
+
+/** The timestamp as `toISOString` writes its UTC instant; an unreadable one as it was written. */
+function asUtcIso(iso: string): string {
+	if (isUtcIso(iso)) return iso;
+	const t = Date.parse(iso);
+	return Number.isNaN(t) ? iso : new Date(t).toISOString();
+}
+
+/**
  * The UTC date `YYYY-MM-DD` of a timestamp: what the date filters compare, and the date `formatUtc` shows. A
  * timestamp written with an offset is converted, not sliced; an unreadable one keeps its first ten characters.
  */
 export function utcDay(iso: string): string {
-	const t = Date.parse(iso);
-	return Number.isNaN(t) ? iso.slice(0, 10) : new Date(t).toISOString().slice(0, 10);
+	return asUtcIso(iso).slice(0, 10);
 }
 
 /** The UTC hour bucket `YYYY-MM-DD HH:00` of a timestamp: converted like `utcDay`, never sliced. */
 export function utcHour(iso: string): string {
-	const t = Date.parse(iso);
-	const s = Number.isNaN(t) ? iso : new Date(t).toISOString();
+	const s = asUtcIso(iso);
 	return `${s.slice(0, 10)} ${s.slice(11, 13)}:00`;
 }
 
