@@ -679,7 +679,19 @@ describe("a resend after a refused pair", () => {
 
 	it("re-mints at most once: a second id_already_failed is a hard failure", async () => {
 		await ledgers(1_000n, 1_000n);
-		answer(S.linked_event_failed, S.id_already_failed);
+		// The third send and every later one is really applied. A re-mint without a bound would then end
+		// by ADMITTING the pair, so this row fails on an assertion instead of looping until a timeout.
+		let sent = 0;
+		fake.onRequest = (op, _batch, apply) => {
+			if (op !== "createTransfers") return apply();
+			sent += 1;
+			return sent <= 2
+				? [
+						{ timestamp: 0n, status: S.linked_event_failed },
+						{ timestamp: 0n, status: S.id_already_failed },
+					]
+				: apply();
+		};
 		const err = await settle(client.createLinkedPendingPair(pairFor(10)));
 		expect(err).toBeInstanceOf(TaskLimitLegError);
 		expect((err as TaskLimitLegError).code).toBe(S.id_already_failed);

@@ -562,6 +562,9 @@ describe("a stale ensure cache", () => {
 		fake.onRequest = (op, batch, apply) => {
 			if (op === "createTransfers" && batch.length === 2) {
 				pairs += 1;
+				// From the third pair on the hold is really applied: a re-ensure without a bound would then
+				// end by ADMITTING the hold, so this row fails on an assertion, not by looping to a timeout.
+				if (pairs > 2) return apply();
 				return [
 					{ timestamp: 0n, status: S.linked_event_failed },
 					{ timestamp: 0n, status: S.debit_account_not_found },
