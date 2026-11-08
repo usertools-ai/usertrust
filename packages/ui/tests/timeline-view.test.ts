@@ -192,7 +192,10 @@ describe("goLiveKeepingFocus", () => {
 });
 
 describe("isStepEvent", () => {
-	const key = (k: string, over: Partial<{ altKey: boolean; ctrlKey: boolean; metaKey: boolean }> = {}) => ({
+	const key = (
+		k: string,
+		over: Partial<{ altKey: boolean; ctrlKey: boolean; metaKey: boolean }> = {},
+	) => ({
 		key: k,
 		altKey: false,
 		ctrlKey: false,
