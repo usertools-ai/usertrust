@@ -81,6 +81,8 @@ EOF
 export UT_CC_CONFIG="$UT_DIR/claude-code.json"
 ```
 
+The `export` is optional for this one path: with `UT_CC_CONFIG` unset, the plugin reads `~/.config/usertrust/claude-code.json` in your account's home whenever anything is there (see [Where the settings come from](#where-the-settings-come-from)).
+
 If the file is in the wrong place, or has the wrong owner or mode, the plugin refuses it. The session then runs watch-only with no key and sends nothing, and the first line Claude Code shows says why: `usertrust: watch-only and key-less — the config file UT_CC_CONFIG names was refused (config: anchor refused (missing)) …`. That is what a file written under a `$HOME` that is not your account's home produces. See [Configuration file](#configuration-file).
 
 4. Start Claude Code. Each session opens with a line naming the mode, for example
@@ -92,14 +94,16 @@ If the file is in the wrong place, or has the wrong owner or mode, the plugin re
 
 ## Environment variables
 
-These are read only when `UT_CC_CONFIG` is not set. With it set, the plugin reads
-every setting from one file instead: see [Configuration file](#configuration-file).
+These are read only when no configuration file is used: `UT_CC_CONFIG` is not set,
+and nothing is at `~/.config/usertrust/claude-code.json` in your account's home.
+Otherwise the plugin reads every setting from one file instead: see
+[Where the settings come from](#where-the-settings-come-from).
 Either way, a session reads its settings once, at its first hook: see
 [One session, one set of settings](#one-session-one-set-of-settings).
 
 | Variable             | Default                  | Meaning                                          |
 | -------------------- | ------------------------ | ------------------------------------------------ |
-| `UT_CC_CONFIG`       | unset                    | Path of a [configuration file](#configuration-file); when set, even empty, none of the variables below is read |
+| `UT_CC_CONFIG`       | unset                    | Path of a [configuration file](#configuration-file); when set, even empty, none of the variables below is read. Unset, the conventional file is read if there is one |
 | `UT_SERVER_URL`      | `http://127.0.0.1:4519`  | Base URL of your usertrust-server; requests go to its origin and path, without a trailing `/`, query or fragment |
 | `UT_SERVER_KEY`      | (empty)                  | Tenant bearer key                                |
 | `UT_CC_MODE`         | `watch`                  | `enforce` (matched case-insensitively) blocks over-budget calls; any other value is watch-only (see [Modes](#modes-watch-only-by-default)) |
@@ -153,7 +157,23 @@ The path is built from your account's home directory (`os.userInfo().homedir`), 
 | `holdGraceMs` | no       | `60000`             | A Bash call's hold life past its timeout, in ms, 0 to 3 600 000 (`UT_CC_HOLD_GRACE_MS`) |
 | `jobTypeInstruction` | no | `false`            | `true` asks the agent to type its jobs at SessionStart (`UT_CC_JOB_TYPE_INSTRUCTION=1`) |
 
-**With `UT_CC_CONFIG` set, even to an empty string, the session is configured:**
+### Where the settings come from
+
+The first of these that applies decides, for a new session:
+
+1. **`UT_CC_CONFIG` is set**, even to an empty string: the file it names.
+2. **Anything is at `~/.config/usertrust/claude-code.json`** in your account's home
+   (the conventional file; only "no such file" means nothing is there, so a dangling
+   link or an unreadable entry counts): that file.
+3. **Otherwise:** the `UT_*` variables.
+
+A configuration file that fails its checks is **refused**, the conventional file
+included: the session runs watch-only and key-less, and the `UT_*` variables are never
+used in its place. When a file wins and some `UT_*` variables are set too, SessionStart
+says once which file it read and names the variables it ignored (names only, never
+their values).
+
+**With a configuration file, `UT_CC_CONFIG` set even to an empty string, the session is configured:**
 every setting comes from the file, and no `UT_*` variable is read, nor
 `CLAUDE_CONFIG_DIR` or `HOME` for the state dir. Fields the plugin does not know
 are ignored. The file is accepted only if all of these hold:
@@ -255,6 +275,29 @@ under your home as the passwd database gives it.
   at or after that removal, or whose pin you delete, is pinned again from the
   settings then current.
 - A config file that is refused is not pinned: the next hook reads it again.
+- **One exception: a DEAD environment pin is re-pinned at SessionStart.** A session
+  pinned from the environment before the conventional file existed would otherwise
+  stay unconfigured for its life, resumes included. Its pin is dead, and SessionStart
+  re-pins it to the conventional file, only when ALL of these hold:
+  - it was pinned with no key (`UT_SERVER_KEY` empty or unset);
+  - `UT_CC_CONFIG` is unset and the conventional file is accepted now;
+  - the session moved no money under it: in its state dir, there is no hold of the
+    session, every one of its transcript cursors records nothing posted, accounted,
+    unresolved or assigned, and `watch.jsonl` holds no record of it but `gap`,
+    `pre-metering` and `no-transcript-agent`. Anything unreadable or of a shape not
+    known counts as money that may have moved. A health answer
+    (`capabilities/`) is not counted: it moves no money.
+
+  The old pin is moved aside (`<id>.json.repinned.<time>.<random>`, never deleted), the
+  re-pin is appended to `.local/state/usertrust/repins/repins.jsonl` (the old pin, the
+  new pin with its key hashed, the reason) before the new pin is published, and
+  SessionStart says so once. The old state dir is left as it was. Nothing is posted
+  twice: the new state dir starts metering at the session's next hook, and nothing
+  the transcript holds from before it is posted there. If the record cannot be
+  written, the pin is not changed, and SessionStart says so.
+- **Any other environment pin is kept**, and while a configuration file would now be
+  read SessionStart warns, first: `usertrust: WARNING: this session is UNCONFIGURED.`
+  with the reason it is not re-pinned. Start a new session (not a resume) to use the file.
 
 **A pin that cannot be used runs the hook key-less: it sends nothing, and records a
 gap.** That covers a session id that is not a safe file name, a passwd home that
@@ -701,7 +744,7 @@ are opaque: 1-128 characters of `[A-Za-z0-9._:-]`.
 
 The mode — `"mode"` in the configuration file, or `UT_CC_MODE` in a session without
 one — decides what PreToolUse, the one hook that can block, does with the
-server's answer. **With `UT_CC_CONFIG` set, every `UT_*` variable is ignored, `UT_CC_MODE`
+server's answer. **With a configuration file (`UT_CC_CONFIG` set, or the conventional file), every `UT_*` variable is ignored, `UT_CC_MODE`
 and `UT_FAIL_OPEN` included:** set the mode and `failOpen` in the file. Reservations, settlement and everything above work the same in
 both modes.
 

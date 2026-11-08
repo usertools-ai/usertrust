@@ -1,10 +1,16 @@
 // The plugin's settings, and the ONE place the hooks read the environment.
 //
-// UNCONFIGURED (no UT_CC_CONFIG in the environment): every setting comes from its
-// UT_* variable, as it always has.
-//
-// CONFIGURED (UT_CC_CONFIG is in the environment, even empty): every setting comes
-// from the one file it names, and no UT_* variable is read. The file is accepted
+// WHERE SETTINGS COME FROM, first match wins (`configSource`):
+// 1. UT_CC_CONFIG is in the environment, even empty: the one file it names.
+// 2. Else the CONVENTIONAL file, <passwd home>/.config/usertrust/claude-code.json, when
+//    anything is at that path (only "no such file" means none): that file.
+// 3. Else UNCONFIGURED: every setting comes from its UT_* variable, as it always has.
+// A session that starts with (1) or (2) is CONFIGURED: every setting comes from that
+// one file, and no UT_* variable is read. When one is set anyway, SessionStart says
+// which source won and names the variables it ignored (`ignoredVariablesNote`), never
+// their values. A conventional file that fails its checks is refused, exactly as a
+// named one is: the session never falls back to the UT_* variables, because a broken
+// file the user wrote is a fault to show, not one to route around. The file is accepted
 // only inside <passwd home>/.config/usertrust/ (the home the passwd database gives
 // the user, never $HOME: that is environment too), only as a regular file the user
 // owns with no group or other permission bits, and only when it holds every
@@ -43,6 +49,8 @@ import {
 } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { isAbsolute, join, sep } from "node:path";
+
+const REAL_FS = { closeSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync };
 
 /** The variable that names the config file; its presence alone makes a session configured. */
 const CONFIG_VARIABLE = "UT_CC_CONFIG";
@@ -97,6 +105,45 @@ function graceFromVariable(raw) {
 
 /** Where a config file must be, under the passwd home. */
 const ANCHOR = [".config", "usertrust"];
+
+/** The conventional config file's name, in the anchor: read when UT_CC_CONFIG is unset. */
+const CONVENTIONAL = "claude-code.json";
+
+/** The conventional config file under a passwd home, or null without one. */
+export function conventionalPath(home) {
+	return home === null || home === undefined ? null : join(home, ...ANCHOR, CONVENTIONAL);
+}
+
+/** How the user-facing lines name the conventional file. */
+export const CONVENTIONAL_NAME = `~/${ANCHOR.join("/")}/${CONVENTIONAL}`;
+
+/**
+ * Where an environment's settings come from: "variable" (UT_CC_CONFIG is in it, even
+ * empty), "conventional" (it is not, and something is at `conventionalPath`), or
+ * "environment" (neither: the UT_* variables). Only ENOENT or ENOTDIR, which say no such
+ * file, mean the conventional file is absent: any other answer (a dangling link, no
+ * permission, an I/O error) makes it the source, so its read refuses the session loudly,
+ * and a broken file is never taken for none.
+ */
+export function configSource({ env, passwdHome, fs = REAL_FS }) {
+	if (Object.hasOwn(env, CONFIG_VARIABLE)) return "variable";
+	const path = conventionalPath(passwdHome);
+	if (path === null) return "environment";
+	try {
+		fs.lstatSync(path);
+		return "conventional";
+	} catch (err) {
+		return err?.code === "ENOENT" || err?.code === "ENOTDIR" ? "environment" : "conventional";
+	}
+}
+
+/**
+ * The UT_* setting variables an environment sets (`VARIABLES`), by name: what a
+ * configured session ignores. The model's old variable has its own note.
+ */
+export function setVariables(env) {
+	return Object.values(VARIABLES).filter((name) => Object.hasOwn(env, name));
+}
 
 /** The largest config file read. */
 const MAX_CONFIG_BYTES = 64 * 1024;
@@ -321,21 +368,25 @@ function readConfig(path, { passwdHome, uid, fs }) {
 	}
 }
 
-const REAL_FS = { closeSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync };
-
 /**
- * The settings for an environment: from the environment when it has no
- * UT_CC_CONFIG, else from the file it names (`readConfig`), or watch-only and
- * key-less when that file is refused. `passwdHome` is the passwd database's home
+ * The settings for an environment, from its source (`configSource`): the file
+ * UT_CC_CONFIG names, else the conventional file, each read by `readConfig` and
+ * watch-only and key-less when refused; else the environment. A file's settings, and
+ * a refused file's, carry `configSource` ("variable" or "conventional"), so the
+ * session-start lines can say which file it was. `passwdHome` is the passwd database's home
  * (null when there is none), `uid` the user's (null without POSIX ownership), and
  * `fs` the file functions it reads with (tests swap in their own `fstatSync` and
  * `lstatSync` to stand in for another owner). A session resolves once, at its first
  * hook, and keeps the result in its pin (session.mjs).
  */
 export function resolveSettings({ env, passwdHome, uid, fs = REAL_FS }) {
-	if (!Object.hasOwn(env, CONFIG_VARIABLE)) return fromEnvironment(env);
-	const read = readConfig(env[CONFIG_VARIABLE], { passwdHome, uid, fs });
-	return typeof read === "string" ? refusedSettings(read, passwdHome) : read;
+	const source = configSource({ env, passwdHome, fs });
+	if (source === "environment") return fromEnvironment(env);
+	const path = source === "variable" ? env[CONFIG_VARIABLE] : conventionalPath(passwdHome);
+	const read = readConfig(path, { passwdHome, uid, fs });
+	return typeof read === "string"
+		? { ...refusedSettings(read, passwdHome), configSource: source }
+		: { ...read, configSource: source };
 }
 
 /** The passwd database's home for this user, or null when it has none. */
@@ -371,6 +422,8 @@ let fromFile;
  */
 export function settings() {
 	if (session !== undefined) return session;
+	// Never the conventional file here: a unit test on a machine that has one would
+	// otherwise send with the user's real key. Hooks resolve it (`resolveSettings`).
 	if (!Object.hasOwn(process.env, CONFIG_VARIABLE)) return fromEnvironment(process.env);
 	const path = process.env[CONFIG_VARIABLE];
 	if (fromFile?.path !== path) {
@@ -394,11 +447,6 @@ export function keyHash(key) {
 /** This process's environment: what a session resolves from, at its first hook (session.mjs). */
 export function environment() {
 	return process.env;
-}
-
-/** Whether an environment makes a session configured: UT_CC_CONFIG is in it, even empty. */
-export function namesConfig(env) {
-	return Object.hasOwn(env, CONFIG_VARIABLE);
 }
 
 /** The tenant key an environment holds (UT_SERVER_KEY), for an environment session's pin check. */
@@ -517,7 +565,53 @@ export function ignoredModelNote() {
  * Why a session runs key-less, for its session-start line: the fixed reason, and
  * what it is about: the config file, or the session's pin or launch.
  */
-export function refusalNote(reason) {
+export function refusalNote(reason, source) {
 	if (!reason.startsWith("config:")) return `this session's settings could not be used (${reason})`;
+	if (source === "conventional") {
+		return `the config file ${CONVENTIONAL_NAME} was refused (${reason}); the UT_* variables are never used in its place`;
+	}
 	return `the config file ${CONFIG_VARIABLE} names was refused (${reason})`;
+}
+
+/** How the session-start lines name a config file, by its source (`configSource`). */
+function configFileName(source) {
+	return source === "conventional" ? CONVENTIONAL_NAME : `the config file ${CONFIG_VARIABLE} names`;
+}
+
+/**
+ * SessionStart's warning for a session kept UNCONFIGURED by its environment pin while a new
+ * session would read a config file from `source` (session.mjs): when it was pinned, and `why`,
+ * the fixed reason it is not re-pinned.
+ */
+export function unconfiguredNote({ createdAt, source, why }) {
+	const file = configFileName(source);
+	return `usertrust: WARNING: this session is UNCONFIGURED. It was pinned at ${createdAt} from the UT_* variables, before ${file} was read, and keeps those settings for its life, resumes included, so it does not use that file. It is not re-pinned: ${why}. Start a new session (not a resume) to use ${file}.`;
+}
+
+/** SessionStart's line for a dead environment pin re-pinned to the conventional file (session.mjs). */
+export function repinnedNote({ createdAt, record }) {
+	return `usertrust: this session was RE-PINNED to ${CONVENTIONAL_NAME}. Its old pin (made ${createdAt} from the UT_* variables, with no key) never moved any money; its state dir is left as it was, and the re-pin is recorded in ${record}. Nothing from before this point is posted again.`;
+}
+
+/** SessionStart's warning for a dead pin left in place because its re-pin record could not be written. */
+export const REPIN_UNRECORDED_NOTE = `usertrust: WARNING: this session is UNCONFIGURED, and could not be re-pinned to ${CONVENTIONAL_NAME}: the re-pin record could not be written. Start a new session (not a resume) to use it.`;
+
+/**
+ * The session-start line for a configured session whose environment ALSO sets UT_*
+ * variables (`setVariables`), or null: which file won, and the names it ignored, never
+ * their values. `source` is the session's `configSource` (a pin made before it was
+ * recorded has none: the file is then named generically).
+ */
+export function ignoredVariablesNote(env, current) {
+	if (current.configured !== true) return null;
+	const names = setVariables(env);
+	if (names.length === 0) return null;
+	const file =
+		current.configSource === "conventional"
+			? `${CONVENTIONAL_NAME} (${CONFIG_VARIABLE} is unset)`
+			: current.configSource === "variable"
+				? configFileName("variable")
+				: "its config file";
+	const verb = names.length === 1 ? "is" : "are";
+	return `usertrust: this session's settings come from ${file}; ${names.join(", ")} ${verb} set in the environment and IGNORED.`;
 }

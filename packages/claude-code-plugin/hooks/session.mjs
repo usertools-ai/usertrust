@@ -40,6 +40,21 @@
 // A pin deleted mid-session is made again, from the settings then current, by the
 // next hook. A pin idle for 30 days is swept (`sweep`, at SessionStart); a session
 // resumed at or after the sweep is pinned again, from the settings then current.
+//
+// A pin is never changed, with ONE exception, made only at SessionStart (`repin`): a
+// DEAD environment pin is re-pinned to the conventional config file. Such a pin was
+// made before that file was read (config.mjs `configSource`), and it would otherwise
+// keep a session unconfigured for its whole life, resumes included. Dead means ALL of
+// (`deadPin`): it holds the EMPTY key; the session moved no money under it
+// (`movedNoMoney`); and the conventional file is the source now, and is accepted. The
+// old pin is moved aside, never deleted; the re-pin is appended to
+// <private state>/repins/repins.jsonl (old pin, new pin with the key hashed, reason)
+// BEFORE the new pin is published; and SessionStart says so once. The old state dir is
+// left exactly as it was. No usage is posted twice: the new state dir stamps the
+// session's first metered hook (transcript.mjs `sessionFirstRun`), and nothing the
+// transcript holds from before it is ever posted there. Any other environment pin is
+// kept, and when a config file would now be read SessionStart warns, loudly, that the
+// session is UNCONFIGURED.
 import { randomBytes } from "node:crypto";
 import {
 	closeSync,
@@ -53,20 +68,26 @@ import {
 	readdirSync,
 	readFileSync,
 	realpathSync,
+	renameSync,
 	unlinkSync,
 	utimesSync,
 	writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import {
+	CONVENTIONAL_NAME,
+	configSource,
 	DEFAULT_HOLD_GRACE_MS,
 	environment,
 	environmentKey,
 	isHoldGrace,
 	keyHash,
-	namesConfig,
+	REPIN_UNRECORDED_NOTE,
+	refusalNote,
 	refusedSettings,
+	repinnedNote,
 	resolveSettings,
+	unconfiguredNote,
 } from "./config.mjs";
 import { LINKLESS } from "./lib.mjs";
 import { stateSubdir } from "./private-dir.mjs";
@@ -90,6 +111,8 @@ export const PIN_IDLE_MS = 30 * 24 * HOUR_MS;
 
 const MODES = ["watch", "enforce"];
 const USAGES = ["transcript", "estimate"];
+/** Where a configured pin's file was found (config.mjs `configSource`); older pins name none. */
+const CONFIG_SOURCES = ["variable", "conventional"];
 
 const REAL_FS = {
 	closeSync,
@@ -102,6 +125,7 @@ const REAL_FS = {
 	readdirSync,
 	readFileSync,
 	realpathSync,
+	renameSync,
 	unlinkSync,
 	utimesSync,
 	writeFileSync,
@@ -145,6 +169,7 @@ function parsePin(text) {
 		// A pin made before the setting existed has none: the default.
 		(s.holdGraceMs === undefined || isHoldGrace(s.holdGraceMs)) &&
 		(s.jobTypeInstruction === undefined || typeof s.jobTypeInstruction === "boolean") &&
+		(s.configSource === undefined || CONFIG_SOURCES.includes(s.configSource)) &&
 		optionalString(s.unrecognizedMode);
 	if (!valid) return null;
 	if (value.kind === "configured" && typeof s.key === "string" && s.keyHash === undefined) {
@@ -211,12 +236,208 @@ function pinOf(resolved, kind, now) {
 		jobTypeInstruction: resolved.jobTypeInstruction === true,
 		unrecognizedMode,
 	};
+	const configured = { ...shared, configSource: resolved.configSource };
 	return {
 		v: 1,
 		kind,
 		createdAt: new Date(now).toISOString(),
-		settings: kind === "configured" ? { ...shared, key } : { ...shared, keyHash: keyHash(key) },
+		settings: kind === "configured" ? { ...configured, key } : { ...shared, keyHash: keyHash(key) },
 	};
+}
+
+/** A pin as the re-pin record holds it: never a key, only its hash. */
+function recordable(pin) {
+	const { key, ...rest } = pin.settings;
+	return { ...pin, settings: key === undefined ? rest : { ...rest, keyHash: keyHash(key) } };
+}
+
+/** The hash of the empty key: what an environment pin made with no UT_SERVER_KEY holds. */
+const EMPTY_KEY_HASH = keyHash("");
+
+/** The most names `movedNoMoney` reads in one directory, its most cursors, and its largest file. */
+const MAX_DEAD_NAMES = 100_000;
+const MAX_DEAD_CURSORS = 4096;
+const MAX_DEAD_FILE_BYTES = 64 * 1024 * 1024;
+
+/** A cursor's name, under <stateDir>/transcripts: `<session>__<agent>.json` (transcript.mjs). */
+const CURSOR_NAME = /^[A-Za-z0-9_-]+\.json$/;
+
+/**
+ * Watch records that say nothing reached a server: a gap, usage from before metering, an agent
+ * with no transcript. Any other record of the session (a `would_block` is a server's answer)
+ * means one did.
+ */
+const LOCAL_RECORDS = new Set(["gap", "pre-metering", "no-transcript-agent"]);
+
+/**
+ * A file's text, read without following a link, only as a regular file the user owns within
+ * `MAX_DEAD_FILE_BYTES`: null otherwise.
+ */
+function boundedText(path, { uid, fs }) {
+	let fd;
+	try {
+		fd = fs.openSync(
+			path,
+			constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0),
+		);
+	} catch {
+		return null;
+	}
+	try {
+		const info = fs.fstatSync(fd);
+		if (!info.isFile() || info.size > MAX_DEAD_FILE_BYTES) return null;
+		if (uid !== null && info.uid !== uid) return null;
+		return fs.readFileSync(fd, "utf-8");
+	} catch {
+		return null;
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
+/**
+ * Whether a cursor's text is a v2 cursor (transcript.mjs `writeCursor`) holding no id that may
+ * have reached a server: `posted`, `accounted`, `unresolved` and `assigned` all empty.
+ */
+function emptyCursor(text) {
+	let value;
+	try {
+		value = JSON.parse(text);
+	} catch {
+		return false;
+	}
+	return (
+		isObject(value) &&
+		value.v === 2 &&
+		Array.isArray(value.posted) &&
+		value.posted.length === 0 &&
+		Array.isArray(value.accounted) &&
+		value.accounted.length === 0 &&
+		isObject(value.unresolved) &&
+		Object.keys(value.unresolved).length === 0 &&
+		isObject(value.assigned) &&
+		Object.keys(value.assigned).length === 0
+	);
+}
+
+/**
+ * Whether `stateDir` records that session `id` moved NO money: null when it moved none, else
+ * the fixed reason it may have. Read for THIS session only (the dir is shared by every session
+ * pinned to it), and at the strict end: anything unreadable, over a bound or of a shape not
+ * known here counts as money that may have moved.
+ * - No hold file of the session at the top level (`<id>__…`, any suffix, `.settling` and
+ *   `.releasing` included): a hold exists only after a reserve the server accepted.
+ * - Every cursor of the session (`transcripts/<id>__…`) is a v2 cursor whose `posted`,
+ *   `accounted`, `unresolved` and `assigned` are all empty. `accounted` also holds ids that may
+ *   have posted (a settle never seen to end), so a non-empty one is never taken for none.
+ * - No record of the session in `watch.jsonl` but the local ones (`LOCAL_RECORDS`): a settle at
+ *   the estimate that succeeded leaves no hold and no cursor id, but nor does it leave a gap.
+ * A /v1/health answer (`capabilities/`) is NOT counted, ON PURPOSE: it moves no money. Only a
+ * reserve, a settle or a post counts. Do not "fix" this by counting capabilities: a server that
+ * answered health and nothing else would keep a dead pin for the session's life.
+ */
+export function movedNoMoney(stateDir, id, { uid, fs = REAL_FS }) {
+	const prefix = `${id}__`;
+	const names = (dir) => {
+		try {
+			const list = fs.readdirSync(dir);
+			return list.length > MAX_DEAD_NAMES ? null : list;
+		} catch {
+			return null;
+		}
+	};
+	const top = names(stateDir);
+	if (top === null) return "its state dir is unreadable";
+	if (top.some((name) => name.startsWith(prefix))) return "its state dir holds a hold of it";
+	const cursors = names(join(stateDir, "transcripts"));
+	if (cursors === null) return "its transcript state is unreadable";
+	const mine = cursors.filter((name) => name.startsWith(prefix));
+	if (mine.length > MAX_DEAD_CURSORS) return "it has more cursors than are read";
+	for (const name of mine) {
+		const text = CURSOR_NAME.test(name)
+			? boundedText(join(stateDir, "transcripts", name), { uid, fs })
+			: null;
+		if (text === null || !emptyCursor(text)) {
+			return "its cursors record usage that may have been posted";
+		}
+	}
+	if (top.includes("watch.jsonl")) {
+		const text = boundedText(join(stateDir, "watch.jsonl"), { uid, fs });
+		if (text === null) return "its watch records are unreadable";
+		const tag = `"session":${JSON.stringify(id)}`;
+		for (const line of text.split("\n")) {
+			if (!line.includes(tag)) continue;
+			let record;
+			try {
+				record = JSON.parse(line);
+			} catch {
+				return "its watch records are unreadable";
+			}
+			if (!isObject(record) || !LOCAL_RECORDS.has(record.kind)) return "a server answered it";
+		}
+	}
+	return null;
+}
+
+/**
+ * Whether environment pin `pin` of session `id` is DEAD, so SessionStart may re-pin it: null
+ * when it is, else the fixed reason it is kept. `resolved` is what a new session would get now
+ * (config.mjs `resolveSettings`). All three must hold:
+ * 1. it holds the EMPTY key (`EMPTY_KEY_HASH`);
+ * 2. the conventional config file is the source now (UT_CC_CONFIG unset) and is accepted;
+ * 3. the session moved no money under it (`movedNoMoney`).
+ */
+export function deadPin(pin, id, resolved, { uid, fs = REAL_FS }) {
+	if (pin.kind !== "environment") return "it is not an environment pin";
+	if (pin.settings.keyHash !== EMPTY_KEY_HASH) return "it was pinned with a key";
+	if (resolved.configSource !== "conventional") {
+		return `${CONVENTIONAL_NAME} is not where a new session's settings come from`;
+	}
+	if (resolved.refused !== null) return refusalNote(resolved.refused, "conventional");
+	return movedNoMoney(pin.settings.stateDir, id, { uid, fs });
+}
+
+/** Append the re-pin record, whole and synced, to a regular file the user owns, 0600: its path. */
+function appendRecord(home, record, { uid, fs }) {
+	const where = stateSubdir(home, "repins", { uid, fs });
+	if (where.refused !== undefined) throw new Error("repins dir refused");
+	const path = join(where.dir, "repins.jsonl");
+	const fd = fs.openSync(
+		path,
+		constants.O_WRONLY |
+			constants.O_APPEND |
+			constants.O_CREAT |
+			(constants.O_NOFOLLOW ?? 0) |
+			(constants.O_NONBLOCK ?? 0),
+		0o600,
+	);
+	try {
+		const info = fs.fstatSync(fd);
+		if (!info.isFile()) throw new Error("repins file refused");
+		if (uid !== null && (info.uid !== uid || (info.mode & 0o077) !== 0)) {
+			throw new Error("repins file refused");
+		}
+		fs.writeFileSync(fd, `${JSON.stringify(record)}\n`);
+		fs.fsyncSync(fd);
+	} finally {
+		fs.closeSync(fd);
+	}
+	return path;
+}
+
+/** The note this process's SessionStart shows (`setSessionNote`, `takeSessionNote`). */
+let sessionNote = null;
+
+/** Keep `note` for this process's SessionStart (launch.mjs, from `sessionSettings`). */
+export function setSessionNote(note) {
+	sessionNote = typeof note === "string" ? note : null;
+}
+
+/** The session's note, once: null after the first take, or when there is none. */
+export function takeSessionNote() {
+	const note = sessionNote;
+	sessionNote = null;
+	return note;
 }
 
 /**
@@ -308,6 +529,7 @@ export function sessionSettings({
 	uid,
 	now = Date.now(),
 	fs = REAL_FS,
+	repin = false,
 }) {
 	/** The mode and failOpen the session means to have, as resolved now: none for a refused file. */
 	const intended = () => {
@@ -316,15 +538,24 @@ export function sessionSettings({
 	};
 	/** Refused settings, in `known`'s mode and failOpen when this hook resolved them, else as now. */
 	const refuse = (reason, known = intended()) => ({
-		settings: refusedSettings(reason, passwdHome, { configured: namesConfig(env), ...known }),
+		settings: refusedSettings(reason, passwdHome, {
+			configured: configSource({ env, passwdHome, fs }) !== "environment",
+			...known,
+		}),
 		kind: null,
 		path: null,
+		note: null,
 	});
 	/** The session of the pin `read` at `path`, refused as `known` says when it is not usable. */
 	const use = (read, path, known) => {
 		if (read.refused !== undefined) return refuse(read.refused, known);
 		if (read.missing) return refuse("pin: unreadable", known);
-		return { settings: pinnedSettings(read.pin, env, passwdHome), kind: read.pin.kind, path };
+		return {
+			settings: pinnedSettings(read.pin, env, passwdHome),
+			kind: read.pin.kind,
+			path,
+			note: null,
+		};
 	};
 	const id = isObject(payload) ? payload.session_id : undefined;
 	if (typeof id !== "string" || !SESSION_ID.test(id)) return refuse("pin: session id refused");
@@ -332,23 +563,92 @@ export function sessionSettings({
 	const where = pinDir(passwdHome, { uid, fs });
 	if (where.refused !== undefined) return refuse(where.refused);
 	const path = join(where.dir, `${id}.json`);
+	/** Publish `pin`, made from `resolved`, at `path`, and use the pin then there. */
+	const pinWith = (resolved, pin) => {
+		const known = { mode: resolved.mode, failOpen: resolved.failOpen };
+		let outcome;
+		try {
+			outcome = publish(path, JSON.stringify(pin), { fs });
+		} catch {
+			return refuse("pin: unwritable", known);
+		}
+		if (outcome === "nolink") return refuse("pin: no hard links", known);
+		// Won or lost, the pin is the one now there.
+		return use(readPin(path, { uid, fs }), path, known);
+	};
+	/** No pin yet: resolve now, and pin that. */
+	const pinNew = () => {
+		const resolved = resolveSettings({ env, passwdHome, uid, fs });
+		// A refused config file is not pinned: the next hook resolves again.
+		if (resolved.refused !== null) {
+			return { settings: resolved, kind: null, path: null, note: null };
+		}
+		return pinWith(
+			resolved,
+			pinOf(resolved, resolved.configured ? "configured" : "environment", now),
+		);
+	};
 	const read = readPin(path, { uid, fs });
-	// A pin, or one that cannot be read: never taken for none, so no pin is made for it.
-	if (!read.missing) return use(read, path);
+	// None, which only ENOENT says.
+	if (read.missing) return pinNew();
+	// A pin, or one that cannot be read: never taken for none, so no pin is made for it. The one
+	// exception is a DEAD environment pin at SessionStart (`deadPin`): it is re-pinned.
+	if (!repin || read.pin?.kind !== "environment") return use(read, path);
 	const resolved = resolveSettings({ env, passwdHome, uid, fs });
-	// A refused config file is not pinned: the next hook resolves again.
-	if (resolved.refused !== null) return { settings: resolved, kind: null, path: null };
-	const known = { mode: resolved.mode, failOpen: resolved.failOpen };
-	const kind = resolved.configured ? "configured" : "environment";
-	let outcome;
-	try {
-		outcome = publish(path, JSON.stringify(pinOf(resolved, kind, now)), { fs });
-	} catch {
-		return refuse("pin: unwritable", known);
+	const kept = deadPin(read.pin, id, resolved, { uid, fs });
+	if (kept !== null) {
+		const session = use(read, path);
+		// Unconfigured while a new session would read a config file: say so, loudly.
+		const source = configSource({ env, passwdHome, fs });
+		if (source === "environment") return session;
+		return {
+			...session,
+			note: unconfiguredNote({ createdAt: read.pin.createdAt, source, why: kept }),
+		};
 	}
-	if (outcome === "nolink") return refuse("pin: no hard links", known);
-	// Won or lost, the pin is the one now there.
-	return use(readPin(path, { uid, fs }), path, known);
+	const next = pinOf(resolved, "configured", now);
+	const aside = `${path}.repinned.${now}.${randomBytes(6).toString("hex")}`;
+	try {
+		fs.renameSync(path, aside);
+	} catch (err) {
+		if (err?.code !== "ENOENT") return use(read, path);
+		// Another hook of this session moved it first: use whatever pin is there, or pin now.
+		const again = readPin(path, { uid, fs });
+		return again.missing ? pinNew() : use(again, path);
+	}
+	let recorded;
+	try {
+		recorded = appendRecord(
+			passwdHome,
+			{
+				v: 1,
+				at: new Date(now).toISOString(),
+				session: id,
+				reason:
+					"dead environment pin: the empty key, the conventional config file accepted, and no money moved for this session in its state dir",
+				old: { ...recordable(read.pin), movedTo: aside },
+				new: recordable(next),
+			},
+			{ uid, fs },
+		);
+	} catch {
+		// No record, no re-pin: link the old pin back (a pin made meanwhile wins), and use what is
+		// there. The copy moved aside stays where it is.
+		try {
+			fs.linkSync(aside, path);
+		} catch {
+			// A pin is there already, or the link failed: the read below decides.
+		}
+		const back = readPin(path, { uid, fs });
+		return {
+			...(back.missing ? pinNew() : use(back, path)),
+			note: REPIN_UNRECORDED_NOTE,
+		};
+	}
+	return {
+		...pinWith(resolved, next),
+		note: repinnedNote({ createdAt: read.pin.createdAt, record: recorded }),
+	};
 }
 
 /** Mark a pin used now, so `sweep` keeps it while its session lives. Best effort. */

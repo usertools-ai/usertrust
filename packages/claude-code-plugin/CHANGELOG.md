@@ -30,6 +30,21 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ### Changed
 
+- **Behaviour change: `~/.config/usertrust/claude-code.json` is read without `UT_CC_CONFIG`.** With
+  `UT_CC_CONFIG` unset, a new session now reads the conventional configuration file in your account's
+  home whenever anything is at that path, and ignores every `UT_*` variable, as `UT_CC_CONFIG` always
+  made it. Only "no such file" falls through to the variables: a conventional file that fails its checks
+  (a dangling link, the wrong mode or owner) is refused, so the session runs watch-only and key-less and
+  never uses the `UT_*` variables in its place. `UT_CC_CONFIG`, when set, still wins. When a file wins
+  while `UT_*` variables are set, SessionStart names the file and the ignored variables (names only).
+- **A session pinned unconfigured before that file existed is re-pinned once, or warned about.** At
+  SessionStart, an environment pin made with no key, for a session that moved no money in its state dir
+  (no hold; no cursor id posted, accounted, unresolved or assigned; no watch record but a gap), is
+  re-pinned to the conventional file: the old pin is moved aside, the change is appended to
+  `.local/state/usertrust/repins/repins.jsonl` (key hashed) first, and SessionStart says so. Usage from
+  before the re-pin is never posted. Any other environment pin is kept, and SessionStart now opens with
+  `usertrust: WARNING: this session is UNCONFIGURED.` and the reason, while a configuration file would be
+  read.
 - **Behaviour change: the job-type instruction is now off by default.** SessionStart no longer asks
   the agent to type its jobs unless you say so. To keep job-type labels, set `"jobTypeInstruction": true`
   in the configuration file (or `UT_CC_JOB_TYPE_INSTRUCTION=1`). Only the exact value `1` turns it on in
