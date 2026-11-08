@@ -42,6 +42,11 @@ function tagsWith(html: string, marker: string): string[] {
 	return out;
 }
 
+/** The class names on one opening tag. */
+function classesOf(tag: string): string[] {
+	return /\bclass="([^"]*)"/.exec(tag)?.[1]?.split(/\s+/) ?? [];
+}
+
 describe("the desk shell", () => {
 	it("has exactly four windows, in the order spend, share, ledger, now", async () => {
 		const html = await shell();
@@ -63,12 +68,18 @@ describe("the desk shell", () => {
 		expect([...order].sort((a, b) => a - b)).toEqual(order);
 	});
 
-	it("has one glass element, and it is the top bar", async () => {
+	it("puts the glass on the top bar, and never on a window's frame or body", async () => {
 		const html = await shell({ data: loadedData() });
-		const glass = tagsWith(html, "ut-glass");
-		expect(glass).toHaveLength(1);
-		expect(glass[0]).toContain("<header");
-		expect(glass[0]).toContain("ut-dk-top");
+		const top = tagsWith(html, "ut-dk-top").filter((t) => classesOf(t).includes("ut-dk-top"));
+		expect(top).toHaveLength(1);
+		expect(top[0]).toContain("<header");
+		expect(classesOf(top[0] ?? "")).toContain("ut-glass");
+		// Glass is for controls (the top bar, a window's own controls), never for a pane: frames and bodies stay solid.
+		const panes = tagsWith(html, "ut-win").filter((t) =>
+			classesOf(t).some((c) => c === "ut-win" || c === "ut-win-body"),
+		);
+		expect(panes).toHaveLength(8);
+		for (const tag of panes) expect(classesOf(tag)).not.toContain("ut-glass");
 	});
 
 	it("draws the timeline whatever the data: empty, still loading, or loaded", async () => {
