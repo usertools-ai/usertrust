@@ -134,6 +134,8 @@ if (a[0] === "install") {
 process.exit(9);
 `;
 
+// timing: 120 s for the five rows together, each running release.sh twice and the script once. The
+// whole describe took 4.9 to 5.2 s in three runs on an 8-core laptop, so the bound is over 20x that.
 describe("shrinkwrap-published.sh (the release's post-publish check)", { timeout: 120_000 }, () => {
 	const version = execFileSync("bash", [join(ROOT, "scripts/release.sh"), "version"], {
 		cwd: ROOT,
