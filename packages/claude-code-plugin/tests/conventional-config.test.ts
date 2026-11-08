@@ -552,6 +552,33 @@ describe("session.mjs: SessionStart re-pins a DEAD environment pin to the conven
 		});
 	}
 
+	it("kept: (2) UT_CC_CONFIG names an accepted file now, with a state dir of its own: no re-pin, for it is not the conventional file", async () => {
+		// The KEPT rows' "no conventional file" leaves the pin's own state dir as the resolved one,
+		// which clause (4) refuses too; this row resolves elsewhere, so only clause (2) keeps it.
+		const { sessionSettings } = await sessionModule();
+		const home = await makeHome();
+		const old = await oldStateDir();
+		await pinFromEnvironment(home, unconfigured(old));
+		await writeConventional(home, FILE(await makeDir("utcc-conv-new-")));
+		const named = join(anchorOf(home), "other.json");
+		await writeFile(named, JSON.stringify(FILE(await makeDir("utcc-conv-named-"))));
+		await chmod(named, 0o600);
+		const session = sessionSettings({
+			env: { ...unconfigured(old), UT_CC_CONFIG: named },
+			payload: { session_id: SESSION },
+			passwdHome: home,
+			uid: UID,
+			repin: true,
+		});
+		// mutant: any accepted source re-pins
+		expect(session.kind).toBe("environment");
+		expect(nodeFs.existsSync(recordsOf(home))).toBe(false);
+		expect((JSON.parse(await readFile(pinOf(home), "utf-8")) as Pin).kind).toBe("environment");
+		expect(session.note).toContain(
+			"It is not re-pinned: ~/.config/usertrust/claude-code.json is not where a new session's settings come from.",
+		);
+	});
+
 	it("a session whose sibling moved money is still dead: the rule is read for THIS session only", async () => {
 		const { movedNoMoney } = await sessionModule();
 		const old = await oldStateDir();
