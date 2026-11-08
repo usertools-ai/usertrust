@@ -225,6 +225,13 @@ describe("lookups", () => {
 		expect(stepIndex(Number.NaN, 1, 1, { i0: 3, i1: 2 })).toBe(-1);
 		expect(stepIndex(Number.NaN, -1, 1, { i0: 3, i1: 2 })).toBe(-1);
 	});
+	it("stepIndex from an infinite index clamps to the span's end", () => {
+		const span = { i0: 2, i1: 5 };
+		expect(stepIndex(Number.POSITIVE_INFINITY, 1, 1, span)).toBe(5);
+		expect(stepIndex(Number.POSITIVE_INFINITY, -1, 1, span)).toBe(5);
+		expect(stepIndex(Number.NEGATIVE_INFINITY, 1, 1, span)).toBe(2);
+		expect(stepIndex(Number.NEGATIVE_INFINITY, -1, 1, span)).toBe(2);
+	});
 	it("stepIndex with a NaN step stays where it is, in both directions", () => {
 		const span = { i0: 2, i1: 5 };
 		expect(stepIndex(3, 1, Number.NaN, span)).toBe(3);
