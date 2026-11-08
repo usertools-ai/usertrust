@@ -523,6 +523,64 @@ describe("usertrust-job while its session is re-pinned: a change written under t
 		expect(await readFile(join(state, "jobs", `${SID}.jsonl`), "utf-8")).toContain('"job":"bug-2"');
 		expect(await readFile(join(other, "jobs", `${SID}.jsonl`), "utf-8")).toBe(otherLog);
 	});
+
+	it("coverage reads the state dir the session was re-pinned from, through the re-pin's record: a gap written there late is listed", async () => {
+		const home = await realpath(await mkdtemp(join(tmpdir(), "utcc-job-home-")));
+		const old = await mkdtemp(join(tmpdir(), "utcc-job-old-"));
+		const carried = start(SID, T0) + op(SID, T0 + 1000, "start", "bug-1");
+		await mkdir(join(old, "jobs"), { recursive: true });
+		await writeFile(join(old, "jobs", `${SID}.jsonl`), carried);
+		await writeLog(carried + op(SID, T0 + 5000, "stop", null));
+		// The record a re-pin writes before its swap (hooks/session.mjs `appendRecord`), in a 0700 dir.
+		const records = join(home, ".local", "state", "usertrust", "repins");
+		await mkdir(records, { recursive: true, mode: 0o700 });
+		for (const dir of [
+			".local",
+			".local/state",
+			".local/state/usertrust",
+			".local/state/usertrust/repins",
+		]) {
+			await chmod(join(home, dir), 0o700);
+		}
+		const pinned = (stateDir: string) => ({
+			v: 1,
+			kind: "environment",
+			createdAt: iso(T0),
+			settings: { stateDir },
+		});
+		await writeFile(
+			join(records, "repins.jsonl"),
+			line({
+				v: 1,
+				id: "0123456789abcdef",
+				at: iso(T0 + 500),
+				session: SID,
+				old: pinned(old),
+				new: pinned(state),
+			}),
+			{ mode: 0o600 },
+		);
+		// A hook launched under the old pin writes its gap there after the re-pin.
+		await writeFile(
+			join(old, "watch.jsonl"),
+			line({
+				at: iso(T0 + 2000),
+				started: iso(T0 + 2000),
+				kind: "gap",
+				mode: "watch",
+				session: SID,
+				agent: "main",
+			}),
+		);
+		const vault = await mkdtemp(join(tmpdir(), "utcc-job-vault-"));
+		await mkdir(join(vault, "audit"));
+		const r = await cliOut(["coverage", "bug-1", "--vault", vault], { TEST_PASSWD_HOME: home });
+		expect(r.code).toBe(0);
+		// mutant: the CLI reads the pinned dir's watch records only → the late gap is missed
+		expect(gapText(JSON.parse(r.stdout))).toContain(
+			`session ${SID}: a gap fell inside an interval of bug-1`,
+		);
+	});
 });
 
 describe("usertrust-job outside a session: its paths come from what a new session would read, the conventional file included", () => {

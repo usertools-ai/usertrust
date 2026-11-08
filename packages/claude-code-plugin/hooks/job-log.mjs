@@ -771,7 +771,7 @@ const ms = (value) => (typeof value === "string" ? Date.parse(value) : Number.Na
  * not be parsed, a missing or invalid log, a denied request of the job.
  * A record's APPEND time is never read.
  */
-export function jobCoverage({ job, logs, records, watch = [], unreadable = {} }) {
+export function jobCoverage({ job, logs, records, watch = [], unreadable = {}, known = [] }) {
 	const knownGaps = [];
 	const why = (text, evidence = {}) => knownGaps.push({ gap: text, evidence });
 
@@ -1121,6 +1121,7 @@ export function jobCoverage({ job, logs, records, watch = [], unreadable = {} })
 	const sessionsBefore = Object.keys(unattributed).length;
 
 	const seen = new Set();
+	for (const g of known) why(g.gap, g.evidence);
 	return {
 		job,
 		diagnostic: true,
@@ -1142,6 +1143,11 @@ export function jobCoverage({ job, logs, records, watch = [], unreadable = {} })
 			return true;
 		}),
 	};
+}
+
+/** STUB (failing first): coverage reads the pinned dir only, as it does at this head. */
+export async function repinnedEvidence() {
+	return { watch: [], knownGaps: [] };
 }
 
 /**

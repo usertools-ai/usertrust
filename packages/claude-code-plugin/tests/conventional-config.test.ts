@@ -1198,6 +1198,316 @@ describe("session.mjs: SessionStart re-pins a DEAD environment pin to the conven
 		expect((JSON.parse(await readFile(pinOf(home), "utf-8")) as Pin).kind).toBe("environment");
 	});
 
+	// ── Late writes: a hook launched under the OLD pin writes to the OLD state dir after the carry.
+	// Each hook fixes its state dir from the pin at launch and never reads the pin again, so no
+	// snapshot taken by the re-pin can see what it writes later. Coverage reads the old dir as it
+	// is when coverage runs, through the re-pin's record, so each such write is placed or named. ──
+
+	interface Gap {
+		gap: string;
+		evidence: Record<string, unknown>;
+	}
+	interface LateModules {
+		jobCoverage(input: {
+			job: string;
+			logs: Record<string, unknown>;
+			records: unknown[];
+			watch: unknown[];
+			known?: Gap[];
+		}): { knownGaps: Gap[] };
+		readLogs(dir: string, job: string): Promise<Record<string, unknown>>;
+		repinnedEvidence(input: {
+			job: string;
+			stateDir: string;
+			logs: Record<string, unknown>;
+			watch: unknown[];
+			repins: string;
+		}): Promise<{ watch: unknown[]; knownGaps: Gap[] }>;
+		appendJobOp(
+			sid: string,
+			op: string,
+			job: string | null,
+			opts?: { waitMs?: number },
+		): Promise<{ ok: boolean }>;
+		recordWatchEvent(event: Record<string, unknown>): Promise<boolean>;
+		useSession(value: unknown): void;
+	}
+	async function lateModules(): Promise<LateModules> {
+		// @ts-expect-error TS7016: job-log.mjs ships as plain .mjs, with no type declarations.
+		const jobLog = await import("../hooks/job-log.mjs");
+		// @ts-expect-error TS7016: lib.mjs ships as plain .mjs, with no type declarations.
+		const lib = await import("../hooks/lib.mjs");
+		// @ts-expect-error TS7016: config.mjs ships as plain .mjs, with no type declarations.
+		const config = await import("../hooks/config.mjs");
+		return {
+			...jobLog,
+			recordWatchEvent: lib.recordWatchEvent,
+			useSession: config.useSession,
+		} as LateModules;
+	}
+
+	/** A re-pinned session: job-1 open from before the re-pin, its stop and its spend after it in the new dir. */
+	async function repinnedAcross(): Promise<{
+		home: string;
+		fresh: string;
+		old: string;
+		oldPin: Pin;
+	}> {
+		const { sessionSettings } = await sessionModule();
+		const home = await makeHome();
+		const fresh = await makeDir("utcc-conv-new-");
+		const old = await deadWithJobLog(home, fresh);
+		const oldPin = JSON.parse(await readFile(pinOf(home), "utf-8")) as Pin;
+		const session = sessionSettings({
+			env: unconfigured(old),
+			payload: { session_id: SESSION },
+			passwdHome: home,
+			uid: UID,
+			repin: true,
+		});
+		expect(session.kind).toBe("configured");
+		await appendFile(
+			join(fresh, "jobs", `${SESSION}.jsonl`),
+			`${JSON.stringify({ sid: SESSION, ts: "2026-11-08T00:10:00.000Z", op: "stop", job: null })}\n`,
+		);
+		return { home, fresh, old, oldPin };
+	}
+
+	const SPEND = {
+		kind: "llm_call",
+		actor: `claude-code:${SESSION}:main:main`,
+		data: {
+			transferId: "tx_1",
+			cost: 5,
+			job: "job-1",
+			principal: { origin: `claude-code:${SESSION}` },
+			usageFrom: "2026-11-08T00:01:00.000Z",
+			usageTo: "2026-11-08T00:02:00.000Z",
+		},
+	};
+
+	/** `usertrust-job coverage job-1` in the new dir, read as the CLI reads it. */
+	async function coverAcross(home: string, fresh: string): Promise<Gap[]> {
+		const m = await lateModules();
+		const logs = await m.readLogs(join(fresh, "jobs"), "job-1");
+		const watch = await watchOf(fresh);
+		const left = await leftBehind(home, fresh);
+		return m.jobCoverage({
+			job: "job-1",
+			logs,
+			records: [SPEND],
+			watch: [...watch, ...left.watch],
+			known: left.knownGaps,
+		}).knownGaps;
+	}
+
+	/** What coverage of job-1 in the new dir reads from the dirs its sessions were re-pinned from. */
+	async function leftBehind(home: string, fresh: string) {
+		const m = await lateModules();
+		return m.repinnedEvidence({
+			job: "job-1",
+			stateDir: fresh,
+			logs: await m.readLogs(join(fresh, "jobs"), "job-1"),
+			watch: await watchOf(fresh),
+			repins: recordsOf(home),
+		});
+	}
+
+	/** Run `write` as a hook launched under the OLD pin: its settings, the empty key, the old dir. */
+	async function underOldPin<T>(oldPin: Pin, write: (m: LateModules) => Promise<T>): Promise<T> {
+		const m = await lateModules();
+		m.useSession({ ...oldPin.settings, key: "", configured: false, refused: null });
+		try {
+			return await write(m);
+		} finally {
+			m.useSession(undefined);
+		}
+	}
+
+	/** The gap carried before the re-pin: the only one when nothing is written late. */
+	const CARRIED = {
+		gap: `session ${SESSION}: a gap fell inside an interval of job-1`,
+		evidence: { kind: "gap", session: SESSION, started: "2026-11-07T23:52:42.882Z" },
+	};
+
+	it("POSITIVE CONTROL: nothing written late: coverage reads the old dir and lists the carried gap once, nothing more", async () => {
+		const { home, fresh } = await repinnedAcross();
+		// mutant: the old dir's copy of the carried gap read as a second record → still one entry
+		// (the same record); a mutant that names the re-pin itself as a gap adds one
+		expect(await coverAcross(home, fresh)).toEqual([CARRIED]);
+	});
+
+	// Every caller of lib.mjs `recordWatchEvent` that coverage reads: PreToolUse's and the transcript's
+	// gaps, Stop's and SubagentStop's deferral, PreToolUse's refusal, and the job log's clock-ahead gap
+	// (job-log.mjs `noteSuspect`, which knows no start).
+	const LATE_WATCH: [string, Record<string, unknown>, Gap][] = [
+		[
+			"a gap (PreToolUse, the transcript)",
+			{
+				kind: "gap",
+				mode: "watch",
+				session: SESSION,
+				agent: "main",
+				started: "2026-11-08T00:05:00.000Z",
+			},
+			{
+				gap: `session ${SESSION}: a gap fell inside an interval of job-1`,
+				evidence: { kind: "gap", session: SESSION, started: "2026-11-08T00:05:00.000Z" },
+			},
+		],
+		[
+			"a deferral (Stop, SubagentStop)",
+			{
+				kind: "deferred",
+				mode: "watch",
+				session: SESSION,
+				agent: "main",
+				started: "2026-11-08T00:06:00.000Z",
+			},
+			{
+				gap: `session ${SESSION}: a deferred fell inside an interval of job-1`,
+				evidence: { kind: "deferred", session: SESSION, started: "2026-11-08T00:06:00.000Z" },
+			},
+		],
+		[
+			"a refusal (PreToolUse's would_block)",
+			{
+				kind: "would_block",
+				mode: "watch",
+				session: SESSION,
+				agent: "main",
+				job: "job-1",
+				started: "2026-11-08T00:07:00.000Z",
+			},
+			{
+				gap: "a request of job-1 was refused (would_block): its usage is unrecorded",
+				evidence: { kind: "would_block", session: SESSION },
+			},
+		],
+		[
+			"the clock-ahead gap (noteSuspect), with no start",
+			{
+				kind: "gap",
+				mode: "watch",
+				session: SESSION,
+				agent: "(job log)",
+				tool: "(job log)",
+				reason: "the job log is stamped ahead of this clock",
+				started: null,
+			},
+			{
+				gap: "a gap cannot be attributed to a job (its time is unreadable): it may belong to job-1",
+				evidence: { kind: "gap", session: SESSION },
+			},
+		],
+	];
+	for (const [writer, event, named] of LATE_WATCH) {
+		it(`${writer}, written under the old pin after the re-pin: coverage in the new dir lists it`, async () => {
+			const { home, fresh, old, oldPin } = await repinnedAcross();
+			const written = await underOldPin(oldPin, (m) => m.recordWatchEvent(event));
+			expect(written).toBe(true);
+			expect(await readFile(join(old, "watch.jsonl"), "utf-8")).toContain(`"kind":"${event.kind}"`);
+			// mutant: coverage reads the pinned dir's watch records only → [CARRIED], the late one missed
+			expect(await coverAcross(home, fresh)).toEqual([CARRIED, named]);
+		});
+	}
+
+	it("a job change (usertrust-job start) written to the old log after the re-pin: coverage names it", async () => {
+		const { home, fresh, old, oldPin } = await repinnedAcross();
+		const appended = await underOldPin(oldPin, (m) =>
+			m.appendJobOp(SESSION, "start", "job-2", { waitMs: 0 }),
+		);
+		expect(appended.ok).toBe(true);
+		expect(await readFile(join(old, "jobs", `${SESSION}.jsonl`), "utf-8")).toContain(
+			'"job":"job-2"',
+		);
+		// mutant: no check of the old log → [CARRIED], and job-1's interval runs on past job-2's start
+		expect(await coverAcross(home, fresh)).toEqual([
+			CARRIED,
+			{
+				gap: `session ${SESSION}: its job log in the state dir it was re-pinned from was written after the re-pin: its intervals of job-1 may be wrong`,
+				evidence: { session: SESSION, stateDir: old },
+			},
+		]);
+	});
+
+	it("a line of the old watch records that cannot be parsed, written after the re-pin: coverage names it", async () => {
+		const { home, fresh, old } = await repinnedAcross();
+		await appendFile(join(old, "watch.jsonl"), '{"at":"2026-11-08T00:05:00.000Z","kind":"ga\n');
+		// mutant: an unparsed line of the old dir skipped → [CARRIED]
+		expect(await coverAcross(home, fresh)).toEqual([
+			CARRIED,
+			{
+				gap: `session ${SESSION}: 1 line(s) of the watch records in the state dir it was re-pinned from could not be parsed: a gap written there after the re-pin cannot be ruled out`,
+				evidence: { session: SESSION, stateDir: old, lines: 1 },
+			},
+		]);
+	});
+
+	it("old watch records, an old job log, or re-pin records that cannot be read: each is a named gap, never none", async () => {
+		const { home, fresh, old } = await repinnedAcross();
+		// Each replaced by a directory: there, but not a regular file.
+		const unreadable = async (path: string) => {
+			nodeFs.renameSync(path, `${path}.moved`);
+			await mkdir(path, { mode: 0o700 });
+		};
+		await unreadable(join(old, "watch.jsonl"));
+		await unreadable(join(old, "jobs", `${SESSION}.jsonl`));
+		// mutant: an unreadable file read as none → [CARRIED]
+		expect(await coverAcross(home, fresh)).toEqual([
+			CARRIED,
+			{
+				gap: `session ${SESSION}: the watch records of the state dir it was re-pinned from cannot be read: a gap written there after the re-pin cannot be ruled out`,
+				evidence: { session: SESSION, stateDir: old },
+			},
+			{
+				gap: `session ${SESSION}: its job log in the state dir it was re-pinned from cannot be read: a job change written there after the re-pin cannot be ruled out`,
+				evidence: { session: SESSION, stateDir: old },
+			},
+		]);
+		await unreadable(recordsOf(home));
+		// mutant: unreadable re-pin records read as none → [CARRIED]
+		expect(await coverAcross(home, fresh)).toEqual([
+			CARRIED,
+			{
+				gap: "the re-pin records cannot be read: evidence left in a state dir a session was re-pinned from cannot be ruled out",
+				evidence: {},
+			},
+		]);
+	});
+
+	it("an old dir's records of another session, and the session's pre-metering there, are not read", async () => {
+		const { home, fresh, old } = await repinnedAcross();
+		await appendFile(
+			join(old, "watch.jsonl"),
+			[
+				{
+					at: "2026-11-08T00:05:00.000Z",
+					started: "2026-11-08T00:05:00.000Z",
+					kind: "gap",
+					mode: "watch",
+					session: "sess-other",
+					agent: "main",
+				},
+				{
+					at: "2026-11-08T00:05:00.000Z",
+					started: null,
+					kind: "pre-metering",
+					mode: "watch",
+					session: SESSION,
+					agent: "main",
+					responses: 3,
+				},
+			]
+				.map((r) => `${JSON.stringify(r)}\n`)
+				.join(""),
+		);
+		// mutant: every record of the old dir read → sess-other's gap placed (it has no log here: a
+		// gap for every job), and the pre-metering counted a second time
+		expect((await leftBehind(home, fresh)).watch).toEqual([]);
+		expect(await coverAcross(home, fresh)).toEqual([CARRIED]);
+	});
+
 	it("a hook that runs inside the re-pin reads the OLD pin, never none: the record is written before the pin is touched", async () => {
 		const { sessionSettings } = await sessionModule();
 		const home = await makeHome();
