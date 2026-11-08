@@ -712,7 +712,11 @@ describe("session.mjs: SessionStart re-pins a DEAD environment pin to the conven
 		// The other hook runs at the record's fsync: after the record is written, before it returns.
 		const fs = {
 			...nodeFs,
-			openSync: (path: nodeFs.PathLike, flags?: nodeFs.OpenMode, mode?: nodeFs.Mode | null) => {
+			openSync: (
+				path: nodeFs.PathLike,
+				flags: nodeFs.OpenMode = "r",
+				mode?: nodeFs.Mode | null,
+			) => {
 				const fd = nodeFs.openSync(path, flags, mode);
 				if (String(path).endsWith("repins.jsonl")) recordFd = fd;
 				return fd;
