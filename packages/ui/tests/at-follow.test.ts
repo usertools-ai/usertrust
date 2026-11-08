@@ -834,6 +834,42 @@ describe("a past view and the vault it comes from", () => {
 		expect(p.kind).toBe("answered");
 		expect(p.rows.map((r) => r.id)).toEqual(["a", "b2"]);
 	});
+
+	it("an answer that overtook the page's rows is held until a re-read sent with rows that reach it lands, then answered", async () => {
+		const h = harness();
+		// The page holds records 0..1 when it asks for 2: the answer overtook the live stream.
+		const asked = [row(0, { id: "a" }), row(1, { id: "b" })];
+		h.page.rows = asked;
+		h.page.rowsVault = "boot-a:0";
+		h.follower.want(2);
+		h.calls[0]?.resolve(at({ pos: 2, head: 2, epoch: 0, boot: "boot-a" }));
+		await h.flush();
+		expect(drawn(h)).toEqual({ kind: "held", rows: [] });
+		// Records 2 and 3 arrive, and record 3 turns row 1 ambiguous: after the position, so not what 2 recorded.
+		const live = [
+			asked[0] as LedgerRow,
+			{ ...(asked[1] as LedgerRow), status: "ambiguous" as const },
+			row(2, { id: "c" }),
+			row(3, { id: "d" }),
+		];
+		h.page.rows = live;
+		expect(drawn(h)).toEqual({ kind: "held", rows: [] });
+		// Their summary frame asks again, with rows that reach the position; the server, now at head 3, says what row 1
+		// was at 2.
+		h.follower.refresh();
+		h.calls[1]?.resolve(
+			at({ pos: 2, head: 3, epoch: 0, boot: "boot-a", statusAt: { [row(1).hash]: "settled" } }),
+		);
+		await h.flush();
+		const p = drawn(h);
+		expect(p.kind).toBe("answered");
+		const shown = h.last().at as AtPayload;
+		expect(cutRows(p.rows, shown).map((r) => `${r.id}:${r.status}`)).toEqual([
+			"a:settled",
+			"b:settled",
+			"c:settled",
+		]);
+	});
 });
 
 describe("an answer from another server start", () => {

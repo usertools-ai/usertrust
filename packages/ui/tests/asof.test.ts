@@ -436,6 +436,49 @@ describe("pastRows: the rows a past view draws, paired with its answer by the va
 		expect(pastRows(reloaded, V1, { rows: reloaded, rowsVault: V1 }, a).kind).toBe("answered");
 	});
 
+	it("an answer for a record the page had not received when it asked is held: a later record's live status never shows at the point", () => {
+		// The page held records 0..1 when it asked; the answer is for record 2 (it overtook the live stream). Record 3 then
+		// turned row 1 ambiguous and its frames arrived after the answer: the answer has no status for row 1, because
+		// record 3 did not exist when it was read, and at 2 the row was settled.
+		const asked = [row(0, { id: "a" }), row(1, { id: "b" })];
+		const live = [
+			asked[0] as LedgerRow,
+			{ ...(asked[1] as LedgerRow), status: "ambiguous" as const },
+			row(2, { id: "c" }),
+			row(3, { id: "d" }),
+		];
+		const a = at({ pos: 2, head: 2, epoch: 0, boot: "boot-a", statusAt: {} });
+		expect(pastRows(live, V0, { rows: asked, rowsVault: V0 }, a)).toEqual({
+			kind: "held",
+			rows: [],
+		});
+		// Nor is that snapshot drawn by itself when the page's rows are another vault's: it lacks record 2 and what it did.
+		expect(pastRows(live, V1, { rows: asked, rowsVault: V0 }, a)).toEqual({
+			kind: "held",
+			rows: [],
+		});
+	});
+
+	it("CONTROL: a snapshot that reaches the position is read as the answer, with the status each row had there", () => {
+		const asked = [row(0, { id: "a" }), row(1, { id: "b" }), row(2, { id: "c" })];
+		const live = [
+			asked[0] as LedgerRow,
+			{ ...(asked[1] as LedgerRow), status: "ambiguous" as const },
+			asked[2] as LedgerRow,
+			row(3, { id: "d" }),
+		];
+		const a = at({ pos: 2, head: 2, epoch: 0, boot: "boot-a", statusAt: {} });
+		const past = pastRows(live, V0, { rows: asked, rowsVault: V0 }, a);
+		expect(past.kind).toBe("answered");
+		expect(draw(past.rows, a).shownRows.map((r) => `${r.id}:${r.status}`)).toEqual([
+			"a:settled",
+			"b:settled",
+			"c:settled",
+		]);
+		// A snapshot that ends at the position is the answer's own rows when the page's rows are another vault's.
+		expect(pastRows(live, V1, { rows: asked, rowsVault: V0 }, a).kind).toBe("snapshot");
+	});
+
 	it("live (no answer) is the live rows themselves", () => {
 		const past = pastRows(reloaded, V1, { rows: old, rowsVault: V0 }, null);
 		expect(past.kind).toBe("live");

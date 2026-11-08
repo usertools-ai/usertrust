@@ -92,7 +92,8 @@ function indexByHash(rows: readonly LedgerRow[]): Map<string, LedgerRow> {
  * `status` frame can change an earlier row between an answer and its re-read; the answer has no status for that row
  * yet, and the row is no later than the position, so the change is not what the position recorded. The re-read takes
  * it up (`statusAt`), and until it lands the list keeps what the answer was read against. Only for a position the page
- * had already received: for a later one, nothing is held. `rows` itself when nothing differs.
+ * had already received: for a later one nothing is held, and `pastRows` draws nothing until a re-read sent with rows
+ * that reach the position lands. `rows` itself when nothing differs.
  */
 export function rowsAsAnswered(
 	rows: LedgerRow[],
@@ -103,7 +104,7 @@ export function rowsAsAnswered(
 	// A record that arrives after the page's last one is after the position only when the position is no later than it.
 	// An answer for a record the page had not received yet (it overtook the live stream) can be changed by one at or
 	// before that position, which `statusAt` does not carry: nothing is held then.
-	if ((answeredRows.at(-1)?.pos ?? -1) < at.pos) return rows;
+	if (!reachesPosition(answeredRows, at.pos)) return rows;
 	let index: Map<string, LedgerRow> | undefined;
 	let out: LedgerRow[] | undefined;
 	for (let i = 0; i < rows.length; i++) {
@@ -116,6 +117,11 @@ export function rowsAsAnswered(
 		out[i] = was;
 	}
 	return out ?? rows;
+}
+
+/** Whether rows reach `pos`: their last one is at or after it (the test the follower adopts a fresher snapshot by). */
+function reachesPosition(rows: readonly LedgerRow[], pos: number): boolean {
+	return (rows.at(-1)?.pos ?? -1) >= pos;
 }
 
 /** The rows a past view draws, and how they were chosen. */
@@ -144,13 +150,14 @@ function sameVault(a: string | null, b: string | null): boolean {
  * The rows a past view draws, paired with the answer by the epoch of the vault they come from (the counter `/api/at`
  * reports and `/api/events` repeats, with the server's `boot`), whichever of a reload's rows and answer lands first.
  * - Live: the page's rows.
- * - The page's rows AND the snapshot the answer was read against (`view.rows`) are the answer's vault: the page's rows,
- *   with each row's status as the answer was read (`rowsAsAnswered`).
- * - Otherwise the snapshot itself, if it is the answer's vault (the rows came first).
- * - Otherwise none (held): no rows of the answer's vault to read its statuses against are held yet (the answer came
+ * - None (held) unless the snapshot the answer was read against (`view.rows`) is the answer's vault and reaches the
+ *   answered position. Either no rows of the answer's vault to read its statuses against are held yet (the answer came
  *   first, a request was sent while a resync was on its way, an unrelated reload landed in between, or the server
- *   sends no epoch). The re-read the resync asks for brings them. Nothing is drawn rather than rows the answer cannot
- *   speak for.
+ *   sends no epoch), or the answer overtook the live stream. The re-read that the resync, or the next summary, asks
+ *   for brings them. Nothing is drawn rather than rows the answer cannot speak for.
+ * - The page's rows are the answer's vault too: the page's rows, with each row's status as the answer was read
+ *   (`rowsAsAnswered`).
+ * - Otherwise the snapshot itself (the rows came first).
  */
 export function pastRows(
 	rows: LedgerRow[],
@@ -161,7 +168,11 @@ export function pastRows(
 	if (at === null) return { kind: "live", rows };
 	const answerVault = vaultKey(at.boot, at.epoch);
 	const snapshot = view.rows !== null && sameVault(view.rowsVault, answerVault) ? view.rows : null;
-	if (snapshot === null) return { kind: "held", rows: [] };
+	// Only rows that reach the answered position are read as the answer. A snapshot that ends before it (the answer
+	// overtook the live stream) lacks the records in between and what they did to earlier rows, and the page's rows gain
+	// later records' changes, which the answer, read before they existed, has no `statusAt` for. So the view is held
+	// until a re-read sent with rows that reach the position lands (every summary asks for one).
+	if (snapshot === null || !reachesPosition(snapshot, at.pos)) return { kind: "held", rows: [] };
 	if (sameVault(liveVault, answerVault))
 		return { kind: "answered", rows: rowsAsAnswered(rows, snapshot, at) };
 	return { kind: "snapshot", rows: [...snapshot] };
