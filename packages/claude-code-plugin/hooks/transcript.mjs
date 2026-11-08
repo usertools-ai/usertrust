@@ -4,7 +4,9 @@
 //  - One JSONL file per agent. The parent ("main") agent writes
 //    <projectDir>/<sessionId>.jsonl — the hook's `transcript_path`. Every
 //    subagent writes <projectDir>/<sessionId>/subagents/agent-<agentId>.jsonl,
-//    beside agent-<agentId>.meta.json (which carries `agentType`). Each
+//    beside agent-<agentId>.meta.json (which carries `agentType`); a Workflow
+//    tool's agent writes the same pair one level down, under
+//    subagents/workflows/<wf_id>/ (`agentType` "workflow-subagent"). Each
 //    subagent entry repeats the same `agentId` and has `isSidechain: true`; the
 //    parent file carries no subagent usage.
 //  - BUT a FORKED subagent's file begins with a copy of its ancestor's entries:
@@ -122,6 +124,7 @@
 // settler of an earlier hold of the same call finds only that hold's file, and
 // one hold's outcome never lands in another's journal.
 import { createHash, randomBytes } from "node:crypto";
+import { lstatSync, readdirSync } from "node:fs";
 import {
 	link,
 	lstat,
@@ -751,7 +754,64 @@ function isAgentId(agentId) {
 	return agentId === "main" || (typeof agentId === "string" && AGENT_ID.test(agentId));
 }
 
-/** The transcript file for one agent of a session, or undefined when there is none. */
+/** A Workflow tool's run directory under subagents/workflows/ (measured: `wf_<8 hex>-<3 hex>`). */
+const WORKFLOW_DIR = /^wf_[A-Za-z0-9_-]{1,64}$/;
+/** At most this many run directories are looked in, so a crowded session's hook stays bounded. */
+const MAX_WORKFLOW_DIRS = 512;
+
+/** The session's subagents/ directory, beside the main transcript. */
+function subagentsDir(main) {
+	return join(dirname(main), basename(main, ".jsonl"), "subagents");
+}
+
+/**
+ * What is at `path`, by lstat (a symlink is never followed): "dir" for a real directory,
+ * "none" when nothing is there (ENOENT only), "other" for anything else, a symlink to a
+ * directory included.
+ */
+function entryKind(path) {
+	try {
+		return lstatSync(path).isDirectory() ? "dir" : "other";
+	} catch (err) {
+		return err?.code === "ENOENT" ? "none" : "other";
+	}
+}
+
+/**
+ * The Workflow run directories under subagents/workflows/: real directories only (a symlink
+ * is never followed: not at the run, nor at workflows/ or subagents/ above it), by a name safe
+ * in a path, sorted, and at most MAX_WORKFLOW_DIRS of them.
+ */
+function workflowDirs(dir) {
+	if (entryKind(dir) !== "dir" || entryKind(join(dir, "workflows")) !== "dir") return [];
+	let entries;
+	try {
+		entries = readdirSync(join(dir, "workflows"), { withFileTypes: true });
+	} catch {
+		return [];
+	}
+	return entries
+		.filter((e) => e.isDirectory() && WORKFLOW_DIR.test(e.name))
+		.map((e) => join(dir, "workflows", e.name))
+		.sort()
+		.slice(0, MAX_WORKFLOW_DIRS);
+}
+
+function isRegularFile(path) {
+	try {
+		return lstatSync(path).isFile();
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * The transcript file for one agent of a session, or undefined when there is none. A subagent's
+ * is subagents/agent-<id>.jsonl, or, for a Workflow tool's agent, the same name in one of
+ * subagents/workflows/<wf_id>/ (its tool hooks carry no `agent_transcript_path`
+ * until SubagentStop, so the path has to be found). When neither exists yet, the subagents/
+ * path is returned: a reader then finds it missing, as for any transcript not written yet.
+ */
 export function transcriptPathFor(input, agentId) {
 	const main = input.transcript_path;
 	if (agentId === "main") return typeof main === "string" && main !== "" ? main : undefined;
@@ -760,23 +820,41 @@ export function transcriptPathFor(input, agentId) {
 	const hinted = input.agent_transcript_path;
 	if (typeof hinted === "string" && basename(hinted) === file) return hinted;
 	if (typeof main !== "string" || main === "") return undefined;
-	return join(dirname(main), basename(main, ".jsonl"), "subagents", file);
+	const dir = subagentsDir(main);
+	// subagents/ is a real directory, or not there yet: anything else (a symlink to a directory
+	// elsewhere) gives no transcript path, so nothing outside the session is ever read as its.
+	if (entryKind(dir) === "other") return undefined;
+	const direct = join(dir, file);
+	if (isRegularFile(direct)) return direct;
+	for (const run of workflowDirs(dir)) {
+		const path = join(run, file);
+		if (isRegularFile(path)) return path;
+	}
+	return direct;
 }
 
-/** Every subagent of the session with a transcript, as agent ids safe to use in a path. */
+/** Every subagent of the session with a transcript, Workflow agents included, as agent ids safe to use in a path. */
 export async function subagentIds(input) {
 	const main = input.transcript_path;
 	if (typeof main !== "string" || main === "") return [];
-	let names;
-	try {
-		names = await readdir(join(dirname(main), basename(main, ".jsonl"), "subagents"));
-	} catch {
-		return [];
+	const dir = subagentsDir(main);
+	// Never through a symlink: subagents/ itself is a real directory, or no subagent is listed.
+	if (entryKind(dir) !== "dir") return [];
+	const ids = new Set();
+	for (const where of [dir, ...workflowDirs(dir)]) {
+		let names;
+		try {
+			names = await readdir(where);
+		} catch {
+			continue;
+		}
+		for (const name of names) {
+			if (!name.startsWith("agent-") || !name.endsWith(".jsonl")) continue;
+			const id = name.slice("agent-".length, -".jsonl".length);
+			if (AGENT_ID.test(id)) ids.add(id);
+		}
 	}
-	return names
-		.filter((name) => name.startsWith("agent-") && name.endsWith(".jsonl"))
-		.map((name) => name.slice("agent-".length, -".jsonl".length))
-		.filter((id) => AGENT_ID.test(id));
+	return [...ids];
 }
 
 /**

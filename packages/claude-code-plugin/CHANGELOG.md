@@ -70,6 +70,15 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ### Fixed
 
+- **A Workflow tool's agents are charged from their own transcripts, not at the estimate.** Claude Code
+  writes such an agent's transcript one level below the other subagents', under
+  `subagents/workflows/<run>/`, and its tool hooks name no transcript path, so the plugin read the
+  transcript as missing. It settled every call of the agent at the per-call estimate, priced at the
+  fallback model `unknown`, and wrote a `late-transcript` gap when the agent stopped. On one measured
+  session that recorded about 3.8 times the agent's real usage, with the wrong token counts and no
+  cache split. The plugin now finds the transcript and its meta file in those run directories too,
+  for every hook and for the remainder at Stop. It looks only in real directories with a run's name,
+  never through a symlink.
 - **A hook launcher killed just after it started a child no longer leaves that child running.** This covered SessionStart's probe child and the child the other hooks send from. The launcher installed its SIGTERM, SIGINT and SIGHUP handlers (and, for the probe, its exit cleanup) after it started the child. A signal in between took the launcher down by the signal's default action, which runs no cleanup, so the child ran on, orphaned: the probe child until its own 3-second bound, a hook's child until that hook finished. The handlers are now in place before the child starts; a signal before the child exists ends the launcher as it would have, and after that the signal is forwarded to the child as before.
 
 ## [3.1.0] - 2026-10-27
