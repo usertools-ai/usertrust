@@ -701,6 +701,127 @@ describe("session.mjs: SessionStart re-pins a DEAD environment pin to the conven
 		expect((JSON.parse(await readFile(pinOf(home), "utf-8")) as Pin).kind).toBe("environment");
 	});
 
+	/** The watch records in `dir`, parsed as `usertrust-job` reads them (every line is valid here). */
+	const watchOf = async (dir: string): Promise<Record<string, unknown>[]> =>
+		(await readFile(join(dir, "watch.jsonl"), "utf-8").catch(() => ""))
+			.split("\n")
+			.filter((l) => l !== "")
+			.map((l) => JSON.parse(l) as Record<string, unknown>);
+
+	/** The old dir's gap lines of SESSION, as they are written there (oldStateDir's first line). */
+	const gapLines = async (old: string) =>
+		(await readFile(join(old, "watch.jsonl"), "utf-8"))
+			.split("\n")
+			.filter((l) => l.includes('"kind":"gap"') && l.includes(`"session":"${SESSION}"`));
+
+	it("the session's gaps are carried to the new watch records: coverage of a job open across the re-pin still lists the one before it", async () => {
+		const { sessionSettings } = await sessionModule();
+		// @ts-expect-error TS7016: job-log.mjs ships as plain .mjs, with no type declarations.
+		const { jobCoverage } = (await import("../hooks/job-log.mjs")) as {
+			jobCoverage(input: {
+				job: string;
+				logs: Record<string, string>;
+				records: unknown[];
+				watch: unknown[];
+			}): { knownGaps: { gap: string }[] };
+		};
+		const home = await makeHome();
+		const fresh = await makeDir("utcc-conv-new-");
+		const old = await deadWithJobLog(home, fresh);
+		// Another session's gap stays in the old dir: the carry is of THIS session's records.
+		await appendFile(
+			join(old, "watch.jsonl"),
+			`${JSON.stringify({ at: "2026-11-07T23:55:00.000Z", kind: "gap", mode: "watch", session: "sess-other", agent: "main" })}\n`,
+		);
+		const untouched = snapshot(old);
+		const session = sessionSettings({
+			env: unconfigured(old),
+			payload: { session_id: SESSION },
+			passwdHome: home,
+			uid: UID,
+			repin: true,
+		});
+		expect(session.kind).toBe("configured");
+		// The gap only, line for line: never the pre-metering record (the new dir's first hook
+		// declares that usage itself) and never the other session's gap.
+		expect(
+			(await readFile(join(fresh, "watch.jsonl"), "utf-8")).split("\n").filter((l) => l !== ""),
+		).toEqual(await gapLines(old));
+		expect(nodeFs.statSync(join(fresh, "watch.jsonl")).mode & 0o777).toBe(0o600);
+		// After the re-pin: the job's spend in the new dir, then its stop.
+		const log = join(fresh, "jobs", `${SESSION}.jsonl`);
+		await appendFile(
+			log,
+			`${JSON.stringify({ sid: SESSION, ts: "2026-11-08T00:10:00.000Z", op: "stop", job: null })}\n`,
+		);
+		const spend = {
+			kind: "llm_call",
+			actor: `claude-code:${SESSION}:main:main`,
+			data: {
+				transferId: "tx_1",
+				cost: 5,
+				job: "job-1",
+				principal: { origin: `claude-code:${SESSION}` },
+				usageFrom: "2026-11-08T00:01:00.000Z",
+				usageTo: "2026-11-08T00:02:00.000Z",
+			},
+		};
+		const report = jobCoverage({
+			job: "job-1",
+			logs: { [SESSION]: await readFile(log, "utf-8") },
+			records: [spend],
+			watch: await watchOf(fresh),
+		});
+		// mutant: no carry → knownGaps: [] over the gap before the re-pin
+		expect(report.knownGaps.map((g) => g.gap)).toEqual([
+			`session ${SESSION}: a gap fell inside an interval of job-1`,
+		]);
+		expect(snapshot(old)).toEqual(untouched);
+	});
+
+	it("an earlier carry's gaps are not carried twice, and another session's records in the new dir are kept", async () => {
+		const { sessionSettings } = await sessionModule();
+		const home = await makeHome();
+		const fresh = await makeDir("utcc-conv-new-");
+		const old = await deadWithJobLog(home, fresh);
+		const sibling = `${JSON.stringify({ at: "2026-11-07T23:40:00.000Z", kind: "gap", session: "sess-other" })}\n`;
+		const earlier = `${sibling}${(await gapLines(old)).join("\n")}\n`;
+		await writeFile(join(fresh, "watch.jsonl"), earlier, { mode: 0o600 });
+		const session = sessionSettings({
+			env: unconfigured(old),
+			payload: { session_id: SESSION },
+			passwdHome: home,
+			uid: UID,
+			repin: true,
+		});
+		expect(session.kind).toBe("configured");
+		// mutant: carry every gap whatever is there → the session's gap twice
+		expect(await readFile(join(fresh, "watch.jsonl"), "utf-8")).toBe(earlier);
+	});
+
+	it("a line of the old watch records that cannot be read refuses the re-pin, before any record: it may be the session's gap", async () => {
+		const { sessionSettings } = await sessionModule();
+		const home = await makeHome();
+		const fresh = await makeDir("utcc-conv-new-");
+		const old = await deadWithJobLog(home, fresh);
+		await appendFile(join(old, "watch.jsonl"), '{"at":"2026-11-07T23:56:00.000Z","kind":"ga\n');
+		const session = sessionSettings({
+			env: unconfigured(old),
+			payload: { session_id: SESSION },
+			passwdHome: home,
+			uid: UID,
+			repin: true,
+		});
+		// mutant: skip the line → re-pinned, and coverage in the new dir cannot see it
+		expect(session.kind).toBe("environment");
+		expect(session.note).toContain(
+			"could not be re-pinned to ~/.config/usertrust/claude-code.json: the old watch records hold a line that cannot be read.",
+		);
+		expect(nodeFs.existsSync(join(fresh, "watch.jsonl"))).toBe(false);
+		expect(nodeFs.existsSync(recordsOf(home))).toBe(false);
+		expect((JSON.parse(await readFile(pinOf(home), "utf-8")) as Pin).kind).toBe("environment");
+	});
+
 	it("a hook that runs inside the re-pin reads the OLD pin, never none: the record is written before the pin is touched", async () => {
 		const { sessionSettings } = await sessionModule();
 		const home = await makeHome();

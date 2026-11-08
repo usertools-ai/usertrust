@@ -53,7 +53,9 @@
 // from before it is ever posted there, while the pin's own dir already holds the stamp and
 // cursors of the unconfigured session. The re-pin, in order:
 // 1. the session's job log is carried to the new state dir (`carryJobLog`), since a
-//    resume or compact writes none there (job-log.mjs `writeSessionStart`);
+//    resume or compact writes none there (job-log.mjs `writeSessionStart`), and so are its
+//    `gap` records (`carryGaps`), since `usertrust-job coverage` reads the new dir's
+//    watch records only;
 // 2. the re-pin is appended to <private state>/repins/repins.jsonl (old pin, new pin with
 //    the key hashed, reason), synced, while the old pin is still in place;
 // 3. the old pin is kept aside under a second name (a hard link, never a deletion), and
@@ -606,8 +608,82 @@ function carryJobLog(oldDir, newDir, id, { uid, fs }) {
 }
 
 /**
+ * Carry session `id`'s `gap` records from the dead pin's `watch.jsonl` to the new state dir's, so
+ * `usertrust-job coverage`, which reads the pinned dir's watch records only, still lists a gap the
+ * session had before the re-pin: it places each gap by its own time against the carried job log.
+ * Each line is carried as it was written, its times with it, and only once: a line the new file
+ * already holds (an earlier carry whose re-pin then failed) is not appended again. Null when they
+ * are carried, or there are none; else the fixed reason they are not. The old file is read, never
+ * changed, and read at the strict end: any line of it that cannot be parsed may be the session's
+ * own gap, and refuses the re-pin, as does a record of the session that is not a local one.
+ * The session's other local records stay behind ON PURPOSE. `pre-metering`: the new dir's first
+ * hook declares the transcript's earlier usage itself, so a carried one would count it twice.
+ * `no-transcript-agent`: its once-per-agent marker stays in the old dir, so the agent would be
+ * counted again.
+ */
+function carryGaps(oldDir, newDir, id, { uid, fs }) {
+	const from = join(oldDir, "watch.jsonl");
+	try {
+		fs.lstatSync(from);
+	} catch (err) {
+		return err?.code === "ENOENT" ? null : "its watch records are unreadable";
+	}
+	const text = boundedText(from, { uid, fs });
+	if (text === null) return "its watch records are unreadable";
+	const gaps = [];
+	for (const line of text.split("\n")) {
+		if (line === "") continue;
+		let record;
+		try {
+			record = JSON.parse(line);
+		} catch {
+			return "the old watch records hold a line that cannot be read";
+		}
+		if (!isObject(record) || record.session !== id) continue;
+		if (!LOCAL_RECORDS.has(record.kind)) return "a server answered it";
+		if (record.kind === "gap") gaps.push(line);
+	}
+	if (gaps.length === 0) return null;
+	const to = join(newDir, "watch.jsonl");
+	let there = "";
+	try {
+		fs.lstatSync(to);
+		there = boundedText(to, { uid, fs });
+	} catch (err) {
+		if (err?.code !== "ENOENT") there = null;
+	}
+	if (there === null) return "the new state dir's watch records are unreadable";
+	const have = new Set(there.split("\n"));
+	const carry = gaps.filter((line) => !have.has(line));
+	if (carry.length === 0) return null;
+	try {
+		fs.mkdirSync(newDir, { recursive: true, mode: 0o700 });
+		const fd = fs.openSync(
+			to,
+			constants.O_WRONLY |
+				constants.O_APPEND |
+				constants.O_CREAT |
+				(constants.O_NOFOLLOW ?? 0) |
+				(constants.O_NONBLOCK ?? 0),
+			0o600,
+		);
+		try {
+			const info = fs.fstatSync(fd);
+			if (!info.isFile() || (uid !== null && info.uid !== uid)) throw new Error("refused");
+			fs.writeFileSync(fd, carry.map((line) => `${line}\n`).join(""));
+			fs.fsyncSync(fd);
+		} finally {
+			fs.closeSync(fd);
+		}
+		return null;
+	} catch {
+		return "the session's gap records could not be written to the new state dir";
+	}
+}
+
+/**
  * Put pin `content` at `path` in place of the old pin `old`, in one step: the old pin is first
- * kept aside as `aside` (a second name for the same file, so it is never deleted), checked to be
+ * kept aside as `aside` (a second name for the same file, so the old pin is kept), checked to be
  * `old` still, and then ONE rename replaces it. Null when done, else the fixed reason it is not;
  * until the rename, the old pin is at `path`.
  */
@@ -742,6 +818,8 @@ export function sessionSettings({
 	};
 	const carried = carryJobLog(read.pin.settings.stateDir, resolved.stateDir, id, { uid, fs });
 	if (carried !== null) return failed(carried);
+	const gapsCarried = carryGaps(read.pin.settings.stateDir, resolved.stateDir, id, { uid, fs });
+	if (gapsCarried !== null) return failed(gapsCarried);
 	const next = pinOf(resolved, "configured", now);
 	const record = randomBytes(8).toString("hex");
 	const aside = `${path}.repinned.${now}.${randomBytes(6).toString("hex")}`;

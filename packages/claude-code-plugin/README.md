@@ -294,10 +294,12 @@ under your home as the passwd database gives it.
     `CLAUDE_CONFIG_DIR` is unset: such a session is warned, not re-pinned.
 
   In order: the session's job log (`<stateDir>/jobs/<id>.jsonl`) is copied to the new
-  state dir, so `usertrust-job` keeps its open job; the re-pin is appended to
+  state dir, so `usertrust-job` keeps its open job, and so are its `gap` records in
+  `watch.jsonl`, each once, so `usertrust-job coverage` still lists a gap from before the
+  re-pin (a line of the old `watch.jsonl` that cannot be read keeps the old pin); the re-pin is appended to
   `.local/state/usertrust/repins/repins.jsonl` (the old pin, the new pin with its key
   hashed, the reason) while the old pin is still in place; then the old pin is kept
-  aside (`<id>.json.repinned.<time>.<random>`, never deleted) and one rename puts the
+  aside under a second name, a hard link (`<id>.json.repinned.<time>.<random>`), and one rename puts the
   new pin in its place, so every other hook of the session reads a pin throughout.
   SessionStart says so once. The old state dir is left as it was. Nothing is posted
   twice: the new state dir starts metering at the session's next hook, and nothing
