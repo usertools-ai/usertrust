@@ -1,7 +1,7 @@
 {
 	"name": "usertrust",
 	"description": "Spend governance for Claude Code: a spend hold on every tool call, and real per-model and per-subagent usage settled from Claude Code transcripts, with a remainder scan at Stop, SubagentStop and SessionEnd. Watch-only by default: nothing is blocked unless you opt in to enforcement (UT_CC_MODE=enforce).",
-	"version": "3.1.0",
+	"version": "3.2.0",
 	"author": { "name": "usertrust" },
 	"repository": "https://github.com/usertools-ai/usertrust",
 	"license": "Apache-2.0",

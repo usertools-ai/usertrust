@@ -1,6 +1,6 @@
 {
 	"name": "usertrust-claude-code",
-	"version": "3.1.0",
+	"version": "3.2.0",
 	"description": "Spend governance hooks for Claude Code: a spend hold on every tool call, watch-only by default",
 	"license": "Apache-2.0",
 	"type": "module",

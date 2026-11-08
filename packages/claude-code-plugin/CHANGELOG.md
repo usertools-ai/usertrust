@@ -7,6 +7,8 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-11-08
+
 ### Renamed
 
 - **BREAKING: the plugin is renamed from `usertools` to `usertrust`.** Install it with
