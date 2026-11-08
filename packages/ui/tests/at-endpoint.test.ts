@@ -488,7 +488,7 @@ describe("GET /api/at", () => {
 			expect(typeof first.body.boot).toBe("string");
 			expect(first.body.boot).not.toBe("");
 			expect(firstEvents.boot).toBe(first.body.boot);
-			writeFileSync(logPath, readFileSync(join(other, ".usertrust", "audit", "events.jsonl")));
+			writeFileSync(dir.logPath, readFileSync(join(other, ".usertrust", "audit", "events.jsonl")));
 			s.reload();
 			const second = await at("pos=4");
 			const secondEvents = await events();
@@ -503,10 +503,10 @@ describe("GET /api/at", () => {
 
 	it("two server instances over the same vault answer different boots, both starting at epoch 0", async () => {
 		await seed(3);
-		await start();
+		const s = await start();
 		const first = (await at("pos=2")).body;
-		await ui?.close();
-		ui = undefined;
+		await s.close();
+		vault.forget();
 		await start();
 		const second = (await at("pos=2")).body;
 		expect(typeof first.boot).toBe("string");
