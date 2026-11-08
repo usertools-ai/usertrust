@@ -107,7 +107,7 @@ function usePinnedSession() {
 function usage(why) {
 	say(`usertrust-job: ${why}`);
 	say(
-		"usage: usertrust-job.mjs start [--type <type>] [--source agent|explicit] <job-id> | stop | coverage <job-id> [--vault DIR] [--jobs DIR]",
+		"usage: usertrust-job.mjs start [--type <type>] [--source agent|explicit] <job-id> | stop | coverage <job-id> --vault DIR [--jobs DIR] [--watch FILE]",
 	);
 	say(`types: ${JOB_TYPES.join(" ")}`);
 	process.exit(2);
