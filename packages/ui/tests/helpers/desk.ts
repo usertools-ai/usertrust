@@ -9,7 +9,7 @@
 import type React from "react";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { DeskData, DeskView } from "../../src/app/desk/desk-types.js";
+import type { DeskData, DeskView, ShellBinding } from "../../src/app/desk/desk-types.js";
 import { breakdown } from "../../src/shared/breakdown.js";
 import { rankColors } from "../../src/shared/colors.js";
 import { deskWindow } from "../../src/shared/desk-filters.js";
@@ -61,11 +61,41 @@ export function defaultDeskView(over: Partial<DeskView> = {}): DeskView {
 	return { ...base, ...over };
 }
 
+/** The shell's wiring for a vault with nothing happening: no note in the address, nothing to peel, handlers that do nothing. */
+export function defaultShellBinding(over: Partial<ShellBinding> = {}): ShellBinding {
+	const base: ShellBinding = {
+		timeline: {
+			wanted: null,
+			committed: null,
+			error: null,
+			reloaded: false,
+			announce: "",
+			onPreview: () => undefined,
+			onHold: () => undefined,
+			onCommit: () => undefined,
+		},
+		goLive: () => undefined,
+		filtering: false,
+		newestOf: undefined,
+		count: "0 records",
+		addressNote: null,
+		peel: { recordOpen: false, fill: null, pinned: false, newestFilter: null },
+		act: {
+			record: () => undefined,
+			fill: () => undefined,
+			pin: () => undefined,
+			filter: () => undefined,
+		},
+	};
+	return { ...base, ...over };
+}
+
 export interface WithDeskOptions {
 	fill?: WindowId | null;
 	held?: boolean;
 	data?: Partial<DeskData>;
 	view?: Partial<DeskView>;
+	shell?: Partial<ShellBinding>;
 }
 
 /**
@@ -77,6 +107,7 @@ export async function withDesk(ui: React.ReactElement, o: WithDeskOptions = {}):
 	const mod = (await import(/* @vite-ignore */ `../../src/app/desk/${"desk-state"}.js`)) as {
 		DeskDataContext: React.Context<DeskData | null>;
 		DeskViewContext: React.Context<DeskView | null>;
+		DeskShellContext: React.Context<ShellBinding | null>;
 	};
 	const data = defaultDeskData({
 		...(o.held === undefined ? {} : { held: o.held }),
@@ -90,7 +121,11 @@ export async function withDesk(ui: React.ReactElement, o: WithDeskOptions = {}):
 		createElement(
 			mod.DeskDataContext.Provider,
 			{ value: data },
-			createElement(mod.DeskViewContext.Provider, { value: view }, ui),
+			createElement(
+				mod.DeskViewContext.Provider,
+				{ value: view },
+				createElement(mod.DeskShellContext.Provider, { value: defaultShellBinding(o.shell) }, ui),
+			),
 		),
 	);
 }

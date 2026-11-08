@@ -15,6 +15,7 @@ import { AddressSync } from "../src/shared/address-sync.js";
 import type { AtPayload } from "../src/shared/api.js";
 import { AtFollower, type AtView } from "../src/shared/at-follow.js";
 import { decodeUrlState, sameUrlState, type UrlState } from "../src/shared/url-state.js";
+import { appSource } from "./helpers/app-source.js";
 
 function answer(pos: number): AtPayload {
 	return {
@@ -227,7 +228,8 @@ describe("the wiring the model mirrors", () => {
 	});
 
 	it("the page hands the count to useAt", () => {
-		const app = read("app.tsx");
+		// The page's root is the desk now: its state and shell hold this wiring (`appSource`).
+		const app = appSource();
 		expect(app).toMatch(/useUrlState\(\)/);
 		expect(app).toMatch(/useAt\(at, summary, live, rows, resyncs, rowsVault, navigation\)/);
 	});

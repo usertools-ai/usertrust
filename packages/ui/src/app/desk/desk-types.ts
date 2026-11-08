@@ -64,7 +64,11 @@ export interface DeskView {
 export interface ShellBinding {
 	timeline: {
 		wanted: number | null;
+		/** The record the wanted position was answered with, kept across reconnects (`AtView.resolved`). */
+		resolved: number | null;
 		committed: number | null;
+		/** How many navigations the user made: a change drops every pending preview and commit. */
+		navigation: number;
 		error: string | null;
 		reloaded: boolean;
 		announce: string;

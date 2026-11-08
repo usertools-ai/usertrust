@@ -117,13 +117,13 @@ export function useUrlState(): {
 		setOpenHash,
 		at: state.at,
 		setAt,
-		navigation,
 		range: state.range,
 		setRange,
 		dim: state.dim,
 		setDim,
 		fill: state.fill,
 		setFill,
+		navigation,
 		addressNote,
 	};
 }

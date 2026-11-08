@@ -14,6 +14,7 @@ import type { PersistedAuditEvent } from "usertrust";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { popoverOwnsEscape } from "../src/shared/row-nav.js";
 import { toLedgerRows } from "../src/shared/rows.js";
+import { appSource } from "./helpers/app-source.js";
 
 // The components are .tsx files, which the tests' tsconfig (no `jsx`) cannot resolve statically: load them by a
 // computed path, typed here by what the tests use.
@@ -166,7 +167,7 @@ describe("the inspector takes focus from the list", () => {
 		expect(src).toContain("headingRef.current?.focus()");
 		// Escape from inside the docked inspector (or from nowhere) returns focus; from the search box it does not
 		expect(src).toMatch(/onClose\(docked && inside\)/);
-		const app = await source("app.tsx");
+		const app = appSource();
 		expect(app).toContain("setRestoreFocus");
 		const tableSrc = await source("audit-table.tsx");
 		expect(tableSrc).toContain("parentRef.current?.focus(");
@@ -213,7 +214,7 @@ describe("the inspector takes focus from the list", () => {
 		// Enter opens a row, Trends and back remounts the inspector: a request still set would take focus from the tab.
 		const panel = await source("row-panel.tsx");
 		expect(panel).toMatch(/headingRef\.current\?\.focus\(\);\s*onFocusHandled\?\.\(\);/);
-		const app = await source("app.tsx");
+		const app = appSource();
 		expect(app).toContain("onFocusHandled={() => setKbOpen(undefined)}");
 	});
 
@@ -246,7 +247,7 @@ describe("the inspector takes focus from the list", () => {
 
 describe("the count is a live region", () => {
 	it("the record count in the header is a polite status, so a filter's effect is announced", async () => {
-		const src = await source("app.tsx");
+		const src = appSource();
 		expect(src).toMatch(/<span className="ut-label" role="status"[^>]*>\s*\{count\}/);
 	});
 });

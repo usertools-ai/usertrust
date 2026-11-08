@@ -15,6 +15,7 @@ import {
 	sameUrlState,
 	type UrlState,
 } from "../src/shared/url-state.js";
+import { appSource } from "./helpers/app-source.js";
 
 const H = "a1".repeat(32);
 
@@ -435,7 +436,7 @@ describe("addressHolds: what is written decodes to the same state", () => {
 });
 
 describe("the page honours the address's limits", () => {
-	const app = readFileSync(new URL("../src/app/app.tsx", import.meta.url), "utf-8");
+	const app = appSource();
 	const hook = readFileSync(new URL("../src/app/use-url-state.ts", import.meta.url), "utf-8");
 	it("every applied navigation is adopted by the writer, unconditionally, before the state is set", () => {
 		const apply = /const apply = \(\): void => \{([\s\S]*?)\n\t\t\};/.exec(hook)?.[1] ?? "";

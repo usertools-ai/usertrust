@@ -39,6 +39,53 @@
 		gap: var(--dk-gap);
 	}
 
+	/* The top bar: the page bar (mark, vault, live state, alarm, as-at line, notice), the search box and Export, on glass
+	   because they are controls. The bar's own header takes the room, the rest follows and wraps on a narrow window. */
+	.ut-dk-top {
+		flex: 0 0 auto;
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 8px 12px;
+		padding: 10px 16px;
+		min-width: 0;
+		border-radius: var(--dk-radius);
+	}
+
+	.ut-dk-top > .ut-top {
+		flex: 1 1 320px;
+	}
+
+	.ut-dk-top > .ut-alarm,
+	.ut-dk-top > .ut-notice {
+		flex: 1 1 100%;
+		margin: 0;
+	}
+
+	.ut-dk > .ut-address-note {
+		flex: 0 0 auto;
+		margin: 0;
+	}
+
+	/* The filter row and the record count. The count dims with the list it counts (the original stylesheet scopes that
+	   rule to its own header, which is gone). */
+	.ut-dk-filters {
+		flex: 0 0 auto;
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		min-width: 0;
+	}
+
+	.ut-dk-filters > .ut-bar {
+		flex: 1 1 auto;
+		min-width: 0;
+	}
+
+	.ut-dk-filters .ut-label[data-held="true"] {
+		opacity: 0.55;
+	}
+
 	/* A window: solid, never glass. A slot is the grid item and is not positioned, so a filled window can be absolute
 	   over the whole desk while its slot keeps the home cell. */
 	.ut-win-slot {

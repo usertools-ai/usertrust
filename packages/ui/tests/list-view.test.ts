@@ -21,6 +21,7 @@ import {
 	pastHeldNote,
 } from "../src/shared/list-view.js";
 import type { LedgerRow } from "../src/shared/rows.js";
+import { appSource } from "./helpers/app-source.js";
 
 function row(pos: number): LedgerRow {
 	return {
@@ -170,7 +171,7 @@ describe("listView", () => {
 	});
 
 	it("the page draws the list from listView over ONE deferred input, phase included", () => {
-		const app = readFileSync(join(import.meta.dirname, "..", "src", "app", "app.tsx"), "utf-8");
+		const app = appSource();
 		expect(app).toContain("useDeferredValue(listInput)");
 		expect(app).not.toContain("heldInput");
 		// With the list's own cutter, made once for the page (`useState(createCutter)`), never per render.
@@ -181,11 +182,22 @@ describe("listView", () => {
 	});
 
 	it("every view drawn from the list's input is marked from the drawn position, not from the drag", () => {
-		const app = readFileSync(join(import.meta.dirname, "..", "src", "app", "app.tsx"), "utf-8");
+		const app = appSource();
 		expect(app).toContain("heldNote(list.at, shownAt)");
 		expect(app).not.toMatch(/setHolding|data-holding|aria-busy=\{holding\}/);
-		// The list or Trends, the count, Export, the facets, both inspectors, and the status under the header.
-		expect(app).toMatch(/className="ut-pane"[\s\S]{0,200}data-held=\{held\}\s*aria-busy=\{held\}/);
+		// The windows' bodies, the count, Export, the facets, both inspectors, and the status under the header. A window's
+		// body is dimmed and busy by the Window itself, except Now, which follows the header.
+		const win = readFileSync(
+			join(import.meta.dirname, "..", "src", "app", "desk", "window.tsx"),
+			"utf-8",
+		);
+		expect(win).toMatch(/className="ut-win-body"[^>]*\{\.\.\.lagging\}/);
+		expect(win).toContain('{ "data-held": held, "aria-busy": held }');
+		const deskCss = readFileSync(
+			join(import.meta.dirname, "..", "src", "app", "desk", "desk.css"),
+			"utf-8",
+		);
+		expect(deskCss).toMatch(/\.ut-win-body\[data-held="true"\]\s*\{\s*opacity: 0\.55;\s*\}/);
 		expect(app).toContain('<span className="ut-label" role="status" data-held={held}>');
 		expect(app).toMatch(/<ExportButton[\s\S]{0,120}held=\{held\}/);
 		expect(app).toMatch(/<FilterBar [^>]*held=\{held\}/);
@@ -306,8 +318,8 @@ describe("holdAnnouncement", () => {
 	});
 
 	it("the page feeds it the held note and the header's position, and hands its text to the timeline", () => {
-		const app = readFileSync(join(import.meta.dirname, "..", "src", "app", "app.tsx"), "utf-8");
+		const app = appSource();
 		expect(app).toContain("setAnnounce((prev) => holdAnnouncement(prev, holdNote, shownAt));");
-		expect(app).toContain("announce={announce.text}");
+		expect(app).toContain("announce={announce}");
 	});
 });

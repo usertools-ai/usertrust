@@ -20,6 +20,7 @@ import {
 	useRef,
 	useState,
 } from "react";
+import { rowsAsAnswered } from "../../shared/asof.js";
 import type { Dimension } from "../../shared/breakdown.js";
 import {
 	deskWindow,
@@ -189,7 +190,7 @@ function sameList(a: readonly string[], b: readonly string[]): boolean {
  * windows draw, published in the three contexts.
  */
 export function DeskProvider({ children }: { children: ReactNode }): React.JSX.Element {
-	const { rows, summary, phase, live, liveIds } = useLedger();
+	const { rows, summary, phase, live, liveIds, resyncs } = useLedger();
 	// The view, filters and open record live in the page address (`location.hash`): a reload keeps them, a link shares them.
 	const {
 		filters,
@@ -204,20 +205,29 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 		setDim,
 		fill,
 		setFill,
+		navigation,
 		addressNote,
 	} = useUrlState();
 	// The past position shown (`#at=N`, or a drag's preview before it is written there), from /api/at. Until its first
 	// answer lands, or when it fails with nothing loaded, the screen stays live and the timeline says so: a past view is
 	// only ever drawn from its own answer.
-	const { view: atView, preview } = useAt(at, summary, live);
+	const { view: atView, preview } = useAt(at, summary, live, rows, resyncs, navigation);
 	const shownAt = atView.at;
+	// The past view reads each row's status against the rows the page held when the answer's request was SENT
+	// (`atView.rows`), not the rows held when the answer renders: a live `status` frame for a record after the
+	// position, one the server had not seen when it answered, can arrive in between, and `statusAt` cannot correct it
+	// (`rowsAsAnswered`).
+	const pastRows = useMemo(
+		() => rowsAsAnswered(rows, atView.rows ?? rows, shownAt),
+		[rows, atView.rows, shownAt],
+	);
 	const head = summary === null ? -1 : summary.chain.events - 1;
 	// What the windows draw: ONE input, deferred, so a timeline drag paints the thumb, its label and the header first
 	// and the rest follows when there is time, never mixing one position's rows with another moment's phase or chain
 	// (`listView`). The rows are cut at the position before the filters, so all of them see the vault then.
 	const listInput = useMemo<ListInput>(
-		() => ({ rows, at: shownAt, filters, phase, summary }),
-		[rows, shownAt, filters, phase, summary],
+		() => ({ rows: pastRows, at: shownAt, filters, phase, summary }),
+		[pastRows, shownAt, filters, phase, summary],
 	);
 	// While a timeline drag is on, the list keeps the input it had when the drag began (`heldInput`): only the thumb,
 	// its label and the header follow the drag, and the list renders once on release or after the drag sits still. The
@@ -374,7 +384,9 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 		() => ({
 			timeline: {
 				wanted: atView.wanted,
+				resolved: atView.resolved,
 				committed: at,
+				navigation,
 				error: atView.error,
 				reloaded: atView.reloaded,
 				announce: announce.text,
@@ -393,6 +405,7 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 		[
 			atView,
 			at,
+			navigation,
 			announce.text,
 			preview,
 			onHold,
