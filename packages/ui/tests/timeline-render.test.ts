@@ -79,6 +79,26 @@ function summary(over: Partial<SummaryPayload> = {}): SummaryPayload {
 
 const NOTE = "budget history starts with the first budget record; this is today's budget";
 
+/** The budget a past position carries: today's, with where it came from and when the controller recorded it. */
+function pastBudget(over: Partial<AtPayload["budget"]> = {}): AtPayload["budget"] {
+	return {
+		ut: 1_000_000,
+		source: "governor",
+		writtenAt: "2026-11-01T10:00:00.000Z",
+		provenance: "the enforced budget, as of 2026-11-01T10:00:00.000Z",
+		note: NOTE,
+		...over,
+	};
+}
+
+/** The fields of a budget no controller has published. */
+const UNPUBLISHED = {
+	ut: null,
+	source: "unpublished",
+	writtenAt: null,
+	provenance: "unknown: not yet published; no controller has recorded the budget it enforces",
+} as const;
+
 function at(over: Partial<AtPayload> = {}): AtPayload {
 	return {
 		pos: 40,
@@ -89,7 +109,7 @@ function at(over: Partial<AtPayload> = {}): AtPayload {
 		spentUt: 56_700,
 		counts: { llm_call: 30, denied: 2, other: 9 },
 		chain: { valid: true, breakIndex: null },
-		budget: { ut: 1_000_000, note: NOTE },
+		budget: pastBudget(),
 		plan: null,
 		windowStartPos: 0,
 		statusAt: {},
@@ -237,7 +257,7 @@ describe("the header at a past position", () => {
 		];
 		const pasts = [
 			at(),
-			at({ budget: { ut: null, note: NOTE } }),
+			at({ budget: pastBudget(UNPUBLISHED) }),
 			at({ chain: { valid: false, breakIndex: 30 } }),
 		];
 		const expected = slots(strip(null, lives[0]));
