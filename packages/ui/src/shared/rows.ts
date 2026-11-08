@@ -26,6 +26,8 @@ export interface LedgerRow {
 	source?: string;
 	model?: string;
 	provider?: string;
+	/** The provider the record itself names (`data.provider`), when it carries one: what `providerOf` trusts first. */
+	providerRecorded?: string;
 	costUt?: number;
 	costUsd?: number;
 	settled?: boolean;
@@ -106,6 +108,7 @@ export function detectProvider(model: string): string {
 	if (model.startsWith("gemini")) return "google";
 	if (model.startsWith("command")) return "cohere";
 	if (model.startsWith("mistral") || model.startsWith("mixtral")) return "mistral";
+	if (model.startsWith("grok")) return "xai";
 	return "unknown";
 }
 
@@ -160,6 +163,8 @@ export function toLedgerRows(
 			row.costUt = costUt;
 			row.costUsd = costUt * UT_TO_USD;
 		}
+		const providerRecorded = str(e.data.provider);
+		if (providerRecorded !== undefined) row.providerRecorded = providerRecorded;
 		const settled = bool(e.data.settled);
 		if (settled !== undefined) row.settled = settled;
 		const error = str(e.data.error);
