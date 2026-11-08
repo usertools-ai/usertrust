@@ -28,7 +28,11 @@ export function ExportButton(props: {
 			aria-busy={held}
 			title={
 				at !== null
-					? `Download the records in view as CSV, as recorded at record ${(at.pos + 1).toLocaleString()}`
+					? `Download the records in view as CSV, as recorded at record ${(at.pos + 1).toLocaleString()}${
+							at.windowStartPos > 0
+								? `, and the list holds records from position ${(at.windowStartPos + 1).toLocaleString()} only`
+								: ""
+						}`
 					: newestOf === undefined
 						? "Download the records in view as CSV"
 						: `Download the records in view as CSV: these are within the newest ${newestOf.toLocaleString()} events only`

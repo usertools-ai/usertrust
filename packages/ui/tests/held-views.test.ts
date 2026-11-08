@@ -118,6 +118,33 @@ describe("Export while the list is held", () => {
 	});
 });
 
+describe("Export's title at a past position states its scope", () => {
+	const title = (at: Partial<AtPayload>): string => {
+		const html = renderToStaticMarkup(
+			createElement(ExportButton, {
+				count: 5,
+				at: at as AtPayload,
+				newestOf: 100,
+				held: false,
+				onExport: () => {},
+			}),
+		);
+		return /title="([^"]*)"/.exec(html)?.[1] ?? "";
+	};
+
+	it("a window that starts at the first record adds nothing", () => {
+		expect(title({ pos: 40, windowStartPos: 0 })).toBe(
+			"Download the records in view as CSV, as recorded at record 41",
+		);
+	});
+
+	it("a window that starts later says where the list starts, counted from 1 like the record numbers", () => {
+		const t = title({ pos: 400, windowStartPos: 250 });
+		expect(t).toContain("as recorded at record 401");
+		expect(t).toContain("the list holds records from position 251 only");
+	});
+});
+
 describe("the facets while the list is held", () => {
 	it("are marked: the bar is busy, and its facets dimmed", () => {
 		const held = renderToStaticMarkup(
