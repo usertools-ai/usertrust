@@ -17,6 +17,10 @@
 #      (b) the ui tarball alone; (c) both together. npm decides to honour a dependency's shrinkwrap
 #      from the package's `_hasShrinkwrap` flag, which a file tarball never carries, and the installs
 #      read the public registry, so a row (or a control) that cannot run is recorded as such.
+#      All of this registry work shares ONE budget, SHRINKWRAP_OPTIONAL_S seconds (default 600),
+#      counted from the verdict, and each npm call in it fetches with no retries, a 30 s fetch
+#      timeout, and an alarm at the budget's end (`optional`). A slow or absent registry therefore
+#      costs the required job at most the budget, never its timeout.
 #
 #   registry  the NON-required `shrinkwrap-registry` workflow (pull requests that touch the shipped
 #             tree's files, and nightly). It needs no build:
@@ -92,18 +96,27 @@ for d in server ui; do
 	echo "$d: reproduced ($(wc -c <"$work/$d.shipped.json" | tr -d ' ') bytes)"
 done
 
+# Everything below is recorded, never required: it shares one budget from here.
+deadline=$((SECONDS + ${SHRINKWRAP_OPTIONAL_S:-600}))
+optional() { # optional <cmd...>: runs <cmd> with bounded fetches, killed at the budget's end; 124 once it is spent
+	local left=$((deadline - SECONDS))
+	[ "$left" -gt 0 ] || return 124
+	npm_config_fetch_retries=0 npm_config_fetch_timeout=30000 perl -e 'alarm shift; exec @ARGV or exit 127' "$left" "$@"
+}
+
 echo "== the controls: one entry of each shrinkwrap moved to another published version in range"
 mutant() { # mutant <dir>: writes $work/<dir>.mutant.json and $work/mutant/<dir>/<tarball>; prints "<place> <locked> <alt>"
 	local d=$1 place name range locked alt dist resolved integrity
 	while read -r place name range; do
 		[ -n "$place" ] || continue
 		locked=$(node -e 'const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).packages;console.log(p[process.argv[2]].version)' "$work/$d.shipped.json" "$place")
-		alt=$(npm view "${name}@${range}" version --json 2>/dev/null |
+		[ $((deadline - SECONDS)) -gt 0 ] || return 1 # the budget is spent
+		alt=$(optional npm view "${name}@${range}" version --json 2>/dev/null |
 			node -e 'let v=JSON.parse(require("fs").readFileSync(0,"utf8")||"[]");v=Array.isArray(v)?v:[v];const o=v.filter(x=>x!==process.argv[1]&&!x.includes("-"));console.log(o.length?o[o.length-1]:"")' "$locked")
 		[ -n "$alt" ] && break
 	done < <($HELP candidate "$work/$d.shipped.json")
-	[ -n "${alt:-}" ] || return 1 # no entry has another published version in range (or the registry did not answer)
-	dist=$(npm view "${name}@${alt}" dist --json) || return 1
+	[ -n "${alt:-}" ] || return 1 # no entry has another published version in range (or the registry did not answer in time)
+	dist=$(optional npm view "${name}@${alt}" dist --json) || return 1
 	resolved=$(printf '%s' "$dist" | node -e 'console.log(JSON.parse(require("fs").readFileSync(0,"utf8")).tarball)')
 	integrity=$(printf '%s' "$dist" | node -e 'console.log(JSON.parse(require("fs").readFileSync(0,"utf8")).integrity)')
 	# The control tarball is assembled exactly as the release assembles one (scripts/release-tarball.py),
@@ -129,7 +142,7 @@ for d in server ui; do
 		echo "$d control: $place $locked -> $alt"
 	else
 		: >"$work/$d.moved"
-		matrix "$d control UNAVAILABLE (recorded: the registry gave no other version in range)"
+		matrix "$d control UNAVAILABLE (recorded: the registry gave no other version in range, or none within the budget)"
 	fi
 done
 
@@ -138,8 +151,8 @@ try_into() { # try_into <dir> <args...>: as install_into, for a row that is reco
 	shift
 	mkdir -p "$into"
 	printf '{"name":"acceptance","private":true}\n' >"$into/package.json"
-	(cd "$into" && npm install --ignore-scripts --no-audit --no-fund --cache "$into.cache" "$@" >"$into.log" 2>&1) && return 0
-	echo "    install failed (recorded): $(tail -c 600 "$into.log" | tr '\n' ' ')"
+	(cd "$into" && optional npm install --ignore-scripts --no-audit --no-fund --cache "$into.cache" "$@" >"$into.log" 2>&1) && return 0
+	echo "    install failed, or the budget ran out (recorded): $(tail -c 600 "$into.log" | tr '\n' ' ')"
 	return 1
 }
 row() { # row <variant> <install dir> <package dir> <expected shrinkwrap>: one matrix line

@@ -106,6 +106,50 @@ describe("shrinkwrap-acceptance.sh", () => {
 	});
 });
 
+describe("shrinkwrap-acceptance.sh files: the registry work after the verdict is bounded", () => {
+	const script = readFileSync(join(ROOT, "scripts/shrinkwrap-acceptance.sh"), "utf8");
+	const lines = script.split("\n");
+	const verdict = lines.findIndex((l) => l.startsWith("deadline=$((SECONDS + "));
+	const fn = script.match(/^optional\(\) \{[^\n]*\n(?:\t[^\n]*\n)*\}\n/m)?.[0] ?? "";
+	/** Bash running `optional` as the script defines it, then `body`. */
+	const run = (body) => spawnSync("bash", ["-c", `${fn}${body}`], { encoding: "utf8" });
+
+	it("every npm call after the verdict goes through `optional`, and none before it", () => {
+		assert.ok(verdict > 0, "the budget starts after the verdict");
+		assert.ok(
+			lines.slice(0, verdict).some((l) => /cmp .*\|\| fail/.test(l)),
+			"the verdict comes first",
+		);
+		const after = lines
+			.slice(verdict)
+			.filter((l) => /\bnpm (view|install|pack)\b/.test(l) && !l.trimStart().startsWith("#"));
+		assert.ok(after.length >= 3, `found the npm calls: ${after.length}`);
+		for (const l of after) assert.match(l, /\boptional npm (view|install)\b/, l);
+		assert.ok(
+			!lines.slice(0, verdict).some((l) => /\boptional /.test(l)),
+			"the verdict is never bounded",
+		);
+	});
+	it("`optional` fetches with no retries and a 30 s fetch timeout", () => {
+		const r = run(
+			"deadline=$((SECONDS + 60)); optional sh -c 'echo \"$npm_config_fetch_retries $npm_config_fetch_timeout\"'",
+		);
+		assert.equal(r.status, 0, r.stderr);
+		assert.equal(r.stdout.trim(), "0 30000");
+	});
+	it("a spent budget runs nothing: 124", () => {
+		const dir = fresh("sw-budget");
+		const r = run(`deadline=$SECONDS; optional touch ${join(dir, "ran")}; echo "rc=$?"`);
+		assert.equal(r.stdout.trim(), "rc=124", r.stderr);
+		assert.throws(() => readFileSync(join(dir, "ran")));
+	});
+	it("a call still running at the budget's end is killed (SIGALRM, 142)", () => {
+		// timing: a 1 s budget against a 30 s hang; the assertion is on the exit status, not the time.
+		const r = run(`deadline=$((SECONDS + 1)); optional perl -e 'sleep 30'; echo "rc=$?"`);
+		assert.match(r.stdout, /rc=142/, r.stderr);
+	});
+});
+
 // The fake npm: `view <pkg>@<v> _hasShrinkwrap`, `pack <pkg>@<v>` and `install ... <pkg>@<v>`, read from $FAKE:
 //   flag-<pkg>       what view prints (default "true")
 //   served-<pkg>.json the npm-shrinkwrap.json pack puts in the tarball (none: no file in the tarball)

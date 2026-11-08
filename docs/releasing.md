@@ -479,7 +479,10 @@ of every project that depends on it.
      entry to another published version in range, from a file (server alone, ui alone, both). npm
      honours a dependency's shrinkwrap only when the package's `_hasShrinkwrap` flag is set, which a
      file tarball never carries, and those installs read the public registry, so a row or a control
-     that cannot run is recorded as such. The release requires this job (`REQUIRED_CI_JOBS`).
+     that cannot run is recorded as such. That registry work shares one budget,
+     `SHRINKWRAP_OPTIONAL_S` seconds (600 by default), and each npm call in it fetches with no
+     retries and a 30 s timeout, so a slow or absent registry costs the job at most the budget.
+     The release requires this job (`REQUIRED_CI_JOBS`).
      `scripts/shrinkwrap.test.mjs` pins the generator's rules on fixture lockfiles and on the real
      tree; `scripts/shrinkwrap-acceptance.test.mjs` pins the comparator and the post-release check
      below, against a fake npm.
