@@ -47,6 +47,11 @@ export function Timeline(props: {
 	resolved: number | null;
 	/** The address's position (`#at`): a change the drag did not write drops its pending commit. */
 	committed: number | null;
+	/**
+	 * How many navigations the user made (Back, Forward, a link, a typed address): every change drops a pending preview
+	 * and commit, also when the destination's position equals the one before it (two live entries).
+	 */
+	navigation: number;
 	/** The live vault's last position; -1 when it has no records. */
 	head: number;
 	error: string | null;
@@ -98,6 +103,12 @@ export function Timeline(props: {
 		s.sync(props.committed);
 		if (hadPending && s.pending === null) setThumb(null);
 	}, [props.committed]);
+	// The same for a navigation whose position is unchanged: the pending move is stale, whatever `committed` says.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: `props.navigation` is a trigger, not a value the effect reads
+	useEffect(() => {
+		scrub.current?.navigated(props.committed);
+		setThumb(null);
+	}, [props.navigation]);
 
 	const max = Math.max(head, 0);
 	// A position asked for past the head was answered with the head: the thumb sits on the record answered, and stays

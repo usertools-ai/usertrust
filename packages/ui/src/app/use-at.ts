@@ -34,6 +34,9 @@ async function loadAt(pos: number, signal: AbortSignal): Promise<AtPayload> {
  * the status a row had there, and a reload can change what the position names. When the live stream comes back after
  * dropping, the server may have restarted and restarted its epochs, so the follower forgets the epoch and re-reads.
  *
+ * `navigation` counts the user's navigations (Back, Forward, a link, a typed address): each one resets the view to the
+ * address's position, dropping a preview that was asking for another.
+ *
  * `rows` are the rows the page holds, `resyncs` how many times they have been replaced wholesale. Each request is sent
  * with the rows held at that moment, and its answer is shown with those rows (`view.rows`), never with the rows held
  * when it lands; a later request that reads the same replaces them once a resync has landed (`AtFollower`).
@@ -44,6 +47,7 @@ export function useAt(
 	live: LiveState,
 	rows: readonly LedgerRow[],
 	resyncs: number,
+	navigation: number,
 ): { view: AtView; preview(pos: number | null): void } {
 	const [view, setView] = useState<AtView>(LIVE_VIEW);
 	const follower = useRef<AtFollower | null>(null);
@@ -62,9 +66,12 @@ export function useAt(
 			() => held.current.resyncs,
 		);
 
+	// A navigation shows the destination's own view, also when its position is the one already wanted: a preview the
+	// drag was asking for is not the address's position, and the address is what Back or Forward went to.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: `navigation` is a trigger, not a value the effect reads
 	useEffect(() => {
 		follower.current?.want(pos);
-	}, [pos]);
+	}, [pos, navigation]);
 
 	// A snapshot that lands after a newer summary frame reinstalls the summary already held: the rows and `resyncs`
 	// change and `summary` does not, and the answer still needs the re-read that replaces its rows.

@@ -75,6 +75,17 @@ export class Scrubber {
 		this.cancel();
 	}
 
+	/**
+	 * The user navigated (Back, Forward, a followed link, a typed address) to an entry saying `at`. Unlike `sync`, this
+	 * drops a pending move whatever `at` is: two entries can hold the same position (both live, say), and a drag begun
+	 * on one must not write its position into the other or cut off the history ahead of it. A drag that starts after
+	 * this is a new gesture.
+	 */
+	navigated(at: number | null): void {
+		this.committed = at;
+		this.cancel();
+	}
+
 	/** Drop whatever is pending, writing nothing (going live mid-drag, unmount). */
 	cancel(): void {
 		const wasActive = this.latest !== null;

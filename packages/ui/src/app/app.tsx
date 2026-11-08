@@ -40,12 +40,22 @@ const DOCK_QUERY = "(min-width: 1100px)";
 export function App(): React.JSX.Element {
 	const { rows, summary, phase, live, liveIds, resyncs } = useLedger();
 	// The view, filters and open record live in the page address (`location.hash`): a reload keeps them, a link shares them.
-	const { view, setView, filters, setFilters, openHash, setOpenHash, at, setAt, addressNote } =
-		useUrlState();
+	const {
+		view,
+		setView,
+		filters,
+		setFilters,
+		openHash,
+		setOpenHash,
+		at,
+		setAt,
+		navigation,
+		addressNote,
+	} = useUrlState();
 	// The past position shown (`#at=N`, or a drag's preview before it is written there), from /api/at. Until its first
 	// answer lands, or when it fails with nothing loaded, the screen stays live and the timeline says so: a past view is
 	// only ever drawn from its own answer.
-	const { view: atView, preview } = useAt(at, summary, live, rows, resyncs);
+	const { view: atView, preview } = useAt(at, summary, live, rows, resyncs, navigation);
 	const shownAt = atView.at;
 	// The past view reads each row's status against the rows the page held when the answer's request was SENT
 	// (`atView.rows`), not the rows held when the answer renders: a live `status` frame for a record after the
@@ -252,6 +262,7 @@ export function App(): React.JSX.Element {
 				wanted={atView.wanted}
 				resolved={atView.resolved}
 				committed={at}
+				navigation={navigation}
 				head={head}
 				error={atView.error}
 				reloaded={atView.reloaded}

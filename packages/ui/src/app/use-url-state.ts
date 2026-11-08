@@ -47,11 +47,16 @@ export function useUrlState(): {
 	/** The position shown (the vault as recorded there), or null for live. */
 	at: number | null;
 	setAt(at: number | null): void;
+	/** How many navigations the user made (not the page's own writes): a change means every pending gesture is stale. */
+	navigation: number;
 	/** Why the address does not describe the page right now, or null; the page shows it. */
 	addressNote: AddressNote;
 } {
 	const [state, setState] = useState<UrlState>(() => decodeUrlState(window.location.hash));
 	const [behind, setBehind] = useState(false);
+	// How many times the user navigated (Back, Forward, a link, a typed address), counted whether or not the state
+	// changed: two entries can show the same position, and what a gesture left pending must still be dropped.
+	const [navigation, setNavigation] = useState(0);
 	// One writer for the page's life: it remembers the last state the address took (push or replace) and retries a
 	// write the browser refused.
 	const sync = useRef<AddressSync | null>(null);
@@ -67,6 +72,7 @@ export function useUrlState(): {
 			const next = decodeUrlState(window.location.hash);
 			sync.current?.adopt(next);
 			setState((prev) => (sameUrlState(prev, next) ? prev : next));
+			setNavigation((n) => n + 1);
 		};
 		window.addEventListener("hashchange", apply);
 		window.addEventListener("popstate", apply);
@@ -99,6 +105,7 @@ export function useUrlState(): {
 		setOpenHash,
 		at: state.at,
 		setAt,
+		navigation,
 		addressNote,
 	};
 }

@@ -138,3 +138,53 @@ describe("Scrubber", () => {
 		expect(h.active).toHaveLength(8);
 	});
 });
+
+describe("Scrubber: an external navigation", () => {
+	it("drops a pending move even when the address's position is the one the drag started from (both entries live)", () => {
+		const h = harness();
+		// Live Audit to live Trends: the address says "live" (null) before and after.
+		h.scrub.sync(null);
+		h.scrub.move(5);
+		h.scrub.navigated(null);
+		h.runFrame();
+		h.runIdle();
+		expect(h.previews).toEqual([]);
+		expect(h.commits).toEqual([]);
+		expect(h.scrub.pending).toBeNull();
+		expect(h.active).toEqual([true, false]);
+	});
+
+	it("drops a pending move when the destination holds the same position the drag last wrote", () => {
+		const h = harness();
+		h.scrub.move(5);
+		h.scrub.release();
+		expect(h.commits).toEqual([5]);
+		h.scrub.move(9);
+		h.scrub.navigated(5);
+		h.runFrame();
+		h.runIdle();
+		expect(h.commits).toEqual([5]);
+		expect(h.scrub.pending).toBeNull();
+	});
+
+	it("says nothing when nothing was pending, and a later drag is a new gesture that commits", () => {
+		const h = harness();
+		h.scrub.navigated(null);
+		expect(h.active).toEqual([]);
+		h.scrub.move(7);
+		h.runIdle();
+		expect(h.commits).toEqual([7]);
+	});
+
+	it("the address catching up with the destination afterwards is not a second cancel of a new drag", () => {
+		const h = harness();
+		h.scrub.move(3);
+		h.scrub.navigated(40);
+		h.scrub.move(41);
+		// The page's own sync effect for the same destination runs after the drag restarted.
+		h.scrub.sync(40);
+		expect(h.scrub.pending).toBe(41);
+		h.scrub.release();
+		expect(h.commits).toEqual([41]);
+	});
+});
