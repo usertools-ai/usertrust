@@ -46,8 +46,10 @@ npm, and its version is its own: the `usertrust` packages and their
   lists a gap from before it), the change is appended to `.local/state/usertrust/repins/repins.jsonl` (key hashed)
   while the old pin is still in place, one rename then puts the new pin in its place (the old one is
   kept aside), and SessionStart says so. A job change written to the old log during the re-pin is
-  copied after the swap; when it cannot be, SessionStart warns, and `usertrust-job start` or `stop`
-  that finds the pin moved after it wrote exits 1, saying to run it again. Usage from before the re-pin is never posted. A file naming
+  copied after the swap; when it cannot be, the new log gets a line that makes it invalid (the
+  session's later calls carry `jobState: "invalid"`, and coverage names the gap) and SessionStart
+  warns, and `usertrust-job start` or `stop` that finds the pin moved after it wrote exits 1, saying
+  to run it again. Usage from before the re-pin is never posted. A file naming
   the pin's own state dir (the README's quickstart layout, in the usual case) does not re-pin, since
   that dir already holds the session's earlier usage. `usertrust-job coverage` run outside a session
   reads the state dir a new session would use, the conventional file included, and gives no verdict

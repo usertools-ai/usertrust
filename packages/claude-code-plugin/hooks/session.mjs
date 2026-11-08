@@ -64,8 +64,10 @@
 // 4. what was appended to the old job log since step 1 is carried too (`carryJobTail`): the
 //    job-log writers take no lock, so a `usertrust-job start` or `stop` that read the old pin
 //    may append there meanwhile. It is appended only while the new log is still what step 1
-//    carried; otherwise SessionStart warns to run it again. The CLI reads the pin again after
-//    its append and says the same when the pin moved (bin/usertrust-job.mjs).
+//    carried; otherwise the new log is marked invalid (`markJobLog`), so the session's later
+//    calls carry `jobState: "invalid"` and coverage names the gap, and SessionStart warns. The
+//    CLI reads the pin again after its append and says to run it again when the pin moved
+//    (bin/usertrust-job.mjs).
 // So every other hook of the session reads a pin throughout: the old one, then the new
 // one. A step that fails leaves the old pin in place, and SessionStart warns, loudly, that
 // the session is UNCONFIGURED, with why; a swap that fails after its record is followed by
@@ -107,6 +109,7 @@ import {
 	resolveSettings,
 	unconfiguredNote,
 } from "./config.mjs";
+import { REPIN_CONFLICT } from "./job-log.mjs";
 import { LINKLESS } from "./lib.mjs";
 import { stateSubdir } from "./private-dir.mjs";
 
@@ -659,16 +662,63 @@ function carryJobLog(oldDir, newDir, id, { uid, fs }) {
  * After the swap, carry the lines appended to the old job log since `carried` (what `carryJobLog`
  * copied): a `usertrust-job start` or `stop` that read the old pin, before the swap or just after
  * it, appends there, and the re-pinned session would otherwise keep the job it had. Null when
- * nothing is left behind, else the fixed reason SessionStart warns about (`repinJobLostNote`).
+ * nothing is left behind. Otherwise the new log can no longer say which job a call is for, so a
+ * line its reader rejects is appended to it (`markJobLog`): from then on every call of the
+ * session is labelled `jobState: "invalid"` and coverage names the gap, rather than the wrong job
+ * for as long as nobody acts on a warning. Returns `{ why, marked }`, for `repinJobLostNote`.
+ */
+function carryJobTail(oldDir, newDir, id, carried, { uid, fs }) {
+	const why = tailLost(oldDir, newDir, id, carried, { uid, fs });
+	if (why === null) return null;
+	return { why, marked: markJobLog(newDir, id, why, { uid, fs }) };
+}
+
+/**
+ * Append the re-pin's conflict line (job-log.mjs `REPIN_CONFLICT`) to the new job log, whole and
+ * synced, on a line of its own, creating the log (0600) when there is none: true when written. A
+ * torn last line there is ended first, so the marker is never joined to it and read as part of it.
+ */
+function markJobLog(newDir, id, why, { uid, fs }) {
+	const to = join(newDir, "jobs", `${id}.jsonl`);
+	const there = boundedText(to, { uid, fs });
+	const lead = there === null || there === "" || there.endsWith("\n") ? "" : "\n";
+	const line = JSON.stringify({ sid: id, ts: new Date().toISOString(), op: REPIN_CONFLICT, why });
+	try {
+		const fd = fs.openSync(
+			to,
+			constants.O_WRONLY |
+				constants.O_APPEND |
+				constants.O_CREAT |
+				(constants.O_NOFOLLOW ?? 0) |
+				(constants.O_NONBLOCK ?? 0),
+			0o600,
+		);
+		try {
+			const info = fs.fstatSync(fd);
+			if (!info.isFile() || (uid !== null && info.uid !== uid)) throw new Error("refused");
+			fs.writeFileSync(fd, `${lead}${line}\n`);
+			fs.fsyncSync(fd);
+		} finally {
+			fs.closeSync(fd);
+		}
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Whether the lines appended to the old job log since `carried` reached the new one: null when
+ * they did (or there are none), else the fixed reason they may not have.
  * - Only whole lines are carried. A last line still being written is the CLI's to report: after
  *   its append it reads the pin again, and finds it moved (bin/usertrust-job.mjs).
  * - The lines are appended only while the new log is still exactly `carried`. A line of the new
  *   dir's own (a CLI that read the new pin) comes after the old ones in time, and lines apply in
- *   file order (job-log.mjs), so an old line is never placed after it: nothing is appended, and
- *   SessionStart says so. After the append the new log must begin with `carried` and the lines;
- *   one appended between that check and this append is said the same way.
+ *   file order (job-log.mjs), so an old line is never placed after it: nothing is appended. After
+ *   the append the new log must begin with `carried` and the lines: one appended between that
+ *   check and this append would have the older line applied after it.
  */
-function carryJobTail(oldDir, newDir, id, carried, { uid, fs }) {
+function tailLost(oldDir, newDir, id, carried, { uid, fs }) {
 	const from = join(oldDir, "jobs", `${id}.jsonl`);
 	try {
 		fs.lstatSync(from);

@@ -28,7 +28,8 @@
 // no other is; every `op` is known; `start` names a valid job id; a `type` is on a `start` and
 // is in the closed list; a `typeSource` is beside a `type` and is `agent` or `explicit`. A line that is not JSON, or
 // a last line with no newline (a torn line), makes the log INVALID: `jobState: "invalid"` on
-// the records and a named gap in coverage, never a guess. NOTHING here repairs, truncates or
+// the records and a named gap in coverage, never a guess. So does the line a re-pin appends when
+// a job change could not be carried to the new state dir (`REPIN_CONFLICT`, session.mjs). NOTHING here repairs, truncates or
 // reorders a log: the reader is the authority and it only reads.
 //
 // NO LOCK: every writer appends ONE complete line with ONE write to a file opened O_APPEND
@@ -72,6 +73,11 @@ export const TORN_REASON = "the last line is torn (it has no newline)";
 /** How long a hook waits before it reads a torn log once more. */
 export const TORN_RECHECK_MS = 40;
 const OPS = new Set(["session-start", "start", "stop"]);
+/**
+ * The op of the line a re-pin appends when it could not carry a job change to the new state dir
+ * (session.mjs `carryJobTail`): never a valid op, so the log is INVALID from then on, and says why.
+ */
+export const REPIN_CONFLICT = "repin-conflict";
 /** How long the CLI waits for the SessionStart line to land. */
 export const DEFAULT_WAIT_MS = 10_000;
 const POLL_MS = 250;
@@ -121,6 +127,9 @@ export function jobLogParser(sessionId) {
 			return `line ${i + 1} is not an object`;
 		}
 		if (rec.sid !== sessionId) return `line ${i + 1} names another session`;
+		if (rec.op === REPIN_CONFLICT) {
+			return `line ${i + 1} marks a job change the re-pin could not carry`;
+		}
 		if (!OPS.has(rec.op)) return `line ${i + 1} has an unknown op`;
 		if (i === 0 && rec.op !== "session-start") return "the first line is not session-start";
 		if (i > 0 && rec.op === "session-start") return `line ${i + 1} repeats session-start`;

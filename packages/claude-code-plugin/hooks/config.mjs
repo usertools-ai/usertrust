@@ -594,11 +594,15 @@ export function repinnedNote({ createdAt, record }) {
 }
 
 /**
- * SessionStart's warning, after a re-pin, that a job change made while it ran may be in the old state
- * dir's job log only (session.mjs `carryJobTail`): `why` is the fixed reason it was not carried.
+ * SessionStart's warning, after a re-pin, that a job change made while it ran could not be carried to
+ * the new state dir's job log (session.mjs `carryJobTail`): `why` is the fixed reason, and `marked`
+ * whether that log now ends with the line that makes it invalid.
  */
-export function repinJobLostNote(why) {
-	return `usertrust: WARNING: a job change made during the re-pin may be only in the old state dir's job log (${why}): run usertrust-job.mjs start <job-id> (or stop) again.`;
+export function repinJobLostNote({ why, marked }) {
+	const head = `usertrust: WARNING: a job change made during the re-pin could not be carried to the new state dir's job log (${why})`;
+	return marked
+		? `${head}, so that log is marked invalid: this session's calls from now on are recorded with an invalid job state, and usertrust-job coverage names the gap; start a new session to label jobs again.`
+		: `${head}, and it could not be marked invalid either: run usertrust-job.mjs start <job-id> (or stop) again.`;
 }
 
 /**

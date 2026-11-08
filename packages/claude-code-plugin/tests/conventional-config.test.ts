@@ -679,6 +679,42 @@ describe("session.mjs: SessionStart re-pins a DEAD environment pin to the conven
 	/** A `usertrust-job stop` as the CLI writes it: one whole line, appended (job-log.mjs `appendLine`). */
 	const STOP = `${JSON.stringify({ sid: SESSION, ts: "2026-11-07T23:52:00.000Z", op: "stop", job: null })}\n`;
 
+	/** The reason the reader gives a log that ends with a re-pin's conflict marker. */
+	const MARKED = /^line \d+ marks a job change the re-pin could not carry$/;
+
+	/**
+	 * A job log as its readers see it: the parse (job-log.mjs `parseJobLog`, what every hook
+	 * labels by) and the gaps `usertrust-job coverage` lists for job-1.
+	 */
+	async function asRead(path: string) {
+		// @ts-expect-error TS7016: job-log.mjs ships as plain .mjs, with no type declarations.
+		const { jobCoverage, parseJobLog } = (await import("../hooks/job-log.mjs")) as {
+			parseJobLog(text: string, sid: string): { state: string; reason?: string };
+			jobCoverage(input: {
+				job: string;
+				logs: Record<string, string>;
+				records: unknown[];
+				watch: unknown[];
+			}): { knownGaps: { gap: string }[] };
+		};
+		const text = await readFile(path, "utf-8");
+		const coverage = jobCoverage({
+			job: "job-1",
+			logs: { [SESSION]: text },
+			records: [],
+			watch: [],
+		});
+		return {
+			text,
+			parsed: parseJobLog(text, SESSION),
+			gaps: coverage.knownGaps.map((g) => g.gap),
+		};
+	}
+
+	/** The re-pin's conflict marker, the last line of `text`: parsed, so a torn one throws. */
+	const markerOf = (text: string) =>
+		JSON.parse(text.slice(text.lastIndexOf("\n", text.length - 2) + 1)) as Record<string, unknown>;
+
 	/**
 	 * `fs`, with `inside` run once inside the re-pin: at the record's fsync (after the job log is
 	 * carried, before the swap), or at the pin's rename (the swap, done: a CLI that read the old pin
@@ -764,7 +800,7 @@ describe("session.mjs: SessionStart re-pins a DEAD environment pin to the conven
 		expect(session.note).not.toContain("WARNING");
 	});
 
-	it("a line of the new dir's own appended between the check and the carry: SessionStart says to run it again", async () => {
+	it("a line of the new dir's own appended between the check and the carry: the new log is marked invalid, so the job state is invalid and coverage names the gap", async () => {
 		const { sessionSettings } = await sessionModule();
 		const home = await makeHome();
 		const fresh = await makeDir("utcc-conv-new-");
@@ -806,13 +842,26 @@ describe("session.mjs: SessionStart re-pins a DEAD environment pin to the conven
 		});
 		expect(raced).toBe(true);
 		expect(session.kind).toBe("configured");
-		// mutant: no check after the append → the older stop lands after job-2's start, silently
+		// The older stop landed after job-2's start, and closes it if the log is read as valid.
+		// mutant: no check after the append, or a warning only → every later call labelled no job
+		const read = await asRead(newLog);
+		expect(read.text.startsWith(JOB_LOG + theirs + STOP)).toBe(true);
+		expect(read.parsed.state).toBe("invalid");
+		expect(read.parsed.reason).toMatch(MARKED);
+		expect(read.gaps).toContain(
+			`session ${SESSION}: the job log is invalid (${read.parsed.reason})`,
+		);
+		expect(markerOf(read.text)).toMatchObject({
+			sid: SESSION,
+			op: "repin-conflict",
+			why: "the new state dir's job log was written meanwhile",
+		});
 		expect(session.note).toContain(
-			"usertrust: WARNING: a job change made during the re-pin may be only in the old state dir's job log",
+			"usertrust: WARNING: a job change made during the re-pin could not be carried to the new state dir's job log (the new state dir's job log was written meanwhile), so that log is marked invalid",
 		);
 	});
 
-	it("a job op in the old log after the swap while the new log was written too: nothing is appended, and SessionStart says to run it again", async () => {
+	it("a job op in the old log after the swap while the new log was written too: the old op is not appended, and the new log is marked invalid", async () => {
 		const { sessionSettings } = await sessionModule();
 		const home = await makeHome();
 		const fresh = await makeDir("utcc-conv-new-");
@@ -831,13 +880,98 @@ describe("session.mjs: SessionStart re-pins a DEAD environment pin to the conven
 			fs,
 		});
 		expect(session.kind).toBe("configured");
-		// The old op is never placed after a newer one: the new log is left as its writer made it.
-		expect(await readFile(join(fresh, "jobs", `${SESSION}.jsonl`), "utf-8")).toBe(JOB_LOG + theirs);
-		// mutant: the tail appended anyway, or no warning → the older stop closes job-2, silently
-		expect(session.note).toContain("this session was RE-PINNED");
-		expect(session.note).toContain(
-			"usertrust: WARNING: a job change made during the re-pin may be only in the old state dir's job log",
+		// The old op is never placed after a newer one: the new log keeps its lines, then the marker.
+		// mutant: the tail appended anyway → the older stop closes job-2; no marker → usage from the
+		// stop's time to job-2's start is labelled job-1, with a warning only
+		const read = await asRead(join(fresh, "jobs", `${SESSION}.jsonl`));
+		expect(read.text.startsWith(JOB_LOG + theirs)).toBe(true);
+		expect(read.text.split("\n").filter((l) => l !== "")).toHaveLength(4);
+		expect(markerOf(read.text)).toMatchObject({ sid: SESSION, op: "repin-conflict" });
+		expect(read.parsed).toEqual({
+			state: "invalid",
+			reason: "line 4 marks a job change the re-pin could not carry",
+		});
+		expect(read.gaps).toContain(
+			`session ${SESSION}: the job log is invalid (${read.parsed.reason})`,
 		);
+		expect(session.note).toContain("this session was RE-PINNED");
+		expect(session.note).toContain("so that log is marked invalid");
+		expect(session.note).toContain("start a new session to label jobs again");
+	});
+
+	it("a new log written meanwhile with a torn last line: the marker is a line of its own, never joined to it", async () => {
+		const { sessionSettings } = await sessionModule();
+		const home = await makeHome();
+		const fresh = await makeDir("utcc-conv-new-");
+		const old = await deadWithJobLog(home, fresh);
+		const fs = opInside("swap", () => {
+			nodeFs.appendFileSync(join(old, "jobs", `${SESSION}.jsonl`), STOP);
+			nodeFs.appendFileSync(join(fresh, "jobs", `${SESSION}.jsonl`), `{"sid":"${SESSION}"`);
+		});
+		const session = sessionSettings({
+			env: unconfigured(old),
+			payload: { session_id: SESSION },
+			passwdHome: home,
+			uid: UID,
+			repin: true,
+			fs,
+		});
+		expect(session.kind).toBe("configured");
+		const read = await asRead(join(fresh, "jobs", `${SESSION}.jsonl`));
+		// mutant: the marker appended straight after the fragment → one line, neither of them read
+		expect(read.text.startsWith(`${JOB_LOG}{"sid":"${SESSION}"\n`)).toBe(true);
+		expect(markerOf(read.text)).toMatchObject({ sid: SESSION, op: "repin-conflict" });
+		expect(read.parsed.state).toBe("invalid");
+		expect(session.note).toContain("so that log is marked invalid");
+	});
+
+	it("a marker that cannot be written is said: SessionStart says to run it again", async () => {
+		const { sessionSettings } = await sessionModule();
+		const home = await makeHome();
+		const fresh = await makeDir("utcc-conv-new-");
+		const old = await deadWithJobLog(home, fresh);
+		const newLog = join(fresh, "jobs", `${SESSION}.jsonl`);
+		const theirs = `${JSON.stringify({ sid: SESSION, ts: "2026-11-07T23:53:00.000Z", op: "start", job: "job-2" })}\n`;
+		const swap = opInside("swap", () => {
+			nodeFs.appendFileSync(join(old, "jobs", `${SESSION}.jsonl`), STOP);
+			nodeFs.appendFileSync(newLog, theirs);
+		});
+		let refused = false;
+		const fs = {
+			...swap,
+			// The marker's open: it creates the log when there is none, and this one is refused.
+			openSync: (
+				path: nodeFs.PathLike,
+				flags: nodeFs.OpenMode = "r",
+				mode?: nodeFs.Mode | null,
+			) => {
+				if (
+					String(path) === newLog &&
+					typeof flags === "number" &&
+					flags & nodeFs.constants.O_APPEND &&
+					flags & nodeFs.constants.O_CREAT
+				) {
+					refused = true;
+					throw Object.assign(new Error("refused"), { code: "EACCES" });
+				}
+				return swap.openSync(path, flags, mode);
+			},
+		} as typeof nodeFs;
+		const session = sessionSettings({
+			env: unconfigured(old),
+			payload: { session_id: SESSION },
+			passwdHome: home,
+			uid: UID,
+			repin: true,
+			fs,
+		});
+		expect(refused).toBe(true);
+		expect(session.kind).toBe("configured");
+		expect(await readFile(newLog, "utf-8")).toBe(JOB_LOG + theirs);
+		// mutant: an unwritten marker said as written → the user is told the log is invalid while
+		// every later call is labelled job-2, and is not told to run it again
+		expect(session.note).toContain("and it could not be marked invalid either");
+		expect(session.note).not.toContain("so that log is marked invalid");
 		expect(session.note).toContain("run usertrust-job.mjs start <job-id> (or stop) again");
 	});
 

@@ -198,7 +198,8 @@ try {
 		// another state dir while this runs (hooks/session.mjs `repin`). So the pin is read again
 		// after the append: when it moved, the change went to the old dir's log, and that dir's
 		// session no longer reads it. The re-pin carries what it finds there after its swap
-		// (`carryJobTail`), but a change written after that is left behind: said, never silent.
+		// (`carryJobTail`, which marks the new log invalid when it cannot), but a change written
+		// after that is left behind: said, never silent.
 		usePinnedSession();
 		if (jobsDir() !== before) {
 			say(

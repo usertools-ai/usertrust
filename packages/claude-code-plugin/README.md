@@ -311,9 +311,13 @@ under your home as the passwd database gives it.
   aside under a second name, a hard link (`<id>.json.repinned.<time>.<random>`), and one rename puts the
   new pin in its place, so every other hook of the session reads a pin throughout. Then any job
   change appended to the old job log meanwhile (a `usertrust-job start` or `stop` that read the old
-  pin) is copied too, whole lines only, and only while the new log holds nothing else; otherwise
-  SessionStart warns to run `usertrust-job.mjs start <job-id>` (or `stop`) again. The command itself
-  reads the pin again after it writes, and exits 1 with the same advice when the pin moved.
+  pin) is copied too, whole lines only, and only while the new log holds nothing else. When it
+  cannot be, a line the reader rejects is appended to the new log, so the session's calls from
+  then on are recorded with `jobState: "invalid"` and `usertrust-job coverage` names the gap, and
+  SessionStart warns: labelling jobs again takes a new session. If even that line cannot be
+  written, SessionStart warns to run `usertrust-job.mjs start <job-id>` (or `stop`) again. The
+  command itself reads the pin again after it writes, and exits 1, saying to run it again, when
+  the pin moved.
   SessionStart says so once. The old state dir is left as it was. Nothing is posted
   twice: the new state dir starts metering at the session's next hook, and nothing
   the transcript holds from before it is posted there. If a step fails, the old pin

@@ -202,6 +202,19 @@ describe("test 3 — stale, foreign or corrupt state is invalid, never a guess",
 		const { resolveJob } = await lib();
 		expect((await resolveJob(SID)).at(T0 + 1000)).toEqual({ jobState: "invalid" });
 	});
+	it("a re-pin's conflict marker makes the log invalid with a reason of its own, and the CLI then appends nothing", async () => {
+		const text = `${start(SID, T0)}${op(SID, T0 + 1, "start", "job-a")}${line({ sid: SID, ts: iso(T0 + 2), op: "repin-conflict", why: "the new state dir's job log was written meanwhile" })}`;
+		await writeLog(text);
+		const { appendJobOp, parseJobLog, resolveJob } = await lib();
+		// mutant: the marker read as just another unknown op → a gap that does not say why
+		expect(parseJobLog(text, SID)).toEqual({
+			state: "invalid",
+			reason: "line 3 marks a job change the re-pin could not carry",
+		});
+		expect((await resolveJob(SID)).at(T0 + 1000)).toEqual({ jobState: "invalid" });
+		expect(await appendJobOp(SID, "stop", null, { waitMs: 0 })).toMatchObject({ ok: false });
+		expect(await readFile(logFile(), "utf-8")).toBe(text);
+	});
 	it("a log for ANOTHER session — even a newer file — is never read", async () => {
 		await writeLog(start(SID, T0) + op(SID, T0 + 1, "start", "job-a"));
 		await writeLog(start("other", T0) + op("other", T0 + 1, "start", "job-z"), "other");
