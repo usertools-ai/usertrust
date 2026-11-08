@@ -3,8 +3,16 @@
 
 import { describe, expect, it } from "vitest";
 import { isHeaderSpend } from "../src/shared/aggregate.js";
-import { type Breakdown, breakdown, type Dimension, keyOf } from "../src/shared/breakdown.js";
+import {
+	type Breakdown,
+	breakdown,
+	categoryRows,
+	type Dimension,
+	keyOf,
+	shareBands,
+} from "../src/shared/breakdown.js";
 import type { LedgerRow } from "../src/shared/rows.js";
+import { bucketTotals } from "../src/shared/spend-series.js";
 
 const T0 = Date.parse("2026-07-27T00:00:00.000Z");
 const HOUR = 3_600_000;
@@ -163,5 +171,98 @@ describe("breakdown", () => {
 	it("takes an unbounded window as the whole vault", () => {
 		const all = breakdown(fixture(), { startMs: -Infinity, endMs: Infinity }, "lane");
 		expect(all.calls).toBe(41);
+	});
+});
+
+describe("categoryRows", () => {
+	const BUCKET = 4 * HOUR;
+
+	it("sums, for every key in every dimension, to the breakdown's number for that key", () => {
+		for (const dim of DIMS) {
+			const b = breakdown(fixture(), WIN, dim);
+			const rows = categoryRows(fixture(), WIN, dim, BUCKET);
+			expect([...rows.keys()]).toEqual(b.keys);
+			for (const key of b.keys) {
+				let sum = 0;
+				for (const v of rows.get(key) as Float64Array) sum += v;
+				expect(sum).toBeCloseTo(b.byKey.get(key)?.spendUt ?? Number.NaN, 9);
+			}
+		}
+	});
+
+	it("puts a record on a bucket edge in the later bucket only, unsmoothed", () => {
+		const rows = [
+			row({ actor: "ana", ts: new Date(T0 + BUCKET).toISOString(), costUt: 7 }),
+			row({ actor: "bo", ts: new Date(T0 + BUCKET - 1).toISOString(), costUt: 2 }),
+		];
+		const out = categoryRows(rows, WIN, "lane", BUCKET);
+		expect(Array.from(out.get("ana") as Float64Array)).toEqual([0, 7, 0, 0, 0, 0]);
+		expect(Array.from(out.get("bo") as Float64Array)).toEqual([2, 0, 0, 0, 0, 0]);
+	});
+
+	it("is empty, never NaN, for a vault with no spend", () => {
+		const rows = [row({ kind: "info", costUt: 3 })];
+		expect(categoryRows(rows, WIN, "lane", BUCKET).size).toBe(0);
+	});
+});
+
+describe("shareBands", () => {
+	const BUCKET = HOUR;
+
+	function bandSums(dim: Dimension, radius?: number): { sums: Float64Array; totals: Float64Array } {
+		const bands =
+			radius === undefined
+				? shareBands(fixture(), WIN, dim, BUCKET)
+				: shareBands(fixture(), WIN, dim, BUCKET, radius);
+		const totals = bucketTotals(fixture(), WIN, BUCKET);
+		const sums = new Float64Array(totals.length);
+		for (const v of bands.values())
+			for (let i = 0; i < sums.length; i++) sums[i] = (sums[i] as number) + (v[i] as number);
+		return { sums, totals };
+	}
+
+	it("adds up, in every bucket, to the exact bucket total (the line)", () => {
+		for (const dim of DIMS) {
+			for (const radius of [undefined, 0, 1, 6]) {
+				const { sums, totals } = bandSums(dim, radius);
+				expect(sums.length).toBe(totals.length);
+				for (let i = 0; i < totals.length; i++)
+					expect(Math.abs((sums[i] as number) - (totals[i] as number))).toBeLessThan(1e-9);
+			}
+		}
+	});
+
+	it("keeps the keys in breakdown order and gives zeros, not NaN, in empty buckets", () => {
+		const rows = [
+			row({ actor: "ana", ts: new Date(T0 + 2 * HOUR).toISOString(), costUt: 6 }),
+			row({ actor: "bo", ts: new Date(T0 + 2 * HOUR + 1).toISOString(), costUt: 2 }),
+			row({ actor: "bo", ts: new Date(T0 + 9 * HOUR).toISOString(), costUt: 4 }),
+		];
+		const bands = shareBands(rows, WIN, "lane", BUCKET, 3);
+		expect([...bands.keys()]).toEqual(breakdown(rows, WIN, "lane").keys);
+		for (const v of bands.values()) for (const x of v) expect(Number.isNaN(x)).toBe(false);
+		for (const i of [0, 1, 3, 4, 10, 23]) for (const v of bands.values()) expect(v[i]).toBe(0);
+		expect(
+			Math.abs(
+				((bands.get("ana") as Float64Array)[2] as number) +
+					((bands.get("bo") as Float64Array)[2] as number) -
+					8,
+			),
+		).toBeLessThan(1e-9);
+	});
+
+	it("smooths the shares, so a key's band is not its raw row", () => {
+		const rows = [
+			row({ actor: "ana", ts: new Date(T0 + 2 * HOUR).toISOString(), costUt: 10 }),
+			row({ actor: "bo", ts: new Date(T0 + 3 * HOUR).toISOString(), costUt: 10 }),
+		];
+		const raw = categoryRows(rows, WIN, "lane", BUCKET).get("ana") as Float64Array;
+		const smooth = shareBands(rows, WIN, "lane", BUCKET, 3).get("ana") as Float64Array;
+		expect(raw[3]).toBe(0);
+		expect(smooth[3] as number).toBeGreaterThan(0);
+	});
+
+	it("is empty for a vault with no spend", () => {
+		expect(shareBands([row({ kind: "info" })], WIN, "lane", BUCKET).size).toBe(0);
 	});
 });
