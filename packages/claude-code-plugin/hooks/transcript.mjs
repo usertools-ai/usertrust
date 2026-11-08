@@ -765,10 +765,25 @@ function subagentsDir(main) {
 }
 
 /**
+ * What is at `path`, by lstat (a symlink is never followed): "dir" for a real directory,
+ * "none" when nothing is there (ENOENT only), "other" for anything else, a symlink to a
+ * directory included.
+ */
+function entryKind(path) {
+	try {
+		return lstatSync(path).isDirectory() ? "dir" : "other";
+	} catch (err) {
+		return err?.code === "ENOENT" ? "none" : "other";
+	}
+}
+
+/**
  * The Workflow run directories under subagents/workflows/: real directories only (a symlink
- * is never followed), by a name safe in a path, sorted, and at most MAX_WORKFLOW_DIRS of them.
+ * is never followed: not at the run, nor at workflows/ or subagents/ above it), by a name safe
+ * in a path, sorted, and at most MAX_WORKFLOW_DIRS of them.
  */
 function workflowDirs(dir) {
+	if (entryKind(dir) !== "dir" || entryKind(join(dir, "workflows")) !== "dir") return [];
 	let entries;
 	try {
 		entries = readdirSync(join(dir, "workflows"), { withFileTypes: true });
@@ -806,6 +821,9 @@ export function transcriptPathFor(input, agentId) {
 	if (typeof hinted === "string" && basename(hinted) === file) return hinted;
 	if (typeof main !== "string" || main === "") return undefined;
 	const dir = subagentsDir(main);
+	// subagents/ is a real directory, or not there yet: anything else (a symlink to a directory
+	// elsewhere) gives no transcript path, so nothing outside the session is ever read as its.
+	if (entryKind(dir) === "other") return undefined;
 	const direct = join(dir, file);
 	if (isRegularFile(direct)) return direct;
 	for (const run of workflowDirs(dir)) {
@@ -820,6 +838,8 @@ export async function subagentIds(input) {
 	const main = input.transcript_path;
 	if (typeof main !== "string" || main === "") return [];
 	const dir = subagentsDir(main);
+	// Never through a symlink: subagents/ itself is a real directory, or no subagent is listed.
+	if (entryKind(dir) !== "dir") return [];
 	const ids = new Set();
 	for (const where of [dir, ...workflowDirs(dir)]) {
 		let names;

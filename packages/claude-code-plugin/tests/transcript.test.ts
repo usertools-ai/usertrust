@@ -4000,6 +4000,64 @@ describe("estimate mode is inherited by a fork only; a subagent's missing transc
 			expect(pre.stderr).toContain("not written yet");
 			await rm(outside, { recursive: true, force: true });
 		});
+
+		it("is never looked for through a symlinked subagents/workflows/: the run below it is outside the session", async () => {
+			await startServer(okResponder);
+			await writeMain([]);
+			const outside = await mkdtemp(join(tmpdir(), "ut-wf-outside-"));
+			await mkdir(join(outside, WF), { recursive: true });
+			await writeFile(
+				join(outside, WF, "agent-w1.jsonl"),
+				`${issued("msg_w1", "tu_w1", u(1200, 300), "w1").join("\n")}\n`,
+			);
+			const subagents = join(projectDir, SESSION, "subagents");
+			await mkdir(subagents, { recursive: true });
+			await symlink(outside, join(subagents, "workflows"));
+			// mutant: no lstat of workflows/ → the outside run is read, and its usage charged
+			const pre = await run("pre-tool-use.mjs", preInput("tu_w1", wfInput));
+			expect(pre.code).toBe(0);
+			expect(pre.stderr).toContain("not written yet");
+			await run("post-tool-use.mjs", postInput("tu_w1", wfInput));
+			await run("stop.mjs", stopInput());
+			expect(settles().map((x) => x.body.inputTokens)).not.toContain(1200);
+			expect(sources()).not.toContain("provider");
+			await rm(outside, { recursive: true, force: true });
+		});
+
+		it("is never looked for through a symlinked subagents/: no transcript path, so the estimate, and nothing outside is listed", async () => {
+			await startServer(okResponder);
+			await writeMain([]);
+			const outside = await mkdtemp(join(tmpdir(), "ut-wf-outside-"));
+			await mkdir(join(outside, "workflows", WF), { recursive: true });
+			for (const at of [
+				join(outside, "agent-w1.jsonl"),
+				join(outside, "workflows", WF, "agent-w1.jsonl"),
+			]) {
+				await writeFile(at, `${issued("msg_w1", "tu_w1", u(1200, 300), "w1").join("\n")}\n`);
+			}
+			await writeFile(
+				join(outside, "agent-x9.jsonl"),
+				`${issued("msg_x9", "tu_x9", u(900, 90), "x9").join("\n")}\n`,
+			);
+			await mkdir(join(projectDir, SESSION), { recursive: true });
+			await symlink(outside, join(projectDir, SESSION, "subagents"));
+			// mutant: no lstat of subagents/ → its agent-w1.jsonl is read as this session's
+			const pre = await run("pre-tool-use.mjs", preInput("tu_w1", wfInput));
+			expect(pre.code).toBe(0);
+			expect(pre.stderr).toContain("no transcript path; this agent now settles at the ESTIMATE");
+			await run("post-tool-use.mjs", postInput("tu_w1", wfInput));
+			// mutant: no lstat in subagentIds → the agents outside are listed as this session's
+			const { subagentIds, transcriptPathFor } = await import("../hooks/transcript.mjs");
+			const main = { transcript_path: mainTranscript };
+			expect(await subagentIds(main)).toEqual([]);
+			expect(transcriptPathFor(main, "x9")).toBeUndefined();
+			await run("stop.mjs", stopInput());
+			const charged = settles().map((x) => x.body.inputTokens);
+			expect(charged).not.toContain(1200);
+			expect(charged).not.toContain(900);
+			expect(sources()).not.toContain("provider");
+			await rm(outside, { recursive: true, force: true });
+		});
 	});
 
 	it("a fork of the same session still inherits the estimate mode, and posts none of its transcript", async () => {
