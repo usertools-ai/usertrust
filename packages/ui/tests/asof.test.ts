@@ -410,6 +410,16 @@ describe("a list's cutter keeps a past row's identity while its record and its s
 		expect(rowOne(cutter.cut(live, answer))).not.toBe(rowOne(second));
 	});
 
+	it("a draw thrown away after the one committed changes nothing either: the commit names its own list", () => {
+		// React draws A, starts B and throws it away, then commits A (a deferred render, interrupted). The next cut must
+		// reuse A's projection, the one on screen, and not B's, which was never drawn.
+		const drawnA = cutter.cut(live, answer);
+		const drawnB = cutter.cut(live, answer);
+		expect(rowOne(drawnB)).not.toBe(rowOne(drawnA));
+		cutter.commit(drawnA);
+		expect(rowOne(cutter.cut(live, answer))).toBe(rowOne(drawnA));
+	});
+
 	it("two cutters interleaved keep their own projections", () => {
 		const other = createCutter();
 		const drawnMine = cutter.cut(live, answer);
