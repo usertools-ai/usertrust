@@ -305,6 +305,19 @@ describe("useWindow", () => {
 		);
 	});
 
+	it("red-first (offsets taken from the fact's border box): the hook places an explainer from its anchor's padding box", () => {
+		// CSS top, bottom, left and right are measured from the padding box of the box an explainer is positioned in, and
+		// getBoundingClientRect gives its border box: the two agreed only while a fact had no border. Pinned in the source
+		// (no DOM here); `paddingBox` is tested in pop-place.test.ts and the browser check gives a fact a border.
+		const src = readFileSync(new URL("../src/app/summary-strip.tsx", import.meta.url), "utf-8");
+		const start = src.indexOf("function usePopPlace(");
+		const hook = src.slice(start, src.indexOf("\n}\n", start));
+		expect(hook).toContain(
+			"const at = paddingBox(anchor.getBoundingClientRect(), getComputedStyle(anchor));",
+		);
+		expect(hook).not.toContain("const at = anchor.getBoundingClientRect();");
+	});
+
 	it("outside a Window, nothing is dimmed (and asking does not throw)", () => {
 		function Probe(): React.JSX.Element {
 			return createElement("p", null, `dimmed ${String(mod.useWindowDimmed())}`);
