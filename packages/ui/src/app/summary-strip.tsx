@@ -45,6 +45,7 @@ import {
 	outside,
 	placePopAt,
 	popStyle,
+	readableHeight,
 	whenMoved,
 } from "../shared/pop-place.js";
 import { shownLabel } from "../shared/timeline-view.js";
@@ -193,8 +194,10 @@ function clipBox(el: HTMLElement): Box {
  * with room inside the box that would cut it, and above its anchor when there is no room below. A side fixed in the
  * stylesheet was cut off whenever the anchor sat in the other half of a narrow window. While it is open it is placed
  * again whenever that box moves or changes size (`whenMoved`): a scroll, the browser's size, its window filling the
- * desk or giving it back. If that leaves its anchor wholly out of view, it calls `close`; so it does when another
- * window fills the desk, which leaves this one inert and out of sight (`useWindowDimmed`).
+ * desk or giving it back. If that leaves its anchor wholly out of view, it calls `close`, once; so it does when its
+ * window shows too little of itself to hold it at its floor (`placePop`'s no room), and when another window fills the
+ * desk, which leaves this one inert and out of sight (`useWindowDimmed`). It is never drawn below its floor: two of its
+ * lines, or all of it.
  */
 function usePopPlace(
 	open: boolean,
@@ -219,7 +222,10 @@ function usePopPlace(
 			return;
 		}
 		let last = "";
+		// Set once it has closed it: nothing this opening heard afterwards places it, or closes it, again.
+		let done = false;
 		const place = (): void => {
+			if (done) return;
 			const at = anchor.getBoundingClientRect();
 			// The line it belongs to, when that is not the whole anchor: measured from the whole fact near the bottom of a
 			// short window, the room on both sides was a few pixels and a cut line's explainer had no readable height.
@@ -228,11 +234,22 @@ function usePopPlace(
 			// Its line wholly out of view (its window scrolled, or a resize or a restore left it below the fold): no place
 			// is both next to the line and inside the window, so it closes, as a click elsewhere would close it.
 			if (outside(lineBox ?? at, clip)) {
+				done = true;
 				close();
 				return;
 			}
 			const r = measure(pop, null);
-			const p = placePopAt(at, r.width, r.height, clip, (w) => measure(pop, w).height, lineBox);
+			const heightAt = (w: number): number => measure(pop, w).height;
+			// Its floor: two of its own lines with its padding and border (all of it, if it is shorter).
+			const readable = readableHeight(getComputedStyle(pop));
+			const p = placePopAt(at, r.width, r.height, clip, heightAt, lineBox, readable);
+			// No room to read it anywhere in its window (a sliver of the window is in view): it closes, as above. The next
+			// press opens it afresh, placed in whatever room there is then.
+			if (p === null) {
+				done = true;
+				close();
+				return;
+			}
 			const next = popStyle(p);
 			const key = JSON.stringify(next);
 			if (key === last) return;

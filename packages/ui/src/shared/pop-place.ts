@@ -25,13 +25,46 @@ export interface PopPlace {
 	width: number;
 	/** Above the anchor: below it would leave the box, and above fits whole or has more room. */
 	up: boolean;
-	/** When neither side has room for all of it: no taller than the room on the side it opens to (it scrolls inside).
-	 *  Null when it fits whole. */
+	/** When it cannot be drawn whole: no taller than the room it is given (it scrolls inside), and never under its
+	 *  floor (`placePop`'s `readable`). Null when it fits whole. */
 	maxHeight: number | null;
-	/** Drawn next to a line inside its anchor (`placePop`'s `line`): pixels from the anchor's top to the popover's top
-	 *  (below the line), or from the anchor's bottom to the popover's bottom (above it). Null when it is drawn next to
-	 *  the anchor itself. */
+	/** Pixels from the anchor's top to the popover's top (`up` false), or from the anchor's bottom to the popover's
+	 *  bottom (`up` true). Set when it is drawn next to a line inside its anchor (`placePop`'s `line`), or laid over its
+	 *  line or anchor when neither side has room to read it. Null when it is drawn next to the anchor itself. */
 	offset: number | null;
+}
+
+/** How many of its lines a text popover shows at the least: a cap below this many lines leaves it unreadable. */
+export const READABLE_LINES = 2;
+
+/** What `readableHeight` reads of a popover's computed style (`getComputedStyle`), in CSS lengths. */
+export interface ReadStyle {
+	lineHeight: string;
+	fontSize: string;
+	paddingTop: string;
+	paddingBottom: string;
+	borderTopWidth: string;
+	borderBottomWidth: string;
+}
+
+/**
+ * The height of `READABLE_LINES` of a text popover's lines, with its padding and its border: its floor, unless all of
+ * it is shorter (`placePop`'s `readable`). A line-height of `normal` is read as 1.25 times the font size, and a length
+ * that cannot be read as 0.
+ */
+export function readableHeight(s: ReadStyle): number {
+	const px = (v: string): number => {
+		const n = Number.parseFloat(v);
+		return Number.isFinite(n) ? n : 0;
+	};
+	const line = px(s.lineHeight) || 1.25 * px(s.fontSize);
+	return (
+		READABLE_LINES * line +
+		px(s.paddingTop) +
+		px(s.paddingBottom) +
+		px(s.borderTopWidth) +
+		px(s.borderBottomWidth)
+	);
 }
 
 /** The part of `a` inside `b`. */
@@ -70,6 +103,11 @@ export function outside(anchor: Box, box: Box): boolean {
  * below is measured from it and the popover is drawn next to it, while `anchor` stays the box its offsets are
  * measured in. Measured from a whole fact near the bottom of a short window, the room on both sides could be a few
  * pixels, and the explainer of a line in view was capped to nothing readable.
+ *
+ * `readable` is its floor (`readableHeight`: two of its lines), or all of it when it is shorter: it is never capped
+ * below that. When neither side has that much room, it is laid over its line (or its anchor): from the line's top,
+ * pulled up as far as it must be to stay inside the box, and capped at the box's inner height. When even that is under
+ * its floor (a sliver of a window), there is no room: null, and nothing is drawn. 0 (the default) is no floor.
  */
 export function placePop(
 	anchor: Box,
@@ -79,7 +117,8 @@ export function placePop(
 	gap = 8,
 	margin = 8,
 	line: Box | null = null,
-): PopPlace {
+	readable = 0,
+): PopPlace | null {
 	const lo = clip.left + margin;
 	const hi = clip.right - margin;
 	const width = Math.min(w, Math.max(0, hi - lo));
@@ -103,20 +142,30 @@ export function placePop(
 	if (h <= roomAbove)
 		return { side, shift, width, up: true, maxHeight: null, offset: offset(true) };
 	const up = roomAbove > roomBelow;
+	const cap = Math.max(0, Math.floor(up ? roomAbove : roomBelow));
+	// The least it is drawn at: its floor, or all of it.
+	const least = Math.floor(Math.min(h, readable));
+	if (cap >= least) return { side, shift, width, up, maxHeight: cap, offset: offset(up) };
+	// Neither side has room to read it: laid over its line, inside the box.
+	const inner = clip.bottom - clip.top - 2 * margin;
+	if (Math.floor(inner) < least) return null;
+	const drawn = Math.min(h, inner);
+	const top = Math.min(Math.max(at.top, clip.top + margin), clip.bottom - margin - drawn);
 	return {
 		side,
 		shift,
 		width,
-		up,
-		maxHeight: Math.max(0, Math.floor(up ? roomAbove : roomBelow)),
-		offset: offset(up),
+		up: false,
+		maxHeight: h <= inner ? null : Math.floor(inner),
+		offset: Math.round(top - anchor.top),
 	};
 }
 
 /**
  * `placePop`, placed by the height the popover has at the width it will be drawn at. One narrowed to fit its box
  * wraps and grows, so its height at its own width would let its last lines leave the box. `heightAt` measures it at a
- * given width; it is asked only when the popover is narrowed.
+ * given width; it is asked only when the popover is narrowed. No room at its own width is no room narrowed (narrower,
+ * it is no shorter), so it is not measured again.
  */
 export function placePopAt(
 	anchor: Box,
@@ -125,9 +174,11 @@ export function placePopAt(
 	clip: Box,
 	heightAt: (width: number) => number,
 	line: Box | null = null,
-): PopPlace {
-	const first = placePop(anchor, w, h, clip, 8, 8, line);
-	return first.width < w ? placePop(anchor, w, heightAt(first.width), clip, 8, 8, line) : first;
+	readable = 0,
+): PopPlace | null {
+	const first = placePop(anchor, w, h, clip, 8, 8, line, readable);
+	if (first === null || first.width >= w) return first;
+	return placePop(anchor, w, heightAt(first.width), clip, 8, 8, line, readable);
 }
 
 /** A target `whenMoved` listens on: the window, for the browser's size, and the document, for every scroll. */

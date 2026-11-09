@@ -274,11 +274,34 @@ describe("useWindow", () => {
 			"const lineBox = line !== null && line !== anchor ? line.getBoundingClientRect() : null;",
 		);
 		expect(hook).toContain("outside(lineBox ?? at, clip)");
-		expect(hook).toMatch(/placePopAt\(at, [^\n]*, lineBox\)/);
+		expect(hook).toMatch(/placePopAt\(at, [^\n]*, lineBox[,)]/);
 		// The line is watched with the boxes around it (its window, its body, its fact): a line that changes size inside a
 		// fact whose own box does not change still places its explainer again.
 		expect(hook).toMatch(
 			/whenMoved\(\s*\[\.\.\.clippers\(pop\), anchor, \.\.\.\(line !== null && line !== anchor \? \[line\] : \[\]\)\],/,
+		);
+	});
+
+	it("red-first (an explainer drawn below its floor in a short window): the hook hands placePop its floor, and closes once when there is no room", () => {
+		// Pinned in the source, as the lines above are: these tests have no DOM. The browser check runs it: in a sliver of
+		// Now a cut line's explainer opens nothing (aria-expanded false, nothing opens it again), and once the window
+		// grows back the next press opens it.
+		const src = readFileSync(new URL("../src/app/summary-strip.tsx", import.meta.url), "utf-8");
+		const start = src.indexOf("function usePopPlace(");
+		const hook = src.slice(start, src.indexOf("\n}\n", start));
+		// Its floor is the one shared rule (two of its lines, `readableHeight`), read from its own computed style.
+		expect(src).toMatch(
+			/import \{[^}]*\breadableHeight\b[^}]*\} from "\.\.\/shared\/pop-place\.js";/,
+		);
+		expect(hook).toContain("const readable = readableHeight(getComputedStyle(pop));");
+		expect(hook).toMatch(/placePopAt\(at, [^\n]*, lineBox, readable\)/);
+		// No room: it closes, and only once. Each opening starts with a fresh flag, so the next press places it again.
+		expect(hook).toMatch(
+			/useLayoutEffect\(\(\) => \{[\s\S]*?let done = false;[\s\S]*?const place = \(\): void => \{\s*if \(done\) return;/,
+		);
+		expect(hook).toMatch(/if \(p === null\) \{\s*done = true;\s*close\(\);\s*return;\s*\}/);
+		expect(hook).toMatch(
+			/if \(outside\(lineBox \?\? at, clip\)\) \{\s*done = true;\s*close\(\);\s*return;\s*\}/,
 		);
 	});
 

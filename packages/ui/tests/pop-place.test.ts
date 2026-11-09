@@ -7,9 +7,12 @@ import {
 	measure,
 	outside,
 	type Page,
+	type PopPlace,
 	placePop,
 	placePopAt,
 	popStyle,
+	READABLE_LINES,
+	readableHeight,
 	whenMoved,
 } from "../src/shared/pop-place.js";
 
@@ -20,6 +23,13 @@ const at = (left: number, top: number, w = 40, h = 16) => ({
 	right: left + w,
 	bottom: top + h,
 });
+
+/** `placePop` where the box has room for it (null is "no room"): for the tests that read its fields. */
+function placed(...args: Parameters<typeof placePop>): PopPlace {
+	const p = placePop(...args);
+	if (p === null) throw new Error("no room");
+	return p;
+}
 
 describe("placePop", () => {
 	it("red-first (an explainer cut off by its window): an anchor with no room to its left opens to the right", () => {
@@ -42,7 +52,7 @@ describe("placePop", () => {
 
 	it("when neither side fits, starts at the box's left edge and is no wider than the box", () => {
 		const narrow = { left: 0, top: 0, right: 250, bottom: 800 };
-		const p = placePop(at(100, 100), 300, 150, narrow);
+		const p = placed(at(100, 100), 300, 150, narrow);
 		expect(p.width).toBe(234);
 		expect(p.shift).toBe(-92);
 		// Its left edge (anchor's left + shift) is 8px in, its right edge (left + width) 8px in from the right.
@@ -59,11 +69,11 @@ describe("placePop", () => {
 		// A short window: 200px of room above the anchor, 100px below, and a 260px explainer. It used to open below and
 		// run 160px past the window's bottom, where the window hid it.
 		const shortBox = { left: 0, top: 0, right: 400, bottom: 340 };
-		const p = placePop(at(340, 216), 300, 260, shortBox);
+		const p = placed(at(340, 216), 300, 260, shortBox);
 		expect(p.up).toBe(true);
 		// Room above: the anchor's top (216) less the gap (8) less the box's top and margin (0 + 8).
 		expect(p.maxHeight).toBe(200);
-		const below = placePop(at(340, 60), 300, 260, shortBox);
+		const below = placed(at(340, 60), 300, 260, shortBox);
 		expect(below.up).toBe(false);
 		// Room below: the box's bottom less the margin (340 - 8) less the anchor's bottom (76) and the gap.
 		expect(below.maxHeight).toBe(248);
@@ -100,6 +110,165 @@ describe("placePop from a line inside its anchor", () => {
 		const narrow = { left: 0, top: 538, right: 250, bottom: 700 };
 		const p = placePopAt(fact, 300, 45, narrow, () => 60, line);
 		expect(p).toMatchObject({ width: 234, up: true, maxHeight: null, offset: 696 - 662 + 8 });
+	});
+});
+
+/** A text popover's computed style: 18.75px lines, 6px padding, a 1px border. Two lines with those: 51.5px. */
+const STYLE = {
+	lineHeight: "18.75px",
+	fontSize: "15px",
+	paddingTop: "6px",
+	paddingBottom: "6px",
+	borderTopWidth: "1px",
+	borderBottomWidth: "1px",
+};
+
+describe("readableHeight", () => {
+	it("is READABLE_LINES of a popover's lines, with its padding and its border", () => {
+		expect(READABLE_LINES).toBe(2);
+		expect(readableHeight(STYLE)).toBe(2 * 18.75 + 6 + 6 + 1 + 1);
+	});
+
+	it("reads a line-height of `normal` as 1.25 times the font size, and a length it cannot read as 0", () => {
+		expect(readableHeight({ ...STYLE, lineHeight: "normal" })).toBe(2 * 1.25 * 15 + 14);
+		const unread = {
+			lineHeight: "",
+			fontSize: "",
+			paddingTop: "",
+			paddingBottom: "",
+			borderTopWidth: "",
+			borderBottomWidth: "",
+		};
+		expect(readableHeight(unread)).toBe(0);
+	});
+});
+
+describe("placePop with a floor (the least a text popover is drawn at)", () => {
+	/** A 34px cut line in the middle of a clip `tall` px high: the last line of its fact. */
+	const middle = (tall: number) => {
+		const top = (tall - 34) / 2;
+		return {
+			clip: { left: 0, top: 0, right: 940, bottom: tall },
+			line: { left: 20, top, right: 320, bottom: top + 34 },
+			fact: { left: 20, top: top - 40, right: 320, bottom: top + 34 },
+		};
+	};
+	/** `readableHeight(STYLE)`, as its own test shows: two lines with the padding and border. A 45px explainer's floor
+	 *  is all of it. */
+	const FLOOR = 51.5;
+
+	it("red-first (a cut line's explainer capped to 37, 27 and 17px in 140, 120 and 100px clips): it is laid over its line, whole, inside the clip", () => {
+		for (const tall of [140, 120, 100]) {
+			const { clip, line, fact } = middle(tall);
+			// Without a floor: capped to the room on either side of its line, under its 45px.
+			expect(placePop(fact, 300, 45, clip, 8, 8, line)).toMatchObject({
+				maxHeight: (tall - 34) / 2 - 16,
+			});
+			// Over its line, from the line's top: whole, and inside the clip's margins.
+			const p = placed(fact, 300, 45, clip, 8, 8, line, FLOOR);
+			expect(p).toMatchObject({ up: false, maxHeight: null, offset: line.top - fact.top });
+			const top = fact.top + (p.offset ?? Number.NaN);
+			expect(top).toBeGreaterThanOrEqual(clip.top + 8);
+			expect(top + 45).toBeLessThanOrEqual(clip.bottom - 8);
+		}
+	});
+
+	it("with room beside its line, it is drawn there as before: whole, or capped no lower than its floor", () => {
+		const { clip, line, fact } = middle(162);
+		expect(placed(fact, 300, 45, clip, 8, 8, line, FLOOR)).toMatchObject({
+			up: false,
+			maxHeight: null,
+			offset: line.bottom - fact.top + 8,
+		});
+		// A 400px explainer in a 300px clip, its line at 100-134: 150px below the line, more than its 51px floor, so it is
+		// capped beside its line, not laid over it.
+		const clip300 = { left: 0, top: 0, right: 940, bottom: 300 };
+		const low = { left: 20, top: 100, right: 320, bottom: 134 };
+		const lowFact = { left: 20, top: 60, right: 320, bottom: 134 };
+		expect(placed(lowFact, 300, 400, clip300, 8, 8, low, FLOOR)).toMatchObject({
+			up: false,
+			maxHeight: 150,
+			offset: 134 - 60 + 8,
+		});
+	});
+
+	it("is pulled up to stay inside the clip when its line sits low", () => {
+		// An 80px clip, the line at 42-76: 26px of room above it, none below. From the line's top (42) it would end at 87,
+		// past the clip's bottom margin (72), so it starts at 27.
+		const clip = { left: 0, top: 0, right: 940, bottom: 80 };
+		const line = { left: 20, top: 42, right: 320, bottom: 76 };
+		const fact = { left: 20, top: 2, right: 320, bottom: 76 };
+		expect(placed(fact, 300, 45, clip, 8, 8, line, FLOOR)).toMatchObject({
+			up: false,
+			maxHeight: null,
+			offset: 27 - 2,
+		});
+	});
+
+	it("taller than the clip, it takes the clip's whole inner height, from its top margin", () => {
+		// A 300px explainer (floor 51px, two of its lines) in a 100px clip: 84px inside the margins.
+		const { clip, line, fact } = middle(100);
+		expect(placed(fact, 300, 300, clip, 8, 8, line, FLOOR)).toMatchObject({
+			up: false,
+			maxHeight: 84,
+			offset: 8 - fact.top,
+		});
+	});
+
+	it("red-first (a sliver of a window): no room when the clip's inner height is under its floor", () => {
+		// A 56px clip: 40px inside its margins, under the 45px explainer's floor (all of it). Nothing readable fits.
+		const clip = { left: 0, top: 0, right: 940, bottom: 56 };
+		const line = { left: 20, top: 11, right: 320, bottom: 45 };
+		const fact = { left: 20, top: -29, right: 320, bottom: 45 };
+		expect(placePop(fact, 300, 45, clip, 8, 8, line, FLOOR)).toBeNull();
+		// 61px: 45px inside, its floor exactly. It fits whole, from the top margin.
+		expect(placePop(fact, 300, 45, { ...clip, bottom: 61 }, 8, 8, line, FLOOR)).toMatchObject({
+			maxHeight: null,
+			offset: 8 - fact.top,
+		});
+		// A tall explainer's floor is two of its lines, 51px: none in a 66px clip (50 inside), room in a 67px one.
+		expect(placePop(fact, 300, 300, { ...clip, bottom: 66 }, 8, 8, line, FLOOR)).toBeNull();
+		expect(placePop(fact, 300, 300, { ...clip, bottom: 67 }, 8, 8, line, FLOOR)).toMatchObject({
+			maxHeight: 51,
+		});
+	});
+
+	it("with no floor (the default), it is never laid over its line and always has room", () => {
+		const { clip, line, fact } = middle(100);
+		expect(placePop(fact, 300, 45, clip, 8, 8, line)).toMatchObject({ maxHeight: 17 });
+		expect(placePop(fact, 300, 45, { ...clip, bottom: 20 }, 8, 8, line)).not.toBeNull();
+	});
+
+	it("placePopAt hands the floor on, judged by the height at the width it is drawn at", () => {
+		// Narrowed from 300 to 234px, a 30px explainer wraps to 60px, and its floor becomes two of its lines (51px).
+		const narrow = { left: 0, top: 0, right: 250, bottom: 70 };
+		const line = { left: 100, top: 20, right: 240, bottom: 40 };
+		const fact = { left: 100, top: 0, right: 240, bottom: 40 };
+		// 54px inside the margins: laid over its line from the top margin, capped at 54px.
+		expect(placePopAt(fact, 300, 30, narrow, () => 60, line, FLOOR)).toMatchObject({
+			width: 234,
+			up: false,
+			maxHeight: 54,
+			offset: 8,
+		});
+		// 44px inside: room for its 30px at 300px wide, none for its 60px at the 234px it is drawn at.
+		expect(placePopAt(fact, 300, 30, { ...narrow, bottom: 60 }, () => 60, line, FLOOR)).toBeNull();
+		// No room at its own width is no room narrowed (narrower, it is no shorter): it is not measured again.
+		let calls = 0;
+		const none = placePopAt(
+			fact,
+			300,
+			60,
+			{ ...narrow, bottom: 60 },
+			() => {
+				calls++;
+				return 90;
+			},
+			line,
+			FLOOR,
+		);
+		expect(none).toBeNull();
+		expect(calls).toBe(0);
 	});
 });
 
@@ -140,10 +309,10 @@ describe("popStyle", () => {
 		// and a border would be drawn wider than it was placed; the page's base layer happens to set border-box today,
 		// but the placed style must not depend on that.
 		for (const p of [
-			placePop(at(340, 100), 300, 150, BOX),
-			placePop(at(20, 100), 300, 150, BOX),
-			placePop(at(100, 100), 300, 150, { left: 0, top: 0, right: 250, bottom: 800 }),
-			placePop(at(340, 216), 300, 260, { left: 0, top: 0, right: 400, bottom: 340 }),
+			placed(at(340, 100), 300, 150, BOX),
+			placed(at(20, 100), 300, 150, BOX),
+			placed(at(100, 100), 300, 150, { left: 0, top: 0, right: 250, bottom: 800 }),
+			placed(at(340, 216), 300, 260, { left: 0, top: 0, right: 400, bottom: 340 }),
 		])
 			expect(popStyle(p).boxSizing).toBe("border-box");
 	});
