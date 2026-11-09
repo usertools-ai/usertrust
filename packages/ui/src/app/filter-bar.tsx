@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { memo, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
 	activeFilterCount,
 	EMPTY_FILTERS,
@@ -155,9 +155,11 @@ export const FilterBar = memo(function FilterBar(props: {
 	onChange(f: FilterState): void;
 	/** The rows are a held view (the moment after a new position lands): the facets' counts are dimmed and busy. */
 	held?: boolean;
-	/** Drawn after the bar and before the active chips (the desk's record count): in the DOM, so the order on screen
-	 *  is the order a screen reader and Tab meet, with the chips on a row of their own below it. */
-	beside?: ReactNode;
+	/** The desk's record count, drawn after the bar and before the active chips as a status that dims with the list:
+	 *  in the DOM, so the order on screen is the order a screen reader and Tab meet, with the chips on a row of their own
+	 *  below it. Text, not a node, so the memo compares it by value: a node made in the page's render is new each time,
+	 *  and the bar was drawn again with every answer. */
+	count?: string;
 }): React.JSX.Element {
 	const { rows, filters, onChange } = props;
 	const held = props.held === true;
@@ -415,7 +417,11 @@ export const FilterBar = memo(function FilterBar(props: {
 					/>
 				</span>
 			</div>
-			{props.beside}
+			{props.count !== undefined && (
+				<span className="ut-label" role="status" data-held={held}>
+					{props.count}
+				</span>
+			)}
 			{isFiltering(filters) && (
 				<div className="ut-active">
 					<span className="ut-label">Filtering</span>

@@ -121,19 +121,15 @@ export function DeskShell(): React.JSX.Element {
 				</div>
 			)}
 			<div className="ut-dk-filters">
-				{/* The count sits between the bar and the active chips (`beside`), so the chips take a row of their own
+				{/* The bar draws the count between itself and the active chips, so the chips take a row of their own
 				    below the bar and the count. A live region: a filter that changes how many rows are in view says so
-				    to a screen reader. */}
+				    to a screen reader. Every prop is a name, so the memoized bar is drawn again only when one changes. */}
 				<FilterBar
 					rows={shownRows}
 					filters={filters}
 					onChange={setFilters}
 					held={held}
-					beside={
-						<span className="ut-label" role="status" data-held={held}>
-							{count}
-						</span>
-					}
+					count={count}
 				/>
 			</div>
 			<main className="ut-dk-desk" style={{ gridTemplateRows: HOME_ROWS }}>
