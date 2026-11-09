@@ -4,7 +4,8 @@
 /**
  * The desk's colours, fixed for the session. A category keeps the colour it was given in every view, whatever the
  * filter, the range or the position: the map is built once per dimension, and a key first seen on the live tail takes
- * the next free slot without repainting any other.
+ * the next free slot without repainting any other. So does a held key the whole-vault ranking lacks: the totals and
+ * the ledger load race, and a category whose first records came between the two is held but not ranked.
  *
  * The ranking comes from the server's whole-vault totals when they arrived. The rows the page holds are only the
  * labelled FALLBACK, for a request that failed or timed out: they can miss a category whose spend is all in older
@@ -63,7 +64,11 @@ export class ColorBook {
 			this.chosen.totals === null
 				? rankColors([...allRows], dim)
 				: colorsFromRanking(dim, rankingFrom(this.chosen.totals, dim));
-		this.entries.set(dim, { map, scanned: allRows.length, seen: keysOf(dim, allRows, 0) });
+		// Every held key has its colour before it counts as seen: `observe` gives nothing to a key it has seen, so a held
+		// key the ranking lacks, marked seen without one, stayed muted for the session.
+		const seen = keysOf(dim, allRows, 0);
+		for (const key of seen) map.add(key);
+		this.entries.set(dim, { map, scanned: allRows.length, seen });
 		return map;
 	}
 

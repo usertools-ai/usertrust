@@ -177,6 +177,25 @@ describe("ColorBook with the totals", () => {
 		expect(fromVault.source).toBe("whole vault");
 	});
 
+	it("red-first (a category the totals had not seen yet): a held key missing from the whole-vault ranking still takes a free slot, and keeps it", () => {
+		// The totals and the ledger load race: a category whose first records were written after the totals were read,
+		// but before the rows came back, is held without being ranked. It was marked seen without a colour, and the live
+		// tail gives nothing to a key already seen, so it stayed muted for the whole session with series slots free.
+		const book = new ColorBook();
+		const totals: TotalsPayload = {
+			...payload(),
+			dims: { ...payload().dims, lane: [{ key: "a", spendUt: 10, calls: 1 }] },
+		};
+		const rows = [row({ pos: 0, actor: "a", costUt: 9 }), row({ pos: 1, actor: "b", costUt: 5 })];
+		const map = book.mapFor("lane", rows, true, totals);
+		expect(map.of("a")).toBe(SERIES[0]);
+		expect(map.of("b")).toBe(SERIES[1]);
+		// More of b on the live tail keeps the colour it has.
+		book.observe("lane", [...rows, row({ pos: 2, actor: "b", costUt: 3 })]);
+		expect(map.of("b")).toBe(SERIES[1]);
+		expect(map.of("a")).toBe(SERIES[0]);
+	});
+
 	it("still gives a key first seen on the live tail the next free slot", () => {
 		const book = new ColorBook();
 		const rows = heldRows();
