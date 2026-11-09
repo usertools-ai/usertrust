@@ -276,12 +276,14 @@ describe("a list's cutter keeps a past row's identity while its record and its s
 	beforeEach(() => {
 		cutter = createCutter();
 	});
-	// What the page draws, and the row it finds again by hash for the open inspector (app.tsx).
+	// What the page draws and shows (it commits the drawn list once React has committed it), and the row it finds again
+	// by hash for the open inspector.
 	const opened = (rows: LedgerRow[], a: AtPayload | null = answer): LedgerRow => {
 		const view = listView(
 			{ rows, at: a, filters: EMPTY_FILTERS, phase: "loaded", summary: null },
 			cutter,
 		);
+		cutter.commit(view.shownRows);
 		const found = view.shownRows.find((r) => r.hash === row(1).hash);
 		if (found === undefined) throw new Error("row 1 is not drawn");
 		return found;
@@ -295,8 +297,11 @@ describe("a list's cutter keeps a past row's identity while its record and its s
 		const check = { row: first, value: "receipt" };
 		// An unrelated append: a new rows array with the same row objects, and the same answer (its re-read read the same).
 		expect(heldFor(check, opened([...live, row(3)]))).toBe("receipt");
-		// The cutter itself: the same object for that row across two draws with the same record and answer.
-		const a = rowOne(cutter.cut(live, answer));
+		// The cutter itself: the same object for that row across two draws with the same record and answer, the first
+		// one shown.
+		const drawn = cutter.cut(live, answer);
+		cutter.commit(drawn);
+		const a = rowOne(drawn);
 		expect(a).toBeDefined();
 		expect(rowOne(cutter.cut(live, answer))).toBe(a);
 	});
@@ -363,15 +368,61 @@ describe("a list's cutter keeps a past row's identity while its record and its s
 		expect(heldFor(check, opened(live, next))).toBe("receipt");
 	});
 
+	it("red-first (a draw thrown away before it was shown): a cut that is never committed leaves the projection on screen to reuse", () => {
+		// The page shows row 1 at the point, with a check's receipt held for it. A move to another reading starts a draw
+		// that React throws away (the operator came back before it was shown), so it is never committed. Kept as the
+		// cutter's state, that draw ended the projection on screen, and the page's next draw at the point lost the receipt.
+		const check = { row: opened(live), value: "receipt" };
+		cutter.cut(live, at({ pos: 2, head: 3, statusAt: { [row(1).hash]: "released" } }));
+		expect(heldFor(check, opened(live))).toBe("receipt");
+	});
+
+	it("red-first: a live draw that is never committed does not end the projection either", () => {
+		const check = { row: opened(live), value: "receipt" };
+		cutter.live(live);
+		expect(heldFor(check, opened(live))).toBe("receipt");
+	});
+
+	it("the draw committed is the one kept, whichever of the draws made since the last commit it is", () => {
+		// Two draws made before a commit (a render restarted, or run twice): the one committed decides what the next cut
+		// reuses.
+		const first = cutter.cut(live, answer);
+		const second = cutter.cut(live, answer);
+		expect(rowOne(second)).not.toBe(rowOne(first));
+		cutter.commit(second);
+		expect(rowOne(cutter.cut(live, answer))).toBe(rowOne(second));
+		// Committing a list this cutter did not draw changes nothing.
+		cutter.commit([...live]);
+		expect(rowOne(cutter.cut(live, answer))).toBe(rowOne(second));
+		// Nor does a draw made before the last commit: a commit drops every draw staged before it.
+		const stale = cutter.cut(
+			live,
+			at({ pos: 2, head: 3, statusAt: { [row(1).hash]: "released" } }),
+		);
+		const newer = cutter.cut(live, answer);
+		cutter.commit(newer);
+		cutter.commit(stale);
+		expect(rowOne(cutter.cut(live, answer))).toBe(rowOne(newer));
+		// A live draw, committed, ends it; its list is the rows themselves.
+		const shownLive = cutter.live(live);
+		expect(shownLive).toBe(live);
+		cutter.commit(shownLive);
+		expect(rowOne(cutter.cut(live, answer))).not.toBe(rowOne(second));
+	});
+
 	it("two cutters interleaved keep their own projections", () => {
 		const other = createCutter();
-		const mine = rowOne(cutter.cut(live, answer));
-		const theirs = rowOne(other.cut(live, answer));
+		const drawnMine = cutter.cut(live, answer);
+		cutter.commit(drawnMine);
+		const drawnTheirs = other.cut(live, answer);
+		other.commit(drawnTheirs);
+		const mine = rowOne(drawnMine);
+		const theirs = rowOne(drawnTheirs);
 		expect(mine).toBeDefined();
 		expect(theirs).not.toBe(mine);
 		// The other list draws the row as it is now, then live: its own run ends, this one's does not.
-		other.cut(live, at({ pos: 2, head: 3, statusAt: {} }));
-		other.live();
+		other.commit(other.cut(live, at({ pos: 2, head: 3, statusAt: {} })));
+		other.commit(other.live(live));
 		expect(rowOne(cutter.cut(live, answer))).toBe(mine);
 		expect(rowOne(other.cut(live, answer))).not.toBe(theirs);
 	});

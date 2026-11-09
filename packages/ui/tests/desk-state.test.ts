@@ -346,6 +346,15 @@ describe("the provider keeps what the page had", () => {
 		expect(src).not.toMatch(/^\t[a-z]+\.current = /m);
 	});
 
+	it("red-first (a render thrown away ended a projection on screen): commits the drawn list to the cutter after React commits it", () => {
+		// Pinned in the source (no DOM here): the deferred list is drawn in a render React may throw away, so the cutter
+		// only stages there (`listView`), and the draw on screen is committed from a layout effect, once, at one place.
+		expect(src).toContain(
+			"useLayoutEffect(() => cutter.commit(list.shownRows), [cutter, list.shownRows]);",
+		);
+		expect(src.match(/cutter\.commit\(/g)).toHaveLength(1);
+	});
+
 	it("reads the level and the breakdown from the list as drawn: its rows and its filters, and the window", () => {
 		// The formatter may break the call over lines: compare with whitespace and trailing commas removed.
 		const flat = (t: string): string => t.replace(/\s+/g, "").replace(/,\)/g, ")");

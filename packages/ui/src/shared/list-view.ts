@@ -64,10 +64,7 @@ function drawnRows(
 	at: AtPayload | null,
 	cutter: Cutter | undefined,
 ): LedgerRow[] {
-	if (at === null) {
-		cutter?.live();
-		return rows;
-	}
+	if (at === null) return cutter === undefined ? rows : cutter.live(rows);
 	return cutter === undefined ? cutRows(rows, at) : cutter.cut(rows, at);
 }
 
