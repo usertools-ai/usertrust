@@ -275,6 +275,11 @@ describe("useWindow", () => {
 		);
 		expect(hook).toContain("outside(lineBox ?? at, clip)");
 		expect(hook).toMatch(/placePopAt\(at, [^\n]*, lineBox\)/);
+		// The line is watched with the boxes around it (its window, its body, its fact): a line that changes size inside a
+		// fact whose own box does not change still places its explainer again.
+		expect(hook).toMatch(
+			/whenMoved\(\s*\[\.\.\.clippers\(pop\), anchor, \.\.\.\(line !== null && line !== anchor \? \[line\] : \[\]\)\],/,
+		);
 	});
 
 	it("outside a Window, nothing is dimmed (and asking does not throw)", () => {
