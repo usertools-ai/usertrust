@@ -1,0 +1,76 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
+/**
+ * Where a text popover opens, from where its anchor sits on screen. A popover lined up with one fixed edge of its
+ * anchor was cut off whenever the anchor sat on the other side of a narrow box: an explainer that opens to the left,
+ * on a fact in a window's first column, ran past the window's edge and the window hid it. Pure, so the rule is tested
+ * here and the hook that measures the page only feeds it.
+ */
+
+/** A box in viewport pixels, as `getBoundingClientRect` reports it. */
+export interface Box {
+	left: number;
+	top: number;
+	right: number;
+	bottom: number;
+}
+
+export interface PopPlace {
+	/** Lined up with the anchor's right edge, opening leftward (`end`, the default), or with its left edge (`start`). */
+	side: "start" | "end";
+	/** When neither side fits: the popover's left edge, in pixels from the anchor's left edge, at the box's left edge. */
+	shift: number | null;
+	/** The width to draw it at: its own, or the box's when the box is narrower. */
+	width: number;
+	/** Above the anchor: below it would leave the box, and above fits whole or has more room. */
+	up: boolean;
+	/** When neither side has room for all of it: no taller than the room on the side it opens to (it scrolls inside).
+	 *  Null when it fits whole. */
+	maxHeight: number | null;
+}
+
+/** The part of `a` inside `b`. */
+export function intersect(a: Box, b: Box): Box {
+	return {
+		left: Math.max(a.left, b.left),
+		top: Math.max(a.top, b.top),
+		right: Math.min(a.right, b.right),
+		bottom: Math.min(a.bottom, b.bottom),
+	};
+}
+
+/**
+ * Where a `w`×`h` popover opens from `anchor` so it stays inside `clip` (the box that would cut it: its window's
+ * visible box, already cut to the viewport), `margin` pixels in from its edges, `gap` pixels from the anchor:
+ * - across: lined up with the anchor's right edge if that fits (the default); else with its left edge if that fits;
+ *   else shifted to start at the box's left edge, and no wider than the box;
+ * - down or up: below the anchor if it fits whole there; else above if it fits whole there; else toward the side
+ *   with more room, and no taller than that room (it scrolls inside), so no part of it is ever out of the box.
+ */
+export function placePop(
+	anchor: Box,
+	w: number,
+	h: number,
+	clip: Box,
+	gap = 8,
+	margin = 8,
+): PopPlace {
+	const lo = clip.left + margin;
+	const hi = clip.right - margin;
+	const width = Math.min(w, Math.max(0, hi - lo));
+	let side: PopPlace["side"] = "end";
+	let shift: number | null = null;
+	if (anchor.right - width >= lo && anchor.right <= hi) side = "end";
+	else if (anchor.left >= lo && anchor.left + width <= hi) side = "start";
+	else {
+		side = "start";
+		shift = Math.min(Math.max(lo, anchor.left), hi - width) - anchor.left;
+	}
+	const roomBelow = clip.bottom - margin - (anchor.bottom + gap);
+	const roomAbove = anchor.top - gap - (clip.top + margin);
+	if (h <= roomBelow) return { side, shift, width, up: false, maxHeight: null };
+	if (h <= roomAbove) return { side, shift, width, up: true, maxHeight: null };
+	const up = roomAbove > roomBelow;
+	return { side, shift, width, up, maxHeight: Math.max(0, Math.floor(up ? roomAbove : roomBelow)) };
+}

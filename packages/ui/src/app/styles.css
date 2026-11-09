@@ -645,12 +645,8 @@ body {
 		right: 0;
 		width: 300px;
 	}
-	/* Opens from the left edge of its anchor, for a fact in the first column. */
-	.ut-pop.text.start {
-		left: 0;
-		right: auto;
-		width: min(300px, calc(100vw - 48px));
-	}
+	/* The side an explainer opens to is not fixed here: it is chosen from where its anchor sits on screen (summary-strip.tsx,
+	   usePopPlace), so a fact in any column of any window shows its whole text. */
 	.ut-pop.text code {
 		font: 400 11.5px/1.5 var(--mono);
 		color: var(--ink);

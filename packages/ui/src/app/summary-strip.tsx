@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { type CSSProperties, type ReactNode, useEffect, useRef, useState } from "react";
+import {
+	type CSSProperties,
+	type ReactNode,
+	type RefObject,
+	useEffect,
+	useLayoutEffect,
+	useRef,
+	useState,
+} from "react";
 import markUrl from "../../brand/usertrust-mark.svg?inline";
 import type { AtPayload, SummaryPayload } from "../shared/api.js";
 import { windowNote } from "../shared/asof.js";
@@ -29,6 +37,7 @@ import {
 	UT_KEY,
 } from "../shared/format.js";
 import { KIT_MARK_URL, KIT_TIMEOUT_MS } from "../shared/kit.js";
+import { type Box, intersect, placePop } from "../shared/pop-place.js";
 import { shownLabel } from "../shared/timeline-view.js";
 import type { LiveState } from "./store.js";
 import { TickingFigure } from "./ticking-figure.js";
@@ -150,6 +159,50 @@ function usePopover(): {
 	return { open, toggle: () => setOpen((o) => !o), rootRef };
 }
 
+/** The box that would cut `el`: every ancestor that clips its content (a window, its body), and the viewport. */
+function clipBox(el: HTMLElement): Box {
+	let box: Box = { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
+	for (let a = el.parentElement; a !== null; a = a.parentElement) {
+		const cs = getComputedStyle(a);
+		if (cs.overflowX !== "visible" || cs.overflowY !== "visible")
+			box = intersect(a.getBoundingClientRect(), box);
+	}
+	return box;
+}
+
+/**
+ * Places an open text popover from where its anchor sits on screen (`placePop`), before it paints: toward the side
+ * with room inside the box that would cut it, and above its anchor when there is no room below. A side fixed in the
+ * stylesheet was cut off whenever the anchor sat in the other half of a narrow window.
+ */
+function usePopPlace(
+	open: boolean,
+	popRef: RefObject<HTMLElement | null>,
+): CSSProperties | undefined {
+	const [style, setStyle] = useState<CSSProperties | undefined>(undefined);
+	useLayoutEffect(() => {
+		const pop = popRef.current;
+		const anchor = pop?.offsetParent;
+		if (!open || pop == null || !(anchor instanceof HTMLElement)) {
+			setStyle(undefined);
+			return;
+		}
+		const r = pop.getBoundingClientRect();
+		const p = placePop(anchor.getBoundingClientRect(), r.width, r.height, clipBox(pop));
+		setStyle({
+			...(p.shift !== null
+				? { left: p.shift, right: "auto" }
+				: p.side === "start"
+					? { left: 0, right: "auto" }
+					: { left: "auto", right: 0 }),
+			width: p.width,
+			...(p.up ? { top: "auto", bottom: "calc(100% + 8px)" } : {}),
+			...(p.maxHeight !== null ? { maxHeight: p.maxHeight } : {}),
+		});
+	}, [open, popRef]);
+	return style;
+}
+
 /** The explainer a bare "absent" never had: a small popover, toggled by click or keyboard, closed by Escape. */
 function AnchorFact(props: {
 	anchorFile: SummaryPayload["anchorFile"];
@@ -158,6 +211,8 @@ function AnchorFact(props: {
 }): React.JSX.Element {
 	const shown = anchorView(props.anchorFile);
 	const { open, toggle, rootRef } = usePopover();
+	const popRef = useRef<HTMLDivElement>(null);
+	const placed = usePopPlace(open, popRef);
 	const [before, after] = shown.explainer.split(ANCHOR_VERIFY_COMMAND);
 	return (
 		<div className="ut-fact detail" id="ut-fact-anchor">
@@ -176,7 +231,7 @@ function AnchorFact(props: {
 					i
 				</button>
 				{open && (
-					<div className="ut-pop text" role="note">
+					<div ref={popRef} className="ut-pop text" role="note" style={placed}>
 						{before}
 						<code>{ANCHOR_VERIFY_COMMAND}</code>
 						{after}
@@ -195,6 +250,8 @@ function AnchorFact(props: {
  */
 function SpendFact(props: { spentUt: number; past: boolean }): React.JSX.Element {
 	const { open, toggle, rootRef } = usePopover();
+	const popRef = useRef<HTMLDivElement>(null);
+	const placed = usePopPlace(open, popRef);
 	return (
 		<div
 			className="ut-fact"
@@ -223,7 +280,7 @@ function SpendFact(props: { spentUt: number; past: boolean }): React.JSX.Element
 					i
 				</button>
 				{open && (
-					<div className="ut-pop text start" role="note">
+					<div ref={popRef} className="ut-pop text" role="note" style={placed}>
 						{UT_KEY}
 					</div>
 				)}
@@ -317,6 +374,7 @@ function FactLine(props: {
 	const [cut, setCut] = useState(false);
 	const [open, setOpen] = useState(false);
 	const popRef = useRef<HTMLSpanElement>(null);
+	const placed = usePopPlace(cut && open, popRef);
 	// biome-ignore lint/correctness/useExhaustiveDependencies: the line is measured again when its text changes
 	useEffect(() => {
 		if (el === null || typeof ResizeObserver === "undefined") return;
@@ -371,7 +429,7 @@ function FactLine(props: {
 				{props.children ?? props.text}
 			</span>
 			{cut && open && (
-				<span ref={popRef} className="ut-pop text" role="note">
+				<span ref={popRef} className="ut-pop text" role="note" style={placed}>
 					{props.text}
 				</span>
 			)}
