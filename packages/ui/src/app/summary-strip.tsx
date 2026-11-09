@@ -41,6 +41,7 @@ import { KIT_MARK_URL, KIT_TIMEOUT_MS } from "../shared/kit.js";
 import {
 	type Box,
 	intersect,
+	measure,
 	outside,
 	placePopAt,
 	popStyle,
@@ -206,18 +207,6 @@ function usePopPlace(
 			setStyle(undefined);
 			return;
 		}
-		// Its size as the stylesheet draws it (`size(null)`) or at width `w` (narrowed to fit, it wraps and grows), with
-		// what the last placement set lifted for the reading and put back.
-		const size = (width: number | null): DOMRect => {
-			const s = pop.style;
-			const was = { width: s.width, maxHeight: s.maxHeight };
-			s.width = width === null ? "" : `${width}px`;
-			s.maxHeight = "";
-			const r = pop.getBoundingClientRect();
-			s.width = was.width;
-			s.maxHeight = was.maxHeight;
-			return r;
-		};
 		let last = "";
 		const place = (): void => {
 			const at = anchor.getBoundingClientRect();
@@ -228,8 +217,8 @@ function usePopPlace(
 				close();
 				return;
 			}
-			const r = size(null);
-			const p = placePopAt(at, r.width, r.height, clip, (w) => size(w).height);
+			const r = measure(pop, null);
+			const p = placePopAt(at, r.width, r.height, clip, (w) => measure(pop, w).height);
 			const next = popStyle(p);
 			const key = JSON.stringify(next);
 			if (key === last) return;
@@ -237,13 +226,18 @@ function usePopPlace(
 			setStyle(next);
 		};
 		place();
-		return whenMoved([...clippers(pop), anchor], place, {
-			view: window,
-			doc: document,
-			frame: (run) => requestAnimationFrame(run),
-			cancelFrame: (id) => cancelAnimationFrame(id),
-			Observer: typeof ResizeObserver === "undefined" ? null : ResizeObserver,
-		});
+		return whenMoved(
+			[...clippers(pop), anchor],
+			place,
+			{
+				view: window,
+				doc: document,
+				frame: (run) => requestAnimationFrame(run),
+				cancelFrame: (id) => cancelAnimationFrame(id),
+				Observer: typeof ResizeObserver === "undefined" ? null : ResizeObserver,
+			},
+			(t) => t instanceof Node && pop.contains(t),
+		);
 	}, [open, popRef, close]);
 	return style;
 }

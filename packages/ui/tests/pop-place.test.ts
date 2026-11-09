@@ -4,6 +4,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	intersect,
+	measure,
 	outside,
 	type Page,
 	placePop,
@@ -136,15 +137,16 @@ describe("popStyle", () => {
 
 /** A page with nothing in it but what `whenMoved` uses: its listeners, its size observer and its frames. */
 function fakePage(withObserver = true) {
-	const on = new Map<string, Set<() => void>>();
+	type Heard = (e: { target: unknown }) => void;
+	const on = new Map<string, Set<Heard>>();
 	const key = (who: string, type: string, capture?: boolean): string =>
 		`${who} ${type} ${capture === true ? "capture" : "bubble"}`;
 	const target = (who: string) => ({
-		addEventListener(type: string, fn: () => void, capture?: boolean): void {
+		addEventListener(type: string, fn: Heard, capture?: boolean): void {
 			const k = key(who, type, capture);
 			on.set(k, (on.get(k) ?? new Set()).add(fn));
 		},
-		removeEventListener(type: string, fn: () => void, capture?: boolean): void {
+		removeEventListener(type: string, fn: Heard, capture?: boolean): void {
 			on.get(key(who, type, capture))?.delete(fn);
 		},
 	});
@@ -178,8 +180,8 @@ function fakePage(withObserver = true) {
 	};
 	return {
 		page,
-		fire(who: string, type: string, capture?: boolean): void {
-			for (const fn of on.get(key(who, type, capture)) ?? []) fn();
+		fire(who: string, type: string, capture?: boolean, target: unknown = null): void {
+			for (const fn of on.get(key(who, type, capture)) ?? []) fn({ target });
 		},
 		resized(): void {
 			sized?.();
@@ -203,6 +205,9 @@ function fakePage(withObserver = true) {
 const WIN = { id: "window" } as unknown as Element;
 const BODY = { id: "body" } as unknown as Element;
 const ANCHOR = { id: "anchor" } as unknown as Element;
+const POP = { id: "pop" };
+/** No scroll is the popover's own. */
+const NONE = (): boolean => false;
 
 describe("whenMoved", () => {
 	it("red-first (an explainer placed once, for the box it opened in): a resize, a scroll and a change of size each place it again, on the next frame", () => {
@@ -210,7 +215,7 @@ describe("whenMoved", () => {
 		// and ran past the home window's edge; a narrower browser left it wider than its window.
 		const f = fakePage();
 		let placed = 0;
-		whenMoved([BODY, WIN, ANCHOR], () => placed++, f.page);
+		whenMoved([BODY, WIN, ANCHOR], () => placed++, f.page, NONE);
 		f.fire("window", "resize");
 		expect(placed).toBe(0);
 		f.runFrames();
@@ -226,7 +231,7 @@ describe("whenMoved", () => {
 	it("places it once a frame, however many changes arrive in that frame", () => {
 		const f = fakePage();
 		let placed = 0;
-		whenMoved([BODY], () => placed++, f.page);
+		whenMoved([BODY], () => placed++, f.page, NONE);
 		f.fire("window", "resize");
 		f.fire("document", "scroll", true);
 		f.fire("document", "scroll", true);
@@ -236,22 +241,41 @@ describe("whenMoved", () => {
 		expect(placed).toBe(1);
 	});
 
+	it("red-first (a capped explainer that could not be scrolled): a scroll of the popover itself is not heard", () => {
+		// Heard, a reader's scroll inside a capped explainer placed it again, and the reading that placement made threw
+		// the reader back to the top. Its own scroll moves nothing around it.
+		const f = fakePage();
+		let placed = 0;
+		whenMoved(
+			[BODY],
+			() => placed++,
+			f.page,
+			(t) => t === POP,
+		);
+		f.fire("document", "scroll", true, POP);
+		f.runFrames();
+		expect(placed).toBe(0);
+		f.fire("document", "scroll", true, BODY);
+		f.runFrames();
+		expect(placed).toBe(1);
+	});
+
 	it("hears a scroll of any scroller, in the capture phase (a window body's scroll does not bubble), and the browser's size", () => {
 		const f = fakePage();
-		whenMoved([BODY], () => {}, f.page);
+		whenMoved([BODY], () => {}, f.page, NONE);
 		expect(f.listening()).toEqual(["document scroll capture", "window resize bubble"]);
 	});
 
 	it("watches the size of every box it is given: its window, the window's body, its anchor", () => {
 		const f = fakePage();
-		whenMoved([BODY, WIN, ANCHOR], () => {}, f.page);
+		whenMoved([BODY, WIN, ANCHOR], () => {}, f.page, NONE);
 		expect(f.observed).toEqual([BODY, WIN, ANCHOR]);
 	});
 
 	it("stops: no listener left, the observer disconnected, and a frame not yet run cancelled", () => {
 		const f = fakePage();
 		let placed = 0;
-		const stop = whenMoved([BODY], () => placed++, f.page);
+		const stop = whenMoved([BODY], () => placed++, f.page, NONE);
 		f.fire("window", "resize");
 		expect(f.pending()).toBe(1);
 		stop();
@@ -265,12 +289,63 @@ describe("whenMoved", () => {
 	it("in a browser with no size observer, still places it again after a resize or a scroll", () => {
 		const f = fakePage(false);
 		let placed = 0;
-		whenMoved([BODY], () => placed++, f.page);
+		whenMoved([BODY], () => placed++, f.page, NONE);
 		f.fire("window", "resize");
 		f.runFrames();
 		f.fire("document", "scroll", true);
 		f.runFrames();
 		expect(placed).toBe(2);
+	});
+});
+
+/**
+ * A popover as `measure` sees it: 300px wide unless its inline width says otherwise, wrapping taller as it narrows, and
+ * capped by its inline max-height or else the stylesheet's 300px. Laying it out clamps its scroll offset to what it can
+ * scroll, as a browser does.
+ */
+function fakePop(width: string, maxHeight: string, scrollTop: number) {
+	const style = { width, maxHeight };
+	let top = scrollTop;
+	const drawn = (): { width: number; height: number; content: number } => {
+		const w = style.width === "" ? 300 : Number.parseFloat(style.width);
+		const content = Math.round((251 * 300) / w);
+		const cap = style.maxHeight === "" ? 300 : Number.parseFloat(style.maxHeight);
+		return { width: w, height: Math.min(content, cap), content };
+	};
+	return {
+		style,
+		get scrollTop(): number {
+			return top;
+		},
+		set scrollTop(v: number) {
+			const d = drawn();
+			top = Math.max(0, Math.min(v, d.content - d.height));
+		},
+		scrollLeft: 0,
+		getBoundingClientRect(): { width: number; height: number } {
+			const d = drawn();
+			top = Math.min(top, d.content - d.height);
+			return { width: d.width, height: d.height };
+		},
+	};
+}
+
+describe("measure", () => {
+	it("red-first (a capped explainer jumped back to its top): the reading puts back the scroll offset it clamped", () => {
+		// Capped at 217px, an explainer 251px tall scrolls 34px; a reader is 30px down it. Read uncapped, it no longer
+		// overflows and the browser clamps its offset to 0; putting the cap back did not put the offset back.
+		const pop = fakePop("300px", "217px", 30);
+		expect(measure(pop, null)).toEqual({ width: 300, height: 251 });
+		expect(pop.scrollTop).toBe(30);
+		expect(pop.style).toEqual({ width: "300px", maxHeight: "217px" });
+	});
+
+	it("reads it at the width it is asked for, then puts back the width and cap the last placement set", () => {
+		const pop = fakePop("234px", "180px", 0);
+		// At 234px it wraps to 322px, and the stylesheet caps it at 300.
+		expect(measure(pop, 234)).toEqual({ width: 234, height: 300 });
+		expect(measure(pop, null)).toEqual({ width: 300, height: 251 });
+		expect(pop.style).toEqual({ width: "234px", maxHeight: "180px" });
 	});
 });
 

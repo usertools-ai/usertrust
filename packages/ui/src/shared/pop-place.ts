@@ -107,8 +107,8 @@ export function placePopAt(
 
 /** A target `whenMoved` listens on: the window, for the browser's size, and the document, for every scroll. */
 export interface Listens {
-	addEventListener(type: string, fn: () => void, capture?: boolean): void;
-	removeEventListener(type: string, fn: () => void, capture?: boolean): void;
+	addEventListener(type: string, fn: (e: { target: unknown }) => void, capture?: boolean): void;
+	removeEventListener(type: string, fn: (e: { target: unknown }) => void, capture?: boolean): void;
 }
 
 /** What `whenMoved` needs of a size observer: the browser's ResizeObserver. */
@@ -132,8 +132,16 @@ export interface Page {
  * or the size of any of `watch` (its window, the window's body, its anchor: a window filling the desk or giving it
  * back). Placed only when it opened, a popover kept the side, width and cap of a box that was no longer there. Returns
  * the function that stops it.
+ *
+ * A scroll for which `own` holds (the popover itself, or anything in it) is not heard: its own scroll moves nothing
+ * around it. Heard, every scroll inside a capped explainer placed it again, and each placement measured it.
  */
-export function whenMoved(watch: readonly Element[], place: () => void, page: Page): () => void {
+export function whenMoved(
+	watch: readonly Element[],
+	place: () => void,
+	page: Page,
+	own: (target: unknown) => boolean,
+): () => void {
 	let pending: number | null = null;
 	const soon = (): void => {
 		if (pending !== null) return;
@@ -142,17 +150,47 @@ export function whenMoved(watch: readonly Element[], place: () => void, page: Pa
 			place();
 		});
 	};
+	const scrolled = (e: { target: unknown }): void => {
+		if (!own(e.target)) soon();
+	};
 	page.view.addEventListener("resize", soon);
-	page.doc.addEventListener("scroll", soon, true);
+	page.doc.addEventListener("scroll", scrolled, true);
 	const observer = page.Observer === null ? null : new page.Observer(soon);
 	for (const el of watch) observer?.observe(el);
 	return () => {
 		page.view.removeEventListener("resize", soon);
-		page.doc.removeEventListener("scroll", soon, true);
+		page.doc.removeEventListener("scroll", scrolled, true);
 		observer?.disconnect();
 		if (pending !== null) page.cancelFrame(pending);
 		pending = null;
 	};
+}
+
+/** What `measure` needs of a popover: its inline style, its scroll offset and its box. */
+export interface Measured {
+	style: { width: string; maxHeight: string };
+	scrollTop: number;
+	scrollLeft: number;
+	getBoundingClientRect(): { width: number; height: number };
+}
+
+/**
+ * A popover's size as the stylesheet draws it (`width` null) or at `width` pixels (narrowed to fit, it wraps and
+ * grows), read with what the last placement set (its width and cap) lifted, then put back with its scroll offset.
+ * Laid out uncapped, a scrolled explainer no longer overflows and the browser clamps its offset to the top; putting
+ * the cap back does not put the offset back.
+ */
+export function measure(el: Measured, width: number | null): { width: number; height: number } {
+	const s = el.style;
+	const was = { width: s.width, maxHeight: s.maxHeight, top: el.scrollTop, left: el.scrollLeft };
+	s.width = width === null ? "" : `${width}px`;
+	s.maxHeight = "";
+	const r = el.getBoundingClientRect();
+	s.width = was.width;
+	s.maxHeight = was.maxHeight;
+	el.scrollTop = was.top;
+	el.scrollLeft = was.left;
+	return { width: r.width, height: r.height };
 }
 
 /** A placement as the popover's inline style. */
