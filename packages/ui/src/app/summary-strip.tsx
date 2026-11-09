@@ -134,7 +134,11 @@ function usePopover(): {
 			if (rootRef.current !== null && !rootRef.current.contains(e.target as Node)) setOpen(false);
 		};
 		const esc = (e: KeyboardEvent): void => {
-			if (e.key === "Escape") setOpen(false);
+			if (e.key === "Escape") {
+				// Handled: the desk's Escape peel leaves a marked press alone.
+				e.preventDefault();
+				setOpen(false);
+			}
 		};
 		document.addEventListener("pointerdown", away);
 		document.addEventListener("keydown", esc);
@@ -333,7 +337,11 @@ function FactLine(props: {
 			if (el?.contains(t) !== true && popRef.current?.contains(t) !== true) setOpen(false);
 		};
 		const esc = (e: KeyboardEvent): void => {
-			if (e.key === "Escape") setOpen(false);
+			if (e.key === "Escape") {
+				// Handled: the desk's Escape peel leaves a marked press alone.
+				e.preventDefault();
+				setOpen(false);
+			}
 		};
 		document.addEventListener("pointerdown", away);
 		document.addEventListener("keydown", esc);
@@ -640,6 +648,9 @@ export function SummaryStrip(props: {
 		if (e.key !== "Escape" || !detailsOpen) return;
 		if (e.target !== detailsRef.current && e.currentTarget.querySelector(".ut-pop") !== null)
 			return;
+		// Handled: React runs this before the desk's Escape peel, which would otherwise take a layer (the record, the
+		// fill, the pin or the newest filter) with the same press.
+		e.preventDefault();
 		setDetailsOpen(false);
 		detailsRef.current?.focus();
 	};

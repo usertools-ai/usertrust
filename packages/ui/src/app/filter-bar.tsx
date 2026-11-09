@@ -81,6 +81,8 @@ function Facet(props: {
 		};
 		const onKeyDown = (e: KeyboardEvent) => {
 			if (e.key === "Escape") {
+				// Handled: the desk's Escape peel leaves a marked press alone.
+				e.preventDefault();
 				setOpen(false);
 				triggerRef.current?.focus();
 			}
@@ -172,6 +174,8 @@ export const FilterBar = memo(function FilterBar(props: {
 			const root = sheetRef.current;
 			if (e.key === "Escape") {
 				if (root?.querySelector(".ut-pop")) return;
+				// Handled: the desk's Escape peel leaves a marked press alone.
+				e.preventDefault();
 				setSheet(false);
 				return;
 			}
