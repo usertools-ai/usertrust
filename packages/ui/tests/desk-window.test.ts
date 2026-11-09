@@ -6,6 +6,7 @@
  * the other windows inert and hidden from assistive tech while one fills the desk.
  */
 
+import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -241,6 +242,23 @@ describe("useWindow", () => {
 		expect(filled).toContain("<p>spend dimmed false false</p>");
 		const rest = await withDesk(body("now", "Now"), {});
 		expect(rest).toContain("<p>now dimmed false false</p>");
+	});
+
+	it("red-first (an explainer left open in a dimmed window): the explainers' hook closes an open one when its window is dimmed, and every explainer hands it its own close", () => {
+		// Pinned in the source: these tests run without a DOM (no jsdom or any other in the repo), so React runs no
+		// effect here, as at-follow's dependency pin says. The browser check runs it: one Esc restores the desk.
+		const src = readFileSync(new URL("../src/app/summary-strip.tsx", import.meta.url), "utf-8");
+		const start = src.indexOf("function usePopPlace(");
+		expect(start).toBeGreaterThan(-1);
+		const hook = src.slice(start, src.indexOf("\n}\n", start));
+		expect(hook).toContain("const dimmed = useWindowDimmed();");
+		expect(hook).toMatch(
+			/useEffect\(\(\) => \{\s*if \(open && dimmed\) close\(\);\s*\}, \[open, dimmed, close\]\);/,
+		);
+		expect(src).toContain('import { useWindowDimmed } from "./desk/window.js";');
+		// The Anchor and UT explainers (usePopover's close) and a cut fact line's explainer (its own close).
+		expect(src.match(/usePopPlace\([^)]*, popRef, close\)/g)?.length).toBe(3);
+		expect(src.match(/usePopPlace\(/g)?.length).toBe(4);
 	});
 
 	it("outside a Window, nothing is dimmed (and asking does not throw)", () => {
