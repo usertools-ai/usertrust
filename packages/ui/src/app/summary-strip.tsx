@@ -37,7 +37,7 @@ import {
 	UT_KEY,
 } from "../shared/format.js";
 import { KIT_MARK_URL, KIT_TIMEOUT_MS } from "../shared/kit.js";
-import { type Box, intersect, placePopAt, popStyle } from "../shared/pop-place.js";
+import { type Box, intersect, placePopAt, popStyle, whenMoved } from "../shared/pop-place.js";
 import { shownLabel } from "../shared/timeline-view.js";
 import type { LiveState } from "./store.js";
 import { TickingFigure } from "./ticking-figure.js";
@@ -159,21 +159,29 @@ function usePopover(): {
 	return { open, toggle: () => setOpen((o) => !o), rootRef };
 }
 
-/** The box that would cut `el`: every ancestor that clips its content (a window, its body), and the viewport. */
-function clipBox(el: HTMLElement): Box {
-	let box: Box = { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
+/** The ancestors of `el` that clip its content (a window, its body): what can cut it, besides the viewport. */
+function clippers(el: HTMLElement): HTMLElement[] {
+	const out: HTMLElement[] = [];
 	for (let a = el.parentElement; a !== null; a = a.parentElement) {
 		const cs = getComputedStyle(a);
-		if (cs.overflowX !== "visible" || cs.overflowY !== "visible")
-			box = intersect(a.getBoundingClientRect(), box);
+		if (cs.overflowX !== "visible" || cs.overflowY !== "visible") out.push(a);
 	}
+	return out;
+}
+
+/** The box that would cut `el`: every ancestor that clips its content, and the viewport. */
+function clipBox(el: HTMLElement): Box {
+	let box: Box = { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
+	for (const a of clippers(el)) box = intersect(a.getBoundingClientRect(), box);
 	return box;
 }
 
 /**
  * Places an open text popover from where its anchor sits on screen (`placePop`), before it paints: toward the side
  * with room inside the box that would cut it, and above its anchor when there is no room below. A side fixed in the
- * stylesheet was cut off whenever the anchor sat in the other half of a narrow window.
+ * stylesheet was cut off whenever the anchor sat in the other half of a narrow window. While it is open it is placed
+ * again whenever that box moves or changes size (`whenMoved`): a scroll, the browser's size, its window filling the
+ * desk or giving it back.
  */
 function usePopPlace(
 	open: boolean,
@@ -187,17 +195,42 @@ function usePopPlace(
 			setStyle(undefined);
 			return;
 		}
-		const r = pop.getBoundingClientRect();
-		// Its height at the width it will be drawn at: narrowed to fit, it wraps and grows.
-		const heightAt = (width: number): number => {
-			const was = pop.style.width;
-			pop.style.width = `${width}px`;
-			const h = pop.getBoundingClientRect().height;
-			pop.style.width = was;
-			return h;
+		// Its size as the stylesheet draws it (`size(null)`) or at width `w` (narrowed to fit, it wraps and grows), with
+		// what the last placement set lifted for the reading and put back.
+		const size = (width: number | null): DOMRect => {
+			const s = pop.style;
+			const was = { width: s.width, maxHeight: s.maxHeight };
+			s.width = width === null ? "" : `${width}px`;
+			s.maxHeight = "";
+			const r = pop.getBoundingClientRect();
+			s.width = was.width;
+			s.maxHeight = was.maxHeight;
+			return r;
 		};
-		const p = placePopAt(anchor.getBoundingClientRect(), r.width, r.height, clipBox(pop), heightAt);
-		setStyle(popStyle(p));
+		let last = "";
+		const place = (): void => {
+			const r = size(null);
+			const p = placePopAt(
+				anchor.getBoundingClientRect(),
+				r.width,
+				r.height,
+				clipBox(pop),
+				(w) => size(w).height,
+			);
+			const next = popStyle(p);
+			const key = JSON.stringify(next);
+			if (key === last) return;
+			last = key;
+			setStyle(next);
+		};
+		place();
+		return whenMoved([...clippers(pop), anchor], place, {
+			view: window,
+			doc: document,
+			frame: (run) => requestAnimationFrame(run),
+			cancelFrame: (id) => cancelAnimationFrame(id),
+			Observer: typeof ResizeObserver === "undefined" ? null : ResizeObserver,
+		});
 	}, [open, popRef]);
 	return style;
 }

@@ -4,8 +4,8 @@
 /**
  * Where a text popover opens, from where its anchor sits on screen. A popover lined up with one fixed edge of its
  * anchor was cut off whenever the anchor sat on the other side of a narrow box: an explainer that opens to the left,
- * on a fact in a window's first column, ran past the window's edge and the window hid it. Pure, so the rule is tested
- * here and the hook that measures the page only feeds it.
+ * on a fact in a window's first column, ran past the window's edge and the window hid it. Pure (`whenMoved` is handed
+ * the page it listens on), so the rules are tested here and the hook that measures the page only feeds them.
  */
 
 /** A box in viewport pixels, as `getBoundingClientRect` reports it. */
@@ -89,6 +89,56 @@ export function placePopAt(
 ): PopPlace {
 	const first = placePop(anchor, w, h, clip);
 	return first.width < w ? placePop(anchor, w, heightAt(first.width), clip) : first;
+}
+
+/** A target `whenMoved` listens on: the window, for the browser's size, and the document, for every scroll. */
+export interface Listens {
+	addEventListener(type: string, fn: () => void, capture?: boolean): void;
+	removeEventListener(type: string, fn: () => void, capture?: boolean): void;
+}
+
+/** What `whenMoved` needs of a size observer: the browser's ResizeObserver. */
+export type SizeObserver = new (
+	changed: () => void,
+) => { observe(el: Element): void; disconnect(): void };
+
+/** The page as `whenMoved` uses it: handed in, so the rule is tested without a browser. */
+export interface Page {
+	view: Listens;
+	doc: Listens;
+	frame(run: () => void): number;
+	cancelFrame(id: number): void;
+	/** Null in a browser without one: then a resize or a scroll still places it again. */
+	Observer: SizeObserver | null;
+}
+
+/**
+ * Calls `place` again, at most once a frame, whenever the box around an open popover may have moved or changed size: a
+ * scroll of any scroller (heard in the capture phase, as a window body's scroll does not bubble), the browser's size,
+ * or the size of any of `watch` (its window, the window's body, its anchor: a window filling the desk or giving it
+ * back). Placed only when it opened, a popover kept the side, width and cap of a box that was no longer there. Returns
+ * the function that stops it.
+ */
+export function whenMoved(watch: readonly Element[], place: () => void, page: Page): () => void {
+	let pending: number | null = null;
+	const soon = (): void => {
+		if (pending !== null) return;
+		pending = page.frame(() => {
+			pending = null;
+			place();
+		});
+	};
+	page.view.addEventListener("resize", soon);
+	page.doc.addEventListener("scroll", soon, true);
+	const observer = page.Observer === null ? null : new page.Observer(soon);
+	for (const el of watch) observer?.observe(el);
+	return () => {
+		page.view.removeEventListener("resize", soon);
+		page.doc.removeEventListener("scroll", soon, true);
+		observer?.disconnect();
+		if (pending !== null) page.cancelFrame(pending);
+		pending = null;
+	};
 }
 
 /** A placement as the popover's inline style. */

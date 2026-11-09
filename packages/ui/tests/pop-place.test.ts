@@ -2,7 +2,14 @@
 // Copyright 2026 Usertools, Inc.
 
 import { describe, expect, it } from "vitest";
-import { intersect, placePop, placePopAt, popStyle } from "../src/shared/pop-place.js";
+import {
+	intersect,
+	type Page,
+	placePop,
+	placePopAt,
+	popStyle,
+	whenMoved,
+} from "../src/shared/pop-place.js";
 
 const BOX = { left: 0, top: 0, right: 400, bottom: 800 };
 const at = (left: number, top: number, w = 40, h = 16) => ({
@@ -123,6 +130,146 @@ describe("popStyle", () => {
 			bottom: "calc(100% + 8px)",
 			maxHeight: 180,
 		});
+	});
+});
+
+/** A page with nothing in it but what `whenMoved` uses: its listeners, its size observer and its frames. */
+function fakePage(withObserver = true) {
+	const on = new Map<string, Set<() => void>>();
+	const key = (who: string, type: string, capture?: boolean): string =>
+		`${who} ${type} ${capture === true ? "capture" : "bubble"}`;
+	const target = (who: string) => ({
+		addEventListener(type: string, fn: () => void, capture?: boolean): void {
+			const k = key(who, type, capture);
+			on.set(k, (on.get(k) ?? new Set()).add(fn));
+		},
+		removeEventListener(type: string, fn: () => void, capture?: boolean): void {
+			on.get(key(who, type, capture))?.delete(fn);
+		},
+	});
+	const frames = new Map<number, () => void>();
+	let nextFrame = 1;
+	const observed: unknown[] = [];
+	let sized: (() => void) | null = null;
+	let disconnected = false;
+	class Observer {
+		constructor(changed: () => void) {
+			sized = changed;
+		}
+		observe(el: unknown): void {
+			observed.push(el);
+		}
+		disconnect(): void {
+			disconnected = true;
+		}
+	}
+	const page: Page = {
+		view: target("window"),
+		doc: target("document"),
+		frame(run: () => void): number {
+			frames.set(nextFrame, run);
+			return nextFrame++;
+		},
+		cancelFrame(id: number): void {
+			frames.delete(id);
+		},
+		Observer: withObserver ? Observer : null,
+	};
+	return {
+		page,
+		fire(who: string, type: string, capture?: boolean): void {
+			for (const fn of on.get(key(who, type, capture)) ?? []) fn();
+		},
+		resized(): void {
+			sized?.();
+		},
+		runFrames(): void {
+			const due = [...frames.values()];
+			frames.clear();
+			for (const run of due) run();
+		},
+		pending: (): number => frames.size,
+		listening: (): string[] =>
+			[...on.entries()]
+				.filter(([, fns]) => fns.size > 0)
+				.map(([k]) => k)
+				.sort(),
+		observed,
+		disconnected: (): boolean => disconnected,
+	};
+}
+
+const WIN = { id: "window" } as unknown as Element;
+const BODY = { id: "body" } as unknown as Element;
+const ANCHOR = { id: "anchor" } as unknown as Element;
+
+describe("whenMoved", () => {
+	it("red-first (an explainer placed once, for the box it opened in): a resize, a scroll and a change of size each place it again, on the next frame", () => {
+		// Placed only when it opened, a restored window's explainer kept the side and width it had in the filled window
+		// and ran past the home window's edge; a narrower browser left it wider than its window.
+		const f = fakePage();
+		let placed = 0;
+		whenMoved([BODY, WIN, ANCHOR], () => placed++, f.page);
+		f.fire("window", "resize");
+		expect(placed).toBe(0);
+		f.runFrames();
+		expect(placed).toBe(1);
+		f.fire("document", "scroll", true);
+		f.runFrames();
+		expect(placed).toBe(2);
+		f.resized();
+		f.runFrames();
+		expect(placed).toBe(3);
+	});
+
+	it("places it once a frame, however many changes arrive in that frame", () => {
+		const f = fakePage();
+		let placed = 0;
+		whenMoved([BODY], () => placed++, f.page);
+		f.fire("window", "resize");
+		f.fire("document", "scroll", true);
+		f.fire("document", "scroll", true);
+		f.resized();
+		expect(f.pending()).toBe(1);
+		f.runFrames();
+		expect(placed).toBe(1);
+	});
+
+	it("hears a scroll of any scroller, in the capture phase (a window body's scroll does not bubble), and the browser's size", () => {
+		const f = fakePage();
+		whenMoved([BODY], () => {}, f.page);
+		expect(f.listening()).toEqual(["document scroll capture", "window resize bubble"]);
+	});
+
+	it("watches the size of every box it is given: its window, the window's body, its anchor", () => {
+		const f = fakePage();
+		whenMoved([BODY, WIN, ANCHOR], () => {}, f.page);
+		expect(f.observed).toEqual([BODY, WIN, ANCHOR]);
+	});
+
+	it("stops: no listener left, the observer disconnected, and a frame not yet run cancelled", () => {
+		const f = fakePage();
+		let placed = 0;
+		const stop = whenMoved([BODY], () => placed++, f.page);
+		f.fire("window", "resize");
+		expect(f.pending()).toBe(1);
+		stop();
+		expect(f.listening()).toEqual([]);
+		expect(f.disconnected()).toBe(true);
+		expect(f.pending()).toBe(0);
+		f.runFrames();
+		expect(placed).toBe(0);
+	});
+
+	it("in a browser with no size observer, still places it again after a resize or a scroll", () => {
+		const f = fakePage(false);
+		let placed = 0;
+		whenMoved([BODY], () => placed++, f.page);
+		f.fire("window", "resize");
+		f.runFrames();
+		f.fire("document", "scroll", true);
+		f.runFrames();
+		expect(placed).toBe(2);
 	});
 });
 
