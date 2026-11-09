@@ -28,6 +28,10 @@ export interface PopPlace {
 	/** When neither side has room for all of it: no taller than the room on the side it opens to (it scrolls inside).
 	 *  Null when it fits whole. */
 	maxHeight: number | null;
+	/** Drawn next to a line inside its anchor (`placePop`'s `line`): pixels from the anchor's top to the popover's top
+	 *  (below the line), or from the anchor's bottom to the popover's bottom (above it). Null when it is drawn next to
+	 *  the anchor itself. */
+	offset: number | null;
 }
 
 /** The part of `a` inside `b`. */
@@ -61,6 +65,11 @@ export function outside(anchor: Box, box: Box): boolean {
  *   else shifted to start at the box's left edge, and no wider than the box;
  * - down or up: below the anchor if it fits whole there; else above if it fits whole there; else toward the side
  *   with more room, and no taller than that room (it scrolls inside), so no part of it is ever out of the box.
+ *
+ * `line`, when given, is the part of the anchor the popover belongs to (a cut line inside a fact): the room above and
+ * below is measured from it and the popover is drawn next to it, while `anchor` stays the box its offsets are
+ * measured in. Measured from a whole fact near the bottom of a short window, the room on both sides could be a few
+ * pixels, and the explainer of a line in view was capped to nothing readable.
  */
 export function placePop(
 	anchor: Box,
@@ -69,6 +78,7 @@ export function placePop(
 	clip: Box,
 	gap = 8,
 	margin = 8,
+	line: Box | null = null,
 ): PopPlace {
 	const lo = clip.left + margin;
 	const hi = clip.right - margin;
@@ -81,12 +91,26 @@ export function placePop(
 		side = "start";
 		shift = Math.min(Math.max(lo, anchor.left), hi - width) - anchor.left;
 	}
-	const roomBelow = clip.bottom - margin - (anchor.bottom + gap);
-	const roomAbove = anchor.top - gap - (clip.top + margin);
-	if (h <= roomBelow) return { side, shift, width, up: false, maxHeight: null };
-	if (h <= roomAbove) return { side, shift, width, up: true, maxHeight: null };
+	const at = line ?? anchor;
+	const roomBelow = clip.bottom - margin - (at.bottom + gap);
+	const roomAbove = at.top - gap - (clip.top + margin);
+	const offset = (up: boolean): number | null =>
+		line === null
+			? null
+			: Math.round(up ? anchor.bottom - line.top + gap : line.bottom - anchor.top + gap);
+	if (h <= roomBelow)
+		return { side, shift, width, up: false, maxHeight: null, offset: offset(false) };
+	if (h <= roomAbove)
+		return { side, shift, width, up: true, maxHeight: null, offset: offset(true) };
 	const up = roomAbove > roomBelow;
-	return { side, shift, width, up, maxHeight: Math.max(0, Math.floor(up ? roomAbove : roomBelow)) };
+	return {
+		side,
+		shift,
+		width,
+		up,
+		maxHeight: Math.max(0, Math.floor(up ? roomAbove : roomBelow)),
+		offset: offset(up),
+	};
 }
 
 /**
@@ -100,9 +124,10 @@ export function placePopAt(
 	h: number,
 	clip: Box,
 	heightAt: (width: number) => number,
+	line: Box | null = null,
 ): PopPlace {
-	const first = placePop(anchor, w, h, clip);
-	return first.width < w ? placePop(anchor, w, heightAt(first.width), clip) : first;
+	const first = placePop(anchor, w, h, clip, 8, 8, line);
+	return first.width < w ? placePop(anchor, w, heightAt(first.width), clip, 8, 8, line) : first;
 }
 
 /** A target `whenMoved` listens on: the window, for the browser's size, and the document, for every scroll. */
@@ -199,8 +224,8 @@ export interface PopStyle {
 	left: number | "auto";
 	right: number | "auto";
 	width: number;
-	top?: "auto";
-	bottom?: string;
+	top?: "auto" | number;
+	bottom?: string | number;
 	maxHeight?: number;
 }
 
@@ -218,7 +243,13 @@ export function popStyle(p: PopPlace): PopStyle {
 				? { left: 0, right: "auto" as const }
 				: { left: "auto" as const, right: 0 }),
 		width: p.width,
-		...(p.up ? { top: "auto" as const, bottom: "calc(100% + 8px)" } : {}),
+		...(p.offset !== null
+			? p.up
+				? { top: "auto" as const, bottom: p.offset }
+				: { top: p.offset }
+			: p.up
+				? { top: "auto" as const, bottom: "calc(100% + 8px)" }
+				: {}),
 		...(p.maxHeight !== null ? { maxHeight: p.maxHeight } : {}),
 	};
 }

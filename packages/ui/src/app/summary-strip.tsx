@@ -200,6 +200,9 @@ function usePopPlace(
 	open: boolean,
 	popRef: RefObject<HTMLElement | null>,
 	close: () => void,
+	/** The line the popover belongs to, when it is not the whole box it is positioned in: a cut fact line inside its
+	 *  fact. The room is measured from it, and the popover is drawn next to it (`placePop`'s `line`). */
+	line: HTMLElement | null = null,
 ): CSSProperties | undefined {
 	const [style, setStyle] = useState<CSSProperties | undefined>(undefined);
 	// Left open in a dimmed window, an explainer sat inert and out of sight and took the next Esc, so the desk did not
@@ -218,15 +221,18 @@ function usePopPlace(
 		let last = "";
 		const place = (): void => {
 			const at = anchor.getBoundingClientRect();
+			// The line it belongs to, when that is not the whole anchor: measured from the whole fact near the bottom of a
+			// short window, the room on both sides was a few pixels and a cut line's explainer had no readable height.
+			const lineBox = line !== null && line !== anchor ? line.getBoundingClientRect() : null;
 			const clip = clipBox(pop);
-			// Its anchor wholly out of view (its window scrolled, or a resize or a restore left it below the fold): no place
-			// is both next to the anchor and inside the window, so it closes, as a click elsewhere would close it.
-			if (outside(at, clip)) {
+			// Its line wholly out of view (its window scrolled, or a resize or a restore left it below the fold): no place
+			// is both next to the line and inside the window, so it closes, as a click elsewhere would close it.
+			if (outside(lineBox ?? at, clip)) {
 				close();
 				return;
 			}
 			const r = measure(pop, null);
-			const p = placePopAt(at, r.width, r.height, clip, (w) => measure(pop, w).height);
+			const p = placePopAt(at, r.width, r.height, clip, (w) => measure(pop, w).height, lineBox);
 			const next = popStyle(p);
 			const key = JSON.stringify(next);
 			if (key === last) return;
@@ -235,7 +241,7 @@ function usePopPlace(
 		};
 		place();
 		return whenMoved(
-			[...clippers(pop), anchor],
+			[...clippers(pop), anchor, ...(line !== null && line !== anchor ? [line] : [])],
 			place,
 			{
 				view: window,
@@ -246,7 +252,7 @@ function usePopPlace(
 			},
 			(t) => t instanceof Node && pop.contains(t),
 		);
-	}, [open, popRef, close]);
+	}, [open, popRef, close, line]);
 	return style;
 }
 
@@ -422,7 +428,8 @@ function FactLine(props: {
 	const [open, setOpen] = useState(false);
 	const close = useCallback(() => setOpen(false), []);
 	const popRef = useRef<HTMLSpanElement>(null);
-	const placed = usePopPlace(cut && open, popRef, close);
+	// Placed from its line, not from the whole fact it is positioned in.
+	const placed = usePopPlace(cut && open, popRef, close, el);
 	// biome-ignore lint/correctness/useExhaustiveDependencies: the line is measured again when its text changes
 	useEffect(() => {
 		if (el === null || typeof ResizeObserver === "undefined") return;

@@ -26,7 +26,14 @@ describe("placePop", () => {
 		// A fact in a window's first column: lined up with the anchor's right edge, a 300px explainer would start 240px
 		// left of the window and the window would hide most of it.
 		const p = placePop(at(20, 100), 300, 150, BOX);
-		expect(p).toEqual({ side: "start", shift: null, width: 300, up: false, maxHeight: null });
+		expect(p).toEqual({
+			side: "start",
+			shift: null,
+			width: 300,
+			up: false,
+			maxHeight: null,
+			offset: null,
+		});
 	});
 
 	it("keeps the default, lined up with the anchor's right edge, when that fits", () => {
@@ -60,6 +67,39 @@ describe("placePop", () => {
 		expect(below.up).toBe(false);
 		// Room below: the box's bottom less the margin (340 - 8) less the anchor's bottom (76) and the gap.
 		expect(below.maxHeight).toBe(248);
+	});
+});
+
+describe("placePop from a line inside its anchor", () => {
+	it("red-first (a cut line's explainer capped to the room around its whole fact): the room is measured from the line, and the explainer is drawn next to it", () => {
+		// 960x700, Now at home: a fact (577-696) near the bottom of Now's visible body (538-700), its cut line at
+		// 662-696. From the whole fact the room above was 23px and below none, so the 45px explainer was capped to 23px
+		// over a line in view. From the line there are 108px above: it fits whole, drawn just above the line.
+		const fact = { left: 20, top: 577, right: 320, bottom: 696 };
+		const line = { left: 20, top: 662, right: 320, bottom: 696 };
+		const clip = { left: 0, top: 538, right: 940, bottom: 700 };
+		expect(placePop(fact, 300, 45, clip, 8, 8, line)).toMatchObject({
+			up: true,
+			maxHeight: null,
+			offset: 696 - 662 + 8,
+		});
+		// With no line, the room is the whole anchor's, as for an explainer whose button row is its anchor.
+		expect(placePop(fact, 300, 45, clip)).toMatchObject({ up: true, maxHeight: 23, offset: null });
+	});
+
+	it("below a line, the offset is from its anchor's top", () => {
+		const fact = { left: 20, top: 100, right: 320, bottom: 220 };
+		const line = { left: 20, top: 120, right: 320, bottom: 140 };
+		const p = placePop(fact, 300, 45, { left: 0, top: 0, right: 940, bottom: 800 }, 8, 8, line);
+		expect(p).toMatchObject({ up: false, maxHeight: null, offset: 140 - 100 + 8 });
+	});
+
+	it("placePopAt hands the line on, also when it measures again at a narrower width", () => {
+		const fact = { left: 100, top: 577, right: 340, bottom: 696 };
+		const line = { left: 100, top: 662, right: 340, bottom: 696 };
+		const narrow = { left: 0, top: 538, right: 250, bottom: 700 };
+		const p = placePopAt(fact, 300, 45, narrow, () => 60, line);
+		expect(p).toMatchObject({ width: 234, up: true, maxHeight: null, offset: 696 - 662 + 8 });
 	});
 });
 
@@ -109,21 +149,32 @@ describe("popStyle", () => {
 	});
 
 	it("writes the side, the shift, the width, the side above or below, and the cap", () => {
-		expect(popStyle({ side: "end", shift: null, width: 300, up: false, maxHeight: null })).toEqual({
+		expect(
+			popStyle({ side: "end", shift: null, width: 300, up: false, maxHeight: null, offset: null }),
+		).toEqual({
 			boxSizing: "border-box",
 			left: "auto",
 			right: 0,
 			width: 300,
 		});
 		expect(
-			popStyle({ side: "start", shift: null, width: 300, up: false, maxHeight: null }),
+			popStyle({
+				side: "start",
+				shift: null,
+				width: 300,
+				up: false,
+				maxHeight: null,
+				offset: null,
+			}),
 		).toEqual({
 			boxSizing: "border-box",
 			left: 0,
 			right: "auto",
 			width: 300,
 		});
-		expect(popStyle({ side: "start", shift: -92, width: 234, up: true, maxHeight: 180 })).toEqual({
+		expect(
+			popStyle({ side: "start", shift: -92, width: 234, up: true, maxHeight: 180, offset: null }),
+		).toEqual({
 			boxSizing: "border-box",
 			left: -92,
 			right: "auto",
@@ -384,6 +435,30 @@ describe("outside", () => {
 		// Its left on the box's right edge, then 1px short of it.
 		expect(outside(at(400, 100), BOX)).toBe(true);
 		expect(outside(at(399, 100), BOX)).toBe(false);
+	});
+});
+
+describe("popStyle next to a line", () => {
+	it("draws next to the line by a pixel offset from its anchor's top (below) or bottom (above)", () => {
+		expect(
+			popStyle({ side: "end", shift: null, width: 300, up: true, maxHeight: null, offset: 42 }),
+		).toEqual({
+			boxSizing: "border-box",
+			left: "auto",
+			right: 0,
+			width: 300,
+			top: "auto",
+			bottom: 42,
+		});
+		expect(
+			popStyle({ side: "end", shift: null, width: 300, up: false, maxHeight: null, offset: 48 }),
+		).toEqual({
+			boxSizing: "border-box",
+			left: "auto",
+			right: 0,
+			width: 300,
+			top: 48,
+		});
 	});
 });
 

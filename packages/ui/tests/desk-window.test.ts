@@ -257,8 +257,24 @@ describe("useWindow", () => {
 		);
 		expect(src).toContain('import { useWindowDimmed } from "./desk/window.js";');
 		// The Anchor and UT explainers (usePopover's close) and a cut fact line's explainer (its own close).
-		expect(src.match(/usePopPlace\([^)]*, popRef, close\)/g)?.length).toBe(3);
+		// The fact line also hands its line (`, el`), placed from it.
+		expect(src.match(/usePopPlace\([^)]*, popRef, close(?:, el)?\)/g)?.length).toBe(3);
 		expect(src.match(/usePopPlace\(/g)?.length).toBe(4);
+	});
+
+	it("red-first (a cut line's explainer placed from its whole fact): a fact line's explainer is placed from its own line", () => {
+		// Pinned in the source, as the dimmed close is: these tests have no DOM. The fact line hands the hook its line, and
+		// the hook measures the room from it (placePop's `line`). Placed from the whole fact, a cut line's explainer near
+		// the bottom of a short Now window was capped to 23px over a line in view.
+		const src = readFileSync(new URL("../src/app/summary-strip.tsx", import.meta.url), "utf-8");
+		expect(src).toContain("usePopPlace(cut && open, popRef, close, el)");
+		const start = src.indexOf("function usePopPlace(");
+		const hook = src.slice(start, src.indexOf("\n}\n", start));
+		expect(hook).toContain(
+			"const lineBox = line !== null && line !== anchor ? line.getBoundingClientRect() : null;",
+		);
+		expect(hook).toContain("outside(lineBox ?? at, clip)");
+		expect(hook).toMatch(/placePopAt\(at, [^\n]*, lineBox\)/);
 	});
 
 	it("outside a Window, nothing is dimmed (and asking does not throw)", () => {
