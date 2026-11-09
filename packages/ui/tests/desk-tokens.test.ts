@@ -13,6 +13,27 @@ const TOKENS = readFileSync(join(APP, "desk", "desk-tokens.css"), "utf-8").repla
 	"",
 );
 
+/** A desk stylesheet's text (`file` from src/app), comments removed. */
+const sheet = (file: string): string =>
+	readFileSync(join(APP, file), "utf-8").replace(/\/\*[\s\S]*?\*\//g, "");
+
+/** The text of the first `@media (max-width: <w>px)` block in `css`, braces matched. */
+function mediaBlock(css: string, w: number): string {
+	const start = css.indexOf(`@media (max-width: ${w}px) {`);
+	if (start < 0) return "";
+	let depth = 0;
+	for (let i = css.indexOf("{", start); i < css.length; i++) {
+		if (css[i] === "{") depth++;
+		else if (css[i] === "}" && --depth === 0) return css.slice(start, i + 1);
+	}
+	return "";
+}
+
+/** The declarations of the first rule in `css` whose selector is exactly `sel`. */
+const ruleOf = (css: string, sel: string): string =>
+	new RegExp(`(?:^|[}\\s])${sel.replace(/[.[\]"=]/g, "\\$&")}\\s*\\{([^}]*)\\}`).exec(css)?.[1] ??
+	"";
+
 const EXPECTED: Record<string, string> = {
 	"--dk-page": "#0b0b0a",
 	"--dk-pane": "#111110",
@@ -184,36 +205,40 @@ describe("the desk's stylesheets", () => {
 	});
 
 	it("red-first: on a narrow screen no window is squeezed, and the Ledger's list keeps a real height above the phone width", () => {
-		const desk = readFileSync(join(APP, "desk", "desk.css"), "utf-8").replace(
-			/\/\*[\s\S]*?\*\//g,
-			"",
-		);
-		/** The text of the first `@media (max-width: <w>px)` block, braces matched. */
-		const block = (w: number): string => {
-			const start = desk.indexOf(`@media (max-width: ${w}px) {`);
-			if (start < 0) return "";
-			let depth = 0;
-			for (let i = desk.indexOf("{", start); i < desk.length; i++) {
-				if (desk[i] === "{") depth++;
-				else if (desk[i] === "}" && --depth === 0) return desk.slice(start, i + 1);
-			}
-			return "";
-		};
-		const rule = (css: string, sel: string): string =>
-			new RegExp(`(?:^|[}\\s])${sel.replace(/[.[\]"=]/g, "\\$&")}\\s*\\{([^}]*)\\}`).exec(
-				css,
-			)?.[1] ?? "";
-		const narrow = block(900);
+		const desk = sheet("desk/desk.css");
+		const narrow = mediaBlock(desk, 900);
 		expect(narrow.length).toBeGreaterThan(0);
 		// The column takes its content's height and scrolls with the page: neither the desk nor a window's slot shrinks
 		// to fit the screen (they did, and the windows' contents ran into each other).
-		expect(rule(narrow, ".ut-dk-desk")).toMatch(/flex:\s*0 0 auto/);
-		expect(rule(narrow, ".ut-win-slot")).toMatch(/flex:\s*0 0 auto/);
+		expect(ruleOf(narrow, ".ut-dk-desk")).toMatch(/flex:\s*0 0 auto/);
+		expect(ruleOf(narrow, ".ut-win-slot")).toMatch(/flex:\s*0 0 auto/);
 		// The Ledger's list has a scroller of its own above the phone width, so its box needs a height (it had none,
 		// and drew no rows).
-		expect(rule(narrow, '[data-win="ledger"] .ut-lg-body')).toMatch(/height:\s*\d+dvh/);
+		expect(ruleOf(narrow, '[data-win="ledger"] .ut-lg-body')).toMatch(/height:\s*\d+dvh/);
 		// On a phone the list flows in the page and the window is its scroller: its box takes its content's height.
-		expect(rule(block(760), '[data-win="ledger"] .ut-lg-body')).toMatch(/height:\s*auto/);
+		expect(ruleOf(mediaBlock(desk, 760), '[data-win="ledger"] .ut-lg-body')).toMatch(
+			/height:\s*auto/,
+		);
+	});
+
+	it("red-first (an empty Spend window): Spend's chart takes the window's height on a wide desk, and a height of its own in the narrow column", () => {
+		const spend = sheet("windows/spend/spend.css");
+		// Trends, its chart card and the chart's box grow into the window's body. Without them the card was its header,
+		// and the chart was clipped in a 62px scroller at every size.
+		expect(ruleOf(spend, '[data-win="spend"] .ut-trends')).toMatch(/flex:\s*1 1 0/);
+		expect(ruleOf(spend, '[data-win="spend"] .ut-card[data-part="chart"]')).toMatch(
+			/flex:\s*1 1 0/,
+		);
+		const box = ruleOf(spend, '[data-win="spend"] .ut-chart-box');
+		expect(box).toMatch(/flex:\s*1 1 0/);
+		expect(box).toMatch(/min-height:\s*\d+px/);
+		// The narrow column takes its content's height, so nothing there has a height to grow into.
+		const narrow = mediaBlock(spend, 900);
+		expect(ruleOf(narrow, '[data-win="spend"] .ut-trends')).toMatch(/flex:\s*0 0 auto/);
+		expect(ruleOf(narrow, '[data-win="spend"] .ut-card[data-part="chart"]')).toMatch(
+			/flex:\s*0 0 auto/,
+		);
+		expect(ruleOf(narrow, '[data-win="spend"] .ut-chart-box')).toMatch(/height:\s*240px/);
 	});
 
 	it("keep the panes opaque, and a window free of anything that traps a fixed drawer", () => {

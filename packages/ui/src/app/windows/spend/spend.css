@@ -2,3 +2,40 @@
 /* Copyright 2026 Usertools, Inc. */
 
 /* The Spend window's rules (prefix ut-sp-). Scoped overrides of the older classes use [data-win="spend"]. */
+
+@layer components {
+	/* Day one the window holds Trends' chart card. On a wide desk Trends, the card and the chart's box take the body's
+	   height, so the chart grows when the window fills and nothing in them scrolls or clips. Without these the card was
+	   its 30px header, and the chart was clipped in a 62px scroller at every size. */
+	[data-win="spend"] .ut-trends {
+		flex: 1 1 0;
+	}
+
+	[data-win="spend"] .ut-card[data-part="chart"] {
+		flex: 1 1 0;
+		min-height: 0;
+	}
+
+	/* What the chart's 100% height resolves against. On a desk too short for this much chart, Trends scrolls. */
+	[data-win="spend"] .ut-chart-box {
+		flex: 1 1 0;
+		min-height: 96px;
+	}
+
+	/* The narrow column takes its content's height, so nothing in it has a height to grow into: the chart has the
+	   height of the page's own chart. */
+	@media (max-width: 900px) {
+		[data-win="spend"] .ut-trends {
+			flex: 0 0 auto;
+		}
+
+		[data-win="spend"] .ut-card[data-part="chart"] {
+			flex: 0 0 auto;
+		}
+
+		[data-win="spend"] .ut-chart-box {
+			flex: 0 0 auto;
+			height: 240px;
+		}
+	}
+}

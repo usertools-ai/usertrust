@@ -133,6 +133,15 @@ describe("Trends draws one part", () => {
 		expect(html).not.toContain("records in view");
 	});
 
+	it("red-first (an inline size no stylesheet can undo): the chart card has no size of its own, and the chart sits in its box", () => {
+		const html = trends("chart");
+		// The Spend window's sheet sizes them (spend.css): inline, the card's size beat the narrow column's and the card
+		// collapsed to its header.
+		expect(html).toMatch(/<div class="ut-card" data-part="chart">/);
+		expect(html).toContain('<div class="ut-chart-box">');
+		expect(trends("all")).not.toContain("ut-chart-box");
+	});
+
 	it("lists is the three bar lists, nothing else", () => {
 		const html = trends("lists");
 		expect(html).toContain("Cost by kind");

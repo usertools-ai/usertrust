@@ -243,9 +243,9 @@ export const Trends = memo(function Trends(props: {
 			</BarChart>
 		</ResponsiveContainer>
 	);
-	// In a window the chart fills the card, so its box must have a height of its own to resolve 100% against.
-	const chartEl =
-		part === "chart" ? <div style={{ flex: "1 1 0", minHeight: 160 }}>{chart}</div> : chart;
+	// In a window the chart fills the card, so its box must have a height of its own to resolve 100% against. The window's
+	// own sheet sizes the box and the card (spend.css): an inline size here could not give way in the narrow column.
+	const chartEl = part === "chart" ? <div className="ut-chart-box">{chart}</div> : chart;
 
 	return (
 		<div className="ut-trends">
@@ -303,11 +303,7 @@ export const Trends = memo(function Trends(props: {
 				</div>
 			)}
 			{drawChart && (
-				<div
-					className="ut-card"
-					data-part={part}
-					style={part === "chart" ? { flex: "1 1 0", minHeight: 0 } : undefined}
-				>
+				<div className="ut-card" data-part={part}>
 					<div className="ut-card-h">
 						<span className="ut-tile-h">Cost over time · UTC</span>
 						{/* One chart, bucketed two ways: a toggle, not tabs (there is no panel to switch to). A fieldset would
