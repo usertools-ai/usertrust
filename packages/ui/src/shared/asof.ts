@@ -46,34 +46,50 @@ function prefixLength(rows: readonly LedgerRow[], pos: number): number {
  * check's result for (`heldFor`). A draw that does not show it (another point, one where its status is its status now,
  * or the live view: `live`) ends it, and so do a new version of the record (a status correction replaces the row
  * object) and another status there: a status that changes and changes back is a new version, and an old result never
- * returns. The state is the cutter's own (the list's owner keeps one) and holds only its last draw's projections;
- * `cutRows` keeps none.
+ * returns. The state is the cutter's own (the list's owner keeps one) and holds only the projections of the draw on
+ * screen. A draw is made in a render that React may throw away (the list is a deferred value), so it is only staged
+ * there, and it is kept once the page commits it (`commit`). Kept when it was made, a draw thrown away ended the
+ * projections on screen, and a check's result held for one of them was lost. `cutRows` keeps none.
  */
 export interface Cutter {
-	/** `cutRows`, reusing a projection only when this cutter's previous draw showed it too, with the same status. */
+	/** `cutRows`, reusing a projection only when the draw last committed showed it, with the same status. The draw is
+	 *  staged: nothing the next cut reuses changes until it is committed. */
 	cut(rows: LedgerRow[], at: AtPayload): LedgerRow[];
-	/** The live view was drawn: no projection carries over to the next cut. */
-	live(): void;
+	/** The live view is drawn (its list is `rows` themselves): once committed, no projection carries over to the next
+	 *  cut. */
+	live(rows: LedgerRow[]): LedgerRow[];
+	/** `drawn`, a list this cutter's `cut` or `live` returned, is on screen: its projections are the ones the next cut
+	 *  may reuse. A draw never committed changes nothing, and nor does a list this cutter did not draw. */
+	commit(drawn: LedgerRow[]): void;
 }
 
 export function createCutter(): Cutter {
-	// The projections the previous draw showed, by the row object each projects: the only ones a draw may reuse.
+	// The projections the draw on screen shows, by the row object each projects: the only ones a draw may reuse.
 	let shown = new Map<LedgerRow, LedgerRow>();
+	// The draws made since the last commit, by the list each returned, with the projections each shows. Held weakly:
+	// while the list on screen stays the same (the live view), nothing is committed, and a strong map kept every draw
+	// React threw away, rows and all. A draw thrown away is no longer reachable, so it goes; the one on screen stays.
+	let staged = new WeakMap<LedgerRow[], Map<LedgerRow, LedgerRow>>();
 	return {
 		cut(rows, at) {
-			const before = shown;
 			const now = new Map<LedgerRow, LedgerRow>();
 			const out = cutWith(rows, at, (r, status) => {
-				const kept = before.get(r);
+				const kept = shown.get(r);
 				const projected = kept !== undefined && kept.status === status ? kept : { ...r, status };
 				now.set(r, projected);
 				return projected;
 			});
-			shown = now;
+			staged.set(out, now);
 			return out;
 		},
-		live() {
-			shown = new Map();
+		live(rows) {
+			staged.set(rows, new Map());
+			return rows;
+		},
+		commit(drawn) {
+			const next = staged.get(drawn);
+			if (next !== undefined) shown = next;
+			staged = new WeakMap();
 		},
 	};
 }

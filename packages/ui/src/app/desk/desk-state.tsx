@@ -16,6 +16,7 @@ import {
 	useContext,
 	useDeferredValue,
 	useEffect,
+	useLayoutEffect,
 	useMemo,
 	useState,
 } from "react";
@@ -238,6 +239,9 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 	// its status there are unchanged, so a check's result held for it in the inspector survives an unrelated record.
 	const [cutter] = useState(createCutter);
 	const list = useMemo(() => listView(drawn, cutter), [drawn, cutter]);
+	// The cut is made in a render React may throw away, so the cutter only stages it there: the draw on screen is kept
+	// once React has committed it.
+	useLayoutEffect(() => cutter.commit(list.shownRows), [cutter, list.shownRows]);
 	const { shownRows, filtered } = list;
 	// Whether what the windows draw shows another position than the header: until the deferred render lands (after
 	// Back, Forward or a link). Those views are dimmed and busy meanwhile, and the status under the header says what is
