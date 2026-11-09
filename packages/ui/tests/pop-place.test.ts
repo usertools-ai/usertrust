@@ -369,6 +369,22 @@ describe("outside", () => {
 		expect(outside(at(100, 800), BOX)).toBe(true);
 		expect(outside(at(100, 100), BOX)).toBe(false);
 	});
+
+	it("at every edge, an anchor that only touches it is outside and one a pixel in is not", () => {
+		// The box is 0 to 400 across and 0 to 800 down; the anchor is 40×16.
+		// Its bottom on the box's top edge, then 1px below it.
+		expect(outside(at(100, -16), BOX)).toBe(true);
+		expect(outside(at(100, -15), BOX)).toBe(false);
+		// Its top on the box's bottom edge, then 1px above it.
+		expect(outside(at(100, 800), BOX)).toBe(true);
+		expect(outside(at(100, 799), BOX)).toBe(false);
+		// Its right on the box's left edge, then 1px past it.
+		expect(outside(at(-40, 100), BOX)).toBe(true);
+		expect(outside(at(-39, 100), BOX)).toBe(false);
+		// Its left on the box's right edge, then 1px short of it.
+		expect(outside(at(400, 100), BOX)).toBe(true);
+		expect(outside(at(399, 100), BOX)).toBe(false);
+	});
 });
 
 describe("intersect", () => {
