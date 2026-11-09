@@ -47,7 +47,7 @@ describe("placePop", () => {
 	});
 
 	it("keeps the default, lined up with the anchor's right edge, when that fits", () => {
-		expect(placePop(at(340, 100), 300, 150, BOX).side).toBe("end");
+		expect(placed(at(340, 100), 300, 150, BOX).side).toBe("end");
 	});
 
 	it("when neither side fits, starts at the box's left edge and is no wider than the box", () => {
