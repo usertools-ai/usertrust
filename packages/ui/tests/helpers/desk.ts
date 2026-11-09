@@ -40,6 +40,8 @@ export function defaultDeskData(over: Partial<DeskData> = {}): DeskData {
 		level: "lane",
 		breakdown: () => breakdown([], window, "lane"),
 		colors: () => rankColors([], "lane"),
+		colorsFor: (dim) => rankColors([], dim),
+		filterOrder: [],
 	};
 	return { ...base, ...over };
 }
@@ -59,6 +61,7 @@ export function defaultDeskView(over: Partial<DeskView> = {}): DeskView {
 		setOpenHash: () => undefined,
 		at: null,
 		setAt: () => undefined,
+		preview: () => undefined,
 	};
 	return { ...base, ...over };
 }

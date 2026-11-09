@@ -13,12 +13,13 @@
  * The encoder never writes a link that decodes to something else: `addressHolds` says whether a state survives the
  * trip, and a state that does not (text a link cannot carry, a facet value past the caps, a fragment past the length
  * cap) is not written at all; the page says so instead.
+ *
+ * The window that fills the desk, the spend range and the split are not here: they are the reader's layout, kept in
+ * memory, so a link does not carry them and Back does not undo them. An old link that still has `fill`, `range` or
+ * `dim` opens, on the defaults: the keys are ignored like any other unknown key.
  */
 
-import type { Dimension } from "./breakdown.js";
-import { WINDOW_IDS, type WindowId } from "./desk-layout.js";
 import { EMPTY_FILTERS, type FilterState } from "./filters.js";
-import { DEFAULT_RANGE, LANE_BUCKET_MS, type RangeId } from "./spend-series.js";
 
 export type ViewId = "audit" | "trends";
 
@@ -31,12 +32,6 @@ export interface UrlState {
 	open: string | null;
 	/** The position the page shows the vault as recorded at, or null for live. */
 	at: number | null;
-	/** Which window fills the desk, or null for the default. */
-	fill: WindowId | null;
-	/** The spend range the desk shows; `DEFAULT_RANGE` is not written. */
-	range: RangeId;
-	/** The dimension the share window and the spend split read; `"lane"` is not written. */
-	dim: Dimension;
 }
 
 export const EMPTY_URL_STATE: UrlState = {
@@ -44,9 +39,6 @@ export const EMPTY_URL_STATE: UrlState = {
 	filters: EMPTY_FILTERS,
 	open: null,
 	at: null,
-	fill: null,
-	range: DEFAULT_RANGE,
-	dim: "lane",
 };
 
 /** The longest search text kept (UTF-16 code units, as `String.length` and an input's `maxLength` count them). */
@@ -62,16 +54,6 @@ const MAX_VALUES_PER_KEY = 100;
 const MAX_VALUE_LENGTH = 256;
 
 const VIEWS: readonly ViewId[] = ["audit", "trends"];
-const RANGES = Object.keys(LANE_BUCKET_MS) as readonly RangeId[];
-const DIMENSIONS_SET = {
-	lane: true,
-	role: true,
-	model: true,
-	kind: true,
-	provider: true,
-} satisfies Record<Dimension, true>;
-const DIMENSIONS = Object.keys(DIMENSIONS_SET) as readonly Dimension[];
-const DEFAULT_DIM: Dimension = "lane";
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 /**
  * Canonical non-negative decimal text: no sign, no leading zeros, no exponent, no trailing zeros in a fraction (`0`,
@@ -137,10 +119,6 @@ export function encodeUrlState(state: UrlState): string {
 	if (min !== null) pairs.push(["min", min]);
 	const at = positionText(state.at);
 	if (at !== null) pairs.push(["at", at]);
-	if (state.fill !== null && WINDOW_IDS.includes(state.fill)) pairs.push(["fill", state.fill]);
-	if (state.range !== DEFAULT_RANGE && RANGES.includes(state.range))
-		pairs.push(["range", state.range]);
-	if (state.dim !== DEFAULT_DIM && DIMENSIONS.includes(state.dim)) pairs.push(["dim", state.dim]);
 	if (state.open !== null && EVENT_HASH.test(state.open)) pairs.push(["open", state.open]);
 	if (f.search !== "") pairs.push(["q", f.search]);
 	if (state.view !== DEFAULT_VIEW) pairs.push(["view", state.view]);
@@ -197,12 +175,6 @@ export function decodeUrlState(hash: string): UrlState {
 
 		const view = params.get("view");
 		const open = params.get("open");
-		const fills = params.getAll("fill");
-		const fillText = fills.length === 1 ? fills[0] : undefined;
-		const rangeText = params.getAll("range");
-		const rangeOne = rangeText.length === 1 ? rangeText[0] : undefined;
-		const dimText = params.getAll("dim");
-		const dimOne = dimText.length === 1 ? dimText[0] : undefined;
 		const atTexts = params.getAll("at");
 		const atText = atTexts.length === 1 ? atTexts[0] : undefined;
 		const at = atText !== undefined && INTEGER.test(atText) ? Number(atText) : null;
@@ -211,9 +183,6 @@ export function decodeUrlState(hash: string): UrlState {
 			filters,
 			open: open !== null && EVENT_HASH.test(open) ? open : null,
 			at: at !== null && Number.isSafeInteger(at) ? at : null,
-			fill: WINDOW_IDS.find((f) => f === fillText) ?? null,
-			range: RANGES.find((r) => r === rangeOne) ?? DEFAULT_RANGE,
-			dim: DIMENSIONS.find((d) => d === dimOne) ?? DEFAULT_DIM,
 		};
 	} catch {
 		return EMPTY_URL_STATE;
@@ -234,9 +203,6 @@ function described(s: UrlState): string {
 		s.view,
 		s.open,
 		s.at === null ? null : String(s.at),
-		s.fill,
-		s.range,
-		s.dim,
 		f.search,
 		opt(f.from),
 		opt(f.to),
@@ -258,10 +224,9 @@ export function addressHolds(state: UrlState): boolean {
 
 /**
  * What to do with the address when the state changes from `prev` to `next` while the address reads `currentHash`.
- * Changing the view, the open record or the window that fills the desk, adding or removing a facet value (a chip), or
- * entering or leaving a position, pushes an entry, so Back undoes it; a search, cost or date tweak, a change of range or
- * dimension, or a move between positions replaces the current one, so typing in the search box or a preview moving
- * along the chart does not flood the back button. Nothing is written when the address already describes `next` (the
+ * Changing the view or the open record, adding or removing a facet value (a chip), or entering or leaving a position,
+ * pushes an entry, so Back undoes it; a search, cost or date tweak, or a move between positions replaces the current
+ * one, so typing in the search box or a preview moving along the chart does not flood the back button. Nothing is written when the address already describes `next` (the
  * state came from the address, or a write already landed). A state the address cannot hold (`addressHolds`) writes
  * the empty hash: a reload or a copied link opens a clean page, never a different filter set, and the page tells the
  * user.
@@ -273,12 +238,11 @@ export function planHistory(
 ): { kind: "push" | "replace" | "none"; hash: string } {
 	const hash = addressHolds(next) ? encodeUrlState(next) : "";
 	if (encodeUrlState(decodeUrlState(currentHash)) === hash) return { kind: "none", hash };
-	// A change of view, record or fill, a chip added or removed, or entering or leaving a position is a navigation;
-	// moving between positions (a preview) is not, nor is a search, cost, date, range or dimension tweak.
+	// A change of view or record, a chip added or removed, or entering or leaving a position is a navigation; moving
+	// between positions (a preview) is not, nor is a search, cost or date tweak.
 	const navigated =
 		prev.view !== next.view ||
 		prev.open !== next.open ||
-		prev.fill !== next.fill ||
 		(prev.at === null) !== (next.at === null) ||
 		FACETS.some(([, field]) => facetSet(prev.filters[field]) !== facetSet(next.filters[field]));
 	return { kind: navigated ? "push" : "replace", hash };

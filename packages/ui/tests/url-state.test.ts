@@ -23,9 +23,6 @@ const FULL: UrlState = {
 	view: "trends",
 	open: H,
 	at: 4182,
-	fill: "share",
-	range: "ytd",
-	dim: "model",
 	filters: {
 		search: "gpt 4 & co",
 		kinds: ["llm_call", "tool_use"],
@@ -59,7 +56,7 @@ describe("encodeUrlState / decodeUrlState", () => {
 			withFilters({ kinds: ["llm_call"] }),
 			withFilters({ models: ["m"] }),
 			withFilters({ providers: ["xAI"] }),
-			{ ...EMPTY_URL_STATE, fill: "spend" },
+			{ ...EMPTY_URL_STATE, at: 17951 },
 			withFilters({ actors: ["a"] }),
 			withFilters({ statuses: ["failed"] }),
 			withFilters({ jobTypes: ["review"] }),
@@ -89,9 +86,6 @@ describe("encodeUrlState / decodeUrlState", () => {
 			view: "trends",
 			open: H,
 			at: null,
-			fill: null,
-			range: "1w",
-			dim: "lane",
 			filters: {
 				...EMPTY_FILTERS,
 				statuses: ["failed", "denied"],
@@ -129,45 +123,91 @@ describe("encodeUrlState / decodeUrlState", () => {
 	});
 });
 
-describe("the provider filter and the fill window in the address", () => {
-	it("reads an old link (#actor=a&job=b) as before, with no provider filter and no fill", () => {
+describe("the provider filter in the address", () => {
+	it("reads an old link (#actor=a&job=b) as before, with no provider filter", () => {
 		const s = decodeUrlState("#actor=a&job=b");
 		expect(s).toEqual({
 			...EMPTY_URL_STATE,
 			filters: { ...EMPTY_FILTERS, actors: ["a"], jobTypes: ["b"] },
 		});
 		expect(s.filters.providers).toEqual([]);
-		expect(s.fill).toBeNull();
 	});
 
-	it("round-trips #provider=xAI&fill=share, and writes it in sorted key order", () => {
-		const s = decodeUrlState("#provider=xAI&fill=share");
+	it("round-trips #provider=xAI, and writes it in sorted key order beside the others", () => {
+		const s = decodeUrlState("#provider=xAI");
 		expect(s.filters.providers).toEqual(["xAI"]);
-		expect(s.fill).toBe("share");
-		expect(encodeUrlState(s)).toBe("#fill=share&provider=xAI");
+		expect(encodeUrlState(s)).toBe("#provider=xAI");
 		expect(decodeUrlState(encodeUrlState(s))).toEqual(s);
 		expect(addressHolds(s)).toBe(true);
+		const more = decodeUrlState(`#view=trends&provider=xAI&at=5&open=${H}&actor=a`);
+		expect(encodeUrlState(more)).toBe(`#actor=a&at=5&open=${H}&provider=xAI&view=trends`);
+		expect(decodeUrlState(encodeUrlState(more))).toEqual(more);
 	});
 
-	it("reads each fill value, and an unknown or repeated one as null", () => {
-		for (const f of ["spend", "share", "ledger", "now"]) {
-			expect(decodeUrlState(`#fill=${f}`).fill).toBe(f);
-		}
-		for (const f of ["bogus", "", "Share", "SPEND", "__proto__", "share,spend"]) {
-			expect(decodeUrlState(`#fill=${encodeURIComponent(f)}`).fill, `fill=${f}`).toBeNull();
-		}
-		expect(decodeUrlState("#fill=share&fill=spend").fill).toBeNull();
-	});
-
-	it("tells a state with a provider or a fill from one without (sameUrlState)", () => {
+	it("tells a state with a provider from one without (sameUrlState)", () => {
 		expect(sameUrlState(EMPTY_URL_STATE, withFilters({ providers: ["xAI"] }))).toBe(false);
-		expect(sameUrlState(EMPTY_URL_STATE, { ...EMPTY_URL_STATE, fill: "now" })).toBe(false);
 	});
 
 	it("a clean page still has an empty hash", () => {
 		expect(encodeUrlState(EMPTY_URL_STATE)).toBe("");
-		expect(EMPTY_URL_STATE.fill).toBeNull();
 		expect(EMPTY_FILTERS.providers).toEqual([]);
+	});
+});
+
+/**
+ * The window that fills the desk, the spend range and the split are the reader's layout, kept in memory: a link does
+ * not carry them and Back does not undo them. The pin (`at`) is still in the address.
+ */
+describe("fill, range and dim are not in the address", () => {
+	const OLD = "#fill=share&range=3m&dim=role";
+
+	it("the state holds the view, the filters, the open record and the position, nothing else", () => {
+		expect(Object.keys(EMPTY_URL_STATE).sort()).toEqual(["at", "filters", "open", "view"]);
+		expect(Object.keys(decodeUrlState(OLD)).sort()).toEqual(["at", "filters", "open", "view"]);
+	});
+
+	it("an old link that carries them decodes to the empty state: ignored, never refused", () => {
+		expect(decodeUrlState(OLD)).toEqual(decodeUrlState(""));
+		expect(decodeUrlState(OLD)).toEqual(EMPTY_URL_STATE);
+		// Repeated, unknown or odd values are ignored the same way.
+		expect(decodeUrlState("#fill=share&fill=spend&range=bogus&dim=__proto__")).toEqual(
+			EMPTY_URL_STATE,
+		);
+		// The keys beside them are kept.
+		expect(decodeUrlState(`${OLD}&provider=xAI&view=trends`)).toEqual({
+			...withFilters({ providers: ["xAI"] }),
+			view: "trends",
+		});
+	});
+
+	it("a shared pin link still opens at the same record", () => {
+		const pin = decodeUrlState("#at=17951");
+		const old = decodeUrlState("#at=17951&fill=share&range=3m&dim=role");
+		expect(pin.at).toBe(17951);
+		expect(old.at).toBe(17951);
+		// Nothing else comes from the dropped keys.
+		expect(old).toEqual(pin);
+		expect(old).toEqual({ ...EMPTY_URL_STATE, at: 17951 });
+	});
+
+	it("encodeUrlState never writes the three keys, even for a state object that still carries them", () => {
+		const carried = { ...FULL, fill: "share", range: "3m", dim: "role" } as UrlState;
+		for (const s of [FULL, carried, { ...EMPTY_URL_STATE, at: 17951 }]) {
+			const hash = encodeUrlState(s);
+			expect(hash).not.toMatch(/(^#|&)(fill|range|dim)=/);
+		}
+		expect(encodeUrlState(carried)).toBe(encodeUrlState(FULL));
+		expect(encodeUrlState({ ...EMPTY_URL_STATE, fill: "spend" } as UrlState)).toBe("");
+		// An old link, written back, loses them and keeps the pin.
+		expect(encodeUrlState(decodeUrlState("#at=17951&fill=share&range=3m&dim=role"))).toBe(
+			"#at=17951",
+		);
+	});
+
+	it("a state that differs only in them is the same state, and changing them writes nothing", () => {
+		const carried = { ...EMPTY_URL_STATE, fill: "share", range: "3m", dim: "role" } as UrlState;
+		expect(sameUrlState(EMPTY_URL_STATE, carried)).toBe(true);
+		expect(planHistory(EMPTY_URL_STATE, carried, "").kind).toBe("none");
 	});
 });
 
@@ -500,27 +540,6 @@ describe("planHistory", () => {
 		expect(planHistory(none, none, "#%E0%A4%A").kind).toBe("none");
 	});
 
-	it("pushes an entry when a fill is entered or left, so Back undoes it", () => {
-		const share = { ...none, fill: "share" as const };
-		expect(planHistory(none, share, "")).toEqual({ kind: "push", hash: "#fill=share" });
-		expect(planHistory(share, none, "#fill=share")).toEqual({ kind: "push", hash: "" });
-	});
-
-	it("pushes when one fill window gives way to another, so Back returns to the first", () => {
-		const share = { ...none, fill: "share" as const };
-		const spend = { ...none, fill: "spend" as const };
-		expect(planHistory(share, spend, "#fill=share")).toEqual({
-			kind: "push",
-			hash: "#fill=spend",
-		});
-	});
-
-	it("writes nothing for a fill change the address already describes", () => {
-		const share = { ...none, fill: "share" as const };
-		expect(planHistory(none, share, "#fill=share").kind).toBe("none");
-		expect(planHistory(share, none, "").kind).toBe("none");
-	});
-
 	it("replaces a stale address with the state's hash when only filters differ", () => {
 		expect(planHistory(none, withFilters({ search: "x" }), "#q=y").kind).toBe("replace");
 	});
@@ -603,78 +622,11 @@ describe("the at field", () => {
 	});
 });
 
-describe("range and dim in the address", () => {
-	it("writes range and dim only away from their defaults", () => {
-		expect(encodeUrlState(EMPTY_URL_STATE)).toBe("");
-		expect(encodeUrlState({ ...EMPTY_URL_STATE, range: "3m" })).toBe("#range=3m");
-		expect(encodeUrlState({ ...EMPTY_URL_STATE, dim: "role" })).toBe("#dim=role");
-		expect(encodeUrlState({ ...EMPTY_URL_STATE, range: "1w", dim: "lane" })).toBe("");
-		expect(EMPTY_URL_STATE.range).toBe("1w");
-		expect(EMPTY_URL_STATE.dim).toBe("lane");
-	});
-
-	it("reads an unknown range, dimension or fill as the default", () => {
-		const s = decodeUrlState("#range=bogus&dim=bogus&fill=bogus");
-		expect(s.range).toBe("1w");
-		expect(s.dim).toBe("lane");
-		expect(s.fill).toBeNull();
-		for (const v of ["", "__proto__", "toString", "1W", "1d,1w"]) {
-			expect(decodeUrlState(`#range=${encodeURIComponent(v)}`).range, `range=${v}`).toBe("1w");
-			expect(decodeUrlState(`#dim=${encodeURIComponent(v)}`).dim, `dim=${v}`).toBe("lane");
-		}
-	});
-
-	it("reads every range and every dimension", () => {
-		for (const r of ["1d", "1w", "1m", "3m", "ytd", "1y"]) {
-			expect(decodeUrlState(`#range=${r}`).range).toBe(r);
-		}
-		for (const d of ["lane", "role", "model", "kind", "provider"]) {
-			expect(decodeUrlState(`#dim=${d}`).dim).toBe(d);
-		}
-	});
-
-	it("reads an old link as before, and writes the same hash back", () => {
-		const hash = "#actor=a&job=b&view=trends";
-		const s = decodeUrlState(hash);
-		expect(s.filters).toEqual({ ...EMPTY_FILTERS, actors: ["a"], jobTypes: ["b"] });
-		expect(s.range).toBe("1w");
-		expect(s.dim).toBe("lane");
-		expect(s.fill).toBeNull();
-		expect(s.view).toBe("trends");
-		expect(encodeUrlState(s)).toBe("#actor=a&job=b&view=trends");
-	});
-
-	it("round-trips #dim=model&fill=share&provider=xAI&range=ytd", () => {
-		const s = decodeUrlState("#dim=model&fill=share&provider=xAI&range=ytd");
-		expect(s.dim).toBe("model");
-		expect(s.range).toBe("ytd");
-		expect(s.fill).toBe("share");
-		expect(s.filters.providers).toEqual(["xAI"]);
-		expect(encodeUrlState(s)).toBe("#dim=model&fill=share&provider=xAI&range=ytd");
-		expect(addressHolds(s)).toBe(true);
-	});
-
-	it("sameUrlState sees a range or a dim difference alone", () => {
-		expect(sameUrlState(EMPTY_URL_STATE, { ...EMPTY_URL_STATE, range: "1d" })).toBe(false);
-		expect(sameUrlState(EMPTY_URL_STATE, { ...EMPTY_URL_STATE, dim: "kind" })).toBe(false);
-		expect(
-			sameUrlState({ ...EMPTY_URL_STATE, dim: "kind" }, { ...EMPTY_URL_STATE, dim: "kind" }),
-		).toBe(true);
-	});
-});
-
 describe("planHistory: which changes push", () => {
 	const none = EMPTY_URL_STATE;
 	const next = (prev: UrlState, over: Partial<UrlState>): UrlState => ({ ...prev, ...over });
 	const kindOf = (prev: UrlState, to: UrlState, current?: string): string =>
 		planHistory(prev, to, current ?? encodeUrlState(prev)).kind;
-
-	it("a fill, and leaving it, push", () => {
-		const filled = next(none, { fill: "share" });
-		expect(planHistory(none, filled, "").kind).toBe("push");
-		expect(planHistory(filled, none, "#fill=share").kind).toBe("push");
-		expect(planHistory(filled, next(none, { fill: "ledger" }), "#fill=share").kind).toBe("push");
-	});
 
 	it("adding or removing a value of any facet pushes", () => {
 		const fields = [
@@ -695,14 +647,12 @@ describe("planHistory: which changes push", () => {
 		}
 	});
 
-	it("search, cost, dates, range and dim replace", () => {
+	it("search, cost and dates replace", () => {
 		expect(kindOf(none, withFilters({ search: "g" }))).toBe("replace");
 		expect(kindOf(none, withFilters({ costMax: 5 }))).toBe("replace");
 		expect(kindOf(none, withFilters({ costMin: 1 }))).toBe("replace");
 		expect(kindOf(none, withFilters({ from: "2026-11-01" }))).toBe("replace");
 		expect(kindOf(none, withFilters({ to: "2026-11-02" }))).toBe("replace");
-		expect(kindOf(none, next(none, { range: "1d" }))).toBe("replace");
-		expect(kindOf(none, next(none, { dim: "role" }))).toBe("replace");
 	});
 
 	it("a move between positions replaces, and a facet reorder alone writes nothing", () => {
@@ -725,15 +675,22 @@ describe("planHistory: which changes push", () => {
 	});
 });
 
-describe("the hook's range, dim and fill", () => {
+describe("the hook holds no range, dim or fill", () => {
 	const hook = readFileSync(new URL("../src/app/use-url-state.ts", import.meta.url), "utf-8");
-	it("returns range, dim and fill with setters that ignore a no-op, and no view", () => {
-		expect(hook).toMatch(/setRange/);
-		expect(hook).toMatch(/setDim/);
-		expect(hook).toMatch(/setFill/);
-		expect(hook).toMatch(/s\.range === r/);
-		expect(hook).toMatch(/s\.dim === d/);
-		expect(hook).toMatch(/s\.fill === f/);
+	it("returns neither the three nor their setters, and no view", () => {
+		// They live in the desk's memory (`useDeskMemory`), not in the address. The doc comment may still name them.
+		const code = hook.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+		for (const word of [
+			"range",
+			"setRange",
+			"dim",
+			"setDim",
+			"fill",
+			"setFill",
+			"RangeId",
+			"WindowId",
+		])
+			expect(code, word).not.toMatch(new RegExp(`\\b${word}\\b`));
 		expect(hook).not.toMatch(/setView/);
 		expect(hook).not.toMatch(/\bview: state\.view/);
 	});
