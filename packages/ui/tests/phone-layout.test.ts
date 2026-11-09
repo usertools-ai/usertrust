@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { SummaryPayload } from "../src/shared/api.js";
 import { activeFilterCount, EMPTY_FILTERS, type FilterState } from "../src/shared/filters.js";
 import { PHONE_MAX_WIDTH, PHONE_QUERY } from "../src/shared/layout.js";
+import { allCss, deskCss, legacyCss } from "./helpers/css.js";
 
-const CSS = readFileSync(join(import.meta.dirname, "..", "src", "app", "styles.css"), "utf-8");
+// The phone block and the wide rules are the original stylesheet's; the breakpoint check below reads every sheet.
+const CSS = legacyCss();
 
 // The components are .tsx, which the tests' typecheck (no jsx) cannot import statically: they are loaded by a computed
 // path, as the other render tests do, and typed here by what these tests pass.
@@ -23,7 +23,12 @@ async function load<P>(file: string, name: string): Promise<Component<P>> {
 	return mod[name] as Component<P>;
 }
 let SummaryStrip: Component<{ summary: SummaryPayload | null; live: string }>;
-let FilterBar: Component<{ rows: never[]; filters: FilterState; onChange: () => void }>;
+let FilterBar: Component<{
+	rows: never[];
+	filters: FilterState;
+	onChange: () => void;
+	beside?: React.ReactNode;
+}>;
 beforeAll(async () => {
 	SummaryStrip = await load("summary-strip", "SummaryStrip");
 	FilterBar = await load("filter-bar", "FilterBar");
@@ -85,7 +90,9 @@ describe("the phone breakpoint", () => {
 		// Every narrow block is written at the phone width (or the summary's wider 900px step), so a phone block written
 		// with another number, which would drift from the components' query, fails here. (The hit-area block at the end
 		// has its own phone-width section, at the same width.)
-		const widths = [...CSS.matchAll(/@media \(max-width: (\d+)px\)/g)].map((m) => Number(m[1]));
+		const widths = [...allCss().matchAll(/@media \(max-width: (\d+)px\)/g)].map((m) =>
+			Number(m[1]),
+		);
 		expect(widths.filter((w) => w !== PHONE_MAX_WIDTH && w !== 900)).toEqual([]);
 		expect(widths.filter((w) => w === PHONE_MAX_WIDTH).length).toBeGreaterThanOrEqual(1);
 	});
@@ -261,6 +268,45 @@ describe("phones: the filter bar is one Filters button that opens the sheet", ()
 		expect(rule(phone.body, ".ut-head .ut-btn")).toMatch(/flex:\s*0 0 auto/);
 		// No phone rule places a head child in a grid column any more.
 		expect(phone.body).not.toMatch(/\.ut-head [^{]*\{[^}]*grid-column/);
+	});
+
+	it("red-first (active chips beside the filter controls ran a 320px page 114px wide): the chips take a row of their own", () => {
+		// On the desk the filter bar's chip strip is a flex sibling of the Filters button and the record count. In a row
+		// that never wrapped it kept its widest chip's width (a chip is up to 260px, plus the strip's padding), and a long
+		// search beside two facet chips drew the page 434px wide on a 320px screen. Above the list, as before the desk,
+		// the strip has its own row; a long chip still fits it, and its chips wrap inside it.
+		const desk = deskCss();
+		const row = rule(desk, ".ut-dk-filters") ?? "";
+		expect(row).toMatch(/display:\s*flex/);
+		expect(row).toMatch(/flex-wrap:\s*wrap/);
+		const strip = rule(desk, ".ut-dk-filters > .ut-active") ?? "";
+		expect(strip).toMatch(/flex:\s*1 1 100%/);
+		expect(strip).toMatch(/min-width:\s*0/);
+		// Never by a CSS order (the desk's sheets set none): the record count comes before the strip in the DOM.
+		expect(strip).not.toMatch(/order:/);
+		// The chips themselves wrap inside the strip.
+		expect(rule(CSS, ".ut-active") ?? "").toMatch(/flex-wrap:\s*wrap/);
+	});
+
+	it("draws what the desk puts beside the bar (its record count) after the bar and before the active chips, in the DOM", () => {
+		// Left after the whole FilterBar, the count followed the chips: with the chips on a row of their own it took a
+		// third row, below them. In the DOM between the two, it shares the bar's row and Tab and a screen reader meet
+		// the bar, the count and the chips in the order they are drawn.
+		const html = renderToStaticMarkup(
+			createElement(FilterBar, {
+				rows: [],
+				filters: { ...EMPTY_FILTERS, search: "abc" },
+				onChange: () => {},
+				beside: createElement("span", { id: "the-count" }, "12 records"),
+			}),
+		);
+		const bar = html.indexOf('class="ut-bar');
+		const count = html.indexOf('id="the-count"');
+		const chips = html.indexOf('class="ut-active"');
+		expect(bar).toBeGreaterThan(-1);
+		expect(chips).toBeGreaterThan(-1);
+		expect(count).toBeGreaterThan(bar);
+		expect(count).toBeLessThan(chips);
 	});
 });
 

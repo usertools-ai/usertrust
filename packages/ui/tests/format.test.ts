@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { applyFilters, EMPTY_FILTERS } from "../src/shared/filters.js";
 import {
 	compactActor,
@@ -80,6 +80,163 @@ describe("formatUtcMinute and utcHour", () => {
 		expect(formatUtcMinute("2026-10-13T01:30:00+02:00")).toBe("2026-10-12 23:30Z");
 		expect(utcHour("2026-10-13T01:30:00+02:00")).toBe("2026-10-12 23:00");
 		expect(formatUtcMinute("not a time")).toBe("not a time");
+	});
+});
+
+// The Spend chart buckets every row it draws by `utcDay` or `utcHour`, once per filter change, so on a large vault a
+// Date per row was most of the time a filter change took.
+describe("utcDay and utcHour on the timestamps the vault writes", () => {
+	// The reading through a Date, kept as the reference: every input must give what it gives.
+	const dayViaDate = (iso: string): string => {
+		const t = Date.parse(iso);
+		return Number.isNaN(t) ? iso.slice(0, 10) : new Date(t).toISOString().slice(0, 10);
+	};
+	const hourViaDate = (iso: string): string => {
+		const t = Date.parse(iso);
+		const s = Number.isNaN(t) ? iso : new Date(t).toISOString();
+		return `${s.slice(0, 10)} ${s.slice(11, 13)}:00`;
+	};
+	const parseCalls = (read: () => void): number => {
+		const parse = vi.spyOn(Date, "parse");
+		try {
+			read();
+			return parse.mock.calls.length;
+		} finally {
+			parse.mockRestore();
+		}
+	};
+
+	it("red-first (a Date per row): a timestamp as the vault writes it is read from its own characters", () => {
+		const calls = parseCalls(() => {
+			expect(utcDay("2026-10-12T17:59:02.770Z")).toBe("2026-10-12");
+			expect(utcHour("2026-10-12T17:59:02.770Z")).toBe("2026-10-12 17:00");
+			expect(utcDay("2024-02-29T23:59:59.999Z")).toBe("2024-02-29");
+		});
+		expect(calls).toBe(0);
+	});
+
+	it("CONTROL: a date the calendar lacks, hour 24, an offset or another shape is still read through a Date", () => {
+		for (const iso of [
+			"2026-02-30T10:00:00.000Z",
+			"2026-02-29T10:00:00.000Z",
+			"1900-02-29T00:00:00.000Z",
+			"2026-04-31T00:00:00.000Z",
+			"2026-11-08T24:00:00.000Z",
+			"2026-10-13T01:30:00.000+02:00",
+			"2026-10-12T17:59:02Z",
+			"2026-10-12t17:59:02.770z",
+		]) {
+			expect(
+				parseCalls(() => utcDay(iso)),
+				iso,
+			).toBe(1);
+			expect(
+				parseCalls(() => utcHour(iso)),
+				iso,
+			).toBe(1);
+		}
+	});
+
+	it("reads ANY string not exactly in the toISOString shape through a Date, and gives what that gives", () => {
+		const shapes = [
+			// offsets, including a zero one
+			"2026-11-08T23:59:59.999+00:00",
+			"2026-11-08T23:59:59.999-00:00",
+			"2026-11-08T12:00:00.000+14:00",
+			"2026-11-08T12:00:00.000-12:00",
+			"2026-11-08T23:59:59.999+0000",
+			// no milliseconds, no seconds, no minutes, no zone (read as local time), no time at all
+			"2026-11-08T23:59:59Z",
+			"2026-11-08T23:59Z",
+			"2026-11-08T23Z",
+			"2026-11-08T23:59:59.999",
+			"2026-11-08",
+			// fewer or extra digits in any field
+			"2026-11-08T23:59:59.9Z",
+			"2026-11-08T23:59:59.99Z",
+			"2026-11-08T23:59:59.9999Z",
+			"2026-11-08T23:59:59.999999Z",
+			"2026-11-08T23:59:59.9999999Z",
+			"12026-11-08T23:59:59.999Z",
+			"+002026-11-08T23:59:59.999Z",
+			"-000001-01-01T00:00:00.000Z",
+			"2026-011-08T23:59:59.999Z",
+			"2026-11-008T23:59:59.999Z",
+			"2026-11-08T023:59:59.999Z",
+			"2026-11-08T23:059:59.999Z",
+			"2026-11-08T23:59:059.999Z",
+			"2026-1-08T23:59:59.999Z",
+			// another separator, case, padding or digit
+			"2026-11-08 23:59:59.999Z",
+			"2026-11-08t23:59:59.999Z",
+			"2026-11-08T23:59:59.999z",
+			" 2026-11-08T23:59:59.999Z",
+			"2026-11-08T23:59:59.999Z\n",
+			"２０２６-11-08T23:59:59.999Z",
+		];
+		for (const iso of shapes) {
+			expect(
+				parseCalls(() => utcDay(iso)),
+				iso,
+			).toBe(1);
+			expect(
+				parseCalls(() => utcHour(iso)),
+				iso,
+			).toBe(1);
+			expect(utcDay(iso), iso).toBe(dayViaDate(iso));
+			expect(utcHour(iso), iso).toBe(hourViaDate(iso));
+		}
+	});
+
+	it("gives what the Date reading gives for every input: leap days, month ends, rollovers, offsets, junk", () => {
+		const pad = (n: number): string => String(n).padStart(2, "0");
+		const inputs = [
+			"2026-02-30T10:00:00.000Z",
+			"2026-02-29T10:00:00.000Z",
+			"2024-02-29T10:00:00.000Z",
+			"2000-02-29T00:00:00.000Z",
+			"1900-02-29T00:00:00.000Z",
+			"2026-04-31T00:00:00.000Z",
+			"2026-11-08T24:00:00.000Z",
+			"2026-11-08T23:59:60.000Z",
+			"2026-11-08T23:60:00.000Z",
+			"2026-11-08T23:59:59.999Z",
+			"2026-11-08T23:59:59Z",
+			"2026-11-08T23:59Z",
+			"2026-11-08t23:59:59.999z",
+			"2026-13-01T00:00:00.000Z",
+			"2026-00-10T00:00:00.000Z",
+			"2026-11-00T00:00:00.000Z",
+			"2026-11-08T23:59:59.999+00:00",
+			"2026-10-13T01:30:00.000+02:00",
+			"2026-10-12T22:30:00.000-02:00",
+			"+020000-01-01T00:00:00.000Z",
+			"0000-01-01T00:00:00.000Z",
+			"0099-12-31T23:59:59.999Z",
+			"9999-12-31T23:59:59.999Z",
+			"2026-10-12",
+			"2026-10-12T17:59:02.770Z ",
+			"not a time",
+			"",
+		];
+		// Both ends of every day around the end of February, in a common year, a leap year, and a century with and
+		// without its leap day.
+		for (const year of [1900, 2000, 2024, 2026])
+			for (const [month, days] of [
+				[2, 31],
+				[3, 1],
+			] as const)
+				for (let day = month === 2 ? 27 : 1; day <= days; day++)
+					for (const time of ["00:00:00.000", "23:59:59.999"])
+						inputs.push(`${year}-${pad(month)}-${pad(day)}T${time}Z`);
+		// Instants written as the vault writes them, about 37 days and 5.6 hours apart, so they fall on every hour.
+		for (let t = Date.UTC(1899, 0, 1); t < Date.UTC(2101, 0, 1); t += 3_217_000_013)
+			inputs.push(new Date(t).toISOString());
+		for (const iso of inputs) {
+			expect(utcDay(iso), iso).toBe(dayViaDate(iso));
+			expect(utcHour(iso), iso).toBe(hourViaDate(iso));
+		}
+		expect(inputs.length).toBeGreaterThan(2000);
 	});
 });
 

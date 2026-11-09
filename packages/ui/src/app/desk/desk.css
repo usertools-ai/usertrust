@@ -1,0 +1,349 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Usertools, Inc. */
+
+/* The desk's stylesheet entry (main.tsx imports it after styles.css, which fixes the layer order). The tokens
+   come first, then each window's sheet, then the shell's own rules. */
+@import "./desk-tokens.css";
+@import "../windows/spend/spend.css";
+@import "../windows/share/share.css";
+@import "../windows/ledger/ledger.css";
+@import "../windows/now/now.css";
+
+@layer components {
+	/* The shell's rules (prefix ut-dk-, and ut-win for a window). */
+
+	/* The page: one column, the height of the viewport, the desk taking what the bars leave. */
+	.ut-dk {
+		height: 100dvh;
+		display: flex;
+		flex-direction: column;
+		gap: var(--dk-gap);
+		padding: var(--dk-gap);
+		background: var(--dk-page);
+	}
+
+	.ut-dk-backdrop {
+		position: fixed;
+		inset: 0;
+		z-index: -1;
+		background: var(--dk-page);
+	}
+
+	/* The desk: twelve columns, two rows, the windows in their home cells. The rows are set inline (HOME_ROWS). */
+	.ut-dk-desk {
+		flex: 1 1 0;
+		min-height: 480px;
+		position: relative;
+		display: grid;
+		grid-template-columns: repeat(12, minmax(0, 1fr));
+		gap: var(--dk-gap);
+	}
+
+	/* The top bar: the page bar (mark, vault, live state, alarm, as-at line, notice), the search box and Export, on glass
+	   because they are controls. The bar's own header takes the room, the rest follows and wraps on a narrow window. */
+	.ut-dk-top {
+		flex: 0 0 auto;
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 8px 12px;
+		padding: 10px 16px;
+		min-width: 0;
+		border-radius: var(--dk-radius);
+	}
+
+	.ut-dk-top > .ut-top {
+		flex: 1 1 320px;
+	}
+
+	.ut-dk-top > .ut-alarm,
+	.ut-dk-top > .ut-notice {
+		flex: 1 1 100%;
+		margin: 0;
+	}
+
+	.ut-dk > .ut-address-note {
+		flex: 0 0 auto;
+		margin: 0;
+	}
+
+	/* The filter row and the record count. The count dims with the list it counts (the original stylesheet scopes that
+	   rule to its own header, which is gone). The active chips take a row of their own below the controls and the count,
+	   as they did above the list: beside them, the strip kept its widest chip's width and ran a narrow phone's page off
+	   the screen. The count comes before the strip in the DOM (FilterBar's `beside`), never by a CSS order. */
+	.ut-dk-filters {
+		flex: 0 0 auto;
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 12px;
+		min-width: 0;
+	}
+
+	.ut-dk-filters > .ut-bar {
+		flex: 1 1 auto;
+		min-width: 0;
+	}
+
+	.ut-dk-filters > .ut-active {
+		flex: 1 1 100%;
+		min-width: 0;
+	}
+
+	.ut-dk-filters .ut-label[data-held="true"] {
+		opacity: 0.55;
+	}
+
+	/* A window: solid, never glass. A slot is the grid item and is not positioned, so a filled window can be absolute
+	   over the whole desk while its slot keeps the home cell. */
+	.ut-win-slot {
+		display: flex;
+		min-width: 0;
+		min-height: 0;
+	}
+
+	.ut-win {
+		flex: 1 1 0;
+		display: flex;
+		flex-direction: column;
+		min-height: 0;
+		min-width: 0;
+		background: var(--dk-pane);
+		border: 1px solid var(--dk-grid);
+		border-radius: var(--dk-radius);
+		box-shadow:
+			inset 0 1px 0 rgba(255, 255, 255, 0.05),
+			0 1px 2px rgba(0, 0, 0, 0.5),
+			0 8px 24px rgba(0, 0, 0, 0.35);
+		overflow: hidden;
+	}
+
+	/* Growing, filled and shrinking: the section covers the desk at its filled size, so nothing inside it reflows
+	   while the clip runs. */
+	.ut-win[data-state="grow"],
+	.ut-win[data-state="filled"],
+	.ut-win[data-state="shrink"] {
+		position: absolute;
+		inset: 0;
+		z-index: 2;
+	}
+
+	/* Another window fills the desk: this one fades out and takes no input. */
+	.ut-win[data-dim="true"] {
+		opacity: 0;
+		pointer-events: none;
+		transition: opacity 270ms cubic-bezier(0.2, 0.8, 0.2, 1);
+	}
+
+	.ut-win-bar {
+		flex: 0 0 auto;
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		min-height: 44px;
+		padding: 6px 10px 6px 16px;
+		border-bottom: 1px solid var(--dk-grid);
+	}
+
+	.ut-win-title {
+		margin: 0;
+		font-size: 13px;
+		font-weight: 600;
+		letter-spacing: 0.02em;
+		color: var(--dk-text);
+	}
+
+	.ut-win-sub {
+		font-size: 12px;
+		color: var(--dk-label);
+	}
+
+	.ut-win-grow {
+		flex: 1 1 auto;
+	}
+
+	.ut-win-fill {
+		display: inline-grid;
+		place-items: center;
+		min-width: 32px;
+		min-height: 32px;
+		padding: 0;
+		border: 1px solid transparent;
+		border-radius: 8px;
+		background: transparent;
+		color: var(--dk-label);
+		cursor: pointer;
+	}
+
+	.ut-win-fill:hover {
+		background: var(--dk-hover);
+		color: var(--dk-text);
+	}
+
+	.ut-win-fill:focus-visible,
+	.ut-win-bar:focus-visible {
+		outline: 2px solid var(--dk-gold);
+		outline-offset: -2px;
+	}
+
+	.ut-win-fill svg {
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 1.5;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+
+	/* The body scrolls on its own, so the wheel moves the window under the cursor. */
+	.ut-win-body {
+		flex: 1 1 0;
+		min-height: 0;
+		overflow: auto;
+		display: flex;
+		flex-direction: column;
+	}
+
+	.ut-win-body[data-held="true"] {
+		opacity: 0.55;
+	}
+
+	/* Glass is for controls only: the top bar, the range capsule, a menu. Never a pane. */
+	.ut-glass {
+		position: relative;
+		background: rgba(24, 24, 22, 0.55);
+		border: 1px solid rgba(255, 255, 255, 0.09);
+		backdrop-filter: blur(8px) saturate(125%);
+		-webkit-backdrop-filter: blur(8px) saturate(125%);
+		box-shadow:
+			inset 0 1px 0 rgba(255, 255, 255, 0.08),
+			0 4px 14px rgba(0, 0, 0, 0.3);
+		transition:
+			scale 120ms ease-out,
+			border-color 120ms ease-out;
+	}
+
+	/* The rim: its brightest point turns toward the pointer (--ra is set by installGlass). */
+	.ut-glass::before {
+		content: "";
+		position: absolute;
+		inset: -1px;
+		border-radius: inherit;
+		padding: 1px;
+		pointer-events: none;
+		background: conic-gradient(
+			from var(--ra, 0deg),
+			rgba(255, 255, 255, 0.5),
+			rgba(255, 255, 255, 0.04) 25%,
+			rgba(255, 255, 255, 0.04) 75%,
+			rgba(255, 255, 255, 0.5)
+		);
+		-webkit-mask:
+			linear-gradient(#000 0 0) content-box,
+			linear-gradient(#000 0 0);
+		-webkit-mask-composite: xor;
+		mask:
+			linear-gradient(#000 0 0) content-box exclude,
+			linear-gradient(#000 0 0);
+	}
+
+	.ut-glass.pressed {
+		scale: 1.04;
+		border-color: rgba(255, 255, 255, 0.22);
+	}
+
+	/* The shine along the edge: only after the page has been idle (installGlass marks the root), once a sweep. */
+	.ut-glass::after {
+		content: "";
+		position: absolute;
+		inset: 0;
+		border-radius: inherit;
+		pointer-events: none;
+		opacity: 0;
+		background: linear-gradient(105deg, transparent 40%, rgba(255, 242, 200, 0.18) 50%, transparent 60%);
+		background-size: 250% 100%;
+		background-position: 120% 0;
+	}
+
+	:root[data-idle] .ut-glass::after {
+		animation: ut-shine 2.4s ease-in-out 1;
+	}
+
+	@keyframes ut-shine {
+		0% {
+			opacity: 0;
+			background-position: 120% 0;
+		}
+		30% {
+			opacity: 1;
+		}
+		100% {
+			opacity: 0;
+			background-position: -20% 0;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.ut-win[data-dim="true"] {
+			transition: none;
+		}
+
+		.ut-glass {
+			transition: none;
+		}
+
+		:root[data-idle] .ut-glass::after {
+			animation: none;
+		}
+	}
+
+	/* Narrow: the desk is a scrolling column, every window shows, and fill is ignored. */
+	@media (max-width: 900px) {
+		.ut-dk {
+			height: auto;
+			min-height: 100dvh;
+		}
+
+		/* The column takes its content's height and the page scrolls: neither the desk nor a window's slot shrinks to fit
+		   the screen, or the windows' contents run into each other. */
+		.ut-dk-desk {
+			flex: 0 0 auto;
+			display: flex;
+			flex-direction: column;
+			min-height: 0;
+		}
+
+		.ut-win-slot {
+			display: block;
+			flex: 0 0 auto;
+		}
+
+		.ut-win {
+			flex: 0 0 auto;
+			min-height: 320px;
+			overflow: visible;
+		}
+
+		.ut-win-fill {
+			display: none;
+		}
+
+		.ut-win-body {
+			flex: 0 0 auto;
+			overflow: visible;
+		}
+
+		/* The Ledger's list keeps a scroller of its own above the phone width (`AuditTable`), so its box needs a height:
+		   with none, the list measured zero and drew no rows. */
+		[data-win="ledger"] .ut-lg-body {
+			flex: 0 0 auto;
+			height: 70dvh;
+		}
+	}
+
+	/* A phone: the list flows in the page and the window is its scroller, so its box takes its content's height. */
+	@media (max-width: 760px) {
+		[data-win="ledger"] .ut-lg-body {
+			height: auto;
+		}
+	}
+}

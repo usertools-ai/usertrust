@@ -1,0 +1,17 @@
+{
+	// The browser app's typecheck. `tsc -b` covers src/server and src/shared only, so nothing checked
+	// src/app before the desk. scripts/typecheck-app.mts runs this config: it fails on an error in the
+	// desk's own files (src/app/desk, src/app/windows) and reports, without failing, errors in the older
+	// components and shared modules they import.
+	"extends": "../../tsconfig.base.json",
+	"compilerOptions": {
+		"jsx": "react-jsx",
+		"noEmit": true,
+		"declaration": false,
+		"declarationMap": false,
+		"sourceMap": false,
+		"composite": false,
+		"types": ["vite/client"]
+	},
+	"include": ["src/app/desk", "src/app/windows", "src/shared"]
+}

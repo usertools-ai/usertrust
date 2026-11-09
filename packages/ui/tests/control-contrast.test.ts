@@ -1,14 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { allCss } from "./helpers/css.js";
 
-const CSS = readFileSync(
-	join(import.meta.dirname, "..", "src", "app", "styles.css"),
-	"utf-8",
-).replace(/\/\*[\s\S]*?\*\//g, "");
+const CSS = allCss().replace(/\/\*[\s\S]*?\*\//g, "");
 
 type Rgba = { r: number; g: number; b: number; a: number };
 

@@ -6,6 +6,7 @@ import { costView, transferView, usageView } from "../shared/display.js";
 import { formatUtc, UT_KEY } from "../shared/format.js";
 import { popoverOwnsEscape } from "../shared/row-nav.js";
 import { JOB_TYPE_CAVEAT, type LedgerRow, statusOf } from "../shared/rows.js";
+import { statusWord } from "../shared/status-word.js";
 import { type Held, heldFor, type VerifyOutcome, verifyOutcome } from "../shared/verify-view.js";
 import { STATUS_TONE } from "./audit-table.js";
 
@@ -201,6 +202,9 @@ export function RowPanel(props: {
 					active === null ||
 					active === document.body ||
 					panelRef.current?.contains(active) === true;
+				// This Escape is handled here: marked, so a listener later in the same keypress (the desk's Escape peel, in the
+				// bubble phase, after the page has re-rendered with the panel closed) does not take a second layer with it.
+				e.preventDefault();
 				// A modal panel returns focus on its own (below); a docked one hands it back to its row. Focus in the search box
 				// or elsewhere stays there: closing must not take it.
 				onClose(docked && inside);
@@ -294,7 +298,7 @@ export function RowPanel(props: {
 				) : (
 					<span className="ut-pill" data-tone={pillTone(STATUS_TONE[status])}>
 						<i />
-						{status}
+						{statusWord(status)}
 					</span>
 				)}
 				{row.integrity === "verified" ? (

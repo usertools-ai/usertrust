@@ -6,12 +6,11 @@
  * view labels it as running today, in the label and in the help line; the live view is unchanged.
  */
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { LedgerRow } from "../src/shared/rows.js";
+import { appSource } from "./helpers/app-source.js";
 
 // The component is .tsx, which the tests' typecheck (no jsx) cannot import statically: load it by a computed path.
 type Component<P> = (props: P) => React.JSX.Element;
@@ -71,7 +70,7 @@ describe("the explicit check in the inspector", () => {
 
 describe("the page tells the inspector the position drawn, not the one in the address", () => {
 	it("both RowPanel call sites pass past from list.at, so a #at that failed to load does not label a live screen as past", () => {
-		const src = readFileSync(join(import.meta.dirname, "..", "src", "app", "app.tsx"), "utf8");
+		const src = appSource();
 		const sites = src.match(/<RowPanel[\s\S]*?\/?>/g) ?? [];
 		expect(sites).toHaveLength(2);
 		for (const site of sites) {

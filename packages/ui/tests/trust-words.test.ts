@@ -128,6 +128,22 @@ describe("summary integrity pill: chained, never verified", () => {
 	});
 });
 
+describe("the outcome word: a charge whose outcome is not confirmed reads 'unresolved' on screen", () => {
+	it("in a row's badge and in the record panel's pill, never 'ambiguous'", async () => {
+		const Row = await auditTable();
+		const { RowPanel } = await rowPanel();
+		const r = row({ status: "ambiguous" });
+		const shown = [
+			renderToStaticMarkup(createElement(Row, { row: r })),
+			renderToStaticMarkup(createElement(RowPanel, { row: r, docked: true, onClose: () => {} })),
+		];
+		for (const html of shown) {
+			expect(text(html)).toContain("unresolved");
+			expect(text(html)).not.toContain("ambiguous");
+		}
+	});
+});
+
 describe("audit rows: no mark while intact, '⚠ after break' after a break", () => {
 	it("an intact row carries no integrity mark at all", async () => {
 		const html = renderToStaticMarkup(createElement(await auditTable(), { row: row() }));

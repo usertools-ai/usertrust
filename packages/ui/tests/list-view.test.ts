@@ -12,15 +12,17 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { AtPayload, SummaryPayload } from "../src/shared/api.js";
 import { listState } from "../src/shared/display.js";
-import { EMPTY_FILTERS } from "../src/shared/filters.js";
+import { applyFilters, EMPTY_FILTERS, type FilterState } from "../src/shared/filters.js";
 import {
 	type HoldAnnouncement,
 	heldNote,
 	holdAnnouncement,
+	levelRows,
 	listView,
 	pastHeldNote,
 } from "../src/shared/list-view.js";
 import type { LedgerRow } from "../src/shared/rows.js";
+import { appSource } from "./helpers/app-source.js";
 
 function row(pos: number): LedgerRow {
 	return {
@@ -170,7 +172,7 @@ describe("listView", () => {
 	});
 
 	it("the page draws the list from listView over ONE deferred input, phase included", () => {
-		const app = readFileSync(join(import.meta.dirname, "..", "src", "app", "app.tsx"), "utf-8");
+		const app = appSource();
 		expect(app).toContain("useDeferredValue(listInput)");
 		expect(app).not.toContain("heldInput");
 		// With the list's own cutter, made once for the page (`useState(createCutter)`), never per render.
@@ -181,14 +183,26 @@ describe("listView", () => {
 	});
 
 	it("every view drawn from the list's input is marked from the drawn position, not from the drag", () => {
-		const app = readFileSync(join(import.meta.dirname, "..", "src", "app", "app.tsx"), "utf-8");
+		const app = appSource();
 		expect(app).toContain("heldNote(list.at, shownAt)");
 		expect(app).not.toMatch(/setHolding|data-holding|aria-busy=\{holding\}/);
-		// The list or Trends, the count, Export, the facets, both inspectors, and the status under the header.
-		expect(app).toMatch(/className="ut-pane"[\s\S]{0,200}data-held=\{held\}\s*aria-busy=\{held\}/);
+		// The windows' bodies, the count, Export, the facets, both inspectors, and the status under the header. A window's
+		// body is dimmed and busy by the Window itself, except Now, which follows the header.
+		const win = readFileSync(
+			join(import.meta.dirname, "..", "src", "app", "desk", "window.tsx"),
+			"utf-8",
+		);
+		expect(win).toMatch(/className="ut-win-body"[^>]*\{\.\.\.lagging\}/);
+		expect(win).toContain('{ "data-held": held, "aria-busy": held }');
+		const deskCss = readFileSync(
+			join(import.meta.dirname, "..", "src", "app", "desk", "desk.css"),
+			"utf-8",
+		);
+		expect(deskCss).toMatch(/\.ut-win-body\[data-held="true"\]\s*\{\s*opacity: 0\.55;\s*\}/);
 		expect(app).toContain('<span className="ut-label" role="status" data-held={held}>');
 		expect(app).toMatch(/<ExportButton[\s\S]{0,120}held=\{held\}/);
-		expect(app).toMatch(/<FilterBar [^>]*held=\{held\}/);
+		// FilterBar's own `held` prop, not the `data-held` of the count it is handed as `beside`.
+		expect(app).toMatch(/<FilterBar\s[^>]*?\sheld=\{held\}/);
 		expect(app.match(/<RowPanel[^>]*held=\{held\}/g)).toHaveLength(2);
 		expect(app).toContain("holdNote={holdNote}");
 		// Dimmed: opacity only, so nothing shifts. The drawer is dimmed inside, so it stays opaque over the page.
@@ -205,6 +219,39 @@ describe("listView", () => {
 			'.ut-drawer[data-held="true"] > .ut-insp-in',
 		])
 			expect(dim?.[1]).toContain(sel);
+	});
+});
+
+// The share window's level (`effectiveLevel`) reads the list's rows under every filter but the models one. It used to
+// filter every row a second time, under the filters just typed rather than the ones the list was drawn with, inside
+// the render each keystroke makes, which nothing can split.
+describe("levelRows", () => {
+	const mixed = Array.from({ length: 400 }, (_, i) => ({
+		...row(i),
+		model: i % 2 === 0 ? "m-even" : "m-odd",
+		actor: i % 3 === 0 ? "alpha" : "beta",
+	}));
+	const draw = (filters: FilterState): ReturnType<typeof listView> =>
+		listView({ rows: mixed, at: null, filters, phase: "loaded", summary: summary() });
+
+	it("red-first (a second pass over every row): with no model picked, they are the list's own filtered rows", () => {
+		const v = draw({ ...EMPTY_FILTERS, search: "alpha" });
+		expect(v.filtered.length).toBe(134);
+		expect(levelRows(v)).toBe(v.filtered);
+	});
+
+	it("with a model picked, they keep every other filter and drop only the models one", () => {
+		const v = draw({ ...EMPTY_FILTERS, search: "alpha", models: ["m-even"] });
+		expect(v.filtered.every((r) => r.model === "m-even")).toBe(true);
+		const rows = levelRows(v);
+		expect(rows).toEqual(applyFilters(mixed, { ...EMPTY_FILTERS, search: "alpha" }));
+		expect(new Set(rows.map((r) => r.model))).toEqual(new Set(["m-even", "m-odd"]));
+		expect(rows.every((r) => r.actor === "alpha")).toBe(true);
+	});
+
+	it("are read under the filters the list was drawn with, which the list carries", () => {
+		const filters = { ...EMPTY_FILTERS, actors: ["alpha"] };
+		expect(draw(filters).filters).toBe(filters);
 	});
 });
 
@@ -305,9 +352,11 @@ describe("holdAnnouncement", () => {
 		expect(holdAnnouncement(lagging, null, null).text).toBe("Showing the live vault");
 	});
 
-	it("the page feeds it the held note and the header's position, and hands its text to the timeline", () => {
-		const app = readFileSync(join(import.meta.dirname, "..", "src", "app", "app.tsx"), "utf-8");
+	it("the page feeds it the held note and the header's position, and hands its text to the status under the header", () => {
+		const app = appSource();
 		expect(app).toContain("setAnnounce((prev) => holdAnnouncement(prev, holdNote, shownAt));");
-		expect(app).toContain("announce={announce.text}");
+		// The desk's state puts the text in the shell's binding, and the shell hands it to the status.
+		expect(app).toContain("announce: announce.text");
+		expect(app).toContain("announce={status.announce}");
 	});
 });

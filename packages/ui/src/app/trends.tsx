@@ -23,11 +23,17 @@ import {
 } from "../shared/format.js";
 import { pastHeldNote } from "../shared/list-view.js";
 import { JOB_TYPE_CAVEAT, type LedgerRow } from "../shared/rows.js";
+import { statusWord } from "../shared/status-word.js";
 import { shownLabel } from "../shared/timeline-view.js";
 import { BarList } from "./bar-list.js";
 import { TickingFigure } from "./ticking-figure.js";
 
 type Granularity = "day" | "hour";
+
+/** Which part of the card to draw: the desk puts the chart and the lists in different windows. */
+export type TrendsPart = "chart" | "lists" | "all";
+
+const NO_TOTALS: ReturnType<typeof costByKind> = [];
 
 /**
  * The chart's figures as a table, and the button that shows it. Hidden, the table is still read by a screen reader
@@ -130,187 +136,223 @@ export const Trends = memo(function Trends(props: {
 	/** The records of the point's own vault are on their way: the empty state is replaced by `reloadingNote`. */
 	reloading?: boolean;
 	reloadingNote?: string;
+	/** The chart card, the three lists, or everything (the default). Only `all` draws the tiles and the footer lines. */
+	part?: TrendsPart;
 }): React.JSX.Element {
 	const at = props.at ?? null;
+	const part = props.part ?? "all";
+	const drawChart = part !== "lists";
+	const drawLists = part !== "chart";
+	const drawAll = part === "all";
 	const [granularity, setGranularity] = useState<Granularity>("day");
 	const [tableShown, setTableShown] = useState(false);
+	// A part not drawn computes nothing: the lists never build the chart's series, nor the chart the three totals.
 	const series = useMemo(
 		() =>
-			spendOverTime(props.rows, granularity)
-				.map((b) => ({
-					...b,
-					t: Date.parse(
-						granularity === "day" ? `${b.bucket}T00:00:00Z` : `${b.bucket.replace(" ", "T")}:00Z`,
-					),
-				}))
-				.filter((b) => !Number.isNaN(b.t)),
-		[props.rows, granularity],
+			drawChart
+				? spendOverTime(props.rows, granularity)
+						.map((b) => ({
+							...b,
+							t: Date.parse(
+								granularity === "day"
+									? `${b.bucket}T00:00:00Z`
+									: `${b.bucket.replace(" ", "T")}:00Z`,
+							),
+						}))
+						.filter((b) => !Number.isNaN(b.t))
+				: [],
+		[props.rows, granularity, drawChart],
 	);
 	const summary = useMemo(
 		() => chartSummary(series, granularity, (t) => formatBucketUtc(t, granularity)),
 		[series, granularity],
 	);
-	const tiles = useMemo(() => statTiles(props.rows), [props.rows]);
-	const window = useMemo(() => timeWindow(props.rows), [props.rows]);
+	const tiles = useMemo(() => (drawAll ? statTiles(props.rows) : null), [props.rows, drawAll]);
+	const window = useMemo(() => (drawAll ? timeWindow(props.rows) : null), [props.rows, drawAll]);
 	// Each a pass over every row: computed once per row set, not on every render (a granularity switch, the table).
-	const byKind = useMemo(() => costByKind(props.rows), [props.rows]);
-	const byModel = useMemo(() => costByModel(props.rows), [props.rows]);
-	const byJobType = useMemo(() => costByJobType(props.rows), [props.rows]);
+	const byKind = useMemo(
+		() => (drawLists ? costByKind(props.rows) : NO_TOTALS),
+		[props.rows, drawLists],
+	);
+	const byModel = useMemo(
+		() => (drawLists ? costByModel(props.rows) : NO_TOTALS),
+		[props.rows, drawLists],
+	);
+	const byJobType = useMemo(
+		() => (drawLists ? costByJobType(props.rows) : NO_TOTALS),
+		[props.rows, drawLists],
+	);
 	// Everything here is the rows in view: never the vault, when the server holds a window of it.
 	const scope =
 		props.newestOf === undefined
 			? "in view"
 			: `in view, of the newest ${props.newestOf.toLocaleString()}`;
 
+	const chart = (
+		<ResponsiveContainer
+			width="100%"
+			height={part === "chart" ? "100%" : 240}
+			role="img"
+			aria-label={summary.label}
+		>
+			<BarChart
+				data={series}
+				margin={{ top: 4, right: 4, bottom: 0, left: 0 }}
+				aria-hidden="true"
+				tabIndex={-1}
+			>
+				<CartesianGrid stroke="var(--line)" vertical={false} />
+				<XAxis
+					dataKey="t"
+					type="number"
+					scale="time"
+					domain={["dataMin", "dataMax"]}
+					padding={{ left: 16, right: 16 }}
+					tickFormatter={(t: number) => formatTickUtc(t, granularity)}
+					tick={{ fill: "var(--body)", fontSize: 10.5, fontFamily: "var(--mono)" }}
+					tickLine={false}
+					axisLine={{ stroke: "var(--line)" }}
+				/>
+				<YAxis
+					width={64}
+					allowDecimals={Y_AXIS_ALLOW_DECIMALS}
+					tickFormatter={(v: number) => formatUsdAxis(v)}
+					tick={{ fill: "var(--body)", fontSize: 10.5, fontFamily: "var(--mono)" }}
+					tickLine={false}
+					axisLine={false}
+				/>
+				<Tooltip
+					cursor={{ fill: "rgba(155, 123, 255, 0.08)" }}
+					contentStyle={{
+						background: "var(--raised)",
+						border: "1px solid var(--line)",
+						borderRadius: 10,
+						boxShadow: "var(--shadow)",
+						fontFamily: "var(--mono)",
+						fontSize: 11.5,
+					}}
+					labelStyle={{ color: "var(--body)" }}
+					itemStyle={{ color: "var(--ink)" }}
+					labelFormatter={(label) => formatBucketUtc(Number(label), granularity)}
+					formatter={(value) => [
+						`${formatUsd(Number(value))} · ${formatUt(Number(value))}`,
+						"cost",
+					]}
+				/>
+				<Bar dataKey="costUt" name="cost" fill="var(--intel)" barSize={12} radius={[2, 2, 0, 0]} />
+			</BarChart>
+		</ResponsiveContainer>
+	);
+	// In a window the chart fills the card, so its box must have a height of its own to resolve 100% against. The window's
+	// own sheet sizes the box and the card (spend.css): an inline size here could not give way in the narrow column.
+	const chartEl = part === "chart" ? <div className="ut-chart-box">{chart}</div> : chart;
+
 	return (
 		<div className="ut-trends">
-			<div className="ut-tiles">
-				{/* Every costed record in view: an action's cost, an ambiguity's. The header's Spend is llm_call records
+			{tiles !== null && (
+				<div className="ut-tiles">
+					{/* Every costed record in view: an action's cost, an ambiguity's. The header's Spend is llm_call records
 				    only, over the whole vault, and is labelled as that: two rules, each named. */}
-				<Tile
-					label="Cost in view"
-					value={
-						// A move between positions jumps from recorded value to recorded value; the switch between live and past remounts
-						// it.
-						<TickingFigure
-							key={at === null ? "live" : "past"}
-							ut={tiles.totalCostUt}
-							jump={at !== null}
-						/>
-					}
-					valueTitle={formatUsd(tiles.totalCostUt)}
-					sub={`${formatUt(tiles.totalCostUt)} · every costed record`}
-				/>
-				<Tile
-					label="Records"
-					value={tiles.calls.toLocaleString()}
-					sub={`${tiles.costed.toLocaleString()} with a cost · ${scope}`}
-				/>
-				<Tile
-					label="Avg cost"
-					value={formatUsd(tiles.avgCostUt)}
-					sub={`${tiles.avgCostUt.toFixed(1)} UT · per costed record (${tiles.costed.toLocaleString()})`}
-				/>
-				<Tile
-					label="Failed"
-					value={`${(tiles.errorRate * 100).toFixed(1)}%`}
-					sub={`${tiles.byStatus.failed.toLocaleString()} of ${tiles.calls.toLocaleString()} records`}
-					{...(tiles.errorRate > 0 ? { tone: "red" as const } : {})}
-				/>
-				{/* Money states and unknowns are COUNTED where an operator looks, never folded into another number. */}
-				<Tile
-					label="Unrecoverable"
-					value={tiles.byStatus.unrecoverable.toLocaleString()}
-					sub="ran and recorded, not charged"
-					{...(tiles.byStatus.unrecoverable > 0 ? { tone: "alert" as const } : {})}
-				/>
-				<Tile
-					label="Ambiguous"
-					value={tiles.byStatus.ambiguous.toLocaleString()}
-					sub="settlement not confirmed"
-				/>
-				<Tile
-					label="Unknown"
-					value={tiles.byStatus.unknown.toLocaleString()}
-					sub="no outcome recorded"
-				/>
-			</div>
-			<div className="ut-card">
-				<div className="ut-card-h">
-					<span className="ut-tile-h">Cost over time · UTC</span>
-					{/* One chart, bucketed two ways: a toggle, not tabs (there is no panel to switch to). A fieldset would
-					    bring its own border and padding into a control that is styled as a segmented switch. */}
-					{/* biome-ignore lint/a11y/useSemanticElements: role="group" keeps the segmented look; a fieldset restyles it */}
-					<div className="ut-seg small" role="group" aria-label="Bucket size">
-						{(["day", "hour"] as const).map((g) => (
-							<button
-								key={g}
-								type="button"
-								aria-pressed={granularity === g}
-								onClick={() => setGranularity(g)}
-							>
-								{g === "day" ? "By day" : "By hour"}
-							</button>
-						))}
-					</div>
-				</div>
-				{series.length === 0 ? (
-					<div className="ut-empty">
-						<b>
-							{props.reloading === true
-								? (props.reloadingNote ?? pastHeldNote(false))
-								: "No records in view"}
-						</b>
-					</div>
-				) : (
-					// The container is the chart's image: the label states the series, and the table below lists every
-					// bucket (an image's children are not exposed, so the SVG is hidden and out of the tab order; the
-					// table's button is the keyboard's way to the figures).
-					<ResponsiveContainer width="100%" height={240} role="img" aria-label={summary.label}>
-						<BarChart
-							data={series}
-							margin={{ top: 4, right: 4, bottom: 0, left: 0 }}
-							aria-hidden="true"
-							tabIndex={-1}
-						>
-							<CartesianGrid stroke="var(--line)" vertical={false} />
-							<XAxis
-								dataKey="t"
-								type="number"
-								scale="time"
-								domain={["dataMin", "dataMax"]}
-								padding={{ left: 16, right: 16 }}
-								tickFormatter={(t: number) => formatTickUtc(t, granularity)}
-								tick={{ fill: "var(--body)", fontSize: 10.5, fontFamily: "var(--mono)" }}
-								tickLine={false}
-								axisLine={{ stroke: "var(--line)" }}
+					<Tile
+						label="Cost in view"
+						value={
+							// A move between positions jumps from recorded value to recorded value; the switch between live and past
+							// remounts it.
+							<TickingFigure
+								key={at === null ? "live" : "past"}
+								ut={tiles.totalCostUt}
+								jump={at !== null}
 							/>
-							<YAxis
-								width={64}
-								allowDecimals={Y_AXIS_ALLOW_DECIMALS}
-								tickFormatter={(v: number) => formatUsdAxis(v)}
-								tick={{ fill: "var(--body)", fontSize: 10.5, fontFamily: "var(--mono)" }}
-								tickLine={false}
-								axisLine={false}
-							/>
-							<Tooltip
-								cursor={{ fill: "rgba(155, 123, 255, 0.08)" }}
-								contentStyle={{
-									background: "var(--raised)",
-									border: "1px solid var(--line)",
-									borderRadius: 10,
-									boxShadow: "var(--shadow)",
-									fontFamily: "var(--mono)",
-									fontSize: 11.5,
-								}}
-								labelStyle={{ color: "var(--body)" }}
-								itemStyle={{ color: "var(--ink)" }}
-								labelFormatter={(label) => formatBucketUtc(Number(label), granularity)}
-								formatter={(value) => [
-									`${formatUsd(Number(value))} · ${formatUt(Number(value))}`,
-									"cost",
-								]}
-							/>
-							<Bar
-								dataKey="costUt"
-								name="cost"
-								fill="var(--intel)"
-								barSize={12}
-								radius={[2, 2, 0, 0]}
-							/>
-						</BarChart>
-					</ResponsiveContainer>
-				)}
-				{series.length > 0 && (
-					<ChartTable
-						summary={summary}
-						shown={tableShown}
-						onToggle={() => setTableShown((s) => !s)}
+						}
+						valueTitle={formatUsd(tiles.totalCostUt)}
+						sub={`${formatUt(tiles.totalCostUt)} · every costed record`}
 					/>
-				)}
-			</div>
-			{/* While the point's records are on their way the lists would only say "none": they wait, as the chart does. */}
-			{props.reloading !== true && (
+					<Tile
+						label="Records"
+						value={tiles.calls.toLocaleString()}
+						sub={`${tiles.costed.toLocaleString()} with a cost · ${scope}`}
+					/>
+					<Tile
+						label="Avg cost"
+						value={formatUsd(tiles.avgCostUt)}
+						sub={`${tiles.avgCostUt.toFixed(1)} UT · per costed record (${tiles.costed.toLocaleString()})`}
+					/>
+					<Tile
+						label="Failed"
+						value={`${(tiles.errorRate * 100).toFixed(1)}%`}
+						sub={`${tiles.byStatus.failed.toLocaleString()} of ${tiles.calls.toLocaleString()} records`}
+						{...(tiles.errorRate > 0 ? { tone: "red" as const } : {})}
+					/>
+					{/* Money states and unknowns are COUNTED where an operator looks, never folded into another number. */}
+					<Tile
+						label="Unrecoverable"
+						value={tiles.byStatus.unrecoverable.toLocaleString()}
+						sub="ran and recorded, not charged"
+						{...(tiles.byStatus.unrecoverable > 0 ? { tone: "alert" as const } : {})}
+					/>
+					<Tile
+						label={statusWord("ambiguous")}
+						value={tiles.byStatus.ambiguous.toLocaleString()}
+						sub="settlement not confirmed"
+					/>
+					<Tile
+						label="Unknown"
+						value={tiles.byStatus.unknown.toLocaleString()}
+						sub="no outcome recorded"
+					/>
+				</div>
+			)}
+			{drawChart && (
+				<div className="ut-card" data-part={part}>
+					<div className="ut-card-h">
+						<span className="ut-tile-h">Cost over time · UTC</span>
+						{/* One chart, bucketed two ways: a toggle, not tabs (there is no panel to switch to). A fieldset would
+					    bring its own border and padding into a control that is styled as a segmented switch. */}
+						{/* biome-ignore lint/a11y/useSemanticElements: role="group" keeps the segmented look; a fieldset restyles it */}
+						<div className="ut-seg small" role="group" aria-label="Bucket size">
+							{(["day", "hour"] as const).map((g) => (
+								<button
+									key={g}
+									type="button"
+									aria-pressed={granularity === g}
+									onClick={() => setGranularity(g)}
+								>
+									{g === "day" ? "By day" : "By hour"}
+								</button>
+							))}
+						</div>
+					</div>
+					{series.length === 0 ? (
+						<div className="ut-empty">
+							<b>
+								{props.reloading === true
+									? (props.reloadingNote ?? pastHeldNote(false))
+									: "No records in view"}
+							</b>
+						</div>
+					) : (
+						// The container is the chart's image: the label states the series, and the table below lists every
+						// bucket (an image's children are not exposed, so the SVG is hidden and out of the tab order; the
+						// table's button is the keyboard's way to the figures).
+						chartEl
+					)}
+					{series.length > 0 && (
+						<ChartTable
+							summary={summary}
+							shown={tableShown}
+							onToggle={() => setTableShown((s) => !s)}
+						/>
+					)}
+				</div>
+			)}
+			{/* While the point's records are on their way the lists would only say "none": they wait, as the chart does. With
+			    no chart drawn (the lists part), the held words stand in their place. */}
+			{drawLists && !drawChart && props.reloading === true && (
+				<div className="ut-empty">
+					<b>{props.reloadingNote ?? pastHeldNote(false)}</b>
+				</div>
+			)}
+			{drawLists && props.reloading !== true && (
 				<>
 					<div className="ut-split">
 						<BarList title="Cost by kind" totals={byKind} />
@@ -324,14 +366,21 @@ export const Trends = memo(function Trends(props: {
 							limit={Number.POSITIVE_INFINITY}
 						/>
 					</div>
-					<div className="ut-sub mono">
-						{props.rows.length.toLocaleString()} records {scope}
-						{window && ` · ${formatUtcMinute(window.first)} to ${formatUtcMinute(window.last)}`}
-						{at !== null && ` · ${shownLabel(at, props.head ?? at.head, new Date().toISOString())}`}
-					</div>
 				</>
 			)}
-			<div className="ut-sub mono">{UT_KEY}</div>
+			{drawAll && (
+				<>
+					{props.reloading !== true && (
+						<div className="ut-sub mono">
+							{props.rows.length.toLocaleString()} records {scope}
+							{window && ` · ${formatUtcMinute(window.first)} to ${formatUtcMinute(window.last)}`}
+							{at !== null &&
+								` · ${shownLabel(at, props.head ?? at.head, new Date().toISOString())}`}
+						</div>
+					)}
+					<div className="ut-sub mono">{UT_KEY}</div>
+				</>
+			)}
 		</div>
 	);
 });

@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { allCss, legacyCss } from "./helpers/css.js";
 
 /**
  * Small controls keep their look and get a larger tappable area: at least 32px on a desktop, at least 44px at the
@@ -13,7 +12,10 @@ import { describe, expect, it } from "vitest";
  * sort button) is not computed here: those controls are checked on their short side, which is the height, and the
  * sideways expansion is only checked against its room.
  */
-const CSS = readFileSync(join(import.meta.dirname, "..", "src", "app", "styles.css"), "utf-8");
+// The hit-area block is the end of styles.css, and every marker slice below is cut from that file alone: the desk's
+// sheets come after it in `allCss()`, and a slice from the marker on must not run into them. The rules a check looks
+// up by selector read the whole page (`allCss()`), so a desk rule that restyles a control is measured too.
+const CSS = legacyCss();
 
 const DESKTOP_MIN = 32;
 const PHONE_MIN = 44;
@@ -96,7 +98,7 @@ function parseRules(source: string): Rule[] {
 	return rules;
 }
 
-const RULES = parseRules(CSS);
+const RULES = parseRules(allCss());
 
 type Viewport = "desktop" | "phone";
 

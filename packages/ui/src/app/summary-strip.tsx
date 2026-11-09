@@ -1,7 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { type CSSProperties, type ReactNode, useEffect, useRef, useState } from "react";
+import {
+	type CSSProperties,
+	type ReactNode,
+	type RefObject,
+	useCallback,
+	useEffect,
+	useLayoutEffect,
+	useRef,
+	useState,
+} from "react";
 import markUrl from "../../brand/usertrust-mark.svg?inline";
 import type { AtPayload, SummaryPayload } from "../shared/api.js";
 import { windowNote } from "../shared/asof.js";
@@ -29,7 +38,18 @@ import {
 	UT_KEY,
 } from "../shared/format.js";
 import { KIT_MARK_URL, KIT_TIMEOUT_MS } from "../shared/kit.js";
+import {
+	type Box,
+	intersect,
+	measure,
+	outside,
+	placePopAt,
+	popStyle,
+	readableHeight,
+	whenMoved,
+} from "../shared/pop-place.js";
 import { shownLabel } from "../shared/timeline-view.js";
+import { useWindowDimmed } from "./desk/window.js";
 import type { LiveState } from "./store.js";
 import { TickingFigure } from "./ticking-figure.js";
 import { useNow } from "./use-now.js";
@@ -79,6 +99,8 @@ function TopBar(props: {
 	vaultPath: string | null;
 	live: LiveState;
 	kit: boolean;
+	/** A past point is shown: the stream may be up, but the screen is not live. */
+	past: boolean;
 }): React.JSX.Element {
 	const [copied, setCopied] = useState(false);
 	const path = props.vaultPath;
@@ -104,9 +126,15 @@ function TopBar(props: {
 				</button>
 			)}
 			<span className="ut-grow" />
-			<span className="ut-live" data-st={props.live} role="status">
+			{/* "live" means the screen shows now AND the stream is up; at a past point an up stream is only "connected". */}
+			<span
+				className="ut-live"
+				data-st={props.live}
+				data-past={props.past ? "true" : undefined}
+				role="status"
+			>
 				<i aria-hidden="true" />
-				{LIVE_LABEL[props.live]}
+				{props.past && props.live === "live" ? "connected" : LIVE_LABEL[props.live]}
 			</span>
 		</header>
 	);
@@ -116,6 +144,7 @@ function TopBar(props: {
 function usePopover(): {
 	open: boolean;
 	toggle(): void;
+	close(): void;
 	rootRef: React.RefObject<HTMLDivElement | null>;
 } {
 	const [open, setOpen] = useState(false);
@@ -126,7 +155,11 @@ function usePopover(): {
 			if (rootRef.current !== null && !rootRef.current.contains(e.target as Node)) setOpen(false);
 		};
 		const esc = (e: KeyboardEvent): void => {
-			if (e.key === "Escape") setOpen(false);
+			if (e.key === "Escape") {
+				// Handled: the desk's Escape peel leaves a marked press alone.
+				e.preventDefault();
+				setOpen(false);
+			}
 		};
 		document.addEventListener("pointerdown", away);
 		document.addEventListener("keydown", esc);
@@ -135,7 +168,109 @@ function usePopover(): {
 			document.removeEventListener("keydown", esc);
 		};
 	}, [open]);
-	return { open, toggle: () => setOpen((o) => !o), rootRef };
+	const close = useCallback(() => setOpen(false), []);
+	return { open, toggle: () => setOpen((o) => !o), close, rootRef };
+}
+
+/** The ancestors of `el` that clip its content (a window, its body): what can cut it, besides the viewport. */
+function clippers(el: HTMLElement): HTMLElement[] {
+	const out: HTMLElement[] = [];
+	for (let a = el.parentElement; a !== null; a = a.parentElement) {
+		const cs = getComputedStyle(a);
+		if (cs.overflowX !== "visible" || cs.overflowY !== "visible") out.push(a);
+	}
+	return out;
+}
+
+/** The box that would cut `el`: every ancestor that clips its content, and the viewport. */
+function clipBox(el: HTMLElement): Box {
+	let box: Box = { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
+	for (const a of clippers(el)) box = intersect(a.getBoundingClientRect(), box);
+	return box;
+}
+
+/**
+ * Places an open text popover from where its anchor sits on screen (`placePop`), before it paints: toward the side
+ * with room inside the box that would cut it, and above its anchor when there is no room below. A side fixed in the
+ * stylesheet was cut off whenever the anchor sat in the other half of a narrow window. While it is open it is placed
+ * again whenever that box moves or changes size (`whenMoved`): a scroll, the browser's size, its window filling the
+ * desk or giving it back. If that leaves its anchor wholly out of view, it calls `close`, once; so it does when its
+ * window shows too little of itself to hold it at its floor (`placePop`'s no room), and when another window fills the
+ * desk, which leaves this one inert and out of sight (`useWindowDimmed`). It is never drawn below its floor: two of its
+ * lines, or all of it.
+ */
+function usePopPlace(
+	open: boolean,
+	popRef: RefObject<HTMLElement | null>,
+	close: () => void,
+	/** The line the popover belongs to, when it is not the whole box it is positioned in: a cut fact line inside its
+	 *  fact. The room is measured from it, and the popover is drawn next to it (`placePop`'s `line`). */
+	line: HTMLElement | null = null,
+): CSSProperties | undefined {
+	const [style, setStyle] = useState<CSSProperties | undefined>(undefined);
+	// Left open in a dimmed window, an explainer sat inert and out of sight and took the next Esc, so the desk did not
+	// restore.
+	const dimmed = useWindowDimmed();
+	useEffect(() => {
+		if (open && dimmed) close();
+	}, [open, dimmed, close]);
+	useLayoutEffect(() => {
+		const pop = popRef.current;
+		const anchor = pop?.offsetParent;
+		if (!open || pop == null || !(anchor instanceof HTMLElement)) {
+			setStyle(undefined);
+			return;
+		}
+		let last = "";
+		// Set once it has closed it: nothing this opening heard afterwards places it, or closes it, again.
+		let done = false;
+		const place = (): void => {
+			if (done) return;
+			const at = anchor.getBoundingClientRect();
+			// The line it belongs to, when that is not the whole anchor: measured from the whole fact near the bottom of a
+			// short window, the room on both sides was a few pixels and a cut line's explainer had no readable height.
+			const lineBox = line !== null && line !== anchor ? line.getBoundingClientRect() : null;
+			const clip = clipBox(pop);
+			// Its line wholly out of view (its window scrolled, or a resize or a restore left it below the fold): no place
+			// is both next to the line and inside the window, so it closes, as a click elsewhere would close it.
+			if (outside(lineBox ?? at, clip)) {
+				done = true;
+				close();
+				return;
+			}
+			const r = measure(pop, null);
+			const heightAt = (w: number): number => measure(pop, w).height;
+			// Its floor: two of its own lines with its padding and border (all of it, if it is shorter).
+			const readable = readableHeight(getComputedStyle(pop));
+			const p = placePopAt(at, r.width, r.height, clip, heightAt, lineBox, readable);
+			// No room to read it anywhere in its window (a sliver of the window is in view): it closes, as above. The next
+			// press opens it afresh, placed in whatever room there is then.
+			if (p === null) {
+				done = true;
+				close();
+				return;
+			}
+			const next = popStyle(p);
+			const key = JSON.stringify(next);
+			if (key === last) return;
+			last = key;
+			setStyle(next);
+		};
+		place();
+		return whenMoved(
+			[...clippers(pop), anchor, ...(line !== null && line !== anchor ? [line] : [])],
+			place,
+			{
+				view: window,
+				doc: document,
+				frame: (run) => requestAnimationFrame(run),
+				cancelFrame: (id) => cancelAnimationFrame(id),
+				Observer: typeof ResizeObserver === "undefined" ? null : ResizeObserver,
+			},
+			(t) => t instanceof Node && pop.contains(t),
+		);
+	}, [open, popRef, close, line]);
+	return style;
 }
 
 /** The explainer a bare "absent" never had: a small popover, toggled by click or keyboard, closed by Escape. */
@@ -145,7 +280,9 @@ function AnchorFact(props: {
 	past?: boolean;
 }): React.JSX.Element {
 	const shown = anchorView(props.anchorFile);
-	const { open, toggle, rootRef } = usePopover();
+	const { open, toggle, close, rootRef } = usePopover();
+	const popRef = useRef<HTMLDivElement>(null);
+	const placed = usePopPlace(open, popRef, close);
 	const [before, after] = shown.explainer.split(ANCHOR_VERIFY_COMMAND);
 	return (
 		<div className="ut-fact detail" id="ut-fact-anchor">
@@ -164,7 +301,7 @@ function AnchorFact(props: {
 					i
 				</button>
 				{open && (
-					<div className="ut-pop text" role="note">
+					<div ref={popRef} className="ut-pop text" role="note" style={placed}>
 						{before}
 						<code>{ANCHOR_VERIFY_COMMAND}</code>
 						{after}
@@ -182,7 +319,9 @@ function AnchorFact(props: {
  * figure is remounted when the view switches between live and past, so that switch jumps too.
  */
 function SpendFact(props: { spentUt: number; past: boolean }): React.JSX.Element {
-	const { open, toggle, rootRef } = usePopover();
+	const { open, toggle, close, rootRef } = usePopover();
+	const popRef = useRef<HTMLDivElement>(null);
+	const placed = usePopPlace(open, popRef, close);
 	return (
 		<div
 			className="ut-fact"
@@ -211,7 +350,7 @@ function SpendFact(props: { spentUt: number; past: boolean }): React.JSX.Element
 					i
 				</button>
 				{open && (
-					<div className="ut-pop text start" role="note">
+					<div ref={popRef} className="ut-pop text" role="note" style={placed}>
 						{UT_KEY}
 					</div>
 				)}
@@ -304,7 +443,10 @@ function FactLine(props: {
 	const [el, setEl] = useState<HTMLSpanElement | null>(null);
 	const [cut, setCut] = useState(false);
 	const [open, setOpen] = useState(false);
+	const close = useCallback(() => setOpen(false), []);
 	const popRef = useRef<HTMLSpanElement>(null);
+	// Placed from its line, not from the whole fact it is positioned in.
+	const placed = usePopPlace(cut && open, popRef, close, el);
 	// biome-ignore lint/correctness/useExhaustiveDependencies: the line is measured again when its text changes
 	useEffect(() => {
 		if (el === null || typeof ResizeObserver === "undefined") return;
@@ -325,7 +467,11 @@ function FactLine(props: {
 			if (el?.contains(t) !== true && popRef.current?.contains(t) !== true) setOpen(false);
 		};
 		const esc = (e: KeyboardEvent): void => {
-			if (e.key === "Escape") setOpen(false);
+			if (e.key === "Escape") {
+				// Handled: the desk's Escape peel leaves a marked press alone.
+				e.preventDefault();
+				setOpen(false);
+			}
 		};
 		document.addEventListener("pointerdown", away);
 		document.addEventListener("keydown", esc);
@@ -355,7 +501,7 @@ function FactLine(props: {
 				{props.children ?? props.text}
 			</span>
 			{cut && open && (
-				<span ref={popRef} className="ut-pop text" role="note">
+				<span ref={popRef} className="ut-pop text" role="note" style={placed}>
 					{props.text}
 				</span>
 			)}
@@ -607,12 +753,20 @@ function LoadingFacts(): React.JSX.Element {
 	);
 }
 
+/** Which part of the strip to draw: the page bar (header, alarm, as-at line, notice), the facts grid, or both. */
+export type SummaryStripPart = "bar" | "facts" | "all";
+
 export function SummaryStrip(props: {
 	summary: SummaryPayload | null;
 	live: LiveState;
 	/** The vault as recorded at a past position, or null (or absent) for live. */
 	at?: AtPayload | null;
+	/** The bar, the facts, or both (the default). The desk puts them in different places. */
+	part?: SummaryStripPart;
 }): React.JSX.Element {
+	const part = props.part ?? "all";
+	const showBar = part !== "facts";
+	const showFacts = part !== "bar";
 	const s = props.summary;
 	const at = props.at ?? null;
 	// Phone only: the Chain and Anchor facts sit behind a button. Elsewhere every fact shows and the button does not.
@@ -624,15 +778,22 @@ export function SummaryStrip(props: {
 		if (e.key !== "Escape" || !detailsOpen) return;
 		if (e.target !== detailsRef.current && e.currentTarget.querySelector(".ut-pop") !== null)
 			return;
+		// Handled: React runs this before the desk's Escape peel, which would otherwise take a layer (the record, the
+		// fill, the pin or the newest filter) with the same press.
+		e.preventDefault();
 		setDetailsOpen(false);
 		detailsRef.current?.focus();
 	};
 	if (!s)
 		return (
 			<>
-				<TopBar vaultPath={null} live={props.live} kit={false} />
-				<AsAtLine at={null} head={-1} />
-				<LoadingFacts />
+				{showBar && (
+					<>
+						<TopBar vaultPath={null} live={props.live} kit={false} past={at !== null} />
+						<AsAtLine at={null} head={-1} />
+					</>
+				)}
+				{showFacts && <LoadingFacts />}
 			</>
 		);
 	const status = chainStatus(s.chain);
@@ -642,103 +803,109 @@ export function SummaryStrip(props: {
 
 	return (
 		<>
-			<TopBar vaultPath={s.vaultPath} live={props.live} kit={s.remote.kit} />
-			{status === "broken" && (
-				<div className="ut-alarm" role="alert">
-					<b>Chain integrity failure</b>
-					<p>
-						{s.chain.breakIndex !== null
-							? `Tampering or corruption detected at chain position ${s.chain.breakIndex + 1}. Rows from there on are marked after break.`
-							: "The vault failed verification: tampering, corruption or deletion."}
-					</p>
-					{s.chain.errors.length > 0 && (
-						<ul>
-							{s.chain.errors.slice(0, 3).map((err) => (
-								<li key={err}>{err}</li>
-							))}
-							{s.chain.errors.length > 3 && <li>…and {s.chain.errors.length - 3} more</li>}
-						</ul>
+			{showBar && (
+				<>
+					<TopBar vaultPath={s.vaultPath} live={props.live} kit={s.remote.kit} past={at !== null} />
+					{status === "broken" && (
+						<div className="ut-alarm" role="alert">
+							<b>Chain integrity failure</b>
+							<p>
+								{s.chain.breakIndex !== null
+									? `Tampering or corruption detected at chain position ${s.chain.breakIndex + 1}. Rows from there on are marked after break.`
+									: "The vault failed verification: tampering, corruption or deletion."}
+							</p>
+							{s.chain.errors.length > 0 && (
+								<ul>
+									{s.chain.errors.slice(0, 3).map((err) => (
+										<li key={err}>{err}</li>
+									))}
+									{s.chain.errors.length > 3 && <li>…and {s.chain.errors.length - 3} more</li>}
+								</ul>
+							)}
+						</div>
 					)}
-				</div>
+					{/* The live alarm above stays: it is the vault now. Everything below this line is the vault then. */}
+					<AsAtLine at={at} head={s.chain.events - 1} />
+					{notice !== null && (
+						<div className="ut-notice" role="status">
+							<b>Window</b>
+							{notice}
+						</div>
+					)}
+				</>
 			)}
-			{/* The live alarm above stays: it is the vault now. Everything below this line is the vault then. */}
-			<AsAtLine at={at} head={s.chain.events - 1} />
-			{notice !== null && (
-				<div className="ut-notice" role="status">
-					<b>Window</b>
-					{notice}
-				</div>
-			)}
-			<section
-				className="ut-facts"
-				aria-label="vault summary"
-				data-details={detailsOpen}
-				onKeyDown={onKeyDown}
-			>
-				<SpendFact spentUt={at === null ? s.spentUt : at.spentUt} past={at !== null} />
-				{at === null ? <BudgetFact s={s} /> : <PastBudgetFact at={at} />}
-				<button
-					ref={detailsRef}
-					type="button"
-					className="ut-more"
-					aria-expanded={detailsOpen}
-					aria-controls="ut-fact-chain ut-fact-anchor"
-					onClick={() => setDetailsOpen((o) => !o)}
+			{showFacts && (
+				<section
+					className="ut-facts"
+					aria-label="vault summary"
+					data-details={detailsOpen}
+					onKeyDown={onKeyDown}
 				>
-					<span>{detailsOpen ? "Hide details" : "Details"}</span>
-					<span className="chev" aria-hidden="true">
-						▾
-					</span>
-				</button>
-				<div className="ut-fact detail" id="ut-fact-chain">
-					<b>Chain</b>
-					<span className="v">
-						<Fit text={`${events.toLocaleString()} ${events === 1 ? "event" : "events"}`}>
-							{events.toLocaleString()} <small>{events === 1 ? "event" : "events"}</small>
-						</Fit>
-					</span>
-				</div>
-				{at !== null ? (
-					<PastIntegrityFact at={at} anchorFile={s.anchorFile} />
-				) : (
-					<div className="ut-fact">
-						<b>Integrity</b>
-						{/* "chained", never "verified": this is the hash links re-checked by the dashboard, not an explicit,
-					    anchored check. Without an anchor file it says so under the pill. */}
-						{status === "verified" && (
-							<span className="ut-pill" data-tone="approve" title={CHAINED_TITLE}>
-								<i />
-								chained
-							</span>
-						)}
-						{status === "broken" && (
-							<span className="ut-pill" data-tone="stakes">
-								<i />
-								broken
-							</span>
-						)}
-						{status === "empty" && (
-							<span className="ut-pill" title="No events yet: nothing to verify, nothing wrong">
-								<i />
-								no events
-							</span>
-						)}
-						{/* The pill's line under it, in every state (held empty when it has nothing to say), so the fact keeps its
-						    height. */}
-						{status === "verified" && s.anchorFile !== "present" ? (
-							<FactLine className="ut-sub" text={NOT_ANCHORED_NOTE} />
-						) : (
-							<Reserve line="sub" />
-						)}
-						<FactLine
-							className="ut-why"
-							text={verifiedAsOf(s.verifiedAt)}
-							title={`${verifiedAsOf(s.verifiedAt)}. The dashboard is a monitor: usertrust verify is the authoritative check of a vault`}
-						/>
+					<SpendFact spentUt={at === null ? s.spentUt : at.spentUt} past={at !== null} />
+					{at === null ? <BudgetFact s={s} /> : <PastBudgetFact at={at} />}
+					<button
+						ref={detailsRef}
+						type="button"
+						className="ut-more"
+						aria-expanded={detailsOpen}
+						aria-controls="ut-fact-chain ut-fact-anchor"
+						onClick={() => setDetailsOpen((o) => !o)}
+					>
+						<span>{detailsOpen ? "Hide details" : "Details"}</span>
+						<span className="chev" aria-hidden="true">
+							▾
+						</span>
+					</button>
+					<div className="ut-fact detail" id="ut-fact-chain">
+						<b>Chain</b>
+						<span className="v">
+							<Fit text={`${events.toLocaleString()} ${events === 1 ? "event" : "events"}`}>
+								{events.toLocaleString()} <small>{events === 1 ? "event" : "events"}</small>
+							</Fit>
+						</span>
 					</div>
-				)}
-				<AnchorFact anchorFile={s.anchorFile} past={at !== null} />
-			</section>
+					{at !== null ? (
+						<PastIntegrityFact at={at} anchorFile={s.anchorFile} />
+					) : (
+						<div className="ut-fact">
+							<b>Integrity</b>
+							{/* "chained", never "verified": this is the hash links re-checked by the dashboard, not an explicit,
+					    anchored check. Without an anchor file it says so under the pill. */}
+							{status === "verified" && (
+								<span className="ut-pill" data-tone="approve" title={CHAINED_TITLE}>
+									<i />
+									chained
+								</span>
+							)}
+							{status === "broken" && (
+								<span className="ut-pill" data-tone="stakes">
+									<i />
+									broken
+								</span>
+							)}
+							{status === "empty" && (
+								<span className="ut-pill" title="No events yet: nothing to verify, nothing wrong">
+									<i />
+									no events
+								</span>
+							)}
+							{/* The pill's line under it, in every state (held empty when it has nothing to say), so the fact keeps its
+						    height. */}
+							{status === "verified" && s.anchorFile !== "present" ? (
+								<FactLine className="ut-sub" text={NOT_ANCHORED_NOTE} />
+							) : (
+								<Reserve line="sub" />
+							)}
+							<FactLine
+								className="ut-why"
+								text={verifiedAsOf(s.verifiedAt)}
+								title={`${verifiedAsOf(s.verifiedAt)}. The dashboard is a monitor: usertrust verify is the authoritative check of a vault`}
+							/>
+						</div>
+					)}
+					<AnchorFact anchorFile={s.anchorFile} past={at !== null} />
+				</section>
+			)}
 		</>
 	);
 }

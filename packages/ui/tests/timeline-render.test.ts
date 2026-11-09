@@ -25,8 +25,9 @@ async function app<T>(file: string): Promise<T> {
 
 let SummaryStrip: Component<{
 	summary: SummaryPayload | null;
-	live: "live";
+	live: "connecting" | "live" | "reconnecting" | "offline";
 	at?: AtPayload | null;
+	part?: "bar" | "facts" | "all";
 }>;
 let TrendsReloading: Component<{
 	rows: never[];
@@ -189,6 +190,16 @@ describe("the header at a past position", () => {
 		expect(trends(99)).toContain("(latest record)");
 		expect(trends(119)).not.toContain("(latest record)");
 		expect(trends(119)).toContain("As recorded at");
+	});
+
+	it("Trends names the ambiguous tile 'unresolved', in a past view too, and never 'Ambiguous'", () => {
+		for (const a of [null, at()]) {
+			const shown = text(
+				renderToStaticMarkup(createElement(Trends, { rows: [], newestOf: undefined, at: a })),
+			);
+			expect(shown).toContain("unresolved");
+			expect(shown).not.toMatch(/ambiguous/i);
+		}
 	});
 
 	it("never says verified", () => {
@@ -613,5 +624,51 @@ describe("Trends while the point's records are reloading", () => {
 		);
 		expect(html).toContain("No records in view");
 		expect(html).toContain("Cost by kind");
+	});
+});
+
+describe("the connection pill at a past position", () => {
+	// "live" means the screen shows now AND the stream is up. At a past point the stream may be up, but the screen is
+	// not live, so the pill says "connected". Found in a real browser: the pill read LIVE beside "As recorded at".
+	const bar = (
+		live: "connecting" | "live" | "reconnecting" | "offline",
+		a: AtPayload | null,
+	): string =>
+		renderToStaticMarkup(
+			createElement(SummaryStrip, { summary: summary(), live, at: a, part: "bar" }),
+		);
+	const pill = (html: string): string =>
+		/<span class="ut-live"[^>]*>[\s\S]*?<\/span>/.exec(html)?.[0] ?? "";
+
+	it("says connected, never live, while a past point is shown and the stream is up", () => {
+		const p = pill(bar("live", at()));
+		expect(text(p)).toBe("connected");
+		expect(text(p).toLowerCase()).not.toContain("live");
+		expect(p).toContain('data-past="true"');
+		// The dot keeps the stream's state: it is up.
+		expect(p).toContain('data-st="live"');
+	});
+
+	it("says live when the screen is live", () => {
+		const p = pill(bar("live", null));
+		expect(text(p)).toBe("live");
+		expect(p).not.toContain("data-past");
+	});
+
+	it("keeps the stream's own word when the stream is not up, past or not", () => {
+		expect(text(pill(bar("reconnecting", at())))).toBe("reconnecting");
+		expect(text(pill(bar("offline", at())))).toBe("offline");
+		expect(text(pill(bar("connecting", null)))).toBe("connecting");
+	});
+
+	it("stops the dot's pulse at a past point", () => {
+		const css = readFileSync(join(import.meta.dirname, "..", "src", "app", "styles.css"), "utf-8");
+		const rule = /\.ut-live\[data-past="true"\] i::after\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";
+		expect(rule).toMatch(/animation:\s*none/);
+		expect(rule).toMatch(/content:\s*none/);
+		// It comes after the live pulse, so the same specificity lets it win.
+		expect(css.indexOf('.ut-live[data-past="true"] i::after')).toBeGreaterThan(
+			css.indexOf('.ut-live[data-st="live"] i::after'),
+		);
 	});
 });

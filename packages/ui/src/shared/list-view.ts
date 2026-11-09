@@ -10,6 +10,7 @@
 
 import type { AtPayload, SummaryPayload } from "./api.js";
 import { type Cutter, chainAt, cutRows } from "./asof.js";
+import { FACET_FIELD, withoutDimension } from "./desk-filters.js";
 import { type ChainStatus, chainStatus, type LoadPhase } from "./display.js";
 import { applyFilters, type FilterState } from "./filters.js";
 import type { LedgerRow } from "./rows.js";
@@ -40,6 +41,8 @@ export type BeforeWindow =
 export interface ListView {
 	/** The rows at the position (live: every row held), before the filters. */
 	shownRows: LedgerRow[];
+	/** The filters the list was drawn with, which `filtered` is under: read these, not newer ones, for what is drawn beside it. */
+	filters: FilterState;
 	filtered: LedgerRow[];
 	total: number;
 	/** The chain the list reads: the position's at T, the summary's live, null while nothing is loaded. */
@@ -77,6 +80,7 @@ export function listView(input: ListInput, cutter?: Cutter): ListView {
 	const shownRows = drawnRows(rows, at, cutter);
 	return {
 		shownRows,
+		filters,
 		filtered: applyFilters(shownRows, filters),
 		total: shownRows.length,
 		chain: at !== null ? chainAt(at) : summary === null ? null : chainStatus(summary.chain),
@@ -85,6 +89,17 @@ export function listView(input: ListInput, cutter?: Cutter): ListView {
 		at,
 		reloading: input.reloading === true,
 	};
+}
+
+/**
+ * The rows the share window's level is read from (`effectiveLevel`): the list's rows under every filter it was drawn
+ * with but the models one, so a model slice picked at the models level does not drop the donut to lanes. With no
+ * model picked those are the list's own filtered rows, and no second pass is made over every row.
+ */
+export function levelRows(list: ListView): LedgerRow[] {
+	return list.filters[FACET_FIELD.model].length === 0
+		? list.filtered
+		: applyFilters(list.shownRows, withoutDimension(list.filters, "model"));
 }
 
 function beforeWindowAt(rows: LedgerRow[], at: AtPayload): BeforeWindow {

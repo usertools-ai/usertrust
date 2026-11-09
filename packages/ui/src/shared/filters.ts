@@ -104,7 +104,8 @@ export function applyFilters(rows: LedgerRow[], f: FilterState): LedgerRow[] {
 	return rows.filter((r) => {
 		if (q && !haystack(r).includes(q)) return false;
 		if (f.kinds.length > 0 && !f.kinds.includes(r.kind)) return false;
-		if (f.models.length > 0 && (r.model === undefined || !f.models.includes(r.model))) return false;
+		// A record with no model is the key `keyOf("model")` gives it, "unknown": a click on that slice keeps it.
+		if (f.models.length > 0 && !f.models.includes(r.model ?? "unknown")) return false;
 		if (f.providers.length > 0 && !f.providers.includes(providerOf(r))) return false;
 		if (f.actors.length > 0 && !f.actors.includes(r.actor)) return false;
 		if (f.statuses.length > 0 && !f.statuses.includes(statusOf(r))) return false;

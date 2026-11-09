@@ -1,0 +1,41 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Usertools, Inc. */
+
+/* The desk's colour tokens. The only unlayered rule in the desk's sheets is the :root block below.
+   The series values (--dk-s0..s3, --dk-a0, --dk-series-muted) are the same hexes src/shared/colors.ts
+   gives the chart marks; tests/desk-tokens.test.ts holds the two together. */
+:root {
+	--dk-page: #0b0b0a;
+	--dk-pane: #111110;
+	--dk-raised: #181816;
+	--dk-hover: #201f1d;
+	--dk-grid: #272624;
+	--dk-base: #3a3835;
+	--dk-muted: #66635d;
+	--dk-label: #8a877f;
+	--dk-legend: #b7b4ab;
+	--dk-text: #ece9e1;
+	--dk-gold: #F0C462;
+	--dk-gold-mid: #C2922F;
+	--dk-gold-deep: #5E420E;
+	--dk-gold-hi: #FFF2C8;
+	--dk-s0: #BE804D;
+	--dk-s1: #5D6775;
+	--dk-s2: #C8CCD3;
+	--dk-s3: #7095C1;
+	--dk-a0: #E8B54B;
+	--dk-series-muted: #8A877F;
+	--dk-pane-a: 1;
+	--dk-radius: 14px;
+	--dk-gap: 16px;
+}
+
+@layer components {
+	/* The legacy bridge: the page's older components read --page, --surface and --raised; inside the desk they
+	   point at the desk's neutrals. Legacy gold and text stay as they are. */
+	.ut-dk {
+		--page: var(--dk-page);
+		--surface: var(--dk-pane);
+		--raised: var(--dk-raised);
+	}
+}

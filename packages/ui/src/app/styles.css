@@ -81,10 +81,14 @@ body {
 	background: rgba(232, 181, 75, 0.35);
 }
 
-:focus-visible {
-	outline: 2px solid var(--words);
-	outline-offset: 2px;
-	border-radius: 6px;
+/* The page's default focus ring. It sits in the base layer so a component's own ring (in @layer components) wins:
+   unlayered, it beat every layered rule, whatever its selector. */
+@layer base {
+	:focus-visible {
+		outline: 2px solid var(--words);
+		outline-offset: 2px;
+		border-radius: 6px;
+	}
 }
 
 @keyframes ut-swap {
@@ -260,6 +264,11 @@ body {
 		border-radius: 50%;
 		border: 2px solid var(--accent);
 		animation: ut-pulse 1.8s ease-out infinite;
+	}
+	/* A past point is shown: the stream may be up, but the screen is not live, so no pulse (the word is "connected"). */
+	.ut-live[data-past="true"] i::after {
+		content: none;
+		animation: none;
 	}
 	.ut-live[data-st="reconnecting"],
 	.ut-live[data-st="connecting"] {
@@ -636,12 +645,8 @@ body {
 		right: 0;
 		width: 300px;
 	}
-	/* Opens from the left edge of its anchor, for a fact in the first column. */
-	.ut-pop.text.start {
-		left: 0;
-		right: auto;
-		width: min(300px, calc(100vw - 48px));
-	}
+	/* The side an explainer opens to is not fixed here: it is chosen from where its anchor sits on screen (summary-strip.tsx,
+	   usePopPlace), so a fact in any column of any window shows its whole text. */
 	.ut-pop.text code {
 		font: 400 11.5px/1.5 var(--mono);
 		color: var(--ink);
@@ -726,7 +731,6 @@ body {
 		color: var(--faint-text);
 	}
 	.ut-search:focus {
-		outline: none;
 		border-color: var(--accent);
 	}
 	.ut-btn {
@@ -878,7 +882,6 @@ body {
 	}
 	.ut-field input:focus,
 	.ut-field-bare:focus {
-		outline: none;
 		border-color: var(--accent);
 	}
 	.ut-active {

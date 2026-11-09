@@ -1,0 +1,26 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Usertools, Inc. */
+
+/* The Now window's rules (prefix ut-nw-). Scoped overrides of the older classes use [data-win="now"]. */
+
+/* PR 6 replaces this file's body. Day one: the facts in two columns, so they fit a window a third of the desk wide.
+   The older sheet's narrower layouts are kept at the same widths. */
+@layer components {
+	[data-win="now"] .ut-facts {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 16px 20px;
+	}
+
+	@media (max-width: 900px) {
+		[data-win="now"] .ut-facts {
+			grid-template-columns: repeat(3, minmax(0, 1fr));
+		}
+	}
+
+	@media (max-width: 760px) {
+		[data-win="now"] .ut-facts {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+			gap: 10px;
+		}
+	}
+}
