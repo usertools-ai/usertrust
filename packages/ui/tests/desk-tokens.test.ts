@@ -221,6 +221,16 @@ describe("the desk's stylesheets", () => {
 		);
 	});
 
+	it("red-first (rows drawn over the next window): on a phone the Ledger's list flows in the page, as the page's own list does", () => {
+		// Above the phone width the list fills the window's body. On a phone it takes its content's height and the page
+		// is its scroller (styles.css): the window's override kept it at no height, and its rows ran over the next window.
+		const ledger = sheet("windows/ledger/ledger.css");
+		expect(ruleOf(ledger, '[data-win="ledger"] .ut-list')).toMatch(/flex:\s*1 1 0/);
+		expect(ruleOf(mediaBlock(ledger, 760), '[data-win="ledger"] .ut-list')).toMatch(
+			/flex:\s*0 0 auto/,
+		);
+	});
+
 	it("red-first (an empty Spend window): Spend's chart takes the window's height on a wide desk, and a height of its own in the narrow column", () => {
 		const spend = sheet("windows/spend/spend.css");
 		// Trends, its chart card and the chart's box grow into the window's body. Without them the card was its header,

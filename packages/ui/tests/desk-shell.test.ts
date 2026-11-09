@@ -192,4 +192,26 @@ describe("the page's source, now spread over the shell", () => {
 		expect(shellSrc).toContain("document.activeElement");
 		expect(shellSrc).toContain(".ut-win-fill");
 	});
+
+	it("red-first (a phone's facts after the whole list): lays the windows out in the order the screen shows them", () => {
+		// On a phone the DOM itself puts Now first and the Ledger last (`windowOrder`), never a CSS order: the Tab order
+		// stays the order on screen.
+		const shellSrc = readFileSync(join(APP, "desk", "desk-shell.tsx"), "utf-8");
+		expect(shellSrc).toContain("const phone = useMedia(PHONE_QUERY, false);");
+		expect(shellSrc).toContain("windowOrder(phone).map(");
+		expect(shellSrc).not.toContain("WINDOWS.map(({ id, Component })");
+		expect(sheetsSetOrder()).toEqual([]);
+	});
 });
+
+/** Every desk stylesheet rule that sets `order`: one would make the Tab order differ from the order on screen. */
+function sheetsSetOrder(): string[] {
+	const files = [
+		"desk/desk.css",
+		"windows/spend/spend.css",
+		"windows/share/share.css",
+		"windows/ledger/ledger.css",
+		"windows/now/now.css",
+	];
+	return files.filter((f) => /(^|[\s;{])order\s*:/.test(readFileSync(join(APP, f), "utf-8")));
+}

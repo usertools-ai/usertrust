@@ -70,6 +70,20 @@ export function isFilled(fill: WindowId | null, id: WindowId, compact: boolean):
 
 /** Where a window is in the fill: at home, growing, filled, or shrinking back. */
 /**
+ * The windows in the order a phone stacks them: the Now facts first and the Ledger last, as the page has them on a
+ * phone (its facts above the list, which flows in the page and runs to its end).
+ */
+export const PHONE_ORDER: readonly WindowId[] = ["now", "spend", "share", "ledger"];
+
+/**
+ * The windows in DOM order: grid order on a wider screen (each sits at its home cell anyway), the phone's own order on
+ * a phone. The DOM follows the order on screen, never a CSS `order`, so the Tab order is the order a reader sees.
+ */
+export function windowOrder(phone: boolean): readonly WindowId[] {
+	return phone ? PHONE_ORDER : WINDOW_IDS;
+}
+
+/**
  * Whether window `id` is dimmed: another window fills the desk (fill is ignored in the compact column). A dimmed
  * window is inert and hidden, so nothing in it is on screen: it draws nothing modal, and Escape takes no layer of it.
  */

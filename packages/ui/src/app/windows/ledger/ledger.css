@@ -28,4 +28,12 @@
 		flex: 1 1 0;
 		min-height: 0;
 	}
+
+	/* A phone: the list flows in the page, as the page's own list does (styles.css), so it takes its content's height
+	   and the page is its scroller. Held at no height, its rows ran over the next window. */
+	@media (max-width: 760px) {
+		[data-win="ledger"] .ut-list {
+			flex: 0 0 auto;
+		}
+	}
 }

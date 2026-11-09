@@ -17,6 +17,7 @@ import {
 	placeStyle,
 	WINDOW_IDS,
 	type WindowId,
+	windowOrder,
 } from "../src/shared/desk-layout.js";
 
 describe("the home layout", () => {
@@ -89,6 +90,21 @@ describe("isDimmed", () => {
 		for (const fill of WINDOW_IDS as readonly WindowId[])
 			for (const id of WINDOW_IDS as readonly WindowId[])
 				expect(isDimmed(fill, id, true)).toBe(false);
+	});
+});
+
+// The order the windows are in the page. On a phone the page keeps its own order: the facts above the list, which
+// flows in the page and runs to its end. The DOM follows it, so the Tab order is the order on screen.
+describe("windowOrder", () => {
+	it("red-first (the facts after a list as long as the vault): on a phone, Now comes first and the Ledger last", () => {
+		const phone = windowOrder(true);
+		expect(phone).toEqual(["now", "spend", "share", "ledger"]);
+		expect(phone.indexOf("now")).toBeLessThan(phone.indexOf("ledger"));
+		expect([...phone].sort()).toEqual([...WINDOW_IDS].sort());
+	});
+
+	it("is grid order on a wider screen, where each window sits at its home cell anyway", () => {
+		expect(windowOrder(false)).toEqual(WINDOW_IDS);
 	});
 });
 

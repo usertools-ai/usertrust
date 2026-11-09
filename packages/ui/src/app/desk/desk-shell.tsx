@@ -9,7 +9,8 @@
 
 import { useEffect, useRef } from "react";
 import { csvFilename, toCsv } from "../../shared/csv.js";
-import { HOME_ROWS, type WindowId } from "../../shared/desk-layout.js";
+import { HOME_ROWS, type WindowId, windowOrder } from "../../shared/desk-layout.js";
+import { PHONE_QUERY } from "../../shared/layout.js";
 import { MAX_SEARCH_LENGTH } from "../../shared/url-state.js";
 import { AtStatus } from "../at-status.js";
 import { ExportButton } from "../export-button.js";
@@ -19,7 +20,11 @@ import { Backdrop } from "./backdrop.js";
 import { useDeskData, useFill, useFilters, useShellBinding } from "./desk-state.js";
 import { useEscapePeel } from "./escape-peel.js";
 import { installGlass } from "./glass.js";
+import { useMedia } from "./use-box-size.js";
 import { WINDOWS } from "./windows.js";
+
+/** Each window's component by its id, for the order the screen shows them in (`windowOrder`). */
+const WINDOW_BY_ID = new Map(WINDOWS.map((w) => [w.id, w.Component]));
 
 /**
  * After a window fills the desk, or is restored, a reader who pressed a key to do it must not be left on the page:
@@ -48,6 +53,8 @@ export function DeskShell(): React.JSX.Element {
 	const { fill } = useFill();
 	const { status, filtering, newestOf, count, addressNote, peel, act } = useShellBinding();
 	const { shownRows, filtered } = list;
+	// On a phone the facts come before the list, which flows in the page to its end (`windowOrder`).
+	const phone = useMedia(PHONE_QUERY, false);
 
 	useEscapePeel(peel, act);
 	useFocusAfterFill(fill);
@@ -121,9 +128,10 @@ export function DeskShell(): React.JSX.Element {
 				</span>
 			</div>
 			<main className="ut-dk-desk" style={{ gridTemplateRows: HOME_ROWS }}>
-				{WINDOWS.map(({ id, Component }) => (
-					<Component key={id} />
-				))}
+				{windowOrder(phone).map((id) => {
+					const Component = WINDOW_BY_ID.get(id);
+					return Component === undefined ? null : <Component key={id} />;
+				})}
 			</main>
 		</div>
 	);
