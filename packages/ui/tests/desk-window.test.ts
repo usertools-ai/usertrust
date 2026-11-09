@@ -20,7 +20,8 @@ interface WindowModule {
 		actions?: React.ReactNode;
 		children: (filled: boolean) => React.ReactNode;
 	}): React.JSX.Element;
-	useWindow(): { id: WindowId; filled: boolean; settling: boolean };
+	useWindow(): { id: WindowId; filled: boolean; settling: boolean; dimmed: boolean };
+	useWindowDimmed(): boolean;
 	fillGesture(
 		kind: "enter" | "dblclick",
 		target: { closest(sel: string): unknown } | null,
@@ -211,5 +212,41 @@ describe("useWindow", () => {
 			{ fill: "share" },
 		);
 		expect(html).toContain("<p>share true false</p>");
+	});
+
+	it("red-first (an explainer left open behind a filled window): says whether another window fills the desk", async () => {
+		// Filled from the keyboard, another window left Now's open explainer mounted, inert and out of sight, and the next
+		// Esc closed it instead of restoring the desk. What a window holds open must know it is dimmed.
+		function Probe(): React.JSX.Element {
+			const w = mod.useWindow();
+			return createElement(
+				"p",
+				null,
+				`${w.id} dimmed ${String(w.dimmed)} ${String(mod.useWindowDimmed())}`,
+			);
+		}
+		const body = (id: WindowId, title: string) =>
+			createElement(
+				mod.Window as unknown as React.ComponentType<{ id: WindowId; title: string }>,
+				{ id, title },
+				asChild(() => createElement(Probe)),
+			);
+		const filled = await withDesk(
+			createElement("div", null, body("spend", "Spend"), body("now", "Now")),
+			{
+				fill: "spend",
+			},
+		);
+		expect(filled).toContain("<p>now dimmed true true</p>");
+		expect(filled).toContain("<p>spend dimmed false false</p>");
+		const rest = await withDesk(body("now", "Now"), {});
+		expect(rest).toContain("<p>now dimmed false false</p>");
+	});
+
+	it("outside a Window, nothing is dimmed (and asking does not throw)", () => {
+		function Probe(): React.JSX.Element {
+			return createElement("p", null, `dimmed ${String(mod.useWindowDimmed())}`);
+		}
+		expect(renderToStaticMarkup(createElement(Probe))).toBe("<p>dimmed false</p>");
 	});
 });

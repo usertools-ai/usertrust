@@ -33,15 +33,26 @@ interface WindowInfo {
 	id: WindowId;
 	filled: boolean;
 	settling: boolean;
+	/** Another window fills the desk: this one is inert and hidden, so it holds nothing open. */
+	dimmed: boolean;
 }
 
 const WindowContext = createContext<WindowInfo | null>(null);
 
-/** Which window this is, whether it fills the desk, and whether it is in the flight to or from filling. */
+/** Which window this is, whether it fills the desk, whether it is in the flight to or from filling, and whether
+ *  another window fills the desk. */
 export function useWindow(): WindowInfo {
 	const w = useContext(WindowContext);
 	if (w === null) throw new Error("useWindow outside Window");
 	return w;
+}
+
+/**
+ * Whether another window fills the desk, so the window this is drawn in is inert and out of sight; false outside a
+ * window. Something it holds open (an explainer) closes then: left open, it would take the next Esc from the desk.
+ */
+export function useWindowDimmed(): boolean {
+	return useContext(WindowContext)?.dimmed ?? false;
 }
 
 /** The controls inside the title bar: a gesture that starts on one of them belongs to it, not to the bar. */
@@ -133,8 +144,8 @@ export function Window(props: {
 	// Another window fills the desk: this one fades, is inert and hidden from assistive tech, but stays in the tree.
 	const dimmed = isDimmed(fill, id, compact);
 	const info = useMemo<WindowInfo>(
-		() => ({ id, filled: renderFilled, settling }),
-		[id, renderFilled, settling],
+		() => ({ id, filled: renderFilled, settling, dimmed }),
+		[id, renderFilled, settling, dimmed],
 	);
 	// Compact: fill is ignored, so a gesture does nothing (and writes no history entry).
 	const fillIfAsked = (): void => {

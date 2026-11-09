@@ -48,6 +48,7 @@ import {
 	whenMoved,
 } from "../shared/pop-place.js";
 import { shownLabel } from "../shared/timeline-view.js";
+import { useWindowDimmed } from "./desk/window.js";
 import type { LiveState } from "./store.js";
 import { TickingFigure } from "./ticking-figure.js";
 import { useNow } from "./use-now.js";
@@ -192,7 +193,8 @@ function clipBox(el: HTMLElement): Box {
  * with room inside the box that would cut it, and above its anchor when there is no room below. A side fixed in the
  * stylesheet was cut off whenever the anchor sat in the other half of a narrow window. While it is open it is placed
  * again whenever that box moves or changes size (`whenMoved`): a scroll, the browser's size, its window filling the
- * desk or giving it back. If that leaves its anchor wholly out of view, it calls `close`.
+ * desk or giving it back. If that leaves its anchor wholly out of view, it calls `close`; so it does when another
+ * window fills the desk, which leaves this one inert and out of sight (`useWindowDimmed`).
  */
 function usePopPlace(
 	open: boolean,
@@ -200,6 +202,12 @@ function usePopPlace(
 	close: () => void,
 ): CSSProperties | undefined {
 	const [style, setStyle] = useState<CSSProperties | undefined>(undefined);
+	// Left open in a dimmed window, an explainer sat inert and out of sight and took the next Esc, so the desk did not
+	// restore.
+	const dimmed = useWindowDimmed();
+	useEffect(() => {
+		if (open && dimmed) close();
+	}, [open, dimmed, close]);
 	useLayoutEffect(() => {
 		const pop = popRef.current;
 		const anchor = pop?.offsetParent;
