@@ -201,7 +201,8 @@ describe("listView", () => {
 		expect(deskCss).toMatch(/\.ut-win-body\[data-held="true"\]\s*\{\s*opacity: 0\.55;\s*\}/);
 		expect(app).toContain('<span className="ut-label" role="status" data-held={held}>');
 		expect(app).toMatch(/<ExportButton[\s\S]{0,120}held=\{held\}/);
-		expect(app).toMatch(/<FilterBar [^>]*held=\{held\}/);
+		// FilterBar's own `held` prop, not the `data-held` of the count it is handed as `beside`.
+		expect(app).toMatch(/<FilterBar\s[^>]*?\sheld=\{held\}/);
 		expect(app.match(/<RowPanel[^>]*held=\{held\}/g)).toHaveLength(2);
 		expect(app).toContain("holdNote={holdNote}");
 		// Dimmed: opacity only, so nothing shifts. The drawer is dimmed inside, so it stays opaque over the page.

@@ -121,11 +121,20 @@ export function DeskShell(): React.JSX.Element {
 				</div>
 			)}
 			<div className="ut-dk-filters">
-				<FilterBar rows={shownRows} filters={filters} onChange={setFilters} held={held} />
-				{/* A live region: a filter that changes how many rows are in view says so to a screen reader. */}
-				<span className="ut-label" role="status" data-held={held}>
-					{count}
-				</span>
+				{/* The count sits between the bar and the active chips (`beside`), so the chips take a row of their own
+				    below the bar and the count. A live region: a filter that changes how many rows are in view says so
+				    to a screen reader. */}
+				<FilterBar
+					rows={shownRows}
+					filters={filters}
+					onChange={setFilters}
+					held={held}
+					beside={
+						<span className="ut-label" role="status" data-held={held}>
+							{count}
+						</span>
+					}
+				/>
 			</div>
 			<main className="ut-dk-desk" style={{ gridTemplateRows: HOME_ROWS }}>
 				{windowOrder(phone).map((id) => {

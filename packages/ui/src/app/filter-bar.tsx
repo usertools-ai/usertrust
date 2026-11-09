@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import {
 	activeFilterCount,
 	EMPTY_FILTERS,
@@ -155,6 +155,9 @@ export const FilterBar = memo(function FilterBar(props: {
 	onChange(f: FilterState): void;
 	/** The rows are a held view (the moment after a new position lands): the facets' counts are dimmed and busy. */
 	held?: boolean;
+	/** Drawn after the bar and before the active chips (the desk's record count): in the DOM, so the order on screen
+	 *  is the order a screen reader and Tab meet, with the chips on a row of their own below it. */
+	beside?: ReactNode;
 }): React.JSX.Element {
 	const { rows, filters, onChange } = props;
 	const held = props.held === true;
@@ -412,6 +415,7 @@ export const FilterBar = memo(function FilterBar(props: {
 					/>
 				</span>
 			</div>
+			{props.beside}
 			{isFiltering(filters) && (
 				<div className="ut-active">
 					<span className="ut-label">Filtering</span>
