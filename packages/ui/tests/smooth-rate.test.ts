@@ -18,6 +18,19 @@ describe("smoothRate", () => {
 		expect(smoothRate([6, 0, 0, 0], 2)[0]).toBe(3);
 	});
 
+	it("a NaN radius gives the values back unchanged, not NaN", () => {
+		expect([...smoothRate([1, 5, 2, 8], Number.NaN)]).toEqual([1, 5, 2, 8]);
+	});
+
+	it("an infinite radius gives the values back unchanged, not NaN", () => {
+		expect([...smoothRate([1, 5, 2, 8], Number.POSITIVE_INFINITY)]).toEqual([1, 5, 2, 8]);
+	});
+
+	it("a fractional radius reaches the whole neighbours below it", () => {
+		const xs = [0, 0, 9, 0, 0];
+		expect([...smoothRate(xs, 1.9)]).toEqual([...smoothRate(xs, 1)]);
+	});
+
 	it("keeps a flat series flat and never leaves the input's range", () => {
 		expect([...smoothRate([4, 4, 4, 4, 4], 2)]).toEqual([4, 4, 4, 4, 4]);
 		const xs = [3, 0, 7, 1, 9, 2, 0, 5];

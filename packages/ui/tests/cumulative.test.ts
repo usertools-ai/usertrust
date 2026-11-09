@@ -277,6 +277,11 @@ describe("breakRecord", () => {
 		expect(breakRecord(s, 2, later)).toBe(-1);
 		expect(breakRecord(s, 6, later)).toBe(4);
 	});
+	it("a break whose record is exactly at the window's start is that record", () => {
+		const i = breakRecord(s, 2, all);
+		const edge = { startMs: s.t[i] as number, endMs: T0 + 60 * MIN };
+		expect(breakRecord(s, 2, edge)).toBe(i);
+	});
 	it("no break, or no records, is none", () => {
 		expect(breakRecord(s, null, all)).toBe(-1);
 		expect(breakRecord(s, Number.NaN, all)).toBe(-1);

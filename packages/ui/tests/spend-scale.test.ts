@@ -346,6 +346,8 @@ describe("the peak label", () => {
 		expect(peakLabelShown({ ...rest, w: -1 })).toBe(false);
 		expect(peakLabelShown({ ...rest, w: Number.NaN })).toBe(false);
 		expect(peakLabelShown({ ...rest, peakRate: 0 })).toBe(false);
+		expect(peakLabelShown({ ...rest, peakRate: -1 })).toBe(false);
+		expect(peakLabelShown({ ...rest, peakRate: Number.NaN })).toBe(false);
 		expect(peakLabelShown({ ...rest, hasCursor: true })).toBe(false);
 		expect(peakLabelShown({ ...rest, morphing: true })).toBe(false);
 		expect(peakLabelShown({ ...rest, knee: 5 })).toBe(false);

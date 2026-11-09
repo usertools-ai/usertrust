@@ -44,6 +44,17 @@ describe("RANGE_CHIPS", () => {
 	});
 });
 
+describe("RangeChips presses", () => {
+	it("each chip's press reports its own range", () => {
+		const seen: RangeId[] = [];
+		const el = RangeChips({ range: "1d", onRange: (r) => seen.push(r) }) as unknown as {
+			props: { children: Array<{ props: { onClick(): void } }> };
+		};
+		for (const b of el.props.children) b.props.onClick();
+		expect(seen).toEqual(["1d", "1w", "1m", "3m", "ytd", "1y"]);
+	});
+});
+
 describe("RangeChips", () => {
 	it("draws six buttons in order, with a title each", () => {
 		const bs = buttons(html("3m"));
