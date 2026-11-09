@@ -90,3 +90,33 @@ export function placePopAt(
 	const first = placePop(anchor, w, h, clip);
 	return first.width < w ? placePop(anchor, w, heightAt(first.width), clip) : first;
 }
+
+/** A placement as the popover's inline style. */
+export interface PopStyle {
+	boxSizing: "border-box";
+	left: number | "auto";
+	right: number | "auto";
+	width: number;
+	top?: "auto";
+	bottom?: string;
+	maxHeight?: number;
+}
+
+/**
+ * A placement as the popover's inline style, in border-box pixels, the units `placePop` measures in (a box's
+ * `getBoundingClientRect`). Written as a content width, a popover with padding and a border would be drawn wider than
+ * it was placed; the page's base layer sets border-box everywhere today, and this does not depend on it.
+ */
+export function popStyle(p: PopPlace): PopStyle {
+	return {
+		boxSizing: "border-box",
+		...(p.shift !== null
+			? { left: p.shift, right: "auto" as const }
+			: p.side === "start"
+				? { left: 0, right: "auto" as const }
+				: { left: "auto" as const, right: 0 }),
+		width: p.width,
+		...(p.up ? { top: "auto" as const, bottom: "calc(100% + 8px)" } : {}),
+		...(p.maxHeight !== null ? { maxHeight: p.maxHeight } : {}),
+	};
+}

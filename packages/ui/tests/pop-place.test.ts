@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { describe, expect, it } from "vitest";
-import { intersect, placePop, placePopAt } from "../src/shared/pop-place.js";
+import { intersect, placePop, placePopAt, popStyle } from "../src/shared/pop-place.js";
 
 const BOX = { left: 0, top: 0, right: 400, bottom: 800 };
 const at = (left: number, top: number, w = 40, h = 16) => ({
@@ -82,6 +82,47 @@ describe("placePopAt", () => {
 		});
 		expect(calls).toBe(0);
 		expect(p).toMatchObject({ side: "end", up: false, maxHeight: null });
+	});
+});
+
+describe("popStyle", () => {
+	it("red-first (a width in the wrong units): always says border-box, the units placePop measures in", () => {
+		// placePop works in border-box pixels (getBoundingClientRect). Written as a content width, a popover with padding
+		// and a border would be drawn wider than it was placed; the page's base layer happens to set border-box today,
+		// but the placed style must not depend on that.
+		for (const p of [
+			placePop(at(340, 100), 300, 150, BOX),
+			placePop(at(20, 100), 300, 150, BOX),
+			placePop(at(100, 100), 300, 150, { left: 0, top: 0, right: 250, bottom: 800 }),
+			placePop(at(340, 216), 300, 260, { left: 0, top: 0, right: 400, bottom: 340 }),
+		])
+			expect(popStyle(p).boxSizing).toBe("border-box");
+	});
+
+	it("writes the side, the shift, the width, the side above or below, and the cap", () => {
+		expect(popStyle({ side: "end", shift: null, width: 300, up: false, maxHeight: null })).toEqual({
+			boxSizing: "border-box",
+			left: "auto",
+			right: 0,
+			width: 300,
+		});
+		expect(
+			popStyle({ side: "start", shift: null, width: 300, up: false, maxHeight: null }),
+		).toEqual({
+			boxSizing: "border-box",
+			left: 0,
+			right: "auto",
+			width: 300,
+		});
+		expect(popStyle({ side: "start", shift: -92, width: 234, up: true, maxHeight: 180 })).toEqual({
+			boxSizing: "border-box",
+			left: -92,
+			right: "auto",
+			width: 234,
+			top: "auto",
+			bottom: "calc(100% + 8px)",
+			maxHeight: 180,
+		});
 	});
 });
 

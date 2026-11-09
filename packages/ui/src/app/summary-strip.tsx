@@ -37,7 +37,7 @@ import {
 	UT_KEY,
 } from "../shared/format.js";
 import { KIT_MARK_URL, KIT_TIMEOUT_MS } from "../shared/kit.js";
-import { type Box, intersect, placePopAt } from "../shared/pop-place.js";
+import { type Box, intersect, placePopAt, popStyle } from "../shared/pop-place.js";
 import { shownLabel } from "../shared/timeline-view.js";
 import type { LiveState } from "./store.js";
 import { TickingFigure } from "./ticking-figure.js";
@@ -197,16 +197,7 @@ function usePopPlace(
 			return h;
 		};
 		const p = placePopAt(anchor.getBoundingClientRect(), r.width, r.height, clipBox(pop), heightAt);
-		setStyle({
-			...(p.shift !== null
-				? { left: p.shift, right: "auto" }
-				: p.side === "start"
-					? { left: 0, right: "auto" }
-					: { left: "auto", right: 0 }),
-			width: p.width,
-			...(p.up ? { top: "auto", bottom: "calc(100% + 8px)" } : {}),
-			...(p.maxHeight !== null ? { maxHeight: p.maxHeight } : {}),
-		});
+		setStyle(popStyle(p));
 	}, [open, popRef]);
 	return style;
 }
