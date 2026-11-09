@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { PositionIndex } from "../src/server/position-index.js";
 import { isHeaderSpend } from "../src/shared/aggregate.js";
 import {
+	breakRecord,
 	indexAtPos,
 	inWindow,
 	lastAtOrBefore,
@@ -247,5 +248,38 @@ describe("lookups", () => {
 		expect(stepIndex(2, 1, 1, { i0: 1, i1: 2 })).toBe(2);
 		// No record in the span: nothing to step to.
 		expect(stepIndex(0, 1, 1, { i0: 3, i1: 2 })).toBe(-1);
+	});
+});
+
+describe("breakRecord", () => {
+	// Records at positions 0 1 4 5 6 7; position 3 is spend with an unreadable time, position 2 is not spend.
+	const s = spendRecords(ROWS, null);
+	const all = { startMs: T0, endMs: T0 + 60 * MIN };
+
+	it("a break between two records is the first record after it", () => {
+		expect(breakRecord(s, 2, all)).toBe(2);
+		expect(s.pos[breakRecord(s, 2, all)]).toBe(4);
+	});
+	it("a break on a record is that record", () => {
+		expect(breakRecord(s, 5, all)).toBe(3);
+		expect(breakRecord(s, 0, all)).toBe(0);
+		expect(breakRecord(s, 7, all)).toBe(5);
+	});
+	it("a break on the unreadable-time row between records is the next record", () => {
+		expect(breakRecord(s, 3, all)).toBe(2);
+	});
+	it("a break past the last record is none", () => {
+		expect(breakRecord(s, 8, all)).toBe(-1);
+		expect(breakRecord(s, 1_000, all)).toBe(-1);
+	});
+	it("a break whose record is before the window is none", () => {
+		const later = { startMs: T0 + 5 * MIN, endMs: T0 + 60 * MIN };
+		expect(breakRecord(s, 2, later)).toBe(-1);
+		expect(breakRecord(s, 6, later)).toBe(4);
+	});
+	it("no break, or no records, is none", () => {
+		expect(breakRecord(s, null, all)).toBe(-1);
+		expect(breakRecord(s, Number.NaN, all)).toBe(-1);
+		expect(breakRecord(spendRecords([], null), 0, all)).toBe(-1);
 	});
 });

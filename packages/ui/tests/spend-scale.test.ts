@@ -6,6 +6,7 @@ import { lttb } from "../src/shared/curve.js";
 import { squeeze } from "../src/shared/knee.js";
 import {
 	AREA_FADE_MAX,
+	AREA_HIGHLIGHT,
 	AREA_STOPS,
 	areaFadeTop,
 	bucketCenterMs,
@@ -19,6 +20,8 @@ import {
 	niceTicks,
 	PAD_B,
 	PAD_T,
+	peakLabelPlace,
+	peakLabelShown,
 	rateOf,
 } from "../src/shared/spend-scale.js";
 
@@ -52,6 +55,13 @@ describe("constants", () => {
 			[0.7, 0.012],
 			[0.9, 0],
 		]);
+	});
+	it("the area brightens by AREA_HIGHLIGHT while a cursor is on the plot", () => {
+		expect(AREA_HIGHLIGHT).toBe(1.25);
+		expect((AREA_STOPS[0] as readonly [number, number])[1] * AREA_HIGHLIGHT).toBeCloseTo(
+			0.1625,
+			12,
+		);
 	});
 });
 
@@ -90,6 +100,17 @@ describe("geometry", () => {
 		const g = geometry({ ...base, win: w });
 		expect(g.spanMs(0)).toBe(HOUR);
 		expect(g.spanMs(1)).toBe(40 * 60_000);
+	});
+	it("takes its top from the peak it is given, not from the rates drawn on it", () => {
+		// Under a filter the scale is the unfiltered (smoothed) peak's; the filtered line is drawn against it.
+		const g = geometry({ ...base, peakRate: 1000 });
+		expect(g.top).toBe(1080);
+		const filtered = new Float64Array(24);
+		filtered[6] = 100;
+		const s = drawSeries(g, filtered);
+		expect(g.top).toBe(1080);
+		expect(s.curve.at(g.centerX(6))).toBeCloseTo(g.yOf(100), 6);
+		expect(g.yOf(100)).toBeGreaterThan(g.yOf(1000));
 	});
 	it("maps time and buckets to x", () => {
 		const g = geometry(base);
@@ -281,5 +302,53 @@ describe("drawSeries", () => {
 		const s = drawSeries(z, new Float64Array(24));
 		expect(s.d).not.toContain("NaN");
 		expect(s.curve.at(100)).toBe(z.baseY);
+	});
+});
+
+describe("the peak label", () => {
+	it("peakLabelPlace anchors by where the peak is: start near the left, end near the right, else middle", () => {
+		expect(peakLabelPlace({ x: 5, y: 100, w: 700 })).toEqual({ x: 5, y: 94, anchor: "start" });
+		expect(peakLabelPlace({ x: 300, y: 100, w: 700 })).toEqual({ x: 300, y: 94, anchor: "middle" });
+		expect(peakLabelPlace({ x: 695, y: 100, w: 700 })).toEqual({ x: 695, y: 94, anchor: "end" });
+		// The edges of the 90px bands are middle: start is BEFORE 90, end is PAST w - 90.
+		expect(peakLabelPlace({ x: 90, y: 100, w: 700 }).anchor).toBe("middle");
+		expect(peakLabelPlace({ x: 89.5, y: 100, w: 700 }).anchor).toBe("start");
+		expect(peakLabelPlace({ x: 610, y: 100, w: 700 }).anchor).toBe("middle");
+		expect(peakLabelPlace({ x: 610.5, y: 100, w: 700 }).anchor).toBe("end");
+	});
+	it("peakLabelPlace clamps x to 4px inside the plot and keeps y at least 10", () => {
+		expect(peakLabelPlace({ x: 1, y: 100, w: 700 }).x).toBe(4);
+		expect(peakLabelPlace({ x: -20, y: 100, w: 700 }).x).toBe(4);
+		expect(peakLabelPlace({ x: 699.5, y: 100, w: 700 }).x).toBe(696);
+		expect(peakLabelPlace({ x: 300, y: 12, w: 700 }).y).toBe(10);
+		expect(peakLabelPlace({ x: 300, y: 16, w: 700 }).y).toBe(10);
+		expect(peakLabelPlace({ x: 300, y: 17, w: 700 }).y).toBe(11);
+		// A plot too narrow for both bands: a right-hand peak still ends at the right.
+		expect(peakLabelPlace({ x: 50, y: 100, w: 100 }).anchor).toBe("end");
+	});
+
+	const rest = {
+		w: 700,
+		peakRate: 9,
+		hasCursor: false,
+		morphing: false,
+		knee: Number.POSITIVE_INFINITY,
+		ringed: false,
+	};
+	it("peakLabelShown is true at rest with nothing hiding it", () => {
+		expect(peakLabelShown(rest)).toBe(true);
+		// A knee the peak does not pass leaves the label.
+		expect(peakLabelShown({ ...rest, knee: 9 })).toBe(true);
+		expect(peakLabelShown({ ...rest, knee: 20 })).toBe(true);
+	});
+	it("peakLabelShown is false for each hider alone", () => {
+		expect(peakLabelShown({ ...rest, w: 0 })).toBe(false);
+		expect(peakLabelShown({ ...rest, w: -1 })).toBe(false);
+		expect(peakLabelShown({ ...rest, w: Number.NaN })).toBe(false);
+		expect(peakLabelShown({ ...rest, peakRate: 0 })).toBe(false);
+		expect(peakLabelShown({ ...rest, hasCursor: true })).toBe(false);
+		expect(peakLabelShown({ ...rest, morphing: true })).toBe(false);
+		expect(peakLabelShown({ ...rest, knee: 5 })).toBe(false);
+		expect(peakLabelShown({ ...rest, ringed: true })).toBe(false);
 	});
 });

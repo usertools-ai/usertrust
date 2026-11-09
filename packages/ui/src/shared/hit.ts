@@ -56,3 +56,19 @@ export function hourSpanOf(ms: number): [number, number] {
 	const a = Math.floor(ms / HOUR_MS) * HOUR_MS;
 	return [a, a + HOUR_MS];
 }
+
+/**
+ * Whether a pointer move should move the crosshair. A mouse hovers, so it always does. A finger or a pen has no hover
+ * a reader means: it only reads the line while pressed, so a tap elsewhere never leaves a crosshair behind.
+ */
+export function shouldTrack(pointerType: string, touchDown: boolean): boolean {
+	return pointerType === "mouse" || touchDown;
+}
+
+/**
+ * Whether a press should capture the pointer, so a drag keeps reading the line after it leaves the plot. Never a
+ * mouse (its click must land where it is) and never a press on a ring (the ring keeps its own press).
+ */
+export function shouldCapture(pointerType: string, onRing: boolean): boolean {
+	return pointerType !== "mouse" && !onRing;
+}
