@@ -16,8 +16,14 @@ import { bucketCount, bucketIndex, canBucket } from "./spend-series.js";
 
 export type Dimension = "lane" | "role" | "model" | "kind" | "provider";
 
+/** The fields of a record a key reads: what `spendFactsOf` derives and `toLedgerRows` carries. */
+export type KeyFields = Pick<
+	LedgerRow,
+	"actor" | "kind" | "model" | "jobType" | "provider" | "providerRecorded"
+>;
+
 /** The key a record falls under in a dimension. */
-export function keyOf(dim: Dimension, row: LedgerRow): string {
+export function keyOf(dim: Dimension, row: KeyFields): string {
 	switch (dim) {
 		case "lane":
 			return row.actor;
@@ -40,6 +46,23 @@ export interface SpendWindow {
 	endMs: number;
 }
 
+/** Every instant there is. A record whose time does not parse still falls in no window, this one included. */
+export const WHOLE_VAULT: SpendWindow = { startMs: -Infinity, endMs: Infinity };
+
+/**
+ * The one rule for what a window counts: the row's cost when it is header spend (`isHeaderSpend`) with a time that
+ * parses and falls inside `[startMs, endMs)`, else `undefined`. A zero cost is spend (it counts, as a call).
+ */
+export function spendInWindow(
+	row: Pick<LedgerRow, "kind" | "costUt" | "ts">,
+	win: SpendWindow,
+): number | undefined {
+	if (!isHeaderSpend(row.kind, row.costUt)) return undefined;
+	const t = Date.parse(row.ts);
+	if (!(t >= win.startMs && t < win.endMs)) return undefined;
+	return row.costUt;
+}
+
 export interface Breakdown {
 	dim: Dimension;
 	/** Ordered by spend, highest first; ties A to Z. */
@@ -55,17 +78,16 @@ export function breakdown(rows: readonly LedgerRow[], win: SpendWindow, dim: Dim
 	let totalUt = 0;
 	let calls = 0;
 	for (const row of rows) {
-		if (!isHeaderSpend(row.kind, row.costUt)) continue;
-		const t = Date.parse(row.ts);
-		if (!(t >= win.startMs && t < win.endMs)) continue;
+		const cost = spendInWindow(row, win);
+		if (cost === undefined) continue;
 		const key = keyOf(dim, row);
 		const entry = byKey.get(key);
-		if (entry === undefined) byKey.set(key, { spendUt: row.costUt, calls: 1 });
+		if (entry === undefined) byKey.set(key, { spendUt: cost, calls: 1 });
 		else {
-			entry.spendUt += row.costUt;
+			entry.spendUt += cost;
 			entry.calls += 1;
 		}
-		totalUt += row.costUt;
+		totalUt += cost;
 		calls += 1;
 	}
 	const spend = new Map<string, number>();
@@ -74,13 +96,16 @@ export function breakdown(rows: readonly LedgerRow[], win: SpendWindow, dim: Dim
 	return { dim, keys, byKey, totalUt, calls };
 }
 
+/** The order of two `[key, spend]` pairs: spend highest first, ties A to Z. Negative when `a` ranks before `b`. */
+export function rankOrder(a: readonly [string, number], b: readonly [string, number]): number {
+	const d = b[1] - a[1];
+	if (d !== 0) return d;
+	return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
+}
+
 /** Keys ordered by spend, highest first; ties A to Z. The order `breakdown` uses. */
-function byTotalDesc(totals: ReadonlyMap<string, number>): string[] {
-	return [...totals.keys()].sort((a, b) => {
-		const d = (totals.get(b) ?? 0) - (totals.get(a) ?? 0);
-		if (d !== 0) return d;
-		return a < b ? -1 : a > b ? 1 : 0;
-	});
+export function byTotalDesc(totals: ReadonlyMap<string, number>): string[] {
+	return [...totals].sort(rankOrder).map(([key]) => key);
 }
 
 /**

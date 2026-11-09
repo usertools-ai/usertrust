@@ -8,6 +8,8 @@ import { TransferIndex } from "../src/server/verdicts.js";
 import {
 	KIND_CLASS,
 	kindClass,
+	type LedgerRow,
+	spendFactsOf,
 	statusOf,
 	toLedgerRows,
 	VERDICT_STATUS,
@@ -334,5 +336,80 @@ describe("KIND_CLASS", () => {
 			UNRECOVERABLE: "unrecoverable",
 			PENDING: "unknown",
 		});
+	});
+});
+
+describe("spendFactsOf", () => {
+	const FIELDS = [
+		"ts",
+		"kind",
+		"actor",
+		"model",
+		"provider",
+		"providerRecorded",
+		"jobType",
+		"costUt",
+	] as const;
+
+	function pick(row: LedgerRow): Record<string, unknown> {
+		const out: Record<string, unknown> = {};
+		// Own keys only: a key present with the value undefined is a difference, so copy presence, not value.
+		for (const f of FIELDS) if (Object.hasOwn(row, f)) out[f] = row[f];
+		return out;
+	}
+
+	const CASES: Array<[string, Partial<PersistedAuditEvent> & { data?: Record<string, unknown> }]> =
+		[
+			["a claude model with a cost", { data: { model: "claude-sonnet-4-6", cost: 5 } }],
+			["a grok model", { data: { model: "grok-4.7", cost: 2 } }],
+			["no model", { data: { cost: 3 } }],
+			["a recorded provider", { data: { model: "gpt-5", provider: "azure", cost: 1 } }],
+			["a blank recorded provider", { data: { model: "gpt-5", provider: "", cost: 1 } }],
+			["a recorded provider and no model", { data: { provider: "xai" } }],
+			["a listed job type", { data: { jobType: "bugfix", cost: 4 } }],
+			["an unlisted job type", { data: { jobType: "moonshot", cost: 4 } }],
+			["no job type", { data: { model: "claude-haiku-4-5" } }],
+			["no cost", { data: { model: "gemini-2" } }],
+			["a cost that is a string", { data: { model: "claude-sonnet-4-6", cost: "5" } }],
+			["a cost of zero", { kind: "llm_call_failed", actor: "ana", data: { cost: 0 } }],
+			["a time that does not parse", { timestamp: "not a time", data: { cost: 7 } }],
+		];
+
+	// Literals for spendFactsOf alone: the parity test below compares it with toLedgerRows, which calls it.
+	it("derives the provider from the model's prefix", () => {
+		expect(spendFactsOf(evt({ data: { model: "claude-sonnet-4-6" } })).provider).toBe("anthropic");
+		expect(spendFactsOf(evt({ data: { model: "grok-4.7" } })).provider).toBe("xai");
+	});
+
+	it("keeps the provider a record names, apart from the one the model gives", () => {
+		expect(spendFactsOf(evt({ data: { model: "gpt-5", provider: "azure" } }))).toEqual({
+			ts: "2026-07-27T10:00:00.000Z",
+			kind: "llm_call",
+			actor: "local",
+			model: "gpt-5",
+			provider: "openai",
+			providerRecorded: "azure",
+		});
+	});
+
+	it("keeps a listed job type, calls an unlisted one unrecognized, and leaves an absent one out", () => {
+		expect(spendFactsOf(evt({ data: { jobType: "bugfix" } })).jobType).toBe("bugfix");
+		expect(spendFactsOf(evt({ data: { jobType: "moonshot" } })).jobType).toBe("unrecognized");
+		expect(Object.hasOwn(spendFactsOf(evt({ data: {} })), "jobType")).toBe(false);
+	});
+
+	it("takes a cost only when it is a number", () => {
+		expect(spendFactsOf(evt({ data: { cost: 5 } })).costUt).toBe(5);
+		expect(spendFactsOf(evt({ data: { cost: 0 } })).costUt).toBe(0);
+		expect(Object.hasOwn(spendFactsOf(evt({ data: { cost: "5" } })), "costUt")).toBe(false);
+		expect(Object.hasOwn(spendFactsOf(evt({ data: {} })), "costUt")).toBe(false);
+	});
+
+	it.each(CASES)("gives exactly the key and spend fields toLedgerRows gives: %s", (_name, over) => {
+		const e = evt(over);
+		const row = toLedgerRows([e], { valid: true, breakIndex: null }, undefined, 0)[0] as LedgerRow;
+		expect(spendFactsOf(e)).toEqual(pick(row));
+		// toEqual ignores keys holding undefined; compare the key lists too.
+		expect(Object.keys(spendFactsOf(e)).sort()).toEqual(Object.keys(pick(row)).sort());
 	});
 });

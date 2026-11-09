@@ -4,15 +4,16 @@
 /**
  * Stable colours. A category keeps one colour in every view, whatever the filter and whatever the time: the colour
  * comes from the category's rank by spend over the records the page holds (at most `ROW_CAP`), never from the filtered
- * view. That held-rows rank is the FALLBACK: the whole-vault ranking comes from the server's totals endpoint once it
- * exists, and the caller should read that first (`colorsFromRanking` takes any ranking of keys, highest first).
+ * view. That held-rows rank is the FALLBACK: the whole-vault ranking comes from the server's totals endpoint
+ * (`GET /api/totals`), and the caller should read that first (`colorsFromRanking` takes any ranking of keys, highest
+ * first).
  *
  * The top five categories take the series slots in order; the rest, "untyped" and "Other" take the muted tone, and a
  * muted category does not use up a slot. Providers keep a fixed colour each. A key that first appears on the live
  * tail takes the next free slot (or muted when none is left), and no existing key is ever repainted.
  */
 
-import { breakdown, type Dimension } from "./breakdown.js";
+import { breakdown, type Dimension, WHOLE_VAULT } from "./breakdown.js";
 import type { ProviderName } from "./provider.js";
 import type { LedgerRow } from "./rows.js";
 
@@ -49,14 +50,14 @@ function isNamedProvider(key: string): key is Exclude<ProviderName, "Other"> {
 
 /**
  * Rank every key of `dim` by spend over the rows the page holds (`allRows`, at most `ROW_CAP`; ties A to Z) and fix
- * its colour. This is the FALLBACK ranking: the whole-vault ranking comes from the server's totals endpoint once it
- * exists, and the caller should read that first and pass it to `colorsFromRanking`. Pass every held record, never a
- * filtered subset: a map built from a filter would repaint the categories the filter leaves. On a vault larger than
- * the cap, an actor whose spend sits in older records is ranked here only by the records the page holds.
+ * its colour. This is the FALLBACK ranking: the whole-vault ranking comes from the server's totals endpoint
+ * (`GET /api/totals`), and the caller should read that first and pass it to `colorsFromRanking`. Pass every held
+ * record, never a filtered subset: a map built from a filter would repaint the categories the filter leaves. On a
+ * vault larger than the cap, an actor whose spend sits in older records is ranked here only by the records the page
+ * holds.
  */
 export function rankColors(allRows: readonly LedgerRow[], dim: Dimension): ColorMap {
-	const keys =
-		dim === "provider" ? [] : breakdown(allRows, { startMs: -Infinity, endMs: Infinity }, dim).keys;
+	const keys = dim === "provider" ? [] : breakdown(allRows, WHOLE_VAULT, dim).keys;
 	return colorsFromRanking(dim, keys);
 }
 

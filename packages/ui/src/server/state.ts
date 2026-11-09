@@ -27,7 +27,8 @@ import { canonicalize, verifyVaultReading } from "usertrust-verify";
 import { isHeaderSpend } from "../shared/aggregate.js";
 import type { SummaryPayload } from "../shared/api.js";
 import { type RemoteSettings, remoteSettings } from "../shared/kit.js";
-import { type LedgerRow, toLedgerRows } from "../shared/rows.js";
+import { type LedgerRow, spendFactsOf, toLedgerRows } from "../shared/rows.js";
+import { TotalsIndex } from "../shared/totals.js";
 import { PositionIndex } from "./position-index.js";
 import { TransferIndex } from "./verdicts.js";
 
@@ -45,6 +46,11 @@ export interface LedgerState {
 	 * `summary.chain.breakIndex` points into), not only the rows held; the live tail extends it.
 	 */
 	positions: PositionIndex;
+	/**
+	 * Spend and calls per key over every event, not only the rows held, for `GET /api/totals`; the live tail folds each
+	 * append in.
+	 */
+	totals: TotalsIndex;
 	/**
 	 * The index, in the FULL ordered list the chain was verified over (a position), of the first event that breaks the
 	 * chain, or null when none does. The rows' integrity uses a copy re-derived for the slice held (relative to its
@@ -539,13 +545,19 @@ function loadPass(
 	transfers.add(events, 0);
 	// Every event too: a past position can fall before the rows held, and its totals are still exact.
 	const positions = new PositionIndex();
-	for (const e of events) positions.add(e);
+	// The same pass folds every event into the totals: a category whose spend is all in older records still counts.
+	const totals = new TotalsIndex();
+	for (const e of events) {
+		positions.add(e);
+		totals.add(spendFactsOf(e));
+	}
 	const rows = toLedgerRows(visible, sliceIntegrity, transfers.verdictOf, offset);
 
 	const state: LedgerState = {
 		rows,
 		transfers,
 		positions,
+		totals,
 		fullBreakIndex,
 		breakIsOnlyFailure: breakIsOnlyFailure(
 			fullBreakIndex,

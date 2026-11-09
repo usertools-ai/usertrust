@@ -23,6 +23,7 @@
  * always fails. PUT /api/settings also needs the per-start token from
  * GET /api/session in `x-usertrust-token`.
  * GET /api/at answers the vault as recorded at a past position (`AtPayload`).
+ * GET /api/totals answers each category's spend and calls over every record of the vault (`TotalsPayload`).
  */
 
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
@@ -39,7 +40,7 @@ import {
 import { type TransferStatus, verifyTransaction } from "usertrust-verify";
 import { isHeaderSpend } from "../shared/aggregate.js";
 import type { AtPayload, SettingKey, SettingsPayload } from "../shared/api.js";
-import { type RowStatus, statusFor, toLedgerRows } from "../shared/rows.js";
+import { type RowStatus, spendFactsOf, statusFor, toLedgerRows } from "../shared/rows.js";
 import { hostAllowed, originAllowed, parseAllowHosts } from "./allow-host.js";
 import { parseZonedTime } from "./position-index.js";
 import {
@@ -104,6 +105,7 @@ const API_METHODS: ReadonlyMap<string, readonly string[]> = new Map([
 	["/api/session", ["GET"]],
 	["/api/settings", ["GET", "PUT"]],
 	["/api/at", ["GET"]],
+	["/api/totals", ["GET"]],
 ]);
 
 /** The methods `pathname` takes, or undefined when no route serves it (a 404). */
@@ -526,7 +528,10 @@ export async function createUiServer(
 			// Every appended event was verified onto the chain the last full load verified, so each takes the next position.
 			const firstPos = state.positions.length;
 			const touched = state.transfers.add(fresh, firstPos);
-			for (const e of fresh) state.positions.add(e);
+			for (const e of fresh) {
+				state.positions.add(e);
+				state.totals.add(spendFactsOf(e));
+			}
 			for (const [i, e] of fresh.entries()) state.records.add(freshContent[i] as string, e.hash);
 			// A new record can change an EARLIER row's verdict (an ambiguity appended after an optimistic
 			// settlement), so every visible row of a touched transfer is re-classified, and each change is sent.
@@ -852,6 +857,16 @@ export async function createUiServer(
 				answerAt(res, url.searchParams);
 			} catch {
 				if (!res.headersSent) sendJson(res, 500, { error: "position could not be read" });
+				else res.destroy();
+			}
+			return;
+		}
+		if (url.pathname === "/api/totals") {
+			// Same shape as /api/at: a fault is a 500 with a fixed message, never a throw out of the listener.
+			try {
+				sendJson(res, 200, state.totals.payload(epoch), { "cache-control": "no-store" });
+			} catch {
+				if (!res.headersSent) sendJson(res, 500, { error: "totals failed" });
 				else res.destroy();
 			}
 			return;
