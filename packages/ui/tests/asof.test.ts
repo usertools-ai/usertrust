@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
+import { readFileSync } from "node:fs";
+import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { AtPayload, SummaryPayload } from "../src/shared/api.js";
 import {
@@ -418,6 +421,34 @@ describe("a list's cutter keeps a past row's identity while its record and its s
 		expect(rowOne(drawnB)).not.toBe(rowOne(drawnA));
 		cutter.commit(drawnA);
 		expect(rowOne(cutter.cut(live, answer))).toBe(rowOne(drawnA));
+	});
+
+	it("red-first (thrown-away draws kept alive): a draw never committed is not held by the cutter", async () => {
+		// While the list on screen stays the same (the live view), nothing is committed, and every past draw React threw
+		// away stayed in the cutter, rows and all, for as long as the view lived. Staged draws are held weakly now. A
+		// collection is forced through V8's gc(): `--expose-gc` set from here, read from a fresh context.
+		setFlagsFromString("--expose-gc");
+		const gc = runInNewContext("gc") as () => void;
+		const many = Array.from({ length: 2000 }, (_, pos) => row(pos, { status: "ambiguous" }));
+		const statusAt = Object.fromEntries(many.map((r) => [r.hash, "settled" as const]));
+		const answerAll = at({ pos: many.length - 1, head: many.length, statusAt });
+		const collected = new Set<number>();
+		const registry = new FinalizationRegistry<number>((n) => collected.add(n));
+		// Forty draws, none committed and none kept by the page.
+		for (let i = 0; i < 40; i++) registry.register(cutter.cut(many, answerAll), i);
+		for (let k = 0; k < 20 && collected.size < 40; k++) {
+			gc();
+			await new Promise((resolve) => setImmediate(resolve));
+		}
+		expect(collected.size).toBeGreaterThan(0);
+	});
+
+	it("holds its staged draws in a WeakMap, at both places it makes one", () => {
+		// Beside the collection above, which depends on the collector: a pin that fails if `staged` is a strong map again.
+		const src = readFileSync(new URL("../src/shared/asof.ts", import.meta.url), "utf-8");
+		expect(src).toMatch(/let staged = new WeakMap<LedgerRow\[\], Map<LedgerRow, LedgerRow>>\(\);/);
+		expect(src.match(/staged = new WeakMap\(\);/g)).toHaveLength(1);
+		expect(src).not.toMatch(/staged = new Map\b/);
 	});
 
 	it("two cutters interleaved keep their own projections", () => {

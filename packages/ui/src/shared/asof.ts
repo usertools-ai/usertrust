@@ -66,8 +66,10 @@ export interface Cutter {
 export function createCutter(): Cutter {
 	// The projections the draw on screen shows, by the row object each projects: the only ones a draw may reuse.
 	let shown = new Map<LedgerRow, LedgerRow>();
-	// The draws made since the last commit, by the list each returned, with the projections each shows.
-	let staged = new Map<LedgerRow[], Map<LedgerRow, LedgerRow>>();
+	// The draws made since the last commit, by the list each returned, with the projections each shows. Held weakly:
+	// while the list on screen stays the same (the live view), nothing is committed, and a strong map kept every draw
+	// React threw away, rows and all. A draw thrown away is no longer reachable, so it goes; the one on screen stays.
+	let staged = new WeakMap<LedgerRow[], Map<LedgerRow, LedgerRow>>();
 	return {
 		cut(rows, at) {
 			const now = new Map<LedgerRow, LedgerRow>();
@@ -87,7 +89,7 @@ export function createCutter(): Cutter {
 		commit(drawn) {
 			const next = staged.get(drawn);
 			if (next !== undefined) shown = next;
-			staged = new Map();
+			staged = new WeakMap();
 		},
 	};
 }
