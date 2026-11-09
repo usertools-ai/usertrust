@@ -69,6 +69,14 @@ export function isFilled(fill: WindowId | null, id: WindowId, compact: boolean):
 }
 
 /** Where a window is in the fill: at home, growing, filled, or shrinking back. */
+/**
+ * Whether window `id` is dimmed: another window fills the desk (fill is ignored in the compact column). A dimmed
+ * window is inert and hidden, so nothing in it is on screen: it draws nothing modal, and Escape takes no layer of it.
+ */
+export function isDimmed(fill: WindowId | null, id: WindowId, compact: boolean): boolean {
+	return fill !== null && !compact && fill !== id;
+}
+
 export type Phase = "home" | "grow" | "filled" | "shrink";
 
 /**

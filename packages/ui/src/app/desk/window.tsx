@@ -15,6 +15,7 @@ import { createContext, useContext, useLayoutEffect, useMemo, useRef, useState }
 import {
 	COMPACT_QUERY,
 	homeInset,
+	isDimmed,
 	isFilled,
 	nextPhase,
 	type Phase,
@@ -71,8 +72,11 @@ export function Window(props: {
 	subtitle?: React.ReactNode;
 	/** Header controls (range chips). */
 	actions?: React.ReactNode;
-	/** One render-prop: small, and filled. */
-	children: (filled: boolean) => React.ReactNode;
+	/**
+	 * One render-prop: whether this window fills the desk, and whether another one does. This one is then inert and
+	 * hidden, so it must hold nothing modal.
+	 */
+	children: (filled: boolean, dimmed: boolean) => React.ReactNode;
 }): React.JSX.Element {
 	const { id, title, subtitle, actions, children } = props;
 	const { held } = useDeskData();
@@ -127,7 +131,7 @@ export function Window(props: {
 	const renderFilled = phase !== "home";
 	const settling = phase === "grow" || phase === "shrink";
 	// Another window fills the desk: this one fades, is inert and hidden from assistive tech, but stays in the tree.
-	const dimmed = fill !== null && !compact && fill !== id;
+	const dimmed = isDimmed(fill, id, compact);
 	const info = useMemo<WindowInfo>(
 		() => ({ id, filled: renderFilled, settling }),
 		[id, renderFilled, settling],
@@ -188,7 +192,9 @@ export function Window(props: {
 					</button>
 				</div>
 				<div className="ut-win-body" {...lagging}>
-					<WindowContext.Provider value={info}>{children(renderFilled)}</WindowContext.Provider>
+					<WindowContext.Provider value={info}>
+						{children(renderFilled, dimmed)}
+					</WindowContext.Provider>
 				</div>
 			</section>
 		</div>

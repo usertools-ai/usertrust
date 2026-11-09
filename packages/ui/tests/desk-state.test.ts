@@ -361,6 +361,17 @@ describe("the provider keeps what the page had", () => {
 		expect(flat(src)).not.toContain(flat("computeBreakdown(list.shownRows, filters,"));
 	});
 
+	it("red-first (Escape closing a record no one can see): Escape's record layer counts only while its panel is on screen", () => {
+		const flat = (t: string): string => t.replace(/\s+/g, "").replace(/,\)/g, ")");
+		// While another window fills the desk the Ledger is hidden: Escape restores the fill first, and the record's
+		// panel then opens. It used to close the hidden record and leave the fill.
+		expect(flat(src)).toContain(
+			flat('recordOpen: open !== null && !isDimmed(fill, "ledger", compact)'),
+		);
+		expect(src).toContain("const compact = useMedia(COMPACT_QUERY, false);");
+		expect(flat(src)).not.toContain(flat("recordOpen: open !== null, fill"));
+	});
+
 	it("takes the window from the drawn answer, never the newer shown position", () => {
 		expect(src).toContain("deskWindow(range, list.at, nowMs)");
 		expect(src).not.toContain("deskWindow(range, shownAt");

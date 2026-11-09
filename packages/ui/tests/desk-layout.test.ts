@@ -9,6 +9,7 @@ import {
 	HOME,
 	HOME_ROWS,
 	homeInset,
+	isDimmed,
 	isFilled,
 	nextPhase,
 	type Phase,
@@ -72,6 +73,22 @@ describe("isFilled", () => {
 	it("ignores fill on a compact window, so none is inert or hidden (a link with fill= on a phone)", () => {
 		expect(isFilled("spend", "spend", true)).toBe(false);
 		for (const id of WINDOW_IDS as readonly WindowId[]) expect(isFilled(id, id, true)).toBe(false);
+	});
+});
+
+// A dimmed window is inert and hidden: the window draws nothing modal in it, and Escape does not take a layer that
+// lives in it (a record whose panel no one can see).
+describe("isDimmed", () => {
+	it("is true for every window but the filled one, on a wide desk", () => {
+		expect(isDimmed("spend", "ledger", false)).toBe(true);
+		expect(isDimmed("spend", "spend", false)).toBe(false);
+		expect(isDimmed(null, "ledger", false)).toBe(false);
+	});
+
+	it("is never true on a compact window, where fill is ignored", () => {
+		for (const fill of WINDOW_IDS as readonly WindowId[])
+			for (const id of WINDOW_IDS as readonly WindowId[])
+				expect(isDimmed(fill, id, true)).toBe(false);
 	});
 });
 

@@ -48,7 +48,7 @@ export const LedgerWindow = memo(function LedgerWindow(): React.JSX.Element {
 
 	return (
 		<Window id="ledger" title="Ledger">
-			{(filled) => {
+			{(filled, dimmed) => {
 				// An empty vault has nothing to select: the list takes the width.
 				const docked = filled && wide && list.shownRows.length > 0;
 				return (
@@ -87,7 +87,10 @@ export const LedgerWindow = memo(function LedgerWindow(): React.JSX.Element {
 									<InspectorHint />
 								))}
 						</div>
-						{!docked && open && (
+						{/* While another window fills the desk this one is inert and hidden: a modal in it could take no focus, and its
+						    Tab handler held the keyboard. The record stays in the address, and its drawer opens (and takes focus)
+						    when the Ledger shows again. */}
+						{!docked && open && !dimmed && (
 							<RowPanel
 								key={open.hash}
 								row={open}

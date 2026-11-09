@@ -28,7 +28,7 @@ import {
 	removeFilterToken,
 	selectedKeys,
 } from "../../shared/desk-filters.js";
-import type { WindowId } from "../../shared/desk-layout.js";
+import { COMPACT_QUERY, isDimmed, type WindowId } from "../../shared/desk-layout.js";
 import { EMPTY_FILTERS, isFiltering } from "../../shared/filters.js";
 import { effectiveLevel } from "../../shared/level.js";
 import {
@@ -50,6 +50,7 @@ import { useUrlState } from "../use-url-state.js";
 import type { DeskData, DeskView, ShellBinding } from "./desk-types.js";
 import type { Peel, PeelState } from "./escape-peel.js";
 import { loadTotals } from "./load-totals.js";
+import { useMedia } from "./use-box-size.js";
 import { computeBreakdown, memoOnce } from "./use-breakdown.js";
 import { ColorBook, type TotalsOutcome } from "./use-colors.js";
 import { useHoverCategory } from "./use-hover.js";
@@ -375,9 +376,18 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 		preview(null);
 		setAt(null);
 	}, [preview, setAt]);
+	// The record layer counts only while its panel is on screen. While another window fills the desk the Ledger is
+	// hidden (`isDimmed`): Escape restores the fill first and the record's panel then opens, rather than closing a
+	// record no one can see and leaving the fill.
+	const compact = useMedia(COMPACT_QUERY, false);
 	const peel = useMemo<PeelState>(
-		() => ({ recordOpen: open !== null, fill, pinned: at !== null, newestFilter: newest }),
-		[open, fill, at, newest],
+		() => ({
+			recordOpen: open !== null && !isDimmed(fill, "ledger", compact),
+			fill,
+			pinned: at !== null,
+			newestFilter: newest,
+		}),
+		[open, fill, compact, at, newest],
 	);
 	const act = useMemo<Record<Peel, () => void>>(
 		() => ({

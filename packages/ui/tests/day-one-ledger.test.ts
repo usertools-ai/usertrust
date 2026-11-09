@@ -95,6 +95,22 @@ describe("the Ledger on day one", () => {
 		expect(html).not.toContain('data-docked="true"');
 	});
 
+	it("red-first (an invisible modal holding the keyboard): while another window fills the desk, the open record draws no drawer", async () => {
+		const row = dayOneRows()[0] as LedgerRow;
+		for (const other of ["spend", "share", "now"] as const) {
+			const html = await withDesk(createElement(LedgerWindow), {
+				data: loadedData(),
+				fill: other,
+				view: { openHash: row.hash },
+			});
+			// The Ledger is inert then: a modal in it could take no focus, and its Tab handler held the keyboard. The record
+			// stays in the address, and its drawer opens when the Ledger shows again (the test above).
+			expect(html, other).toContain("data-dim");
+			expect(html, other).not.toContain("ut-drawer");
+			expect(html, other).not.toContain('aria-modal="true"');
+		}
+	});
+
 	it("filled with nothing open, shows the hint where the panel will be", async () => {
 		const html = await withDesk(createElement(LedgerWindow), {
 			data: loadedData(),
