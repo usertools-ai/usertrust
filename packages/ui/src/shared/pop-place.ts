@@ -41,6 +41,20 @@ export function intersect(a: Box, b: Box): Box {
 }
 
 /**
+ * Whether `anchor` lies wholly outside `box`, past any one of its edges (only touching an edge is outside: none of it
+ * shows). An anchor out of its window's view leaves its popover no place that is both next to it and inside the
+ * window.
+ */
+export function outside(anchor: Box, box: Box): boolean {
+	return (
+		anchor.bottom <= box.top ||
+		anchor.top >= box.bottom ||
+		anchor.right <= box.left ||
+		anchor.left >= box.right
+	);
+}
+
+/**
  * Where a `w`×`h` popover opens from `anchor` so it stays inside `clip` (the box that would cut it: its window's
  * visible box, already cut to the viewport), `margin` pixels in from its edges, `gap` pixels from the anchor:
  * - across: lined up with the anchor's right edge if that fits (the default); else with its left edge if that fits;

@@ -4,6 +4,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	intersect,
+	outside,
 	type Page,
 	placePop,
 	placePopAt,
@@ -270,6 +271,28 @@ describe("whenMoved", () => {
 		f.fire("document", "scroll", true);
 		f.runFrames();
 		expect(placed).toBe(2);
+	});
+});
+
+describe("outside", () => {
+	it("red-first (an explainer cut off with its anchor out of view): an anchor wholly past any edge of the box is outside it", () => {
+		// A window gave the desk back, or the browser shrank, and the fact an explainer belongs to now sits below the
+		// window's fold. Next to the fact, the explainer ran out of the window's bottom; inside the window, it would sit
+		// apart from a fact the reader cannot see.
+		expect(outside(at(100, 806, 140, 23), { left: 0, top: 573, right: 400, bottom: 783 })).toBe(
+			true,
+		);
+		expect(outside(at(100, 100), { left: 0, top: 300, right: 400, bottom: 800 })).toBe(true);
+		expect(outside(at(-60, 100), BOX)).toBe(true);
+		expect(outside(at(420, 100), BOX)).toBe(true);
+	});
+
+	it("an anchor partly in the box is not outside it; one that only touches an edge is", () => {
+		// 10 of its 16px in view.
+		expect(outside(at(100, 790), BOX)).toBe(false);
+		// Its top on the box's bottom edge: none of it shows.
+		expect(outside(at(100, 800), BOX)).toBe(true);
+		expect(outside(at(100, 100), BOX)).toBe(false);
 	});
 });
 

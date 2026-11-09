@@ -5,6 +5,7 @@ import {
 	type CSSProperties,
 	type ReactNode,
 	type RefObject,
+	useCallback,
 	useEffect,
 	useLayoutEffect,
 	useRef,
@@ -37,7 +38,14 @@ import {
 	UT_KEY,
 } from "../shared/format.js";
 import { KIT_MARK_URL, KIT_TIMEOUT_MS } from "../shared/kit.js";
-import { type Box, intersect, placePopAt, popStyle, whenMoved } from "../shared/pop-place.js";
+import {
+	type Box,
+	intersect,
+	outside,
+	placePopAt,
+	popStyle,
+	whenMoved,
+} from "../shared/pop-place.js";
 import { shownLabel } from "../shared/timeline-view.js";
 import type { LiveState } from "./store.js";
 import { TickingFigure } from "./ticking-figure.js";
@@ -133,6 +141,7 @@ function TopBar(props: {
 function usePopover(): {
 	open: boolean;
 	toggle(): void;
+	close(): void;
 	rootRef: React.RefObject<HTMLDivElement | null>;
 } {
 	const [open, setOpen] = useState(false);
@@ -156,7 +165,8 @@ function usePopover(): {
 			document.removeEventListener("keydown", esc);
 		};
 	}, [open]);
-	return { open, toggle: () => setOpen((o) => !o), rootRef };
+	const close = useCallback(() => setOpen(false), []);
+	return { open, toggle: () => setOpen((o) => !o), close, rootRef };
 }
 
 /** The ancestors of `el` that clip its content (a window, its body): what can cut it, besides the viewport. */
@@ -181,11 +191,12 @@ function clipBox(el: HTMLElement): Box {
  * with room inside the box that would cut it, and above its anchor when there is no room below. A side fixed in the
  * stylesheet was cut off whenever the anchor sat in the other half of a narrow window. While it is open it is placed
  * again whenever that box moves or changes size (`whenMoved`): a scroll, the browser's size, its window filling the
- * desk or giving it back.
+ * desk or giving it back. If that leaves its anchor wholly out of view, it calls `close`.
  */
 function usePopPlace(
 	open: boolean,
 	popRef: RefObject<HTMLElement | null>,
+	close: () => void,
 ): CSSProperties | undefined {
 	const [style, setStyle] = useState<CSSProperties | undefined>(undefined);
 	useLayoutEffect(() => {
@@ -209,14 +220,16 @@ function usePopPlace(
 		};
 		let last = "";
 		const place = (): void => {
+			const at = anchor.getBoundingClientRect();
+			const clip = clipBox(pop);
+			// Its anchor wholly out of view (its window scrolled, or a resize or a restore left it below the fold): no place
+			// is both next to the anchor and inside the window, so it closes, as a click elsewhere would close it.
+			if (outside(at, clip)) {
+				close();
+				return;
+			}
 			const r = size(null);
-			const p = placePopAt(
-				anchor.getBoundingClientRect(),
-				r.width,
-				r.height,
-				clipBox(pop),
-				(w) => size(w).height,
-			);
+			const p = placePopAt(at, r.width, r.height, clip, (w) => size(w).height);
 			const next = popStyle(p);
 			const key = JSON.stringify(next);
 			if (key === last) return;
@@ -231,7 +244,7 @@ function usePopPlace(
 			cancelFrame: (id) => cancelAnimationFrame(id),
 			Observer: typeof ResizeObserver === "undefined" ? null : ResizeObserver,
 		});
-	}, [open, popRef]);
+	}, [open, popRef, close]);
 	return style;
 }
 
@@ -242,9 +255,9 @@ function AnchorFact(props: {
 	past?: boolean;
 }): React.JSX.Element {
 	const shown = anchorView(props.anchorFile);
-	const { open, toggle, rootRef } = usePopover();
+	const { open, toggle, close, rootRef } = usePopover();
 	const popRef = useRef<HTMLDivElement>(null);
-	const placed = usePopPlace(open, popRef);
+	const placed = usePopPlace(open, popRef, close);
 	const [before, after] = shown.explainer.split(ANCHOR_VERIFY_COMMAND);
 	return (
 		<div className="ut-fact detail" id="ut-fact-anchor">
@@ -281,9 +294,9 @@ function AnchorFact(props: {
  * figure is remounted when the view switches between live and past, so that switch jumps too.
  */
 function SpendFact(props: { spentUt: number; past: boolean }): React.JSX.Element {
-	const { open, toggle, rootRef } = usePopover();
+	const { open, toggle, close, rootRef } = usePopover();
 	const popRef = useRef<HTMLDivElement>(null);
-	const placed = usePopPlace(open, popRef);
+	const placed = usePopPlace(open, popRef, close);
 	return (
 		<div
 			className="ut-fact"
@@ -405,8 +418,9 @@ function FactLine(props: {
 	const [el, setEl] = useState<HTMLSpanElement | null>(null);
 	const [cut, setCut] = useState(false);
 	const [open, setOpen] = useState(false);
+	const close = useCallback(() => setOpen(false), []);
 	const popRef = useRef<HTMLSpanElement>(null);
-	const placed = usePopPlace(cut && open, popRef);
+	const placed = usePopPlace(cut && open, popRef, close);
 	// biome-ignore lint/correctness/useExhaustiveDependencies: the line is measured again when its text changes
 	useEffect(() => {
 		if (el === null || typeof ResizeObserver === "undefined") return;
