@@ -74,3 +74,19 @@ export function placePop(
 	const up = roomAbove > roomBelow;
 	return { side, shift, width, up, maxHeight: Math.max(0, Math.floor(up ? roomAbove : roomBelow)) };
 }
+
+/**
+ * `placePop`, placed by the height the popover has at the width it will be drawn at. One narrowed to fit its box
+ * wraps and grows, so its height at its own width would let its last lines leave the box. `heightAt` measures it at a
+ * given width; it is asked only when the popover is narrowed.
+ */
+export function placePopAt(
+	anchor: Box,
+	w: number,
+	h: number,
+	clip: Box,
+	heightAt: (width: number) => number,
+): PopPlace {
+	const first = placePop(anchor, w, h, clip);
+	return first.width < w ? placePop(anchor, w, heightAt(first.width), clip) : first;
+}

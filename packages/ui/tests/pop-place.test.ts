@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { describe, expect, it } from "vitest";
-import { intersect, placePop } from "../src/shared/pop-place.js";
+import { intersect, placePop, placePopAt } from "../src/shared/pop-place.js";
 
 const BOX = { left: 0, top: 0, right: 400, bottom: 800 };
 const at = (left: number, top: number, w = 40, h = 16) => ({
@@ -51,6 +51,37 @@ describe("placePop", () => {
 		expect(below.up).toBe(false);
 		// Room below: the box's bottom less the margin (340 - 8) less the anchor's bottom (76) and the gap.
 		expect(below.maxHeight).toBe(248);
+	});
+});
+
+describe("placePopAt", () => {
+	it("red-first (a stale height): a popover narrowed to fit is placed by the height it has at that width", () => {
+		// A 300px popover, 150px tall, in a 250px-wide box: it is drawn 234px wide, wraps, and grows to 192px. The room
+		// above its anchor is 180px. By its height at 300px it would fit above whole; at 234px it does not, so it needs a
+		// cap or its last lines would leave the box.
+		const box = { left: 0, top: 0, right: 250, bottom: 260 };
+		const anchor = at(100, 196);
+		const heightAt = (w: number): number => Math.round((150 * 300) / w);
+		expect(placePop(anchor, 300, 150, box)).toMatchObject({
+			width: 234,
+			up: true,
+			maxHeight: null,
+		});
+		expect(placePopAt(anchor, 300, 150, box, heightAt)).toMatchObject({
+			width: 234,
+			up: true,
+			maxHeight: 180,
+		});
+	});
+
+	it("measures nothing again when the popover keeps its own width", () => {
+		let calls = 0;
+		const p = placePopAt(at(340, 100), 300, 150, BOX, () => {
+			calls++;
+			return 999;
+		});
+		expect(calls).toBe(0);
+		expect(p).toMatchObject({ side: "end", up: false, maxHeight: null });
 	});
 });
 
