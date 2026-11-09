@@ -276,6 +276,7 @@ describe("activeFilterCount", () => {
 				...EMPTY_FILTERS,
 				kinds: ["a", "b"],
 				models: ["m"],
+				providers: ["xAI"],
 				actors: ["x"],
 				statuses: ["settled"],
 				jobTypes: ["j"],
@@ -285,7 +286,7 @@ describe("activeFilterCount", () => {
 				costMin: 0,
 				costMax: 5,
 			}),
-		).toBe(11);
+		).toBe(12);
 	});
 
 	it("counts a zero cost bound: zero is a bound, not an absent one", () => {

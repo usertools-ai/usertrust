@@ -2,7 +2,13 @@
 // Copyright 2026 Usertools, Inc.
 
 import { describe, expect, it } from "vitest";
-import { applyFilters, EMPTY_FILTERS, isFiltering, sortRows } from "../src/shared/filters.js";
+import {
+	activeFilterCount,
+	applyFilters,
+	EMPTY_FILTERS,
+	isFiltering,
+	sortRows,
+} from "../src/shared/filters.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 
 function row(overrides: Partial<LedgerRow>): LedgerRow {
@@ -95,6 +101,31 @@ describe("applyFilters", () => {
 		expect(
 			applyFilters(rows, { ...EMPTY_FILTERS, statuses: ["pending"] }).map((r) => r.id),
 		).not.toContain("u");
+	});
+});
+
+describe("the provider filter", () => {
+	const rows = [
+		row({ id: "a", model: "claude-sonnet-4-6" }),
+		row({ id: "g", model: "grok-4.7" }),
+		row({ id: "o", model: "gpt-5" }),
+		row({ id: "r", model: "x", providerRecorded: "xai" }),
+		row({ id: "n", kind: "policy_denied" }),
+	];
+
+	it("keeps only the rows whose provider is the one chosen", () => {
+		const ids = (providers: string[]) =>
+			applyFilters(rows, { ...EMPTY_FILTERS, providers }).map((r) => r.id);
+		expect(ids(["xAI"])).toEqual(["g", "r"]);
+		expect(ids(["Anthropic", "OpenAI"])).toEqual(["a", "o"]);
+		expect(ids(["Other"])).toEqual(["n"]);
+		expect(ids([])).toHaveLength(5);
+	});
+
+	it("counts as a filter, once per chosen provider", () => {
+		expect(isFiltering({ ...EMPTY_FILTERS, providers: ["xAI"] })).toBe(true);
+		expect(activeFilterCount({ ...EMPTY_FILTERS, providers: ["xAI", "Google"] })).toBe(2);
+		expect(EMPTY_FILTERS.providers).toEqual([]);
 	});
 });
 

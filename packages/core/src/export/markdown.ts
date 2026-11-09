@@ -35,6 +35,7 @@ function detectProvider(model: string): string {
 	if (model.startsWith("gemini")) return "google";
 	if (model.startsWith("command")) return "cohere";
 	if (model.startsWith("mistral") || model.startsWith("mixtral")) return "mistral";
+	if (model.startsWith("grok")) return "xai";
 	return "unknown";
 }
 

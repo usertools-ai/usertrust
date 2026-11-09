@@ -221,6 +221,17 @@ describe("renderReceipt", () => {
 		assertBoxStructure(output);
 	});
 
+	it("names a grok model as xai, the same as the dashboard does", () => {
+		const output = renderReceipt(
+			makeReceiptData({
+				event: makeEvent({
+					data: { model: "grok-4.7", cost: 1, settled: true, transferId: "tx_grok" },
+				}),
+			}),
+		);
+		expect(output.split("\n").find((l) => l.includes("Provider"))).toMatch(/Provider \.+ xai │$/);
+	});
+
 	it("detects providers correctly", () => {
 		// claude -> anthropic
 		const claudeOutput = renderReceipt(
