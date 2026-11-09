@@ -43,6 +43,7 @@ import {
 	intersect,
 	measure,
 	outside,
+	paddingBox,
 	placePopAt,
 	popStyle,
 	readableHeight,
@@ -226,7 +227,8 @@ function usePopPlace(
 		let done = false;
 		const place = (): void => {
 			if (done) return;
-			const at = anchor.getBoundingClientRect();
+			// The box its offsets are measured from: the anchor's padding box, where CSS measures top and bottom from.
+			const at = paddingBox(anchor.getBoundingClientRect(), getComputedStyle(anchor));
 			// The line it belongs to, when that is not the whole anchor: measured from the whole fact near the bottom of a
 			// short window, the room on both sides was a few pixels and a cut line's explainer had no readable height.
 			const lineBox = line !== null && line !== anchor ? line.getBoundingClientRect() : null;

@@ -8,6 +8,7 @@ import {
 	outside,
 	type Page,
 	type PopPlace,
+	paddingBox,
 	placePop,
 	placePopAt,
 	popStyle,
@@ -628,6 +629,50 @@ describe("popStyle next to a line", () => {
 			width: 300,
 			top: 48,
 		});
+	});
+});
+
+describe("paddingBox", () => {
+	const NONE = {
+		borderLeftWidth: "0px",
+		borderTopWidth: "0px",
+		borderRightWidth: "0px",
+		borderBottomWidth: "0px",
+	};
+
+	it("red-first (offsets measured from a border box): is the box inside its borders, the one CSS offsets are measured from", () => {
+		const border = { left: 10, top: 20, right: 310, bottom: 220 };
+		const widths = {
+			borderLeftWidth: "2px",
+			borderTopWidth: "3px",
+			borderRightWidth: "4px",
+			borderBottomWidth: "5px",
+		};
+		expect(paddingBox(border, widths)).toEqual({ left: 12, top: 23, right: 306, bottom: 215 });
+		// No border (a fact today): the same box. A width it cannot read counts as none.
+		expect(paddingBox(border, NONE)).toEqual(border);
+		expect(paddingBox(border, { ...NONE, borderTopWidth: "" })).toEqual(border);
+	});
+
+	it("placed from a bordered fact's padding box, a cut line's explainer sits a gap from its line", () => {
+		// A fact with a 6px border, its line at 662-696 near the bottom of the clip. The explainer opens above the line,
+		// its bottom `offset` pixels up from the bottom of the fact's padding box (696), which is where CSS measures from.
+		const factBorder = { left: 14, top: 571, right: 326, bottom: 702 };
+		const six = {
+			borderLeftWidth: "6px",
+			borderTopWidth: "6px",
+			borderRightWidth: "6px",
+			borderBottomWidth: "6px",
+		};
+		const line = { left: 20, top: 662, right: 320, bottom: 696 };
+		const clip = { left: 0, top: 538, right: 940, bottom: 700 };
+		const p = placed(paddingBox(factBorder, six), 300, 45, clip, 8, 8, line);
+		expect(p.up).toBe(true);
+		// The popover's bottom on screen: CSS `bottom` is measured up from the padding box's bottom (696).
+		expect(696 - (p.offset ?? Number.NaN)).toBe(line.top - 8);
+		// From the border box it would have sat 6px further up: 14px from its line.
+		const off = placed(factBorder, 300, 45, clip, 8, 8, line);
+		expect(696 - (off.offset ?? Number.NaN)).toBe(line.top - 8 - 6);
 	});
 });
 

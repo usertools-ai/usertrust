@@ -53,10 +53,6 @@ export interface ReadStyle {
  * that cannot be read as 0.
  */
 export function readableHeight(s: ReadStyle): number {
-	const px = (v: string): number => {
-		const n = Number.parseFloat(v);
-		return Number.isFinite(n) ? n : 0;
-	};
 	const line = px(s.lineHeight) || 1.25 * px(s.fontSize);
 	return (
 		READABLE_LINES * line +
@@ -65,6 +61,35 @@ export function readableHeight(s: ReadStyle): number {
 		px(s.borderTopWidth) +
 		px(s.borderBottomWidth)
 	);
+}
+
+/** A computed CSS length in pixels; one that cannot be read is 0. */
+function px(v: string): number {
+	const n = Number.parseFloat(v);
+	return Number.isFinite(n) ? n : 0;
+}
+
+/** What `paddingBox` reads of a box's computed style: its border widths, in CSS lengths. */
+export interface Borders {
+	borderLeftWidth: string;
+	borderTopWidth: string;
+	borderRightWidth: string;
+	borderBottomWidth: string;
+}
+
+/**
+ * The part of `border` (a box as `getBoundingClientRect` reports it: its border box) inside its borders: its padding
+ * box, the box an absolutely positioned popover's top, bottom, left and right are measured from. Placed from the
+ * border box, a popover in a box with a border would sit that border's width from where it was placed (no fact has a
+ * border today, so the two agreed). A width that cannot be read counts as none.
+ */
+export function paddingBox(border: Box, s: Borders): Box {
+	return {
+		left: border.left + px(s.borderLeftWidth),
+		top: border.top + px(s.borderTopWidth),
+		right: border.right - px(s.borderRightWidth),
+		bottom: border.bottom - px(s.borderBottomWidth),
+	};
 }
 
 /** The part of `a` inside `b`. */

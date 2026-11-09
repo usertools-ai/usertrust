@@ -146,6 +146,23 @@ describe("the desk shell", () => {
 describe("the page's source, now spread over the shell", () => {
 	const src = appSource();
 
+	it("red-first (a memoized bar drawn again on every answer): hands FilterBar names only, never a node made in the render", () => {
+		// FilterBar is memoized: the page re-renders on every answer, and the bar's rows change only after it. A node
+		// written in the render (the record count, once handed to it as `beside={<span …>}`) is a new object every time,
+		// so the memo never matched and the bar was drawn again with every answer. Each prop is a name now: the count is
+		// a string, `held` a boolean, the rest references the desk keeps until they change.
+		const shell = readFileSync(
+			join(import.meta.dirname, "..", "src", "app", "desk", "desk-shell.tsx"),
+			"utf-8",
+		);
+		const start = shell.indexOf("<FilterBar");
+		expect(start).toBeGreaterThan(-1);
+		const tag = shell.slice(start, shell.indexOf("/>", start) + 2);
+		const props = [...tag.matchAll(/\s([\w-]+)=\{([^}]*)\}/g)].map((m) => [m[1], m[2]]);
+		expect(props.map(([name]) => name)).toEqual(["rows", "filters", "onChange", "held", "count"]);
+		for (const [name, value] of props) expect(value, name).toMatch(/^[A-Za-z_$][\w$]*$/);
+	});
+
 	it("draws the list from one input and never from the bare phase", () => {
 		expect(src).not.toContain("phase={phase}");
 		expect(src).toContain("phase={list.phase}");

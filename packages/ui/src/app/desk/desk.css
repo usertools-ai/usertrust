@@ -70,7 +70,7 @@
 	/* The filter row and the record count. The count dims with the list it counts (the original stylesheet scopes that
 	   rule to its own header, which is gone). The active chips take a row of their own below the controls and the count,
 	   as they did above the list: beside them, the strip kept its widest chip's width and ran a narrow phone's page off
-	   the screen. The count comes before the strip in the DOM (FilterBar's `beside`), never by a CSS order. */
+	   the screen. The count comes before the strip in the DOM (FilterBar draws it, from its `count`), never by a CSS order. */
 	.ut-dk-filters {
 		flex: 0 0 auto;
 		display: flex;

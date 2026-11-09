@@ -27,7 +27,8 @@ let FilterBar: Component<{
 	rows: never[];
 	filters: FilterState;
 	onChange: () => void;
-	beside?: React.ReactNode;
+	held?: boolean;
+	count?: string;
 }>;
 beforeAll(async () => {
 	SummaryStrip = await load("summary-strip", "SummaryStrip");
@@ -288,25 +289,34 @@ describe("phones: the filter bar is one Filters button that opens the sheet", ()
 		expect(rule(CSS, ".ut-active") ?? "").toMatch(/flex-wrap:\s*wrap/);
 	});
 
-	it("draws what the desk puts beside the bar (its record count) after the bar and before the active chips, in the DOM", () => {
+	it("red-first (a count handed in as a node, new on every render): draws the desk's record count itself, after the bar and before the active chips, as a status that dims with the list", () => {
 		// Left after the whole FilterBar, the count followed the chips: with the chips on a row of their own it took a
 		// third row, below them. In the DOM between the two, it shares the bar's row and Tab and a screen reader meet
-		// the bar, the count and the chips in the order they are drawn.
+		// the bar, the count and the chips in the order they are drawn. Handed in as text, not as a node, so the bar's
+		// memo compares it by value.
 		const html = renderToStaticMarkup(
 			createElement(FilterBar, {
 				rows: [],
 				filters: { ...EMPTY_FILTERS, search: "abc" },
 				onChange: () => {},
-				beside: createElement("span", { id: "the-count" }, "12 records"),
+				held: true,
+				count: "12 records",
 			}),
 		);
 		const bar = html.indexOf('class="ut-bar');
-		const count = html.indexOf('id="the-count"');
+		const count = html.indexOf(
+			'<span class="ut-label" role="status" data-held="true">12 records</span>',
+		);
 		const chips = html.indexOf('class="ut-active"');
 		expect(bar).toBeGreaterThan(-1);
 		expect(chips).toBeGreaterThan(-1);
 		expect(count).toBeGreaterThan(bar);
 		expect(count).toBeLessThan(chips);
+		// No count, no status: the bar on its own draws none.
+		const alone = renderToStaticMarkup(
+			createElement(FilterBar, { rows: [], filters: EMPTY_FILTERS, onChange: () => {} }),
+		);
+		expect(alone).not.toContain('role="status"');
 	});
 });
 

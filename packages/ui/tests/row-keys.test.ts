@@ -247,7 +247,9 @@ describe("the inspector takes focus from the list", () => {
 
 describe("the count is a live region", () => {
 	it("the record count in the header is a polite status, so a filter's effect is announced", async () => {
-		const src = appSource();
-		expect(src).toMatch(/<span className="ut-label" role="status"[^>]*>\s*\{count\}/);
+		// The filter bar draws it, from the text the desk hands it.
+		const bar = await readFile(new URL("../src/app/filter-bar.tsx", import.meta.url), "utf-8");
+		expect(bar).toMatch(/<span className="ut-label" role="status"[^>]*>\s*\{props\.count\}/);
+		expect(appSource()).toMatch(/<FilterBar\s[^>]*?\scount=\{count\}/);
 	});
 });
