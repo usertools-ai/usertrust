@@ -10,6 +10,7 @@ import {
 	type HoverIo,
 	isOurs,
 	LEGEND_FROM,
+	listedKey,
 	rowToShow,
 } from "../src/app/windows/share/legend-hover.js";
 import type { HoverCategory } from "../src/shared/hover-bus.js";
@@ -143,6 +144,103 @@ describe("the legend's hover owner", () => {
 		owner.enter("a");
 		owner.rows(["a", "b"]);
 		expect(t.sent).toEqual([mine("a")]);
+	});
+
+	it("holds a row whose name has a line feed as one row, and tells it from two rows", () => {
+		const t = deferredIo();
+		const owner = createHoverOwner(t.io, "lane");
+		owner.enter("a\nb");
+		owner.rows(["a\nb", "c"]);
+		expect(t.sent).toEqual([mine("a\nb")]);
+		owner.rows(["a", "b", "c"]);
+		expect(t.sent.at(-1)).toBeNull();
+		expect(listedKey(["a\nb"])).not.toBe(listedKey(["a", "b"]));
+		expect(listedKey(["a", "b"])).toBe(listedKey(["a", "b"]));
+	});
+
+	it("hands the ring's hover back when a focus it took over from the pointer ends", () => {
+		const t = deferredIo();
+		const owner = createHoverOwner(t.io, "lane");
+		const ring: HoverCategory = { dim: "lane", key: "r", from: "share" };
+		t.other(ring);
+		owner.focus("a");
+		expect(t.sent.at(-1)).toEqual(mine("a"));
+		owner.focus("b");
+		owner.blur();
+		expect(t.sent.at(-1)).toEqual(ring);
+	});
+
+	it("hands the ring's hover back after a pointer visit to a row and back", () => {
+		const t = deferredIo();
+		const owner = createHoverOwner(t.io, "lane");
+		const ring: HoverCategory = { dim: "lane", key: "r", from: "share" };
+		t.other(ring);
+		owner.enter("a");
+		owner.leave();
+		expect(t.sent.at(-1)).toEqual(ring);
+	});
+
+	it("gives nothing back when no other hover was there, and not a hover the ring has since dropped", () => {
+		const t = deferredIo();
+		const owner = createHoverOwner(t.io, "lane");
+		owner.focus("a");
+		owner.blur();
+		expect(t.sent.at(-1)).toBeNull();
+		t.other({ dim: "lane", key: "r", from: "share" });
+		owner.focus("a");
+		t.other(null);
+		owner.blur();
+		expect(t.sent.at(-1)).toBeNull();
+		expect(t.sent.length).toBe(5);
+	});
+
+	it("does not bring back a ring hover the ring dropped while the legend held a row", () => {
+		const t = deferredIo();
+		const owner = createHoverOwner(t.io, "lane");
+		t.other({ dim: "lane", key: "r", from: "share" });
+		owner.focus("a");
+		t.other(null);
+		owner.enter("b");
+		owner.leave();
+		owner.blur();
+		expect(t.sent.at(-1)).toBeNull();
+	});
+
+	it("brings back the ring hover that replaced an earlier one the legend had displaced", () => {
+		const t = deferredIo();
+		const owner = createHoverOwner(t.io, "lane");
+		t.other({ dim: "lane", key: "r", from: "share" });
+		owner.focus("a");
+		t.other({ dim: "lane", key: "s", from: "share" });
+		owner.enter("b");
+		owner.leave();
+		owner.blur();
+		expect(t.sent.at(-1)).toEqual({ dim: "lane", key: "s", from: "share" });
+	});
+
+	it("brings back a ring hover at the owner's own level when it was replaced by the legend's own row and let go", () => {
+		const t = deferredIo();
+		const owner = createHoverOwner(t.io, "model");
+		const ring: HoverCategory = { dim: "model", key: "r", from: "share" };
+		t.other(ring);
+		owner.focus("a");
+		owner.enter("b");
+		owner.leave();
+		owner.blur();
+		expect(t.sent.at(-1)).toEqual(ring);
+	});
+
+	it("does not hand back a hover the legend itself left on the bus", () => {
+		const t = deferredIo();
+		const owner = createHoverOwner(t.io, "lane");
+		t.other(mine("x"));
+		owner.focus("a");
+		owner.blur();
+		expect(t.sent.at(-1)).toBeNull();
+	});
+
+	it("tells two lists of the same length apart", () => {
+		expect(listedKey(["a", "b"])).not.toBe(listedKey(["c", "d"]));
 	});
 
 	it("clears its own hover when disposed, and only then", () => {

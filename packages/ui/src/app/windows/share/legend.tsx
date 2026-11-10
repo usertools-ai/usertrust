@@ -25,7 +25,7 @@ import {
 	useHoverCategory,
 } from "../../desk/desk-state.js";
 import { latestHoverCategory } from "../../desk/use-hover.js";
-import { createHoverOwner } from "./legend-hover.js";
+import { createHoverOwner, listedKey } from "./legend-hover.js";
 import { useLitOf } from "./use-lit-at.js";
 
 /** The folded line's name. It is not a category: its figure carries `data-fold`. */
@@ -58,8 +58,10 @@ export function ShareLegend(props: {
 	);
 	const enter = (key: string) => () => owner.enter(key);
 	const focus = (key: string) => () => owner.focus(key);
-	const shown = rows.map((row) => row.key).join("\n");
-	useEffect(() => owner.rows(shown.split("\n")), [owner, shown]);
+	const keys = rows.map((row) => row.key);
+	const listed = listedKey(keys);
+	// biome-ignore lint/correctness/useExhaustiveDependencies: `listed` is the identity of `keys`; the keys go in as they are
+	useEffect(() => owner.rows(keys), [owner, listed]);
 	useEffect(() => () => owner.dispose(), [owner]);
 	return (
 		<ul className="ut-sh-legend" data-when={when} data-hot={hot} data-decimals={decimals}>

@@ -8,6 +8,7 @@
 
 import type { DeskData } from "../../src/app/desk/desk-types.js";
 import { breakdown, type SpendWindow } from "../../src/shared/breakdown.js";
+import { chartWindow } from "../../src/shared/chart-window.js";
 import { rankColors } from "../../src/shared/colors.js";
 import { deskWindow } from "../../src/shared/desk-filters.js";
 import { EMPTY_FILTERS, type FilterState } from "../../src/shared/filters.js";
@@ -17,8 +18,8 @@ import type { LedgerRow } from "../../src/shared/rows.js";
 export const HOUR = 3_600_000;
 /** The helper's clock: the same instant `defaultDeskData` uses. */
 export const NOW_MS = Date.UTC(2026, 10, 8, 12, 0, 0);
-/** The chart's window at 1W: seven days to the end of the current minute. */
-export const CHART: SpendWindow = deskWindow("1w", null, NOW_MS);
+/** The chart's window at 1W with no record before it: seven days to the end of the current minute, on an hour. */
+export const CHART: SpendWindow = chartWindow("1w", NOW_MS, null);
 
 let nextPos = 0;
 
@@ -46,12 +47,24 @@ export function spend(
 	};
 }
 
+/**
+ * The first record the page holds, at the start of the chart's window and with no spend: the window opens at the first
+ * held record, so one at the start keeps the window the fixtures count their hours from.
+ */
+const ANCHOR: LedgerRow = {
+	...spend("anchor", 0, 0, { kind: "info", ts: new Date(CHART.startMs).toISOString() }),
+	pos: -1,
+	seq: -1,
+	id: "anchor",
+};
+
 /** The desk's data holding `rows`, drawn under `filters`, with colours ranked from those rows. */
 export function shareData(
-	rows: LedgerRow[],
+	held: LedgerRow[],
 	filters: FilterState = EMPTY_FILTERS,
 	over: Partial<DeskData> = {},
 ): Partial<DeskData> {
+	const rows = [ANCHOR, ...held];
 	return {
 		rows,
 		nowMs: NOW_MS,

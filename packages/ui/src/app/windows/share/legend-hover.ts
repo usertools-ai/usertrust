@@ -39,6 +39,11 @@ export interface HoverIo {
 	latest(): HoverCategory | null;
 }
 
+/** One string that is the same for two lists only when the lists are the same; a name may hold any character. */
+export function listedKey(keys: readonly string[]): string {
+	return JSON.stringify(keys);
+}
+
 export interface HoverOwner {
 	enter(key: string): void;
 	leave(): void;
@@ -59,15 +64,24 @@ export function createHoverOwner(io: HoverIo, level: Dimension): HoverOwner {
 	let published: string | null = null;
 	let pointer: string | null = null;
 	let focused: string | null = null;
+	// The hover another source (the ring's pointer) held when the legend took over; it comes back when the legend lets go.
+	let displaced: HoverCategory | null = null;
 	const publish = (key: string | null): void => {
 		if (key !== null) {
+			// Read again whenever the bus is not the legend's own: the ring may have dropped, or changed, what was held.
+			const now = io.latest();
+			if (!isOurs(now, level, published)) {
+				displaced = now !== null && now.from !== LEGEND_FROM ? now : null;
+			}
 			published = key;
 			io.set({ dim: level, key, from: LEGEND_FROM });
 			return;
 		}
 		const ours = isOurs(io.latest(), level, published);
+		const back = displaced;
 		published = null;
-		if (ours) io.set(null);
+		displaced = null;
+		if (ours) io.set(back);
 	};
 	const settle = (): void => publish(rowToShow(pointer, focused));
 	return {
