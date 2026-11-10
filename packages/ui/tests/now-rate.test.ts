@@ -94,6 +94,9 @@ describe("rateNow", () => {
 		// Spend began seven hours ago, then nothing until the last hour: six real hours.
 		const young = rateNow([llm(END - 7 * HOUR_MS + 1, 700), llm(END - 30 * 60_000, 500)], END);
 		expect(young.known).toBe(true);
+		// The first spend exactly on an hour's first instant is in that hour: still six real hours.
+		const onTheHour = rateNow([llm(END - 7 * HOUR_MS, 700), llm(END - 30 * 60_000, 500)], END);
+		expect(onTheHour.known).toBe(true);
 		const younger = rateNow([llm(END - 6 * HOUR_MS, 700), llm(END - 30 * 60_000, 500)], END);
 		expect(younger.known).toBe(false);
 	});

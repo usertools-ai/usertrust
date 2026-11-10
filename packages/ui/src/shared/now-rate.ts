@@ -5,13 +5,13 @@
  * The spend rate now: the last hour's spend against the usual range of the week before it. Pure.
  *
  * The range is `usualBand`, the one every chart draws, so the words here and a chart's shading cannot disagree. The
- * hours before the first spend record are not history: they are left out of the range (`usualBand`'s `skip`), so a
+ * hours before the first spend record are not history: they are left out of the range (`skipBeforeFirstSpend`), so a
  * vault with only a few hours of spend reads "too little history to call" however large its last hour is. Quiet hours
  * after the first spend are real zeros and count.
  */
 
-import { isHeaderSpend } from "./aggregate.js";
 import { usualBand } from "./band.js";
+import { skipBeforeFirstSpend } from "./band-skip.js";
 import { NOW_COPY } from "./now-copy.js";
 import type { LedgerRow } from "./rows.js";
 import { bucketTotals } from "./spend-series.js";
@@ -35,17 +35,8 @@ export interface RateNowView {
 export function rateNow(rows: readonly LedgerRow[], endMs: number): RateNowView {
 	const startMs = endMs - RATE_HOURS * HOUR_MS;
 	const hours = bucketTotals(rows, { startMs, endMs }, HOUR_MS);
-	let firstMs = Number.POSITIVE_INFINITY;
-	for (const row of rows) {
-		if (!isHeaderSpend(row.kind, row.costUt)) continue;
-		const t = Date.parse(row.ts);
-		if (t < firstMs) firstMs = t;
-	}
-	const firstHour = Math.floor((firstMs - startMs) / HOUR_MS);
-	const { mid, lo, hi } = usualBand(
-		hours,
-		Array.from({ length: RATE_HOURS }, (_, k) => k < firstHour),
-	);
+	const skip = skipBeforeFirstSpend(rows, startMs, HOUR_MS, RATE_HOURS);
+	const { mid, lo, hi } = usualBand(hours, skip);
 	const last = RATE_HOURS - 1;
 	const ratePerHourUt = hours[last] as number;
 	const top = hi[last] as number;
