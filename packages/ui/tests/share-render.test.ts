@@ -474,6 +474,74 @@ describe("the legend", () => {
 		expect(attr(tagsOf(html, "ut-sh-legend")[0] ?? "", "data-when")).toBe("range");
 	});
 
+	it("prints the Other line's dollars and percent, whole when small and one decimal when filled", async () => {
+		const v = valuesOf(8);
+		const other = legendOf(v).other;
+		expect(other).not.toBeNull();
+		if (other === null) return;
+		for (const decimals of [0, 1] as const) {
+			const html = await withDesk(legend(v, { decimals }));
+			expect(innerOf(html, /<span class="v"[^>]*data-fold="true"[^>]*>/)).toBe(
+				formatUsdTotal(other.spendUt),
+			);
+			expect(percents(html).at(-1)).toBe(formatShare(other.share, decimals));
+			expect(percents(html).at(-1)).not.toBe(
+				formatShare(legendOf(v).rows[0]?.share ?? 0, decimals),
+			);
+		}
+		expect(formatShare(other.share, 0)).not.toBe(formatShare(other.share, 1));
+		expect(formatUsdTotal(other.spendUt)).not.toBe(formatUsdTotal(0));
+	});
+
+	it("paints each row's swatch from the level's colour map, a different colour for each", async () => {
+		const swatches = (html: string, keys: string[]): string[] =>
+			keys.map(
+				(k) =>
+					new RegExp(`data-key="${k}"[^>]*><i style="background:([^"]*)"`).exec(html)?.[1] ?? "",
+			);
+		const lanes = await withDesk(legend(two(500, 300)), { data: shareData(ROWS) });
+		const laneColors = rankColors(ROWS, "lane");
+		expect(swatches(lanes, ["a", "b"])).toEqual([laneColors.of("a"), laneColors.of("b")]);
+		expect(laneColors.of("a")).not.toBe(laneColors.of("b"));
+		// The level picks the map: the same key is coloured by the model ranking, not the lane one.
+		const modelKey = "claude-sonnet-5";
+		const models = await withDesk(
+			legend(two(500, 300, [modelKey, "other-model"]), { level: "model" }),
+			{
+				data: shareData(ROWS),
+			},
+		);
+		const modelColors = rankColors(ROWS, "model");
+		expect(swatches(models, [modelKey])).toEqual([modelColors.of(modelKey)]);
+		expect(modelColors.of(modelKey)).not.toBe(laneColors.of(modelKey));
+	});
+
+	it("says a hover is on only for this level and a key the legend holds, and presses only the selected row", async () => {
+		const hot = async (hover: { dim: Dimension; key: string }): Promise<string | null> => {
+			categoryBus.set({ ...hover, from: "spend" });
+			const html = await withDesk(legend(valuesOf(3)));
+			return attr(tagsOf(html, "ut-sh-legend")[0] ?? "", "data-hot");
+		};
+		expect(await hot({ dim: "model", key: "k0" })).toBe("false");
+		expect(await hot({ dim: "lane", key: "not-in-the-legend" })).toBe("false");
+		expect(await hot({ dim: "model", key: "not-in-the-legend" })).toBe("false");
+		expect(await hot({ dim: "lane", key: "k0" })).toBe("true");
+		// A hovered row is lit but not pressed: only a selection presses.
+		categoryBus.set({ dim: "lane", key: "k2", from: "spend" });
+		const html = await withDesk(legend(valuesOf(3)));
+		expect(tagsOf(html, "ut-sh-row").map((r) => attr(r, "aria-pressed"))).toEqual([
+			"false",
+			"false",
+			"false",
+		]);
+	});
+
+	it("shows the no-spend line only when there are no rows", async () => {
+		const html = await withDesk(legend(valuesOf(3)));
+		expect(html).not.toContain("ut-sh-none");
+		expect(html).not.toContain(SHARE_EMPTY);
+	});
+
 	it("adds up exactly: every row and Other sum to the total", async () => {
 		for (const n of [1, 6, 7, 8, 12]) {
 			const v = valuesOf(n);
