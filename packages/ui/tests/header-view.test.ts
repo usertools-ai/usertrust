@@ -64,7 +64,7 @@ describe("the provider's list reads the committed position only", () => {
 
 	it("hands the windows the committed view's resolved record for the address, not the preview's", () => {
 		expect(src).toContain("const resolvedPos = resolvedFor(atView, at);");
-		expect(src).toMatch(/headAt: header\.at,\n\t\t\tresolvedPos,/);
+		expect(src).toMatch(/headAt: header\.at,\n\t\t\tresolvedPos,\n\t\t\tpastKind: past\.kind,/);
 	});
 
 	it("a navigation clears the preview", () => {

@@ -27,7 +27,7 @@ function momentOf(ts: string): number | null {
 }
 
 const SpendBody = memo(function SpendBody(): React.JSX.Element {
-	const { rows, list, summary, at, head, resolvedPos } = useDeskData();
+	const { rows, list, summary, at, head, resolvedPos, pastHeld, pastKind } = useDeskData();
 	const { chartRows, allRows, chartWindow, filterNote } = useChartData();
 	const { range, setRange } = useRange();
 	const { at: addressPos, setAt: onPin } = usePosition();
@@ -39,6 +39,10 @@ const SpendBody = memo(function SpendBody(): React.JSX.Element {
 		() => <RangeChips range={range} onRange={setRange} />,
 		[range, setRange],
 	);
+
+	// The answer's vault is not held yet (a reload with a position pinned): the rows here are another vault's, and the
+	// list waits for the same pairing, so the chart keeps the plot's room and draws nothing until they match.
+	if (pastHeld) return <div className="ut-sp-wait" aria-busy="true" />;
 
 	if (chartRows.length === 0) {
 		// "No records" is only true of a vault that has loaded: while it loads (or if the load failed) the window keeps
@@ -64,8 +68,15 @@ const SpendBody = memo(function SpendBody(): React.JSX.Element {
 	// is answered with the head), which stays put when a reconnect raises the head.
 	const pinnedPos = resolvedPin(addressPos, resolvedPos);
 	// Unfiltered, the pinned headline is the snapshot's own total: the rows held may begin after the pin (a cut vault).
+	// Only an answer of the rows' own vault: another vault's total never stands under these rows' line.
 	const pinTotalUt =
-		!filtered && pinnedPos !== null && at !== null && at.pos === pinnedPos ? at.spentUt : null;
+		!filtered &&
+		pinnedPos !== null &&
+		at !== null &&
+		pastKind === "answered" &&
+		at.pos === pinnedPos
+			? at.spentUt
+			: null;
 	return (
 		<SpendChart
 			rows={chartRows}

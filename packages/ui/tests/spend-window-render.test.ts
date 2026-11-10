@@ -303,6 +303,8 @@ interface WinCase {
 	at?: { head: number; pos?: number; spentUt?: number } | null;
 	/** The record the follower answered the pin with (kept across reconnects), or null before the first answer. */
 	resolved?: number | null;
+	/** How the rows were chosen against the answer; `answered` whenever an answer is given, unless said. */
+	past?: DeskData["pastKind"];
 }
 
 /** The Spend window inside the desk, as static markup. */
@@ -323,6 +325,8 @@ function spend(o: WinCase = {}): Promise<string> {
 		summary: o.summary === undefined ? null : o.summary,
 		...(o.at === undefined || o.at === null ? {} : { at: o.at as unknown as DeskData["at"] }),
 		resolvedPos: o.resolved ?? null,
+		pastKind: o.past ?? (o.at === undefined || o.at === null ? "live" : "answered"),
+		pastHeld: o.past === "held",
 		filterOrder: o.order ?? [],
 		colorsFor: (dim) => rankColors(rows, dim),
 	};
@@ -562,6 +566,29 @@ describe("Spend: a pin that the address names past, or before, what the page hol
 		// Before any answer the address's own position is drawn.
 		const first = await spend({ rows, pin: 4, filters: alpha });
 		expect(headline(first)).toBe(formatUsdTotal(cumTo(lane, 4)));
+	});
+
+	it("draws nothing while the answer's vault is not held, and never another vault's total under these rows", async () => {
+		const rows = thirteen();
+		const at = { head: 12, pos: 4, spentUt: 10_000 };
+		const held = await spend({ rows, pin: 4, at, past: "held" });
+		expect(held).toContain('class="ut-sp-wait" aria-busy="true"');
+		expect(held).not.toContain('role="slider"');
+		expect(held).not.toContain("ut-sp-chips");
+		expect(held).not.toContain(formatUsdTotal(10_000));
+		// The same with no record under the filters of a loaded vault: the wait, never the empty line or the chips.
+		const heldEmpty = await spend({ rows: [], pin: 4, at, past: "held", phase: "loaded" });
+		expect(heldEmpty).toContain('class="ut-sp-wait" aria-busy="true"');
+		expect(heldEmpty).not.toContain("no records");
+		expect(heldEmpty).not.toContain("ut-sp-chips");
+		// The answer's snapshot is drawn elsewhere and the page's live rows are another vault's: the rows' own total.
+		const other = await spend({ rows, pin: 4, at, past: "snapshot" });
+		expect(headline(other)).toBe(formatUsdTotal(cumTo(rows, 4)));
+		expect(cumTo(rows, 4)).not.toBe(10_000);
+		// The answer's own vault: its total.
+		expect(headline(await spend({ rows, pin: 4, at, past: "answered" }))).toBe(
+			formatUsdTotal(10_000),
+		);
 	});
 
 	it("reads an unfiltered pin's total from the snapshot, which counts what the rows held begin after", async () => {
