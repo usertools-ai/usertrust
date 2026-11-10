@@ -27,7 +27,7 @@ let SummaryStrip: Component<{
 	summary: SummaryPayload | null;
 	live: "connecting" | "live" | "reconnecting" | "offline";
 	at?: AtPayload | null;
-	part?: "bar" | "facts" | "all";
+	part?: "bar" | "head" | "facts" | "all";
 }>;
 let TrendsReloading: Component<{
 	rows: never[];
@@ -669,6 +669,80 @@ describe("Trends while the point's records are reloading", () => {
 		);
 		expect(html).toContain("No records in view");
 		expect(html).toContain("Cost by kind");
+	});
+});
+
+describe("the bar names a past position whichever window is open", () => {
+	// A filled window dims the Now window, which carries the as-at line; the bar is drawn by the shell above every
+	// window, so the position must be named there. A committed position only: no pin, no chip.
+	const part = (p: "bar" | "head" | "facts", a: AtPayload | null): string =>
+		renderToStaticMarkup(
+			createElement(SummaryStrip, { summary: summary(), live: "live", at: a, part: p }),
+		);
+	const chip = (html: string): string =>
+		/<span class="ut-past"[^>]*>[\s\S]*?<\/span>/.exec(html)?.[0] ?? "";
+
+	it("draws `past · MM-DD HH:MMZ` in the bar, the time to the minute in UTC", () => {
+		const c = chip(part("bar", at()));
+		expect(text(c)).toBe("past \u00b7 11-06 10:04Z");
+	});
+
+	it("carries the whole line in its title and accessible name, with the record number", () => {
+		const c = chip(part("bar", at({ pos: 60 })));
+		const whole = "As recorded at 11-06 10:04:05Z, up to record 61";
+		expect(c).toContain(`title="${whole}"`);
+		expect(c).toContain(`aria-label="${whole}"`);
+		expect(c).toContain('role="img"');
+	});
+
+	it("says latest record in the name when the position was clamped to the head and nothing has followed", () => {
+		const c = chip(part("bar", at({ pos: 99, head: 99, clamped: true })));
+		expect(c).toContain("(latest record), up to record 100");
+	});
+
+	it("drops the latest-record words once records follow a clamped position (the summary's chain is longer)", () => {
+		const c = chip(part("bar", at({ pos: 90, head: 90, clamped: true })));
+		expect(c).toContain('title="As recorded at 11-06 10:04:05Z, up to record 91"');
+		expect(c).not.toContain("latest record");
+	});
+
+	it("shows the time as written when it cannot be read, never a made-up minute", () => {
+		const c = chip(part("bar", at({ ts: "not a time" })));
+		expect(text(c)).toBe("past \u00b7 not a time");
+		expect(c).toContain("As recorded at not a time, up to record 41");
+	});
+
+	it("is drawn while the summary is still loading, from the position itself", () => {
+		const html = renderToStaticMarkup(
+			createElement(SummaryStrip, { summary: null, live: "live", at: at(), part: "bar" }),
+		);
+		expect(text(chip(html))).toBe("past \u00b7 11-06 10:04Z");
+		const none = renderToStaticMarkup(
+			createElement(SummaryStrip, { summary: null, live: "live", at: null, part: "bar" }),
+		);
+		expect(chip(none)).toBe("");
+	});
+
+	it("is not drawn live: no chip without a pin, and the bar's other words are unchanged", () => {
+		const live = part("bar", null);
+		expect(chip(live)).toBe("");
+		expect(text(live)).not.toContain("past");
+		expect(text(part("bar", at()))).toContain("connected");
+	});
+
+	it("is drawn by the bar only: the head and the facts never repeat the time", () => {
+		expect(chip(part("head", at()))).toBe("");
+		expect(chip(part("facts", at()))).toBe("");
+		expect(text(part("bar", at())).split("10:04").length - 1).toBe(1);
+		expect(text(part("head", at()))).not.toContain("past \u00b7");
+		expect(text(part("facts", at()))).not.toContain("past \u00b7");
+	});
+
+	it("is a pill that grows to its text and does not shrink", () => {
+		const css = readFileSync(join(import.meta.dirname, "..", "src", "app", "styles.css"), "utf-8");
+		const rule = /\.ut-past\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";
+		expect(rule).toMatch(/flex:\s*0 0 auto/);
+		expect(rule).toMatch(/white-space:\s*nowrap/);
 	});
 });
 

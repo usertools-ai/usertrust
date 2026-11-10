@@ -49,7 +49,11 @@ function weekPace(rows: readonly LedgerRow[], endMs: number, wholeWeek = false):
 	};
 }
 
-/** Whether `rows` reach back over the whole week before `endMs` (see `reachesBack`). */
+/**
+ * Whether `rows` reach back over the whole week before `endMs` (see `reachesBack`). The same assumption stands here
+ * as for the rate view: the cut is by position and times follow chain order, so a week is called whole when the oldest
+ * time held is a week or more before `endMs`.
+ */
 export function coversWeek(rows: readonly LedgerRow[], endMs: number): boolean {
 	return reachesBack(rows, endMs, WEEK_MS);
 }

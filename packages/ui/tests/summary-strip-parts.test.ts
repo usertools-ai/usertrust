@@ -258,10 +258,11 @@ describe("all", () => {
 		createHash("sha256").update(asBefore(html)).digest("hex");
 	it.each([
 		["live", {}, "1532d41fda26553e42a5f3f3cd0db57ffb9d805da2181f72103248c8c8d5ccfb"],
+		// The bar's one new element, the pill naming the position (the pin moved with it, nothing else in the strip).
 		[
 			"a past position",
 			{ at: at() },
-			"bb507f47cc51e1289e1a706c5b8d4b1695cfc39d5bea41d6e572846498e1f153",
+			"e93a223b6d4d9b186a2b4c08b80631d7ad0eda2d995deed7194732969376ae4c",
 		],
 		[
 			"a broken chain",

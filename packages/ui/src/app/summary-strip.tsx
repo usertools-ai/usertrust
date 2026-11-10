@@ -104,6 +104,9 @@ function TopBar(props: {
 	kit: boolean;
 	/** A past point is shown: the stream may be up, but the screen is not live. */
 	past: boolean;
+	/** The position shown, named in the bar whichever window is open (the as-at line itself is the Now window's). */
+	at?: AtPayload | null;
+	head?: number;
 }): React.JSX.Element {
 	const [copied, setCopied] = useState(false);
 	const path = props.vaultPath;
@@ -129,6 +132,7 @@ function TopBar(props: {
 				</button>
 			)}
 			<span className="ut-grow" />
+			{props.at != null && <PastChip at={props.at} head={props.head ?? -1} />}
 			{/* "live" means the screen shows now AND the stream is up; at a past point an up stream is only "connected". */}
 			<span
 				className="ut-live"
@@ -140,6 +144,22 @@ function TopBar(props: {
 				{props.past && props.live === "live" ? "connected" : LIVE_LABEL[props.live]}
 			</span>
 		</header>
+	);
+}
+
+/**
+ * `past · MM-DD HH:MMZ`: names the position shown wherever the desk is, since a filled window dims the Now window that
+ * carries the full as-at line. The title and the accessible name hold the whole of it.
+ */
+function PastChip(props: { at: AtPayload; head: number }): React.JSX.Element {
+	const now = useNow();
+	const whole = `${shownLabel(props.at, props.head, new Date(now).toISOString())}, up to record ${props.at.pos + 1}`;
+	const full = formatUtc(props.at.ts);
+	const minute = Number.isNaN(Date.parse(props.at.ts)) ? full : `${full.slice(0, 11)}Z`;
+	return (
+		<span className="ut-past" title={whole} role="img" aria-label={whole}>
+			{`past \u00b7 ${minute}`}
+		</span>
 	);
 }
 
@@ -887,7 +907,16 @@ export function SummaryStrip(props: {
 	if (!s)
 		return (
 			<>
-				{showBar && <TopBar vaultPath={null} live={props.live} kit={false} past={at !== null} />}
+				{showBar && (
+					<TopBar
+						vaultPath={null}
+						live={props.live}
+						kit={false}
+						past={at !== null}
+						at={at}
+						head={-1}
+					/>
+				)}
 				{showHead && <AsAtLine at={null} head={-1} />}
 				{showFacts && <LoadingFacts budgetNote={props.budgetNote} />}
 			</>
@@ -907,7 +936,14 @@ export function SummaryStrip(props: {
 		<>
 			{showBar && (
 				<>
-					<TopBar vaultPath={s.vaultPath} live={props.live} kit={s.remote.kit} past={at !== null} />
+					<TopBar
+						vaultPath={s.vaultPath}
+						live={props.live}
+						kit={s.remote.kit}
+						past={at !== null}
+						at={at}
+						head={s.chain.events - 1}
+					/>
 					{status === "broken" && (
 						<div className="ut-alarm" role="alert">
 							<b>Chain integrity failure</b>

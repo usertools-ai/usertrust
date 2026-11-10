@@ -36,7 +36,14 @@ export interface RateNowView {
 	band: { mid: Float64Array; lo: Float64Array; hi: Float64Array };
 }
 
-/** The time of the oldest record held, of any kind; infinite with none, or none with a time that can be read. */
+/**
+ * The time of the oldest record held, of any kind; infinite with none, or none with a time that can be read.
+ *
+ * It stands for where the held rows are complete, on one assumption: the list is cut by position (the oldest records
+ * in chain order are dropped) and times follow chain order, so no dropped record is dated after the oldest one held.
+ * Records dated out of order across the cut, within seconds of an hour's edge, would make an hour called whole miss
+ * one: the server gives no figure for where the rows are complete, so this is the reading the page can make.
+ */
 export function oldestHeldMs(rows: readonly LedgerRow[]): number {
 	let firstMs = Number.POSITIVE_INFINITY;
 	for (const row of rows) {

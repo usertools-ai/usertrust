@@ -227,6 +227,19 @@ body {
 	.ut-asof:hover {
 		color: var(--body);
 	}
+	/* The position shown, in the bar: it grows to its text and no further, and keeps the time over its prefix. */
+	.ut-past {
+		flex: 0 0 auto;
+		font: 600 10.5px/1 var(--mono);
+		letter-spacing: 1.4px;
+		text-transform: uppercase;
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
+		padding: 5px 9px;
+		border-radius: 999px;
+		border: 1px solid var(--control-line);
+		color: var(--ink);
+	}
 	.ut-grow {
 		flex: 1 1 auto;
 	}

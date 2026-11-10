@@ -210,6 +210,23 @@ describe("oldestHeldMs and reachesBack", () => {
 	});
 });
 
+describe("where the held rows are complete", () => {
+	it("is read from the oldest time held, whatever order the rows come in: times are taken to follow chain order", () => {
+		const a = llm(END - 30 * HOUR_MS, 1);
+		const b = llm(END - 2 * HOUR_MS, 1);
+		const c = llm(END - 10 * HOUR_MS, 1);
+		for (const order of [
+			[a, b, c],
+			[c, b, a],
+			[b, a, c],
+		]) {
+			expect(oldestHeldMs(order)).toBe(END - 30 * HOUR_MS);
+			expect(reachesBack(order, END, 30 * HOUR_MS)).toBe(true);
+			expect(reachesBack(order, END, 30 * HOUR_MS + 1)).toBe(false);
+		}
+	});
+});
+
 describe("rateNow on a cut vault", () => {
 	const START = END - RATE_HOURS * HOUR_MS;
 	// 40 steady hours, then the last hour 50 times larger: far above the usual range, where one is known.
