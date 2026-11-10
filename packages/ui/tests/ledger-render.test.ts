@@ -405,6 +405,15 @@ describe("the panel's arithmetic", () => {
 		expect(table(RESIDUE)).toContain("<td>0.3 UT</td>");
 	});
 
+	it("a rate too large to be written without an exponent is still written out, with its zeros", () => {
+		const html = table(row({ appliedRates: { ...RATES, inputPer1k: 1e21, outputPer1k: 1.5e21 } }));
+		const input = html.slice(html.indexOf("Input"), html.indexOf("Output"));
+		expect(input).toContain("<td>1,000</td><td>1,000,000,000,000,000,000,000 UT</td>");
+		const output = html.slice(html.indexOf("Output"), html.indexOf("Cache read"));
+		expect(output).toContain("<td>500</td><td>1,500,000,000,000,000,000,000 UT</td>");
+		expect(html).not.toMatch(/\de\+\d/);
+	});
+
 	it("a partial charge names what is missing and does not claim that no counts are recorded", () => {
 		const html = table(
 			row({ usage: { inputTokens: 1000, outputTokens: 500, cacheWriteTokens: 100 } }),
@@ -472,7 +481,7 @@ describe("the lines under a record's status", () => {
 	});
 
 	it("a cost that is not a cost (below 0, not a number) has no share, so no budget line and no source", () => {
-		for (const costUt of [-5, Number.NaN]) {
+		for (const costUt of [-5, Number.NaN, Number.POSITIVE_INFINITY]) {
 			expect(extra(row({ costUt }), [], budget()), String(costUt)).toBe("");
 			const html = extra({ ...(busy[0] as LedgerRow), costUt }, busy, budget());
 			expect(html).toContain('role="note"');
