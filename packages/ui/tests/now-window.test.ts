@@ -605,6 +605,32 @@ describe("the Now window, filled", () => {
 	});
 });
 
+describe("the Now window under a filter before its records have loaded", () => {
+	const y = only("actors", "y");
+
+	it("keeps the vault's Spend under its own label until the list is loaded, and when its read failed", async () => {
+		const spent = (html: string): string =>
+			/<b>Spend<\/b><span class="v" title="([^"]*)"/.exec(html)?.[1] ?? "";
+		for (const phase of ["loading", "failed"] as const) {
+			for (const over of [{}, { at: atOf(Y_MID, 12_000) }]) {
+				const html = await renderNow({ rows: ROWS, filters: y, phase, ...over });
+				expect(spendScope(html)).toBe(
+					"at" in over ? "llm calls · up to this point" : "llm calls · whole vault",
+				);
+				expect(text(fact(html, "Spend"))).not.toContain("filtered");
+				expect(spent(html)).not.toBe(formatUsd(0));
+			}
+			expect(spent(await renderNow({ rows: ROWS, filters: y, phase }))).toBe(
+				formatUsd(SUMMARY.spentUt),
+			);
+		}
+		// Loaded, the same filter sums the Ledger's own list.
+		const loaded = await renderNow({ rows: ROWS, filters: y });
+		expect(spendScope(loaded)).toBe("llm calls · filtered");
+		expect(spent(loaded)).toBe(formatUsd(10_000));
+	});
+});
+
 describe("the Now window on a cut vault", () => {
 	const cut = { ...dayOneSummary(), truncated: true };
 

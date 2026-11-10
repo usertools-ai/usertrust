@@ -66,9 +66,10 @@ function NowSmall(): React.JSX.Element {
 	// the list's own cut: the rows up to it, each with the status it had there, so a call whose status has changed
 	// since counts as the Ledger shows it. The label is the list's too: its position, and, when the list does not
 	// hold every record of the vault, that the sum is of the rows held. While the list waits for a point's own
-	// records it holds none: the vault's figure at the position stays, under its own label.
+	// records it holds none: the vault's figure at the position stays, under its own label. So it does until the records
+	// have loaded (or when their read failed): a sum of rows not yet read would be a claim.
 	const spentOverride = useMemo(() => {
-		if (!filtering || list.reloading) return null;
+		if (!filtering || list.reloading || list.phase !== "loaded") return null;
 		const label =
 			list.at === null
 				? cut
