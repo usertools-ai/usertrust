@@ -56,15 +56,6 @@
 		flex: 1 1 320px;
 	}
 
-	/* With a position shown the bar carries a pill beside the connection pill. The header wraps rather than overflows
-	   there, so what does not fit beside the search controls (the pill, the vault path) drops to a line of its own and
-	   the header's own basis, and so the outer row, stay as they are (a hover on the Spend chart shows the position too,
-	   and must not move the search). */
-	.ut-dk-top > .ut-top[data-past="true"] {
-		flex-wrap: wrap;
-		row-gap: 6px;
-	}
-
 	.ut-dk-top > .ut-alarm,
 	.ut-dk-top > .ut-notice {
 		flex: 1 1 100%;

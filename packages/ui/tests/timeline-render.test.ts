@@ -672,7 +672,7 @@ describe("Trends while the point's records are reloading", () => {
 	});
 });
 
-describe("the bar names a past position whichever window is open", () => {
+describe("the bar's one pill names a past position whichever window is open", () => {
 	// The year the pill leaves out is the clock's, so the clock is fixed.
 	beforeEach(() => {
 		vi.useFakeTimers({ toFake: ["Date"] });
@@ -682,13 +682,13 @@ describe("the bar names a past position whichever window is open", () => {
 		vi.useRealTimers();
 	});
 	// A filled window dims the Now window, which carries the as-at line; the bar is drawn by the shell above every
-	// window, so the position must be named there. A committed position only: no pin, no chip.
+	// window, so the position is the connection pill's own text there: one pill, never two.
 	const part = (p: "bar" | "head" | "facts", a: AtPayload | null): string =>
 		renderToStaticMarkup(
 			createElement(SummaryStrip, { summary: summary(), live: "live", at: a, part: p }),
 		);
 	const chip = (html: string): string =>
-		/<span class="ut-past"[^>]*>[\s\S]*?<\/span>/.exec(html)?.[0] ?? "";
+		/<span class="ut-live"[^>]*>[\s\S]*?<\/span>/.exec(html)?.[0] ?? "";
 
 	it("draws `past · MM-DD HH:MMZ` in the bar, the time to the minute in UTC", () => {
 		const c = chip(part("bar", at()));
@@ -697,27 +697,29 @@ describe("the bar names a past position whichever window is open", () => {
 
 	it("carries the whole line in its title and accessible name, with the record number", () => {
 		const c = chip(part("bar", at({ pos: 60 })));
-		const whole = "As recorded at 11-06 10:04:05Z, up to record 61";
+		const whole = "As recorded at 11-06 10:04:05Z, up to record 61. Stream: connected";
 		expect(c).toContain(`title="${whole}"`);
 		expect(c).toContain(`aria-label="${whole}"`);
-		expect(c).toContain('role="img"');
+		expect(c).toContain('role="status"');
 	});
 
 	it("says latest record in the name when the position was clamped to the head and nothing has followed", () => {
 		const c = chip(part("bar", at({ pos: 99, head: 99, clamped: true })));
-		expect(c).toContain("(latest record), up to record 100");
+		expect(c).toContain("(latest record), up to record 100. Stream: connected");
 	});
 
 	it("drops the latest-record words once records follow a clamped position (the summary's chain is longer)", () => {
 		const c = chip(part("bar", at({ pos: 90, head: 90, clamped: true })));
-		expect(c).toContain('title="As recorded at 11-06 10:04:05Z, up to record 91"');
+		expect(c).toContain(
+			'title="As recorded at 11-06 10:04:05Z, up to record 91. Stream: connected"',
+		);
 		expect(c).not.toContain("latest record");
 	});
 
 	it("shows the time as written when it cannot be read, never a made-up minute", () => {
 		const c = chip(part("bar", at({ ts: "not a time" })));
 		expect(text(c)).toBe("past \u00b7 not a time");
-		expect(c).toContain("As recorded at not a time, up to record 41");
+		expect(c).toContain("As recorded at not a time, up to record 41. Stream: connected");
 	});
 
 	it("shows an unreadable time whole even when it ends like a time, never cutting its seconds", () => {
@@ -733,24 +735,50 @@ describe("the bar names a past position whichever window is open", () => {
 		const none = renderToStaticMarkup(
 			createElement(SummaryStrip, { summary: null, live: "live", at: null, part: "bar" }),
 		);
-		expect(chip(none)).toBe("");
+		expect(text(chip(none))).toBe("live");
 	});
 
 	it("puts the year first when the position is not this year's, as the line does", () => {
 		const c = chip(part("bar", at({ ts: "2025-03-02T04:05:06.000Z" })));
 		expect(text(c)).toBe("past \u00b7 2025-03-02 04:05Z");
-		expect(c).toContain("As recorded at 2025-03-02 04:05:06Z, up to record 41");
+		expect(c).toContain("As recorded at 2025-03-02 04:05:06Z, up to record 41. Stream: connected");
 	});
 
 	it("groups the record number in the name like the desk's other figures", () => {
 		expect(chip(part("bar", at({ pos: 10_000 })))).toContain("up to record 10,001");
 	});
 
-	it("is not drawn live: no chip without a pin, and the bar's other words are unchanged", () => {
+	it("is the only pill in the bar: no second pill, in any stream state", () => {
+		const one = (live: "connecting" | "live" | "reconnecting" | "offline", a: AtPayload | null) =>
+			renderToStaticMarkup(
+				createElement(SummaryStrip, { summary: summary(), live, at: a, part: "bar" }),
+			);
+		for (const live of ["connecting", "live", "reconnecting", "offline"] as const) {
+			for (const a of [null, at()]) {
+				const html = one(live, a);
+				expect(html.split('class="ut-live"').length - 1).toBe(1);
+				expect(html).not.toContain("ut-past");
+			}
+		}
+	});
+
+	it("is not drawn live: the pill keeps its own word without a pin", () => {
 		const live = part("bar", null);
-		expect(chip(live)).toBe("");
+		expect(text(chip(live))).toBe("live");
 		expect(text(live)).not.toContain("past");
-		expect(text(part("bar", at()))).toContain("connected");
+		expect(chip(live)).not.toContain("title=");
+	});
+
+	it("keeps the stream's state in the name, not the text, at a past position", () => {
+		for (const live of ["reconnecting", "offline", "connecting"] as const) {
+			const html = renderToStaticMarkup(
+				createElement(SummaryStrip, { summary: summary(), live, at: at(), part: "bar" }),
+			);
+			const c = chip(html);
+			expect(text(c)).toBe("past \u00b7 11-06 10:04Z");
+			expect(c).toContain(`up to record 41. Stream: ${live}"`);
+			expect(c).toContain(`data-st="${live}"`);
+		}
 	});
 
 	it("is drawn by the bar only: the head and the facts never repeat the time", () => {
@@ -761,24 +789,13 @@ describe("the bar names a past position whichever window is open", () => {
 		expect(text(part("facts", at()))).not.toContain("past \u00b7");
 	});
 
-	it("marks the header while a position is pinned, so the desk lets it wrap", () => {
-		expect(part("bar", at())).toContain('<header class="ut-top" data-past="true">');
-		expect(part("bar", null)).toContain('<header class="ut-top">');
+	it("leaves no layout rule behind for a pinned bar: no header mark, no wrap rule in the desk sheet", () => {
+		expect(part("bar", at())).toContain('<header class="ut-top">');
 		const css = readFileSync(
 			join(import.meta.dirname, "..", "src", "app", "desk", "desk.css"),
 			"utf-8",
 		);
-		const rule = /\.ut-dk-top > \.ut-top\[data-past="true"\]\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";
-		expect(rule).toMatch(/flex-wrap:\s*wrap;/);
-		expect(rule).toMatch(/(?<![-\w])row-gap:\s*6px;/);
-		expect(rule).not.toMatch(/flex-basis|column-gap/);
-	});
-
-	it("is a pill that grows to its text and does not shrink", () => {
-		const css = readFileSync(join(import.meta.dirname, "..", "src", "app", "styles.css"), "utf-8");
-		const rule = /\.ut-past\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";
-		expect(rule).toMatch(/flex:\s*0 0 auto/);
-		expect(rule).toMatch(/white-space:\s*nowrap/);
+		expect(css).not.toContain("data-past");
 	});
 });
 
@@ -797,7 +814,7 @@ describe("the connection pill at a past position", () => {
 
 	it("says connected, never live, while a past point is shown and the stream is up", () => {
 		const p = pill(bar("live", at()));
-		expect(text(p)).toBe("connected");
+		expect(p).toContain("Stream: connected");
 		expect(text(p).toLowerCase()).not.toContain("live");
 		expect(p).toContain('data-past="true"');
 		// The dot keeps the stream's state: it is up.
@@ -811,8 +828,8 @@ describe("the connection pill at a past position", () => {
 	});
 
 	it("keeps the stream's own word when the stream is not up, past or not", () => {
-		expect(text(pill(bar("reconnecting", at())))).toBe("reconnecting");
-		expect(text(pill(bar("offline", at())))).toBe("offline");
+		expect(pill(bar("reconnecting", at()))).toContain("Stream: reconnecting");
+		expect(pill(bar("offline", at()))).toContain("Stream: offline");
 		expect(text(pill(bar("connecting", null)))).toBe("connecting");
 	});
 

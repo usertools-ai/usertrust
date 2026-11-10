@@ -111,7 +111,7 @@ function TopBar(props: {
 	const [copied, setCopied] = useState(false);
 	const path = props.vaultPath;
 	return (
-		<header className="ut-top" data-past={props.at != null ? "true" : undefined}>
+		<header className="ut-top">
 			{props.kit && <KitMark />}
 			{/* Bundled into the page as a data URL (`?inline`): it shows offline and costs no request. */}
 			<img className="ut-logo" src={markUrl} alt="usertrust" height={24} decoding="async" />
@@ -132,34 +132,53 @@ function TopBar(props: {
 				</button>
 			)}
 			<span className="ut-grow" />
-			{props.at != null && <PastChip at={props.at} head={props.head ?? -1} />}
-			{/* "live" means the screen shows now AND the stream is up; at a past point an up stream is only "connected". */}
-			<span
-				className="ut-live"
-				data-st={props.live}
-				data-past={props.past ? "true" : undefined}
-				role="status"
-			>
-				<i aria-hidden="true" />
-				{props.past && props.live === "live" ? "connected" : LIVE_LABEL[props.live]}
-			</span>
+			<ConnectionPill
+				live={props.live}
+				past={props.past}
+				at={props.at ?? null}
+				head={props.head ?? -1}
+			/>
 		</header>
 	);
 }
 
 /**
- * `past · MM-DD HH:MMZ`: names the position shown wherever the desk is, since a filled window dims the Now window that
- * carries the full as-at line. The title and the accessible name hold the whole of it.
+ * The one pill in the bar's corner. Live, it says the stream's state. At a past position its text is the position
+ * (`past · MM-DD HH:MMZ`, the year first when it is not this year's), since a filled window dims the Now window that
+ * carries the full as-at line; the stream's state stays as the dot's colour and in the title and accessible name, which
+ * hold the whole line. "live" means the screen shows now AND the stream is up; at a past point an up stream is only
+ * "connected".
  */
-function PastChip(props: { at: AtPayload; head: number }): React.JSX.Element {
+function ConnectionPill(props: {
+	live: LiveState;
+	past: boolean;
+	at: AtPayload | null;
+	head: number;
+}): React.JSX.Element {
 	const now = useNow();
-	const whole = `${shownLabel(props.at, props.head, new Date(now).toISOString())}, up to record ${COUNT.format(props.at.pos + 1)}`;
-	// The line's own time (the year in front when it is not this year's), cut to the minute.
-	const full = recordedAt(props.at.ts, new Date(now).toISOString());
-	const minute = Number.isNaN(Date.parse(props.at.ts)) ? full : full.replace(/:\d\d(?=Z$)/, "");
+	const word = props.past && props.live === "live" ? "connected" : LIVE_LABEL[props.live];
+	const at = props.at;
+	let text = word;
+	let name: string | undefined;
+	if (at !== null) {
+		const nowIso = new Date(now).toISOString();
+		// The line's own time (the year in front when it is not this year's), cut to the minute.
+		const full = recordedAt(at.ts, nowIso);
+		const minute = Number.isNaN(Date.parse(at.ts)) ? full : full.replace(/:\d\d(?=Z$)/, "");
+		text = `past \u00b7 ${minute}`;
+		name = `${shownLabel(at, props.head, nowIso)}, up to record ${COUNT.format(at.pos + 1)}. Stream: ${word}`;
+	}
 	return (
-		<span className="ut-past" title={whole} role="img" aria-label={whole}>
-			{`past \u00b7 ${minute}`}
+		<span
+			className="ut-live"
+			data-st={props.live}
+			data-past={props.past ? "true" : undefined}
+			role="status"
+			title={name}
+			aria-label={name}
+		>
+			<i aria-hidden="true" />
+			{text}
 		</span>
 	);
 }

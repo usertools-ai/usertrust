@@ -258,11 +258,11 @@ describe("all", () => {
 		createHash("sha256").update(asBefore(html)).digest("hex");
 	it.each([
 		["live", {}, "1532d41fda26553e42a5f3f3cd0db57ffb9d805da2181f72103248c8c8d5ccfb"],
-		// The bar's new elements, the pill naming the position and the header's past mark (the pin moved with it, nothing else in the strip).
+		// The bar's one change: the connection pill's text and name at a past position (nothing else in the strip moved).
 		[
 			"a past position",
 			{ at: at() },
-			"54da6a4868c0d3c6a2a89df08a00bacc405ed6b979be6dcaa22541ffb2fbd86d",
+			"a2e93ca08b01365318d672a8be7cc9d3c1335f5ddc5bb75c7cc23475c9c7631a",
 		],
 		[
 			"a broken chain",
