@@ -169,7 +169,7 @@ describe("the caveat is on every surface that shows a type", () => {
 	});
 
 	it("the CSV columns are named for it and keep the earlier columns where they were", () => {
-		expect(CSV_HEADERS.slice(-3)).toEqual([
+		expect(CSV_HEADERS.slice(15, 18)).toEqual([
 			"job",
 			"job_type_declared_not_checked",
 			"type_declared_by",
