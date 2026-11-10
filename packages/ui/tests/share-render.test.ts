@@ -288,6 +288,15 @@ describe("the ring", () => {
 		expect(RIM_W).not.toBe(RIM_W_HOT);
 	});
 
+	it("gives every slice of two rings in one tree its own gradient", async () => {
+		const html = await withDesk(createElement("div", null, donut(), donut()), {
+			data: shareData(ROWS),
+		});
+		const ids = [...html.matchAll(/<radialGradient[^>]*\sid="([^"]*)"/g)].map((m) => m[1]);
+		expect(ids).toHaveLength(6);
+		expect(new Set(ids).size).toBe(6);
+	});
+
 	it("draws no rim for a slice with nothing, and dims nothing for a hover on a key the ring does not hold", async () => {
 		const empty = await withDesk(donut({ values: [500, 0, 200] }), { data: shareData(ROWS) });
 		expect(empty.match(/<path class="rim"/g)).toHaveLength(2);
