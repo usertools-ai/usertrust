@@ -141,6 +141,21 @@ describe("the open record's ring for a record written out of order", () => {
 	});
 });
 
+describe("the open record's ring for a record that is not spend", () => {
+	it("sits at the record's own time, not at the nearest spend record's", () => {
+		const own = T0 + 20 * HOUR;
+		const mixed = [
+			spendRow(0, { ts: new Date(T0 + 10 * HOUR).toISOString(), costUt: 1000 }),
+			spendRow(1, { ts: new Date(own).toISOString(), kind: "policy_decision" }),
+			spendRow(2, { ts: new Date(T0 + 30 * HOUR).toISOString(), costUt: 1000 }),
+		];
+		const cx = /<circle class="ut-sp-mark" cx="([^"]+)"/.exec(
+			chart({ rows: mixed, markMs: own, markPos: 1 }),
+		)?.[1];
+		expect(Number(cx)).toBeCloseTo(msToX(own, WEEK_WIN, W), 3);
+	});
+});
+
 describe("the peak label", () => {
 	/** The label's anchor, its transform's pieces and its text, or null when there is none. */
 	function label(html: string): {

@@ -56,12 +56,12 @@ export function firstRecordMs(rows: readonly LedgerRow[]): number | null {
 
 /**
  * The position the chart draws as pinned. The address's position can be past the vault's end (a link written when the
- * vault was longer, or a typed one): the server answers with the head and says so, and that is the position the pin
- * stands for, so records that arrive later are not counted into it. Until an answer says so, the address's own.
+ * vault was longer, or a typed one): the pin stands for the head the answer knew of (whatever position that answer
+ * is for), so records that arrive later are not counted into it. Until an answer has come, the address's own.
  */
 export function resolvedPin(addressPos: number | null, at: AtPayload | null): number | null {
 	if (addressPos === null) return null;
-	return at !== null && addressPos > at.head ? at.pos : addressPos;
+	return at !== null && addressPos > at.head ? at.head : addressPos;
 }
 
 /** The chart's window: the range ending at the end of the current minute, never at a pinned position. */

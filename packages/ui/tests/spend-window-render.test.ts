@@ -274,8 +274,11 @@ describe("the chart data's pure parts", () => {
 		expect(resolvedPin(13, at(12, 12))).toBe(12);
 		expect(resolvedPin(12, at(12, 12))).toBe(12);
 		expect(resolvedPin(4, at(4, 12))).toBe(4);
-		// Another position's answer still on screen changes nothing.
+		// Another position's answer still on screen changes nothing for a position inside the vault...
 		expect(resolvedPin(4, at(3, 12))).toBe(4);
+		expect(resolvedPin(12, at(3, 12))).toBe(12);
+		// ...and a position past the end stands for the head that answer knew of, not for the answer's own position.
+		expect(resolvedPin(20, at(3, 12))).toBe(12);
 		expect(resolvedPin(4, null)).toBe(4);
 	});
 
@@ -459,6 +462,17 @@ describe("Spend: the marks", () => {
 		const out = cx(await spend({ rows, openHash: "h7" }));
 		expect(out).toBeGreaterThan(0);
 		expect(out).toBeCloseTo(cx(await spend({ rows, openHash: "h5" })), 3);
+	});
+
+	it("rings a record that is not a spend record at its own time, not at the nearest spend record's", async () => {
+		const cx = (html: string): number =>
+			Number(/<circle class="ut-sp-mark" cx="([^"]+)"/.exec(html)?.[1]);
+		// Position 6 is the policy decision, between spend positions 5 and 7.
+		const before = cx(await spend({ openHash: "h5" }));
+		const policy = cx(await spend({ openHash: "h6" }));
+		const after = cx(await spend({ openHash: "h7" }));
+		expect(policy).toBeGreaterThan(before);
+		expect(policy).toBeLessThan(after);
 	});
 
 	it("marks where the chain breaks, from the summary's break index", async () => {
