@@ -15,6 +15,8 @@ const HOUR_MS = 3_600_000;
 /** The hours before a record's hour that make "the usual": one week. */
 const USUAL_HOURS = 168;
 
+/** The kind of record the unusual-hour note counts and is given for. */
+const CALL_KIND = "llm_call";
 /** An hour is unusual only with at least this many calls in it. */
 export const UNUSUAL_MIN = 8;
 /** And only at this many times the usual hourly count (a usual under 1 counts as 1). */
@@ -40,11 +42,14 @@ export interface UnusualNote {
  * hour `[h0, h0 + 1h)` that holds `row`, and the usual is those in the 168 hours before `h0`, divided by 168. A
  * record whose time cannot be read is in neither count. Null for a record with no model or no readable time.
  *
+ * The sentence says "calls", so the note is given only for a completed call (kind `llm_call`). Other kinds can
+ * carry a model too (a failed call, a denial, a released hold) and are not counted as calls here.
+ *
  * `rows` are the records held: a vault with more history than is held gives a lower usual than the whole vault
  * would, so the note can be said where the full history would not say it, never the other way round.
  */
 export function unusualNote(rows: readonly LedgerRow[], row: LedgerRow): UnusualNote | null {
-	if (row.model === undefined) return null;
+	if (row.model === undefined || row.kind !== CALL_KIND) return null;
 	const t = Date.parse(row.ts);
 	if (!Number.isFinite(t)) return null;
 	const h0 = Math.floor(t / HOUR_MS) * HOUR_MS;
@@ -73,12 +78,16 @@ export function unusualNote(rows: readonly LedgerRow[], row: LedgerRow): Unusual
 
 /**
  * The record's cost as a share of the budget, with the decimals a small share needs to not read as zero: 1 at 1%
- * and above, 3 at 0.01% and above, else 5. Null without a cost, or without a budget above 0 to be a share of.
+ * and above, 3 at 0.01% and above, else 5. A cost above 0 whose share would still print as five zeros is said as
+ * "under 0.00001%"; a cost of exactly 0 is 0.00000%. Null without a cost, for a cost below 0 (not a share of
+ * anything), or without a budget above 0 to be a share of.
  */
 export function budgetShare(costUt: number | undefined, budgetUt: number | null): string | null {
 	if (costUt === undefined || budgetUt === null || !(budgetUt > 0)) return null;
+	if (!(costUt >= 0)) return null;
 	const p = (costUt / budgetUt) * 100;
 	if (!Number.isFinite(p)) return null;
+	if (p > 0 && p < 0.000005) return "under 0.00001% of the budget";
 	const digits = p >= 1 ? 1 : p >= 0.01 ? 3 : 5;
 	return `${p.toFixed(digits)}% of the budget`;
 }

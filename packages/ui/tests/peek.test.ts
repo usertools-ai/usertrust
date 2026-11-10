@@ -176,6 +176,13 @@ describe("unusualNote", () => {
 		);
 	});
 
+	it("only a completed call gets a note: ten failed calls in the hour say nothing", () => {
+		const failed = inHour(10, { kind: "llm_call_failed" });
+		expect(unusualNote(failed, first(failed))).toBeNull();
+		const denied = inHour(10, { kind: "policy_denied" });
+		expect(unusualNote(denied, first(denied))).toBeNull();
+	});
+
 	it("a record with no model says nothing", () => {
 		const { model: _model, ...noModel } = row(H0 + 1);
 		const rows: LedgerRow[] = Array.from({ length: 10 }, () => ({ ...noModel }));
@@ -237,7 +244,18 @@ describe("budgetShare", () => {
 		expect(budgetShare(2_500_000, 1_000_000)).toBe("250.0% of the budget");
 	});
 
-	it("no cost, or no budget to be a share of: null, never a figure", () => {
+	it("a cost above 0 never reads as zero; a cost of 0 does", () => {
+		expect(budgetShare(1, 10_000_000)).toBe("0.00001% of the budget");
+		expect(budgetShare(1, 1_000_000_000)).toBe("under 0.00001% of the budget");
+		// Either side of the half of the last decimal: 0.000004% would print as zeros, 0.000006% prints as 0.00001%.
+		expect(budgetShare(4, 100_000_000)).toBe("under 0.00001% of the budget");
+		expect(budgetShare(6, 100_000_000)).toBe("0.00001% of the budget");
+		expect(budgetShare(0, 1_000_000)).toBe("0.00000% of the budget");
+	});
+
+	it("no cost, a cost below 0, or no budget to be a share of: null, never a figure", () => {
+		expect(budgetShare(-5, 1_000_000)).toBeNull();
+		expect(budgetShare(-0.000001, 1_000_000)).toBeNull();
 		expect(budgetShare(undefined, 1)).toBeNull();
 		expect(budgetShare(5, null)).toBeNull();
 		expect(budgetShare(5, 0)).toBeNull();
