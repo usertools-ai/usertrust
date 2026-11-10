@@ -799,6 +799,30 @@ describe("the bar's one pill names a past position whichever window is open", ()
 	});
 });
 
+describe("the bar's header gives the vault path up first", () => {
+	// Measured in a browser: with the second mark and a long pill the header shrank into the search at 800–900 px.
+	const css = readFileSync(
+		join(import.meta.dirname, "..", "src", "app", "desk", "desk.css"),
+		"utf-8",
+	);
+	const rule = (selector: string): string =>
+		new RegExp(`${selector.replace(/[.>[\]"=*]/g, "\\$&")}\\s*\\{([^}]*)\\}`).exec(css)?.[1] ?? "";
+
+	it("the header is never narrower than its own contents", () => {
+		const r = rule(".ut-dk-top > .ut-top");
+		expect(r).toMatch(/min-width:\s*min-content;/);
+		expect(r).toMatch(/flex:\s*1 1 320px;/);
+	});
+
+	it("the path counts as nothing toward that size, takes the room left, and the spacer takes none", () => {
+		const path = rule(".ut-dk-top > .ut-top > .ut-asof");
+		expect(path).toMatch(/contain:\s*inline-size;/);
+		expect(path).toMatch(/flex:\s*1 1 0;/);
+		expect(path).toMatch(/text-align:\s*left;/);
+		expect(rule(".ut-dk-top > .ut-top > .ut-grow")).toMatch(/flex:\s*0 0 0;/);
+	});
+});
+
 describe("the connection pill at a past position", () => {
 	// "live" means the screen shows now AND the stream is up. At a past point the stream may be up, but the screen is
 	// not live, so the pill says "connected". Found in a real browser: the pill read LIVE beside "As recorded at".

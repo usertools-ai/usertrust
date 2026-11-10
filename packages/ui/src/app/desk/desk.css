@@ -54,6 +54,21 @@
 
 	.ut-dk-top > .ut-top {
 		flex: 1 1 320px;
+		/* Never narrower than the mark, the title and the pill: the outer row then wraps the search and Export under
+		   the header exactly when they no longer fit beside it, instead of the header shrinking into them. */
+		min-width: min-content;
+	}
+
+	/* The vault path is what gives way. It counts as nothing toward the header's own size (`contain`), so the minimum
+	   above is the pills' and not the path's text; it takes the width left over and ends in its ellipsis. */
+	.ut-dk-top > .ut-top > .ut-asof {
+		contain: inline-size;
+		flex: 1 1 0;
+		text-align: left;
+	}
+
+	.ut-dk-top > .ut-top > .ut-grow {
+		flex: 0 0 0;
 	}
 
 	.ut-dk-top > .ut-alarm,
