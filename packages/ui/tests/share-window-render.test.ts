@@ -454,6 +454,18 @@ describe("what the centre and the ring's words say", () => {
 });
 
 describe("the window while the point's records are on their way", () => {
+	it("names the lane level's scope from the rows it counts when the lane and the model picked share none", async () => {
+		const rows = [spend("a", 1, 500, { model: "claude-fable-5" }), spend("b", 1, 300)];
+		let picked = toggleCategory(EMPTY_FILTERS, "lane", "a", false);
+		picked = toggleCategory(picked, "model", "claude-sonnet-5", false);
+		const html = await win({
+			data: shareData(rows, picked),
+			view: { dim: "provider", filters: picked },
+		});
+		expect(subtitle(html)).toBe(`${SUBTITLE_DRILL.lane} · claude-sonnet-5`);
+		expect(sliceKeys(html)).toEqual(["b"]);
+	});
+
 	it("keeps the switch and says what the Spend line says, in place of the ring and the legend", async () => {
 		const d = shareData(eightLanes());
 		const waiting = {
