@@ -302,6 +302,104 @@ describe("the panel's arithmetic", () => {
 			"Sum 3 UT. Recorded 4 UT: the cost was",
 		);
 	});
+
+	it("a whole sum that computes one higher, on a record that holds another figure: both sentences in full", () => {
+		const tiers =
+			"Sum 3 UT. A charge of these tiers comes to 4 UT: it is computed in floating point, came out a hair above 3, and charges round up.";
+		// Settled: the tiers' own charge is described, then the difference from what was charged.
+		expect(table({ ...RESIDUE, costUt: 7 })).toContain(
+			`<p class="ut-lg-sumnote">${tiers} The tiers add up to 4 UT; the record charged 7 UT; the charge is 3 UT higher. Shown as recorded.</p>`,
+		);
+		// Not settled: the first sentence is about the tiers, not this record, so it keeps "charge"; the second
+		// speaks of the recorded cost.
+		expect(table({ ...RESIDUE, costUt: 7, status: "unknown" })).toContain(
+			`<p class="ut-lg-sumnote">${tiers} The tiers add up to 4 UT; the record holds 7 UT; the recorded cost is 3 UT higher. Shown as recorded.</p>`,
+		);
+	});
+
+	it("a missing rate reads 'not recorded' in its own cell, never 0", () => {
+		const html = table(
+			row({ appliedRates: { inputPer1k: 30, outputPer1k: 150, cacheWritePer1k: 37.5 } }),
+		);
+		const cacheRead = html.slice(html.indexOf("Cache read"), html.indexOf("Cache write"));
+		expect(cacheRead).toContain("<td>2,000</td><td>not recorded</td>");
+		expect(cacheRead).not.toContain("0 UT");
+		expect(html).toContain("Cannot be added up: the cache-read rate was not recorded.");
+	});
+
+	it("a priced cache write in two parts has exactly two part rows, and a tier in one part exactly one row", () => {
+		const split = table(row({ costUt: 116, cacheWrite1h: { tokens: 40, ratePer1k: 60 } }));
+		const rowsIn = (html: string): number =>
+			html.slice(html.indexOf("<tbody>"), html.indexOf("</tbody>")).split("<tr").length - 1;
+		expect(split.split('class="ut-lg-part"').length - 1).toBe(2);
+		expect(split.split("1-hour").length - 1).toBe(1);
+		// Four tiers and the two parts.
+		expect(rowsIn(split)).toBe(6);
+		const whole = table(row());
+		expect(rowsIn(whole)).toBe(4);
+		expect(whole).not.toContain("ut-lg-part");
+		expect(whole).not.toContain('<th scope="row"></th>');
+	});
+
+	it("a 1-hour share with a rate and no count: its row shows that, and the sentence names the count", () => {
+		const html = table(row({ cacheWrite1h: { ratePer1k: 60 } }));
+		expect(html).toContain(
+			'<tr class="ut-lg-part"><th scope="row">1-hour</th><td>not recorded</td><td>60 UT</td>',
+		);
+		expect(html).toContain(
+			"Cannot be added up: the 1-hour cache-write token count was not recorded.",
+		);
+		expect(html).not.toContain("ledger.panel-sum");
+	});
+
+	it("an unusable 1-hour share shows the share's own count, not the write's", () => {
+		const html = table(row({ cacheWrite1h: { tokens: 40 } }));
+		expect(html).toContain(
+			'<tr class="ut-lg-part"><th scope="row">1-hour</th><td>40</td><td>not recorded</td>',
+		);
+		// The write's own row keeps the write's count and its rate.
+		expect(html).toContain('<th scope="row">Cache write</th><td>100</td><td>37.5 UT</td>');
+	});
+
+	it("the minimum is said only of a sum of nothing: not of half a usertoken, and not of exactly 1", () => {
+		const half = table(inputOnly(500, 1));
+		expect(half).toContain(fig("panel-sum-exact", "0.5 UT"));
+		expect(half).toContain(fig("panel-sum", "1 UT"));
+		expect(half).not.toContain("at least");
+		expect(half).not.toContain("ut-lg-sumnote");
+		const one = table(inputOnly(1000, 1));
+		expect(one).toContain(fig("panel-sum-exact", "1 UT"));
+		expect(one).not.toContain("at least");
+		expect(one).not.toContain("ut-lg-sumnote");
+	});
+
+	it("in a difference the 'Rounded up' row shows what the tiers come to, not the record's cost", () => {
+		const html = table(row({ costUt: 120 }));
+		expect(html).toContain(fig("panel-sum-exact", "114.75 UT"));
+		expect(html).toContain(fig("panel-sum", "115 UT"));
+		expect(html).toContain(fig("panel-cost", "120 UT"));
+		expect(html).not.toContain(fig("panel-sum", "120 UT"));
+	});
+
+	it("a sum of a thousand usertokens or more is grouped, with its fraction kept", () => {
+		const html = table(inputOnly(1_234_500, 1235));
+		expect(html).toContain("<td>1,234,500</td>");
+		expect(html).toContain(fig("panel-sum-exact", "1,234.5 UT"));
+		expect(html).toContain(fig("panel-sum", "1,235 UT"));
+		expect(html).toContain(fig("panel-cost", "1,235 UT"));
+		expect(html).not.toContain("1234.5");
+	});
+
+	it("a partial charge names what is missing and does not claim that no counts are recorded", () => {
+		const html = table(
+			row({ usage: { inputTokens: 1000, outputTokens: 500, cacheWriteTokens: 100 } }),
+		);
+		expect(html).toContain("Cannot be added up:");
+		expect(html).not.toContain("No token counts are recorded");
+		// And the other way round.
+		const { usage: _usage, ...bare } = row();
+		expect(table(bare)).not.toContain("Cannot be added up:");
+	});
 });
 
 describe("the lines under a record's status", () => {
@@ -346,6 +444,17 @@ describe("the lines under a record's status", () => {
 		expect(html).toContain('role="note"');
 		expect(html).not.toContain("Budget");
 	});
+
+	it("a record with no cost has no share, so no budget line and no source", () => {
+		const { costUt: _cost, ...bare } = row();
+		expect(extra(bare, [], budget())).toBe("");
+		// With a note to show, the note is all there is.
+		const { costUt: _busyCost, ...busyBare } = busy[0] as LedgerRow;
+		const html = extra(busyBare, busy, budget());
+		expect(html).toContain('role="note"');
+		expect(html).not.toContain("Budget");
+		expect(html).not.toContain("ut-lg-share");
+	});
 });
 
 describe("the record panel", () => {
@@ -385,6 +494,15 @@ describe("the record panel", () => {
 		);
 		expect(order.every((at) => at >= 0)).toBe(true);
 		expect([...order].sort((a, b) => a - b)).toEqual(order);
+	});
+
+	it("in the window it takes the window's form whatever it is told about docking", () => {
+		const html = panel(row(), { inWindow: true, docked: false, ...SLOTS });
+		expect(html).toMatch(/<aside class="ut-lg-peek ut-glass"/);
+		expect(html).not.toContain("ut-scrim");
+		expect(html).not.toContain('role="dialog"');
+		expect(html).toContain("ut-chainnote");
+		expect(html).toContain("extra here");
 	});
 
 	it("docked beside the list it stays solid, takes the same slots and has no chain line", () => {
