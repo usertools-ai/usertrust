@@ -110,8 +110,10 @@ describe("chartWindow", () => {
 		expect(iso(w.startMs)).toBe("2026-11-10T08:00:00.000Z");
 	});
 
-	it("never gives an empty window: a first record after the end falls back to one bucket", () => {
+	it("never gives an empty window: a first record after the end falls back to the last bucket, on its mark", () => {
 		const w = chartWindow("1w", now, at("2027-01-01T00:00:00Z"));
-		expect(w.endMs - w.startMs).toBe(LINE_BUCKETS["1w"]);
+		expect(iso(w.startMs)).toBe("2026-11-10T08:00:00.000Z");
+		expect(iso(w.endMs)).toBe("2026-11-10T08:49:00.000Z");
+		expect(w.startMs % LINE_BUCKETS["1w"]).toBe(0);
 	});
 });

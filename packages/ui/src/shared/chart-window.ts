@@ -15,7 +15,11 @@ import { type RangeId, rangeWindow } from "./spend-series.js";
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 
-/** The Spend line's bucket at each range: 5 min, 1 h, 4 h, then 6 h. */
+/**
+ * The bucket sizes the chart draws at each range: 5 min, 1 h, 4 h, then 6 h. This file is where they are defined, and
+ * the Spend line is to take them from here (until it does, its bucket follows its width), so the share ring and the
+ * line name the same moment.
+ */
 export const LINE_BUCKETS: Readonly<Record<RangeId, number>> = {
 	"1d": 5 * MINUTE_MS,
 	"1w": HOUR_MS,
@@ -37,6 +41,7 @@ export function chartWindow(range: RangeId, nowMs: number, firstMs: number | nul
 	let startMs = (range === "ytd" ? rangeWindow(range, nowMs) : rangeWindow(range, endMs)).startMs;
 	if (firstMs !== null && Number.isFinite(firstMs) && firstMs > startMs) startMs = firstMs;
 	startMs = Math.floor(startMs / bucketMs) * bucketMs;
-	if (!(startMs < endMs)) startMs = endMs - bucketMs;
+	// A start at or after the end (a first record at the end) falls back to the bucket the end's last instant is in.
+	if (!(startMs < endMs)) startMs = Math.floor((endMs - 1) / bucketMs) * bucketMs;
 	return { startMs, endMs };
 }
