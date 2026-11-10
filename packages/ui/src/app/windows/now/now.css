@@ -213,7 +213,7 @@
 		color: var(--dk-label);
 	}
 
-	@media (max-width: 900px) {
+	@media (max-width: 999px) {
 		[data-win="now"] .ut-facts {
 			grid-template-columns: repeat(3, minmax(0, 1fr));
 		}

@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
 	COMPACT_QUERY,
 	DESK_GAP,
+	DESK_MIN_WIDTH,
 	DOCK_QUERY,
 	HOME,
 	HOME_ROWS,
@@ -36,11 +37,17 @@ describe("the home layout", () => {
 		}
 	});
 
-	it("names the row split, the gap and the two queries", () => {
+	it("names the row split, the gap and the dock query", () => {
 		expect(HOME_ROWS).toBe("minmax(0, 11fr) minmax(0, 9fr)");
 		expect(DESK_GAP).toBe(16);
-		expect(COMPACT_QUERY).toBe("(max-width: 900px)");
 		expect(DOCK_QUERY).toBe("(min-width: 1100px)");
+	});
+
+	it("red-first (a desk squeezed between 901 and 999 px): the desk starts at 1000 px, and under it is the column", () => {
+		expect(DESK_MIN_WIDTH).toBe(1000);
+		expect(COMPACT_QUERY).toBe("(max-width: 999px)");
+		// One number: the query is the last width under the desk's first.
+		expect(COMPACT_QUERY).toBe(`(max-width: ${DESK_MIN_WIDTH - 1}px)`);
 	});
 
 	it("turns a place into grid properties", () => {

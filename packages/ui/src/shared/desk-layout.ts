@@ -32,8 +32,10 @@ export const HOME: Readonly<Record<WindowId, Place>> = {
 export const HOME_ROWS = "minmax(0, 11fr) minmax(0, 9fr)";
 /** The gap between windows, in CSS px. */
 export const DESK_GAP = 16;
-/** At or under this width the desk is a column and fill is ignored. */
-export const COMPACT_QUERY = "(max-width: 900px)";
+/** The narrowest window the desk is laid out in, in CSS px. */
+export const DESK_MIN_WIDTH = 1000;
+/** Under that width the desk is a column and fill is ignored. The desk's sheets write the same width. */
+export const COMPACT_QUERY = `(max-width: ${DESK_MIN_WIDTH - 1}px)`;
 /** At or over this width a filled ledger shows its record panel docked beside it. */
 export const DOCK_QUERY = "(min-width: 1100px)";
 

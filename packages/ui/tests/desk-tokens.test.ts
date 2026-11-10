@@ -5,6 +5,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { MUTED, PROVIDER_COLOR, SERIES } from "../src/shared/colors.js";
+import { COMPACT_QUERY, DESK_MIN_WIDTH } from "../src/shared/desk-layout.js";
+import { PHONE_MAX_WIDTH } from "../src/shared/layout.js";
 import { allCss, contrast, deskCss, deskCssFiles, legacyCss } from "./helpers/css.js";
 
 const APP = join(import.meta.dirname, "..", "src", "app");
@@ -197,16 +199,41 @@ describe("the desk's stylesheets", () => {
 		expect(roots).toHaveLength(1);
 	});
 
-	it("use only the breakpoints the page has: 760px and 900px, and the bar's own 999px step (one under the 1000px the desk moves to)", () => {
-		const widths = [...allCss().matchAll(/@media\s*\(max-width:\s*(\d+)px\)/g)].map((m) =>
-			Number(m[1]),
-		);
-		expect(widths.filter((w) => w !== 760 && w !== 900 && w !== 999)).toEqual([]);
+	/** Every width a sheet's `@media (max-width: …px)` blocks are written at, in order. */
+	const maxWidths = (css: string): number[] =>
+		[...css.matchAll(/@media\s*\(max-width:\s*(\d+)px\)/g)].map((m) => Number(m[1]));
+
+	it("use only the breakpoints the page has: 760px, the desk's 999px, and the older sheet's 900px", () => {
+		expect(maxWidths(allCss()).filter((w) => w !== 760 && w !== 900 && w !== 999)).toEqual([]);
+	});
+
+	it("red-first (the column kept to 900 px while the desk starts at 1000): no desk or window sheet is written at 900px", () => {
+		expect(/max-width:\s*900px/.test(deskCss())).toBe(false);
+		// The desk's sheets know two widths: the phone's, and the last one under the desk's first.
+		expect(DESK_MIN_WIDTH - 1).toBe(999);
+		expect(COMPACT_QUERY).toBe("(max-width: 999px)");
+		for (const file of deskCssFiles()) {
+			const others = maxWidths(sheet(file)).filter((w) => w !== PHONE_MAX_WIDTH);
+			expect(
+				others.every((w) => w === DESK_MIN_WIDTH - 1),
+				`${file}: ${others.join(", ")}`,
+			).toBe(true);
+		}
+		// The three sheets that lay the column out each do it at that width, once.
+		for (const file of ["desk/desk.css", "windows/spend/spend.css", "windows/now/now.css"]) {
+			expect(
+				maxWidths(sheet(file)).filter((w) => w === 999),
+				file,
+			).toHaveLength(1);
+			expect(sheet(file), file).toContain(`@media ${COMPACT_QUERY} {`);
+		}
+		// The older sheet is not the desk's: its own 900px step (the summary's) stays where it was.
+		expect(maxWidths(legacyCss()).filter((w) => w !== PHONE_MAX_WIDTH)).toEqual([900]);
 	});
 
 	it("red-first: on a narrow screen no window is squeezed, and the Ledger's list keeps a real height above the phone width", () => {
 		const desk = sheet("desk/desk.css");
-		const narrow = mediaBlock(desk, 900);
+		const narrow = mediaBlock(desk, 999);
 		expect(narrow.length).toBeGreaterThan(0);
 		// The column takes its content's height and scrolls with the page: neither the desk nor a window's slot shrinks
 		// to fit the screen (they did, and the windows' contents ran into each other).
@@ -243,7 +270,7 @@ describe("the desk's stylesheets", () => {
 		expect(box).toMatch(/flex:\s*1 1 0/);
 		expect(box).toMatch(/min-height:\s*\d+px/);
 		// The narrow column takes its content's height, so nothing there has a height to grow into.
-		const narrow = mediaBlock(spend, 900);
+		const narrow = mediaBlock(spend, 999);
 		expect(ruleOf(narrow, '[data-win="spend"] .ut-trends')).toMatch(/flex:\s*0 0 auto/);
 		expect(ruleOf(narrow, '[data-win="spend"] .ut-card[data-part="chart"]')).toMatch(
 			/flex:\s*0 0 auto/,
