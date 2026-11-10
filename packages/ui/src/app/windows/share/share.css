@@ -3,11 +3,106 @@
 
 /* The Share window's rules (prefix ut-sh-). Scoped overrides of the older classes use [data-win="share"]. */
 
-/* PR 4 replaces this file's body. Day one: the three lists stack in one column, so they fit a window a third of the
-   desk wide. */
 @layer components {
+	/* Day one: the three lists stack in one column, so they fit a window a third of the desk wide. The window part of
+	   this PR stack removes this rule when it replaces the lists. */
 	[data-win="share"] .ut-split {
 		grid-template-columns: minmax(0, 1fr);
+	}
+
+	/* The switch, then the ring beside its legend; the legend drops under the ring when the window is narrow. */
+	.ut-sh {
+		flex: 1 1 auto;
+		min-height: 0;
+		display: flex;
+		flex-flow: row wrap;
+		align-content: flex-start;
+		align-items: center;
+		gap: 6px 8px;
+		padding: 8px 10px 10px;
+		overflow: auto;
+	}
+
+	/* The one data-change fade: the container, when the range, the filters or the dimension change. Two identical
+	   fades take turns, so a change restarts the fade without rebuilding the ring. Never per slice or row, and never
+	   on a resize. */
+	.ut-sh[data-gen="a"] {
+		animation: ut-sh-in-a 0.22s cubic-bezier(0.16, 0.84, 0.3, 1);
+	}
+
+	.ut-sh[data-gen="b"] {
+		animation: ut-sh-in-b 0.22s cubic-bezier(0.16, 0.84, 0.3, 1);
+	}
+
+	@keyframes ut-sh-in-a {
+		from {
+			opacity: 0.55;
+		}
+	}
+
+	@keyframes ut-sh-in-b {
+		from {
+			opacity: 0.55;
+		}
+	}
+
+	.ut-sh-dims {
+		flex: 1 0 100%;
+		display: flex;
+		flex-wrap: wrap;
+		min-width: 0;
+		margin: 0 0 6px;
+	}
+
+	.ut-sh-cap {
+		flex: 1 0 100%;
+		margin: 0 0 4px;
+		color: var(--dk-label);
+		font-size: 12px;
+	}
+
+	/* The switch: a 32px tier of 28px buttons, wrapping when the window is narrow. */
+	[data-win="share"] .ut-seg {
+		flex-wrap: wrap;
+		max-width: 100%;
+		min-height: 32px;
+		padding: 2px;
+		gap: 2px;
+		border: 0;
+		border-radius: 8px;
+		background: var(--dk-raised);
+		box-shadow: inset 0 0 0 1px var(--dk-grid);
+	}
+
+	[data-win="share"] .ut-seg button {
+		height: 28px;
+		padding: 0 11px;
+		border-radius: 6px;
+		background: transparent;
+		box-shadow: none;
+		color: var(--dk-label);
+		font: 500 12px/28px var(--sans);
+	}
+
+	/* The rows wrap with a 2px gap, so the hit area stays inside each button: the shared 4px (10px on a phone) of
+	   extension above and below would let a lower row take clicks on the row above. */
+	[data-win="share"] .ut-seg button::after {
+		inset: 0 -1px;
+	}
+
+	[data-win="share"] .ut-seg button:hover {
+		color: var(--dk-text);
+	}
+
+	[data-win="share"] .ut-seg button[aria-pressed="true"] {
+		background: var(--dk-hover);
+		color: var(--dk-gold);
+		box-shadow: none;
+	}
+
+	[data-win="share"] .ut-seg button:focus-visible {
+		outline: 2px solid var(--dk-gold);
+		outline-offset: -2px;
 	}
 
 	/* Drawn once in a fixed box and sized here: a resize or a fill never rebuilds it. */
@@ -78,4 +173,123 @@
 		font: 400 12px var(--fig, var(--sans));
 	}
 
+	.ut-sh-legend {
+		flex: 1 1 190px;
+		display: grid;
+		gap: 2px;
+		min-width: 0;
+		margin: 0;
+		padding: 0;
+		list-style: none;
+	}
+
+	.ut-sh-row,
+	.ut-sh-other {
+		display: grid;
+		grid-template-columns: 10px minmax(0, 1fr) auto var(--ut-sh-pct, 40px);
+		gap: 6px;
+		align-items: center;
+		height: 28px;
+		padding: 0 8px;
+		font: 500 12.5px var(--sans);
+		font-variant-numeric: tabular-nums;
+	}
+
+	/* One decimal ("100.0%", ">99.9%") needs a wider column than a whole percent. */
+	.ut-sh-legend[data-decimals="1"] {
+		--ut-sh-pct: 52px;
+	}
+
+	.ut-sh-row {
+		width: 100%;
+		border: 0;
+		border-radius: 8px;
+		background: transparent;
+		color: var(--dk-text);
+		text-align: left;
+		cursor: pointer;
+		transition:
+			background 0.15s,
+			opacity 0.18s;
+	}
+
+	.ut-sh-other {
+		color: var(--dk-label);
+	}
+
+	.ut-sh-row i {
+		width: 10px;
+		height: 2px;
+		border-radius: 1px;
+	}
+
+	.ut-sh-row .n,
+	.ut-sh-other .n {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		text-align: left;
+	}
+
+	.ut-sh-row .v,
+	.ut-sh-other .v {
+		font-weight: 600;
+		font-family: var(--fig, var(--sans));
+		text-align: right;
+		white-space: nowrap;
+	}
+
+	.ut-sh-row .p,
+	.ut-sh-other .p {
+		color: var(--dk-label);
+		font-family: var(--fig, var(--sans));
+		text-align: right;
+		white-space: nowrap;
+	}
+
+	.ut-sh-row:hover,
+	.ut-sh-row[data-lit="hover"],
+	.ut-sh-row[aria-pressed="true"] {
+		background: color-mix(in srgb, var(--dk-text) 8%, transparent);
+	}
+
+	.ut-sh-row[data-lit="dim"] {
+		opacity: 0.45;
+	}
+
+	.ut-sh-legend[data-hot="true"] .ut-sh-row[data-lit="rest"] {
+		opacity: 0.45;
+	}
+
+	.ut-sh-row:focus-visible {
+		outline: 2px solid var(--dk-gold);
+		outline-offset: -2px;
+	}
+
+	.ut-sh-none {
+		padding: 8px;
+		color: var(--dk-label);
+		font-size: 12px;
+	}
+
+	/* On a phone a legend row is a full touch target. */
+	@media (max-width: 760px) {
+		.ut-sh-row {
+			height: 44px;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.ut-sh[data-gen] {
+			animation: none;
+		}
+
+		.ut-sh-slice,
+		.ut-sh-slice .body,
+		.ut-sh-slice .rim,
+		.ut-sh-row {
+			transition: none;
+		}
+	}
 }
