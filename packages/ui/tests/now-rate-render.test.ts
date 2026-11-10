@@ -115,6 +115,22 @@ describe("Rate now", () => {
 		expect(NOW_COPY.rateHeadingFiltered).toBe("Rate now · filtered");
 	});
 
+	it("with no rate it is busy while the records load, and not once they failed", () => {
+		const of = (failed?: boolean): string =>
+			renderToStaticMarkup(
+				createElement(RateNow, {
+					view: null,
+					color: null,
+					filled: false,
+					...(failed === undefined ? {} : { failed }),
+				}),
+			);
+		expect(of()).toContain('aria-busy="true"');
+		expect(of(false)).toContain('aria-busy="true"');
+		expect(of(true)).not.toContain("aria-busy");
+		expect(of(true)).toContain("<b>Rate now</b>");
+	});
+
 	it("is a fact of the grid, marked unusual or not", () => {
 		expect(draw(view())).toMatch(/^<div class="ut-fact ut-nw-rate" data-unusual="false">/);
 		expect(draw(view({ unusual: true }))).toMatch(

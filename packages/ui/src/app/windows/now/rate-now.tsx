@@ -36,12 +36,14 @@ export function RateNow(props: {
 	filled: boolean;
 	/** The rate is of the filtered records, not of the whole vault. */
 	filtered?: boolean;
+	/** The records could not be read: nothing is coming, so the box is not announced as busy. */
+	failed?: boolean;
 }): React.JSX.Element {
 	const { view } = props;
 	const heading = props.filtered === true ? NOW_COPY.rateHeadingFiltered : NOW_COPY.rateHeading;
 	if (view === null)
 		return (
-			<div className="ut-fact ut-nw-rate" aria-busy="true">
+			<div className="ut-fact ut-nw-rate" aria-busy={props.failed === true ? undefined : "true"}>
 				<b>{heading}</b>
 				<span className="v na">…</span>
 				<span className="ut-nw-words" aria-hidden="true" data-reserve="true">

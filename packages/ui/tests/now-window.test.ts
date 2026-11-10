@@ -301,7 +301,9 @@ describe("the Now window before its records have loaded", () => {
 		for (const phase of ["loading", "failed"] as const) {
 			const html = await renderNow({ rows: ROWS, phase });
 			expect(html).toContain('aria-label="vault summary"');
-			expect(html).toContain(`${HELD_RATE}${HELD_PROJ}<div class="ut-fact"><b>Integrity</b>`);
+			// A failed read is not announced as busy: nothing is coming.
+			const held = phase === "failed" ? HELD_RATE.replace(' aria-busy="true"', "") : HELD_RATE;
+			expect(html).toContain(`${held}${HELD_PROJ}<div class="ut-fact"><b>Integrity</b>`);
 			expect(html).toContain(`</section>${HELD_LAST}</div>`);
 			expect(html).not.toContain('data-fig="now.rate"');
 			expect(html).not.toContain("<svg role");
@@ -600,6 +602,28 @@ describe("the Now window, filled", () => {
 				expect(inside).toContain(part);
 			expect(inside).toBe(body(small));
 		}
+	});
+});
+
+describe("the Now window's body keeps one component through a fill", () => {
+	const SRC = readFileSync(
+		join(import.meta.dirname, "..", "src", "app", "windows", "now", "now-window.tsx"),
+		"utf-8",
+	);
+
+	it("draws one component at one place for both forms, so a fill or a restore remounts nothing", () => {
+		// The tests run without a DOM, so state held across a fill is pinned in the source: no branch on the form
+		// chooses between two component types under the body.
+		expect(SRC).not.toMatch(/filled\s*\?\s*<\w+/);
+		expect(SRC).not.toContain("NowFilled");
+		expect(SRC).toContain("{() => <NowBody />}");
+		expect(SRC.match(/<NowSmall \/>/g)?.length).toBe(1);
+	});
+
+	it("tells the rate it is not busy once the records failed to load", async () => {
+		const failed = await renderNow({ phase: "failed" });
+		expect(fact(failed, "Rate now")).not.toContain("aria-busy");
+		expect(fact(await renderNow({ phase: "loading" }), "Rate now")).toContain('aria-busy="true"');
 	});
 });
 

@@ -91,7 +91,13 @@ function NowSmall(): React.JSX.Element {
 				{...(spentOverride === null ? {} : { spentOverride })}
 				budgetNote={
 					<>
-						<RateNow view={loaded ? rate : null} color={tint} filled={false} filtered={filtering} />
+						<RateNow
+							view={loaded ? rate : null}
+							color={tint}
+							filled={false}
+							filtered={filtering}
+							failed={list.phase === "failed"}
+						/>
 						<ProjectionLine projection={loaded ? projection : null} />
 					</>
 				}
@@ -101,16 +107,16 @@ function NowSmall(): React.JSX.Element {
 	);
 }
 
-/** The filled form. Its own parts (tiles, charts and lists) are not built yet: until they are, it is the small form. */
-function NowFilled(): React.JSX.Element {
-	return <NowSmall />;
-}
-
-function NowBody({ filled }: { filled: boolean }): React.JSX.Element {
+/**
+ * One component at this place whether the window is small or filled, so a fill or a restore does not remount what is
+ * under it (an open Details, an open explainer). The filled form's own parts (tiles, charts and lists) are not built
+ * yet: until they are, the filled window shows the small form.
+ */
+function NowBody(): React.JSX.Element {
 	const gen = useChangeMark(JSON.stringify(useDeskData().list.filters));
 	return (
 		<div className="ut-nw" data-gen={gen}>
-			{filled ? <NowFilled /> : <NowSmall />}
+			<NowSmall />
 		</div>
 	);
 }
@@ -118,7 +124,7 @@ function NowBody({ filled }: { filled: boolean }): React.JSX.Element {
 export const NowWindow = memo(function NowWindow(): React.JSX.Element {
 	return (
 		<Window id="now" title="Now">
-			{(filled) => <NowBody filled={filled} />}
+			{() => <NowBody />}
 		</Window>
 	);
 });
