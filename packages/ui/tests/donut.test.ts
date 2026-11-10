@@ -563,3 +563,56 @@ describe("donut paths and angles at the edges a wrong radius or guard would move
 		expect(ringPath(150, 150, 2, 1.5, 0, 5, HALF_GAP).startsWith("M152,150A2,2 0 ")).toBe(true);
 	});
 });
+
+describe("donut guards: whole turn, unreal times, NaN", () => {
+	it("gives a whole turn no corners, exactly from the full-turn threshold, as ringPath and rimPath draw it closed", () => {
+		const FULL = TAU - 1e-6;
+		expect(ringEdges(150, 150, 100, 50, 0, TAU, HALF_GAP)).toBeNull();
+		expect(ringEdges(150, 150, 100, 50, 0, FULL, HALF_GAP)).toBeNull();
+		expect(ringEdges(150, 150, 100, 50, 0, FULL - 1e-9, HALF_GAP)).not.toBeNull();
+	});
+
+	it("names no moment for a time that is not real: the range wording, no throw", () => {
+		for (const ms of [
+			Number.NaN,
+			Number.POSITIVE_INFINITY,
+			Number.NEGATIVE_INFINITY,
+			8.64e15 + 1,
+		]) {
+			expect(atTime(ms)).toBe("This range");
+			expect(atWhen(ms)).toBe("this range");
+			const c = centreOf({ hot: null, total: 5, spending: 2, noun: "model", startMs: ms });
+			expect(c.name).toBe("This range");
+			const lit = centreOf({
+				hot: { key: "a", spendUt: 1 },
+				total: 5,
+				spending: 2,
+				noun: "model",
+				startMs: ms,
+			});
+			expect(lit.sub).toBe("20.0% this range");
+		}
+		expect(atTime(0)).toBe("At 1970-01-01 00:00Z");
+		expect(atWhen(8.64e15)).toMatch(/^at \+275760-09-13/);
+	});
+
+	it("holds a printed share to 0..100% with NaN as 0", () => {
+		expect(formatShare(Number.NaN, 0)).toBe("0%");
+		expect(formatShare(Number.NaN, 1)).toBe("0.0%");
+		expect(formatShare(1.5, 0)).toBe("100%");
+		expect(formatShare(1.5, 1)).toBe("100.0%");
+		expect(formatShare(-0.004, 0)).toBe("0%");
+		expect(formatShare(-0.004, 1)).toBe("0.0%");
+		expect(formatShare(Number.NEGATIVE_INFINITY, 0)).toBe("0%");
+	});
+
+	it("eases NaN as the end and blends with the ease held to 0..1, NaN as 1", () => {
+		expect(easeOutCubic(Number.NaN)).toBe(1);
+		const from = new Map([["a", { a0: 0, a1: 1 }]]);
+		const to = new Map([["a", { a0: 2, a1: 4 }]]);
+		expect(blendArcs(from, to, Number.NaN).get("a")).toEqual({ a0: 2, a1: 4 });
+		expect(blendArcs(from, to, 2).get("a")).toEqual({ a0: 2, a1: 4 });
+		expect(blendArcs(from, to, -1).get("a")).toEqual({ a0: 0, a1: 1 });
+		expect(blendArcs(from, to, 0.5).get("a")).toEqual({ a0: 1, a1: 2.5 });
+	});
+});

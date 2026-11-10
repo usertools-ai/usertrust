@@ -101,7 +101,10 @@ const at = (cx: number, cy: number, r: number, a: number): Pt => ({
 const num = (v: number): string => String(Math.round(v * 100) / 100);
 const pt = (p: Pt): string => `${num(p.x)},${num(p.y)}`;
 
-/** A slice's four corners, outer and inner; null for an empty arc. */
+/**
+ * A slice's four corners, outer and inner; null for an empty arc and for a whole turn (which `ringPath` and `rimPath`
+ * draw as closed circles, with no straight edge).
+ */
 export function ringEdges(
 	cx: number,
 	cy: number,
@@ -111,7 +114,7 @@ export function ringEdges(
 	a1: number,
 	half: number,
 ): { o0: Pt; o1: Pt; i0: Pt; i1: Pt } | null {
-	if (!(a1 > a0)) return null;
+	if (!(a1 > a0) || a1 - a0 >= FULL) return null;
 	const [o0, o1] = edgeAngles(ro, a0, a1, half);
 	const [i0, i1] = edgeAngles(ri, a0, a1, half);
 	return {
@@ -169,9 +172,15 @@ export function rimPath(
 	return `M${pt(at(cx, cy, r, b0))}A${num(r)},${num(r)} 0 ${b1 - b0 > Math.PI ? 1 : 0} 1 ${pt(at(cx, cy, r, b1))}`;
 }
 
+/** `v` held to [0, 1]; `nan` when it is not a number. */
+function unit(v: number, nan: 0 | 1): number {
+	if (Number.isNaN(v)) return nan;
+	return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
 /** Fast at first, settling at the end. */
 export function easeOutCubic(p: number): number {
-	const t = p < 0 ? 0 : p > 1 ? 1 : p;
+	const t = unit(p, 1);
 	return 1 - (1 - t) ** 3;
 }
 
@@ -185,6 +194,7 @@ export function blendArcs(
 	e: number,
 ): Map<string, Arc> {
 	const out = new Map<string, Arc>();
+	e = unit(e, 1);
 	for (const [key, t] of to) {
 		const mid = (t.a0 + t.a1) / 2;
 		const f = from.get(key) ?? { a0: mid, a1: mid };
@@ -242,14 +252,18 @@ export function bucketStartMs(win: SpendWindow, bucketMs: number, k: number): nu
 
 const minute = (ms: number): string => formatUtcMinute(new Date(ms).toISOString());
 
-/** The centre's first line at a moment: "At 2026-11-07 18:00Z". */
+/** A moment we can name: a finite time inside the range `Date` can print. */
+const named = (ms: number | null): ms is number =>
+	ms !== null && Number.isFinite(ms) && !Number.isNaN(new Date(ms).getTime());
+
+/** The centre's first line at a moment: "At 2026-11-07 18:00Z"; "This range" when the time is not a real one. */
 export function atTime(startMs: number): string {
-	return `At ${minute(startMs)}`;
+	return named(startMs) ? `At ${minute(startMs)}` : "This range";
 }
 
-/** When the values are read: "at 2026-11-07 18:00Z" at a moment, "this range" for the range. */
+/** When the values are read: "at 2026-11-07 18:00Z" at a moment, "this range" for the range or an unreal time. */
 export function atWhen(startMs: number | null): string {
-	return startMs === null ? "this range" : `at ${minute(startMs)}`;
+	return named(startMs) ? `at ${minute(startMs)}` : "this range";
 }
 
 export interface LegendRow {
@@ -283,6 +297,7 @@ export function legendOf(
  * a share short of all of it never prints as all of it: it reads ">99%" (">99.9%").
  */
 export function formatShare(share: number, decimals: 0 | 1): string {
+	share = unit(share, 0);
 	if (share === 0) return decimals === 0 ? "0%" : "0.0%";
 	const pct = share * 100;
 	if (decimals === 0) {
