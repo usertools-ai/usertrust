@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { describe, expect, it } from "vitest";
-import { NOW_COPY } from "../src/shared/now-copy.js";
+import { NOW_COPY, weekPaceWords, youngPaceWords } from "../src/shared/now-copy.js";
 import { HOUR_MS, RATE_HOURS, rateNow, rateWords } from "../src/shared/now-rate.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 
@@ -80,6 +80,32 @@ describe("rateNow", () => {
 		expect(rateWords(inside)).toBe(NOW_COPY.rateNormal);
 		expect(rateNow(withLastHour(uneven, 2000), END).unusual).toBe(false);
 		expect(rateNow(withLastHour(uneven, 2001), END).unusual).toBe(true);
+	});
+
+	it("the last hour is read against the 24 hours before it, not the whole week", () => {
+		// Six days of 500 and 1,500 by turns, then a quiet day of 100 an hour.
+		const rows = steady(RATE_HOURS, 0).map((r, i) => ({
+			...r,
+			costUt: i <= 24 ? 100 : i % 2 === 0 ? 500 : 1500,
+		}));
+		// Against the whole week the range would reach past 1,500, and 300 would read as normal.
+		const v = rateNow(withLastHour(rows, 300), END);
+		expect(v.known).toBe(true);
+		expect(v.band.lo[LAST]).toBe(100);
+		expect(v.band.mid[LAST]).toBe(100);
+		expect(v.band.hi[LAST]).toBe(100);
+		expect(v.unusual).toBe(true);
+		expect(rateWords(v)).toBe(NOW_COPY.rateUnusual);
+		expect(rateNow(rows, END).unusual).toBe(false);
+		// The reverse: a quiet week, then a day of 500 and 1,500 by turns. 1,400 is inside that day's range.
+		const busy = steady(RATE_HOURS, 0).map((r, i) => ({
+			...r,
+			costUt: i > 24 ? 100 : i % 2 === 0 ? 500 : 1500,
+		}));
+		const w = rateNow(withLastHour(busy, 1400), END);
+		expect(w.band.mid[LAST]).toBe(1000);
+		expect(w.band.hi[LAST]).toBe(2000);
+		expect(w.unusual).toBe(false);
 	});
 
 	it("a vault two hours old is too little history, however big the hour", () => {
@@ -168,14 +194,28 @@ describe("NOW_COPY", () => {
 			rateUnknown: "too little history to call",
 			rateUnusual: "unusual spend rate",
 			rateNormal: "normal rate",
-			rateTip: "The last hour's spend against the usual range of the past week",
+			rateTip: "The last hour's spend against the usual range of the 24 hours before",
 			rateBandNote: "The shaded band is the usual range for those hours.",
 			projectionUsed: "Projection: the budget is already used",
 			projectionIdle: "Projection: no spend in the past week, so no date",
+			projectionPaceWeek: "the past week's pace",
+			projectionPaceYoung: "the pace so far",
 			integrityIntact: "hash links intact",
 			integrityMonitor: "The dashboard is a monitor: usertrust verify is the authoritative check.",
 			statusEmpty: "no records in this view",
 		});
+	});
+
+	it("names a young vault's average by the vault's age", () => {
+		expect(youngPaceWords("$0.24/day", 3)).toBe(
+			"the average of $0.24/day since the first spend record, 3.0 days ago,",
+		);
+		expect(youngPaceWords("$1.00/day", 6.96)).toContain("7.0 days ago");
+		expect(youngPaceWords("$1.00/day", 1)).toContain("1.0 days ago");
+		expect(youngPaceWords("$1.00/day", 0.999)).toBe(
+			"the average of $1.00/day since the first spend record, under a day ago,",
+		);
+		expect(weekPaceWords("$0.24/day")).toBe("the past 7 days' average of $0.24/day");
 	});
 
 	it("claims no cause and no check it has not made", () => {
