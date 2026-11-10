@@ -4,7 +4,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { breakdown, categoryRows } from "../src/shared/breakdown.js";
+import { type Breakdown, breakdown, categoryRows } from "../src/shared/breakdown.js";
 import {
 	type Arc,
 	atTime,
@@ -14,12 +14,19 @@ import {
 	bucketStartMs,
 	centreOf,
 	easeOutCubic,
+	FADE,
+	FADE_HOT,
 	formatShare,
+	GROW,
 	HALF_GAP,
 	INNER,
+	LEGEND_ROWS,
 	legendOf,
 	legendTitle,
+	OUTLINE_INSET,
 	type Pt,
+	RIM_W,
+	RIM_W_HOT,
 	rimPath,
 	ringEdges,
 	ringPath,
@@ -28,6 +35,8 @@ import {
 	SLIVER,
 	shareValues,
 	sliceAngles,
+	TWEEN_MS,
+	VB,
 } from "../src/shared/donut.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 
@@ -149,6 +158,132 @@ describe("donut geometry", () => {
 		const half = blendArcs(from, to, 0.5);
 		expect(half.get("a")?.a1).toBeCloseTo(0.65, 12);
 		expect(half.has("gone")).toBe(false);
+	});
+
+	it("pins the drawing box, the widths, the tween and the shading tables", () => {
+		expect(VB).toBe(300);
+		expect(INNER).toBe(0.62);
+		expect(GROW).toBe(7);
+		expect(HALF_GAP).toBe(2.2);
+		expect(OUTLINE_INSET).toBe(0.5);
+		expect(SLIVER).toBe(2);
+		expect(RIM_W).toBe(2.2);
+		expect(RIM_W_HOT).toBe(3);
+		expect(TWEEN_MS).toBe(240);
+		expect(LEGEND_ROWS).toBe(5);
+		expect(FADE).toEqual([
+			[0, 0.56],
+			[0.35, 0.32],
+			[0.7, 0.18],
+			[1, 0.1],
+		]);
+		expect(FADE_HOT).toEqual([
+			[0, 0.8],
+			[0.35, 0.5],
+			[0.7, 0.3],
+			[1, 0.17],
+		]);
+		for (const table of [FADE, FADE_HOT]) {
+			// From the outer edge (0) to the inner (1), fading but never to nothing.
+			expect(table[0]?.[0]).toBe(0);
+			expect(table.at(-1)?.[0]).toBe(1);
+			for (let i = 1; i < table.length; i++) {
+				const [p0, o0] = table[i - 1] as readonly [number, number];
+				const [p1, o1] = table[i] as readonly [number, number];
+				expect(p1).toBeGreaterThan(p0);
+				expect(o1).toBeLessThan(o0);
+			}
+			for (const [, o] of table) expect(o).toBeGreaterThan(0);
+		}
+		// In focus it rises at every stop, at the same positions.
+		expect(FADE_HOT).toHaveLength(FADE.length);
+		for (const [i, [p, o]] of FADE.entries()) {
+			expect(FADE_HOT[i]?.[0]).toBe(p);
+			expect(FADE_HOT[i]?.[1]).toBeGreaterThan(o);
+		}
+	});
+
+	it("writes a slice's body and rim exactly: two decimals, rotation 0, sweep clockwise out and back in", () => {
+		const H = Math.PI / 2;
+		expect(ringPath(150, 150, 100, 50, 0, H, 0)).toBe(
+			"M150,50A100,100 0 0 1 250,150L200,150A50,50 0 0 0 150,100Z",
+		);
+		expect(rimPath(150, 150, 100, 0, H, 0)).toBe("M150,50A100,100 0 0 1 250,150");
+		// A slice that starts past 12 o'clock: the large-arc flag reads the arc's span, not where it sits.
+		expect(ringPath(150, 150, 100, 50, H, Math.PI, 0)).toBe(
+			"M250,150A100,100 0 0 1 150,250L150,200A50,50 0 0 0 200,150Z",
+		);
+		expect(rimPath(150, 150, 100, H, Math.PI, 0)).toBe("M250,150A100,100 0 0 1 150,250");
+		expect(rimPath(150, 150, 100, 2, 3, 0)).toMatch(/^M[\d.,]+A100,100 0 0 1 [\d.,]+$/);
+		// sin 1 = 0.84147..., cos 1 = 0.54030...: rounded to the nearest hundredth, not cut.
+		expect(rimPath(150, 150, 100, 0, 1, 0)).toBe("M150,50A100,100 0 0 1 234.15,95.97");
+	});
+
+	it("sets the large-arc flag only past half a turn: exactly π is not large, a hair over is", () => {
+		const P = Math.PI;
+		const notLarge = "M150,50A100,100 0 0 1 150,250L150,200A50,50 0 0 0 150,100Z";
+		const large = "M150,50A100,100 0 1 1 150,250L150,200A50,50 0 1 0 150,100Z";
+		expect(ringPath(150, 150, 100, 50, 0, P - 1e-9, 0)).toBe(notLarge);
+		expect(ringPath(150, 150, 100, 50, 0, P, 0)).toBe(notLarge);
+		expect(ringPath(150, 150, 100, 50, 0, P + 1e-9, 0)).toBe(large);
+		expect(rimPath(150, 150, 100, 0, P - 1e-9, 0)).toBe("M150,50A100,100 0 0 1 150,250");
+		expect(rimPath(150, 150, 100, 0, P, 0)).toBe("M150,50A100,100 0 0 1 150,250");
+		expect(rimPath(150, 150, 100, 0, P + 1e-9, 0)).toBe("M150,50A100,100 0 1 1 150,250");
+	});
+
+	it("draws a whole turn as closed circles from 12 o'clock, from exactly the full-turn threshold", () => {
+		const FULL = TAU - 1e-6;
+		const outer = "M150,50A100,100 0 1 1 150,250A100,100 0 1 1 150,50Z";
+		const inner = "M150,100A50,50 0 1 1 150,200A50,50 0 1 1 150,100Z";
+		expect(ringPath(150, 150, 100, 50, 0, TAU, 0)).toBe(outer + inner);
+		expect(ringPath(150, 150, 100, 50, 0, FULL, HALF_GAP)).toBe(outer + inner);
+		expect(rimPath(150, 150, 100, 0, TAU, HALF_GAP)).toBe(outer);
+		expect(rimPath(150, 150, 100, 0, FULL, HALF_GAP)).toBe(outer);
+		// A hair short of the threshold is a slice: its gap, its straight edges, one arc each way.
+		const short = ringPath(150, 150, 100, 50, 0, FULL - 1e-9, HALF_GAP);
+		expect(short).toContain("L");
+		expect(short.match(/A/g)?.length).toBe(2);
+		const shortRim = rimPath(150, 150, 100, 0, FULL - 1e-9, HALF_GAP);
+		expect(shortRim.match(/A/g)?.length).toBe(1);
+		expect(shortRim).not.toContain("Z");
+		// Rounded, not cut, to two decimals: 139.994, 160.006 and 10.006; 144.996, 155.004 and 5.004.
+		expect(ringPath(150, 150, 10.006, 5.004, 0, TAU, 0)).toBe(
+			"M150,139.99A10.01,10.01 0 1 1 150,160.01A10.01,10.01 0 1 1 150,139.99Z" +
+				"M150,145A5,5 0 1 1 150,155A5,5 0 1 1 150,145Z",
+		);
+	});
+
+	it("keeps a body while it is a sliver wide or more, and centres a sliver on its own mid-angle", () => {
+		const d = Math.asin(HALF_GAP / RO);
+		const s = Math.asin(SLIVER / 2 / RO);
+		// One and a quarter slivers of body left at the outer radius: still a body, half a gap in at both ends.
+		const body = { a0: 1, a1: 1 + 2 * d + 2.5 * s };
+		const eb = edges(body);
+		expect(side(eb.o0, body.a0)).toBeCloseTo(HALF_GAP, 9);
+		expect(side(eb.o1, body.a1)).toBeCloseTo(-HALF_GAP, 9);
+		// A sliver away from 12 o'clock, at both radii, on the mid-angle of its own two ends.
+		const thin = { a0: 1, a1: 1.01 };
+		const et = edges(thin);
+		const mid = 1.005;
+		expect(side(et.o0, mid)).toBeCloseTo(-SLIVER / 2, 9);
+		expect(side(et.o1, mid)).toBeCloseTo(SLIVER / 2, 9);
+		expect(side(et.i0, mid)).toBeCloseTo(-SLIVER / 2, 9);
+		expect(side(et.i1, mid)).toBeCloseTo(SLIVER / 2, 9);
+		expect(Math.atan2(et.o0.x - C, C - et.o0.y)).toBeCloseTo(mid - s, 9);
+	});
+
+	it("splits a total below one like any other", () => {
+		expect(sliceAngles([0.125, 0.375])).toEqual([
+			{ a0: 0, a1: TAU / 4 },
+			{ a0: TAU / 4, a1: TAU },
+		]);
+	});
+
+	it("clamps the ease outside 0..1", () => {
+		expect(easeOutCubic(-1)).toBe(0);
+		expect(easeOutCubic(-0.25)).toBe(0);
+		expect(easeOutCubic(1.25)).toBe(1);
+		expect(easeOutCubic(2)).toBe(1);
 	});
 });
 
@@ -324,6 +459,51 @@ describe("share values, legend, percentages and centre", () => {
 		expect(legendTitle("b", 4, 0.0004, atWhen(T0 + 2 * HOUR))).toBe(
 			"b: $0.0004, <0.1% at 2026-11-07 02:00Z. Click to filter the desk to it.",
 		);
+	});
+
+	it("lists a key that spent less than one unit, and not a key the breakdown has no entry for", () => {
+		const bd: Breakdown = {
+			dim: "lane",
+			keys: ["half", "ghost"],
+			byKey: new Map([["half", { spendUt: 0.5, calls: 1 }]]),
+			totalUt: 0.5,
+			calls: 1,
+		};
+		expect(shareValues(bd, null, null)).toEqual({ keys: ["half"], values: [0.5], total: 0.5 });
+		const buckets = new Map([["half", Float64Array.of(0.25, 0.25)]]);
+		expect(shareValues(bd, buckets, 1)).toEqual({ keys: ["half"], values: [0.25], total: 0.25 });
+	});
+
+	it("shares out a total below one, and reads a key with no value as 0", () => {
+		expect(legendOf({ keys: ["a", "b"], values: [0.375, 0.125], total: 0.5 }).rows).toEqual([
+			{ key: "a", spendUt: 0.375, share: 0.75 },
+			{ key: "b", spendUt: 0.125, share: 0.25 },
+		]);
+		expect(legendOf({ keys: ["a", "b"], values: [3], total: 3 }).rows).toEqual([
+			{ key: "a", spendUt: 3, share: 1 },
+			{ key: "b", spendUt: 0, share: 0 },
+		]);
+		const hot = { key: "a", spendUt: 0.25 };
+		expect(centreOf({ hot, total: 0.5, spending: 1, noun: "lane", startMs: null }).sub).toBe(
+			"50.0% this range",
+		);
+	});
+
+	it("refuses each bucket width and window edge it cannot bucket by, on its own", () => {
+		const n = 24;
+		expect(bucketAt(T0 + 1, WIN, 0, n)).toBeNull();
+		expect(bucketAt(T0 + 1, WIN, -HOUR, n)).toBeNull();
+		expect(bucketAt(T0 + 1, WIN, Number.NaN, n)).toBeNull();
+		expect(bucketAt(T0, WIN, HOUR, -1)).toBeNull();
+		const toForever = { startMs: T0, endMs: Number.POSITIVE_INFINITY };
+		expect(bucketAt(T0, toForever, HOUR, n)).toBeNull();
+		const fromForever = { startMs: Number.NEGATIVE_INFINITY, endMs: T0 + HOUR };
+		expect(bucketAt(T0, fromForever, HOUR, n)).toBeNull();
+		expect(bucketAt(T0, { startMs: Number.NaN, endMs: T0 + HOUR }, HOUR, n)).toBeNull();
+		// One bucket is enough, and a bucket narrower than a millisecond is still a bucket.
+		expect(bucketAt(T0, WIN, HOUR, 1)).toBe(0);
+		expect(bucketAt(WIN.endMs, WIN, HOUR, 1)).toBe(0);
+		expect(bucketAt(T0 + 1, { startMs: T0, endMs: T0 + 10 }, 0.5, 20)).toBe(2);
 	});
 
 	it("offers no additive click", async () => {
