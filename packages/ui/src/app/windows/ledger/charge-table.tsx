@@ -22,10 +22,11 @@ function exactUt(text: string): string {
 	return `${fraction === undefined ? head : `${head}.${fraction}`} UT`;
 }
 
-const tokens = (n: number | null | undefined): string =>
-	n === null || n === undefined ? NOT_RECORDED : n.toLocaleString("en-US");
-const rate = (n: number | null | undefined): string =>
-	n === null || n === undefined ? NOT_RECORDED : `${n} UT`;
+/** The count and rate of one row; `null` where the record carries none. */
+type Cells = Pick<ChargeLine, "count" | "ratePer1k">;
+
+const tokens = (n: number | null): string => n?.toLocaleString("en-US") ?? NOT_RECORDED;
+const rate = (n: number | null): string => (n === null ? NOT_RECORDED : `${n} UT`);
 
 /** A product in usertokens with its dollars under it; a long dash when there is none to print. */
 function Cost(props: { ut: string | null; usd: string | null }): React.JSX.Element {
@@ -39,20 +40,12 @@ function Cost(props: { ut: string | null; usd: string | null }): React.JSX.Eleme
 }
 
 /** The 1-hour share of a cache write as the row carries it, when its tier could not be priced because of it. */
-function unusableShare(
-	line: ChargeLine,
-	row: LedgerRow,
-): { tokens?: number; ratePer1k?: number } | null {
-	if (line.tier !== "cacheWrite" || line.parts.length > 0 || row.cacheWrite1h === undefined) {
-		return null;
-	}
+function unusableShare(line: ChargeLine, row: LedgerRow): Cells | null {
+	const share = row.cacheWrite1h;
+	if (line.tier !== "cacheWrite" || line.parts.length > 0 || share === undefined) return null;
 	if (line.count === null || line.ratePer1k === null) return null;
-	const share: { tokens?: number; ratePer1k?: number } = {};
-	const count = amountOf(row.cacheWrite1h.tokens, true);
-	const per1k = amountOf(row.cacheWrite1h.ratePer1k, false);
-	if (count !== undefined) share.tokens = count;
-	if (per1k !== undefined) share.ratePer1k = per1k;
-	return share;
+	const count = amountOf(share.tokens, true) ?? null;
+	return { count, ratePer1k: amountOf(share.ratePer1k, false) ?? null };
 }
 
 /** What keeps a charge from being added up, by name: "the cache-read rate", "the 1-hour cache-write token count". */
@@ -63,8 +56,8 @@ function missing(charge: Charge, row: LedgerRow): string[] {
 		if (line.count === null) names.push(`the ${tier} token count`);
 		if (line.ratePer1k === null) names.push(`the ${tier} rate`);
 		const share = unusableShare(line, row);
-		if (share !== null && share.tokens === undefined) names.push(`the 1-hour ${tier} token count`);
-		if (share !== null && share.ratePer1k === undefined) names.push(`the 1-hour ${tier} rate`);
+		if (share !== null && share.count === null) names.push(`the 1-hour ${tier} token count`);
+		if (share !== null && share.ratePer1k === null) names.push(`the 1-hour ${tier} rate`);
 	}
 	return names;
 }
@@ -98,34 +91,46 @@ function sumLine(
 	};
 }
 
+/** A row under the tiers: a label across the first three columns and one figure, under the hook that names it. */
+function Foot(props: { label: string; fig: string; value: string }): React.JSX.Element {
+	return (
+		<tr>
+			<th scope="row" colSpan={3}>
+				{props.label}
+			</th>
+			<td>
+				<span data-fig={props.fig}>{props.value}</span>
+			</td>
+		</tr>
+	);
+}
+
+/** One row of tokens, rate and product: a tier, or (`part`) one of the two parts of a cache write under it. */
+function Line(props: {
+	label: string | null;
+	part?: boolean;
+	of: Cells & Partial<Pick<ChargeLine, "utText" | "usdText">>;
+}): React.JSX.Element {
+	const { of } = props;
+	return (
+		<tr className={props.part === true ? "ut-lg-part" : undefined}>
+			<th scope="row">{props.label}</th>
+			<td>{tokens(of.count)}</td>
+			<td>{rate(of.ratePer1k)}</td>
+			<Cost ut={of.utText ?? null} usd={of.usdText ?? null} />
+		</tr>
+	);
+}
+
 function TierRows(props: { line: ChargeLine; row: LedgerRow }): React.JSX.Element {
 	const { line } = props;
 	const share = unusableShare(line, props.row);
 	return (
 		<>
-			<tr>
-				<th scope="row">{line.label}</th>
-				<td>{tokens(line.count)}</td>
-				<td>{rate(line.ratePer1k)}</td>
-				<Cost ut={line.utText} usd={line.usdText} />
-			</tr>
+			<Line label={line.label} of={line} />
 			{line.parts.length > 1 &&
-				line.parts.map((part) => (
-					<tr key={part.label} className="ut-lg-part">
-						<th scope="row">{part.label}</th>
-						<td>{tokens(part.count)}</td>
-						<td>{rate(part.ratePer1k)}</td>
-						<Cost ut={part.utText} usd={part.usdText} />
-					</tr>
-				))}
-			{share !== null && (
-				<tr className="ut-lg-part">
-					<th scope="row">1-hour</th>
-					<td>{tokens(share.tokens)}</td>
-					<td>{rate(share.ratePer1k)}</td>
-					<Cost ut={null} usd={null} />
-				</tr>
-			)}
+				line.parts.map((part) => <Line key={part.label} label={part.label} part of={part} />)}
+			{share !== null && <Line label="1-hour" part of={share} />}
 		</>
 	);
 }
@@ -158,42 +163,22 @@ export function ChargeTable(props: { row: LedgerRow }): React.JSX.Element | null
 				<tfoot>
 					{priced && (
 						<>
-							<tr>
-								<th scope="row" colSpan={3}>
-									Adds up to
-								</th>
-								<td>
-									<span data-fig="ledger.panel-sum-exact">{exactUt(sumText)}</span>
-								</td>
-							</tr>
+							<Foot label="Adds up to" fig="ledger.panel-sum-exact" value={exactUt(sumText)} />
 							{sum?.residue === true && (
-								<tr>
-									<th scope="row" colSpan={3}>
-										Added by floating-point rounding
-									</th>
-									<td>
-										<span data-fig="ledger.panel-residue">{formatUt(1)}</span>
-									</td>
-								</tr>
+								<Foot
+									label="Added by floating-point rounding"
+									fig="ledger.panel-residue"
+									value={formatUt(1)}
+								/>
 							)}
-							<tr>
-								<th scope="row" colSpan={3}>
-									Rounded up to a whole UT (minimum 1)
-								</th>
-								<td>
-									<span data-fig="ledger.panel-sum">{formatUt(computedUt)}</span>
-								</td>
-							</tr>
+							<Foot
+								label="Rounded up to a whole UT (minimum 1)"
+								fig="ledger.panel-sum"
+								value={formatUt(computedUt)}
+							/>
 						</>
 					)}
-					<tr>
-						<th scope="row" colSpan={3}>
-							Charged
-						</th>
-						<td>
-							<span data-fig="ledger.panel-cost">{formatUt(costUt)}</span>
-						</td>
-					</tr>
+					<Foot label="Charged" fig="ledger.panel-cost" value={formatUt(costUt)} />
 				</tfoot>
 			</table>
 			{charge.state === "no-counts" && (

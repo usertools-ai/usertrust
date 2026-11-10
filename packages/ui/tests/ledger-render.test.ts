@@ -45,6 +45,9 @@ beforeAll(async () => {
 	RowPanel = await load("row-panel", "RowPanel");
 });
 
+const appFile = (file: string): string =>
+	readFileSync(join(import.meta.dirname, "..", "src", "app", file), "utf-8");
+
 const RATES = { inputPer1k: 30, outputPer1k: 150, cacheReadPer1k: 3, cacheWritePer1k: 37.5 };
 
 /** 30 + 75 + 6 + 3.75 = 114.75 usertokens, charged as 115. */
@@ -336,10 +339,7 @@ describe("the record panel", () => {
 	});
 
 	it("its keys: Escape is marked as handled, and Up and Down step only from inside the Ledger window", () => {
-		const src = readFileSync(
-			join(import.meta.dirname, "..", "src", "app", "row-panel.tsx"),
-			"utf-8",
-		);
+		const src = appFile("row-panel.tsx");
 		const onEscape = src.slice(src.indexOf('e.key === "Escape"'), src.indexOf('e.key === "Tab"'));
 		expect(onEscape).toContain("e.preventDefault()");
 		const arrows = src.slice(src.indexOf('"ArrowUp"'), src.indexOf('e.key === "Escape"'));
@@ -348,5 +348,35 @@ describe("the record panel", () => {
 		expect(arrows).toContain("e.preventDefault()");
 		expect(arrows).toContain("e.stopPropagation()");
 		expect(arrows).toMatch(/onStep\(e\.key === "ArrowUp" \? -1 : 1\)/);
+	});
+});
+
+describe("the Ledger window's sheet", () => {
+	const css = appFile("windows/ledger/ledger.css").replace(/\/\*[\s\S]*?\*\//g, "");
+	/** The declarations of the first rule with this selector. */
+	const rule = (selector: string): string => {
+		const at = css.indexOf(`${selector} {`);
+		return at < 0 ? "" : css.slice(at, css.indexOf("}", at));
+	};
+
+	it("the floating panel is near-opaque glass with an 18px blur, and slides in over 220ms", () => {
+		const glass = rule(".ut-glass.ut-lg-peek");
+		expect(glass).toContain("color-mix(in srgb, var(--dk-raised) 97%, transparent)");
+		expect(glass).toMatch(/[^-]backdrop-filter: blur\(18px\)/);
+		expect(glass).toContain("animation: ut-lg-peek-in 0.22s cubic-bezier(0.16, 0.84, 0.3, 1) both");
+		expect(css).toMatch(/@keyframes ut-lg-peek-in\s*\{\s*from\s*\{[^}]*translateX\(24px\)/);
+		const reduced = css.slice(css.indexOf("@media (prefers-reduced-motion: reduce)"));
+		expect(reduced).toMatch(/\.ut-glass\.ut-lg-peek\s*\{\s*animation: none/);
+		expect(rule('.ut-lg-peek[data-held="true"] > .ut-insp-in')).toContain("opacity: 0.55");
+	});
+
+	it("every new class has a rule, the figures are right-aligned and tabular, and no colour is written out", () => {
+		const names = "lg-charge lg-sums lg-part lg-src lg-extra lg-unusual lg-share lg-peek chainnote";
+		for (const name of names.split(" ")) {
+			expect(css, name).toMatch(new RegExp(`\\.ut-${name}[^{}]*\\{`));
+		}
+		expect(rule(".ut-lg-sums td")).toContain("text-align: right");
+		expect(rule(".ut-lg-sums td")).toContain("font-variant-numeric: tabular-nums");
+		expect(css).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(/);
 	});
 });
