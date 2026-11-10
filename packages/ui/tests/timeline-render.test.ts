@@ -490,6 +490,34 @@ describe("past budget provenance", () => {
 		expect(fact).toContain(reason);
 		expect(fact).not.toContain("$");
 	});
+
+	it("no figure and no controller's record: the line is the note, and its title says why there is none", () => {
+		// The three sentences the reader of the vault writes for a budget it cannot give.
+		const states = [
+			UNPUBLISHED,
+			{
+				ut: null,
+				source: "unreadable",
+				writtenAt: null,
+				provenance: "unknown: the enforced-budget record could not be read; permission denied",
+			},
+			{
+				ut: null,
+				source: "several",
+				writtenAt: "2026-11-01T10:00:00.000Z",
+				provenance:
+					"unknown: several controllers with different budgets, as of 2026-11-01T10:00:00.000Z",
+			},
+		] as const;
+		for (const state of states) {
+			const html = strip(at({ budget: pastBudget(state) }));
+			const [, title = "", line = ""] =
+				/<span class="ut-why" title="([^"]*)"[^>]*>(.*?)<\/span>/.exec(html) ?? [];
+			expect(text(line)).toBe(NOTE);
+			// The sentence in full, "unknown" included, then the note: the line alone does not say why.
+			expect(text(title)).toBe(`${state.provenance}. ${NOTE}`);
+		}
+	});
 });
 
 describe("the list at a past position before the first row held", () => {

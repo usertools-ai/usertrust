@@ -145,6 +145,23 @@ describe("the Now window, live", () => {
 		);
 	});
 
+	it("the current minute is the minute, whatever the hour: at 12:31:45 the last hour is 11:32 to 12:32", async () => {
+		const minute = NOW_MS + 31 * 60_000;
+		const edge = spend("x", 0, 1_000, { ts: iso(minute - 3_600_000 + 60_000) });
+		const inside = spend("x", 0, 4_000, { ts: iso(minute + 30_000) });
+		// X_NEW and Y_NEW, at 11:02, are an hour and a half back; the records at 11:32:00 and 12:31:30 are in the hour.
+		const rows = [X_NEW, Y_NEW, edge, inside];
+		expect(rateNow(rows, chartWindow("1w", minute + 45_000, null).endMs).ratePerHourUt).toBe(5_000);
+		// The first instant of that minute, the middle of it and its last read the same hour.
+		for (const nowMs of [minute, minute + 45_000, minute + 59_999]) {
+			expect(rateFigure(await renderNow({ rows, nowMs }))).toBe(formatUsdTotal(5_000));
+		}
+		// One millisecond on the minute has turned, and the hour starts at 11:33: the record at 11:32:00 has left it.
+		expect(rateFigure(await renderNow({ rows, nowMs: minute + 60_000 }))).toBe(
+			formatUsdTotal(4_000),
+		);
+	});
+
 	it("the last full read is given in UTC, as every time on the page is", async () => {
 		const summary = dayOneSummary({ verifiedAt: "2026-11-10T14:42:27.000Z" });
 		const integrity = fact(await renderNow({ rows: ROWS, summary }), "Integrity");
