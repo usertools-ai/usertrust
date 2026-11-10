@@ -3,6 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+	BAND_K,
 	BAND_MIN_HISTORY,
 	BAND_WINDOW,
 	exceedRuns,
@@ -22,6 +23,43 @@ describe("usualBand", () => {
 		expect(alternating.hi[BAND_WINDOW]).toBe(30);
 		// 10 - 2 * 10 is below 0: the lower bound is floored at 0.
 		expect(alternating.lo[BAND_WINDOW]).toBe(0);
+	});
+
+	it("puts the lower bound two standard deviations below the mean when that is above 0", () => {
+		// Bucket 24 sees 12 nineties and 12 one-hundred-and-tens: mean 100, variance 10100 - 10000 = 100.
+		const values = [...Array.from({ length: BAND_WINDOW }, (_, i) => (i % 2 === 0 ? 90 : 110)), 0];
+		const b = usualBand(values);
+		expect(b.mid[BAND_WINDOW]).toBe(100);
+		expect(b.hi[BAND_WINDOW]).toBe(120);
+		expect(b.lo[BAND_WINDOW]).toBe(80);
+	});
+
+	it("uses a 24-bucket window, 6 buckets of history and two standard deviations", () => {
+		expect(BAND_WINDOW).toBe(24);
+		expect(BAND_MIN_HISTORY).toBe(6);
+		expect(BAND_K).toBe(2);
+		const b = usualBand(new Array(20).fill(3));
+		expect(b.hi[5]).toBeNaN();
+		expect(b.hi[6]).toBe(3);
+	});
+
+	it("keeps the bounds defined on a flat series whose variance rounds below 0", () => {
+		// On a flat series the mean of the squares minus the square of the mean should be 0, but floating-point
+		// rounding can leave it a hair below 0 (about -2e-16 for 0.7, about -4e-12 for 123.456). The square root of
+		// a negative number is NaN, so the variance is floored at 0 before the root is taken.
+		for (const [v, n] of [
+			[0.7, 7],
+			[123.456, 25],
+		] as const) {
+			const b = usualBand(new Array(n).fill(v));
+			const k = n - 1;
+			expect(Number.isFinite(b.mid[k])).toBe(true);
+			expect(Number.isFinite(b.hi[k])).toBe(true);
+			expect(Number.isFinite(b.lo[k])).toBe(true);
+			expect(b.mid[k] as number).toBeCloseTo(v, 9);
+			expect(b.hi[k] as number).toBeCloseTo(b.mid[k] as number, 9);
+			expect(b.lo[k] as number).toBeCloseTo(b.mid[k] as number, 9);
+		}
 	});
 
 	it("leaves the bucket itself out of its own history, and a big bucket moves the next one", () => {
