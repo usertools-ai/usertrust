@@ -108,6 +108,19 @@ describe("unusualNote", () => {
 		);
 	});
 
+	it("the usual is rounded to the nearest call, not up", () => {
+		const hour = inHour(10);
+		// 202 in 168 hours is 1.2 an hour.
+		const low = unusualNote([...before(202), ...hour], first(hour));
+		expect(low?.usual).toBe(1);
+		expect(low?.text).toBe("Unusual: 10 calls from a to m in this hour (usual 1)");
+		// 251 is 1.494 an hour; 252 is exactly 1.5.
+		expect(unusualNote([...before(251), ...hour], first(hour))?.usual).toBe(1);
+		const half = unusualNote([...before(252), ...hour], first(hour));
+		expect(half?.usual).toBe(2);
+		expect(half?.text).toBe("Unusual: 10 calls from a to m in this hour (usual 2)");
+	});
+
 	it("a busier usual raises the bar and is printed rounded", () => {
 		// 5 an hour before: 15 calls is 3 times that, 14 is not.
 		const usual5 = before(840);
