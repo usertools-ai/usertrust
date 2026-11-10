@@ -108,6 +108,17 @@ describe("unusualNote", () => {
 		);
 	});
 
+	it("the bar is 3 times the usual as counted, not 3 times the rounded figure printed", () => {
+		// 571 in 168 hours is 3.4 an hour, printed as 3: the bar is 10.2 calls, not 9.
+		const week = before(571);
+		const ten = inHour(10);
+		expect(unusualNote([...week, ...ten], first(ten))).toBeNull();
+		const eleven = inHour(11);
+		const note = unusualNote([...week, ...eleven], first(eleven));
+		expect(note?.usual).toBe(3);
+		expect(note?.text).toBe("Unusual: 11 calls from a to m in this hour (usual 3)");
+	});
+
 	it("the usual is rounded to the nearest call, not up", () => {
 		const hour = inHour(10);
 		// 202 in 168 hours is 1.2 an hour.

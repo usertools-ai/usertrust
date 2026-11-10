@@ -23,7 +23,11 @@ export const UNUSUAL_FACTOR = 3;
 export interface UnusualNote {
 	/** The calls in the record's hour by its actor to its model. */
 	calls: number;
-	/** The usual calls an hour over the week before, rounded, and never below 1: the figure the test used. */
+	/**
+	 * The usual calls an hour over the week before, rounded to the nearest call and never below 1: the figure
+	 * printed. The hour is held against 3 times the usual before rounding, so with a usual of 3.4 (printed 3) 10
+	 * calls say nothing and 11 are a note.
+	 */
 	usual: number;
 	/** The sentence shown. */
 	text: string;
