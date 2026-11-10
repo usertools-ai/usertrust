@@ -4,12 +4,14 @@
 /* The Now window's rules (prefix ut-nw-). Scoped overrides of the older classes use [data-win="now"]. */
 
 @layer components {
-	/* The window's data: as tall as what it holds, so the desk can size its row to it. */
+	/* The window's data: as tall as what it holds, so the desk can size its row to it. Its width is the one the
+	   rate's narrow form is asked of (below): the window's own, whatever the screen's. */
 	.ut-nw {
 		flex: 0 0 auto;
 		display: flex;
 		flex-direction: column;
 		min-width: 0;
+		container: ut-nw / inline-size;
 	}
 
 	/* The one data-change fade: the container, when the filters change. Two identical fades take turns, so a change
@@ -107,7 +109,8 @@
 		display: flex;
 	}
 
-	/* Rate now: a fact of the grid, its words on the left and the past 24 hours on the right. */
+	/* Rate now: a fact of the grid. Its heading runs the fact's width; under it the figure and its words are on the
+	   left and the past 24 hours on the right. */
 	[data-win="now"] .ut-nw-rate {
 		display: grid;
 		grid-template-columns: minmax(0, 1fr) auto;
@@ -115,13 +118,40 @@
 		column-gap: 8px;
 	}
 
-	/* The line's box, the same whether it holds the line or keeps its place before the records load. */
+	[data-win="now"] .ut-nw-rate > b {
+		grid-column: 1 / -1;
+	}
+
+	/* The line's box, the same whether it holds the line or keeps its place before the records load, and the same
+	   beside the figure as under it: its size is set here and nowhere else. */
 	[data-win="now"] .ut-nw-rate > .ut-nw-spark {
 		grid-column: 2;
-		grid-row: 1 / span 3;
+		grid-row: 2 / span 2;
 		align-self: center;
 		width: 96px;
 		min-height: 32px;
+	}
+
+	/* A narrow window: the line goes under the words, and the figure has the fact's whole width. A window 444px wide
+	   has two facts' columns of 195px; beside the 96px line and its 8px gap that leaves 91px, the least in which a
+	   figure up to $999.99/h is drawn at its own size. Narrower than that, the fact is one column. Its heading may
+	   then take two lines ("Rate now · filtered"), and holds two always, so a filter moves nothing. */
+	@container ut-nw (max-width: 444px) {
+		[data-win="now"] .ut-nw-rate {
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		[data-win="now"] .ut-facts .ut-nw-rate > b {
+			min-height: 22px;
+			align-items: flex-start;
+			white-space: normal;
+		}
+
+		[data-win="now"] .ut-nw-rate > .ut-nw-spark {
+			grid-column: 1;
+			grid-row: auto;
+			justify-self: start;
+		}
 	}
 
 	.ut-nw-words {

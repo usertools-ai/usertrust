@@ -2,19 +2,25 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * Rate now as it is drawn: the heading that never changes, the figure with its hook, the words, and the 24 hour line
- * with its colour, its shaded usual range (small form only) and the dot on its last hour.
+ * Rate now as it is drawn: the heading that never names a position and says when the rate is a filter's, the figure
+ * with its hook, shrunk to fit and given whole in its title, the words, and the 24 hour line with its colour, its
+ * shaded usual range (small form only) and the dot on its last hour.
  */
 
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, describe, expect, it } from "vitest";
-import { formatUsdTotal } from "../src/shared/format.js";
+import { formatUsd, formatUsdTotal } from "../src/shared/format.js";
 import { NOW_COPY } from "../src/shared/now-copy.js";
 import { RATE_HOURS, type RateNowView } from "../src/shared/now-rate.js";
 import { appExport, type Component } from "./helpers/day-one.js";
 
-let RateNow: Component<{ view: RateNowView; color: string | null; filled: boolean }>;
+let RateNow: Component<{
+	view: RateNowView | null;
+	color: string | null;
+	filled: boolean;
+	filtered?: boolean;
+}>;
 beforeAll(async () => {
 	RateNow = await appExport("windows/now/rate-now", "RateNow");
 });
@@ -81,12 +87,32 @@ function points(html: string): [number, number][] {
 }
 
 describe("Rate now", () => {
-	it("the heading is always Rate now", () => {
+	it("the heading is Rate now, whatever the rate reads as", () => {
 		for (const v of [view(), view({ known: false }), view({ unusual: true })]) {
 			const html = draw(v);
 			expect(html).toContain("<b>Rate now</b>");
 			expect(text(html)).not.toContain("Rate at this point");
+			expect(text(html)).not.toContain("filtered");
 		}
+	});
+
+	it("under a filter the heading says the rate is the filtered records', before there is a rate too", () => {
+		const of = (v: RateNowView | null, filtered?: boolean): string =>
+			renderToStaticMarkup(
+				createElement(RateNow, {
+					view: v,
+					color: null,
+					filled: false,
+					...(filtered === undefined ? {} : { filtered }),
+				}),
+			);
+		for (const v of [view(), view({ known: false }), null]) {
+			expect(of(v, true)).toContain("<b>Rate now · filtered</b>");
+			expect(of(v, true)).not.toContain("<b>Rate now</b>");
+			expect(of(v, false)).toContain("<b>Rate now</b>");
+			expect(of(v)).toBe(of(v, false));
+		}
+		expect(NOW_COPY.rateHeadingFiltered).toBe("Rate now · filtered");
 	});
 
 	it("is a fact of the grid, marked unusual or not", () => {
@@ -98,10 +124,25 @@ describe("Rate now", () => {
 
 	it("the figure is the last hour's spend per hour, with its hook", () => {
 		const html = draw(view({ tail: [9_000, 1_000] }));
+		const figure = formatUsdTotal(1_000);
 		expect(html).toContain(
-			`<span class="v" data-fig="now.rate">${formatUsdTotal(1_000)}<small>/h</small></span>`,
+			`<span class="v" data-fig="now.rate" title="${formatUsd(1_000)}/h"><span class="ut-fit" style="--n:${figure.length + 2}">${figure}<small>/h</small></span></span>`,
 		);
 		expect(text(html)).not.toContain(formatUsdTotal(9_000));
+	});
+
+	it("the figure is never cut: it shrinks to fit by its length with its /h, and its title gives it in full", () => {
+		for (const ut of [0, 1_234_500, 123_456_780_000]) {
+			const html = draw(view({ tail: [ut] }));
+			const figure = formatUsdTotal(ut);
+			const [, title = "", n = ""] =
+				/data-fig="now\.rate" title="([^"]*)"><span class="ut-fit" style="--n:(\d+)">/.exec(html) ??
+				[];
+			expect(title).toBe(`${formatUsd(ut)}/h`);
+			expect(Number(n)).toBe(`${figure}/h`.length);
+		}
+		// The longest figure counts the most characters, so it is drawn the smallest.
+		expect(formatUsdTotal(123_456_780_000).length).toBeGreaterThan(formatUsdTotal(0).length);
 	});
 
 	it("a steady rate reads normal, with what it is read against in a tooltip", () => {

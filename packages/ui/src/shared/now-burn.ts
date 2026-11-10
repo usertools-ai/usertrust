@@ -15,7 +15,7 @@ import { isHeaderSpend } from "./aggregate.js";
 import type { SummaryPayload } from "./api.js";
 import { budgetAsOf, budgetDisplay } from "./budget-display.js";
 import { formatUsdTotal, formatUtc } from "./format.js";
-import { NOW_COPY, weekPaceWords, youngPaceWords } from "./now-copy.js";
+import { NOW_COPY, weekPaceWords, wholeVaultProjection, youngPaceWords } from "./now-copy.js";
 import { HOUR_MS } from "./now-rate.js";
 import type { LedgerRow } from "./rows.js";
 import { bucketTotals } from "./spend-series.js";
@@ -97,11 +97,15 @@ export function monthBurn(
  * When the budget is reached at the past week's pace, as a sentence and its tooltip. `rows` are the whole vault's: a
  * whole-vault budget is set against a whole-vault pace. Null when there is no summary, when the budget is not known
  * (the Budget fact gives the reason), or when the day is past what a date can hold.
+ *
+ * `filtered`: the figures beside the sentence are a filter's. The projection is not, and its opening then says it
+ * is the whole vault's.
  */
 export function projectionOf(
 	summary: SummaryPayload | null,
 	rows: readonly LedgerRow[],
 	endMs: number,
+	filtered = false,
 ): { text: string; title: string } | null {
 	if (summary === null || budgetDisplay(summary).kind === "unknown") return null;
 	const left = summary.remainingUt as number;
@@ -112,8 +116,12 @@ export function projectionOf(
 	const assumes = young ? youngPaceWords(perDay, ageDays) : weekPaceWords(perDay);
 	// A controller's record is named by its age: its provenance sentence says more than an old record can.
 	const title = `A projection, not a forecast: it assumes ${assumes} holds. Budget: ${budgetAsOf(summary, endMs).text}`;
-	if (left <= 0) return { text: NOW_COPY.projectionUsed, title };
-	if (!(paceUtPerDay > 0)) return { text: NOW_COPY.projectionIdle, title };
+	const say = (sentence: string): { text: string; title: string } => ({
+		text: filtered ? wholeVaultProjection(sentence) : sentence,
+		title,
+	});
+	if (left <= 0) return say(NOW_COPY.projectionUsed);
+	if (!(paceUtPerDay > 0)) return say(NOW_COPY.projectionIdle);
 	// Under a day of history is too little to date a budget by: no line, as with a budget that is not known.
 	if (ageDays < 1) return null;
 	const daysLeft = left / paceUtPerDay;
@@ -122,8 +130,7 @@ export function projectionOf(
 	const iso = when.toISOString();
 	// A month and a day name one date only within a year; further out the year is printed.
 	const date = daysLeft < 365 ? formatUtc(iso).slice(0, 5) : iso.slice(0, iso.indexOf("T"));
-	return {
-		text: `Projection: reaches ${formatUsdTotal(summary.budget as number)} on ${date} at ${young ? NOW_COPY.projectionPaceYoung : NOW_COPY.projectionPaceWeek}`,
-		title,
-	};
+	return say(
+		`${NOW_COPY.projectionLead} reaches ${formatUsdTotal(summary.budget as number)} on ${date} at ${young ? NOW_COPY.projectionPaceYoung : NOW_COPY.projectionPaceWeek}`,
+	);
 }

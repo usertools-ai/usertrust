@@ -301,6 +301,37 @@ describe("projectionOf", () => {
 		expect(projectionOf(summary({ remainingUt: 1e18 }), week(2400), END)).toBeNull();
 	});
 
+	it("beside a filter's figures each sentence says it is the whole vault's, and nothing else of it changes", () => {
+		const young = [llm(END - 3 * DAY, 3600), llm(END - HOUR, 3600)];
+		const cases: [ReturnType<typeof summary>, ReturnType<typeof week>][] = [
+			[summary(), week(2400)],
+			[summary({ remainingUt: 24_000 }), young],
+			[summary({ remainingUt: 0 }), week(2400)],
+			[summary(), []],
+		];
+		for (const [s, rows] of cases) {
+			const plain = projectionOf(s, rows, END);
+			expect(plain?.text.startsWith("Projection: ")).toBe(true);
+			expect(projectionOf(s, rows, END, true)).toStrictEqual({
+				text: `Projection, whole vault: ${plain?.text.slice("Projection: ".length)}`,
+				title: plain?.title,
+			});
+			expect(projectionOf(s, rows, END, false)).toStrictEqual(plain);
+		}
+		expect(projectionOf(summary(), week(2400), END, true)?.text).toBe(
+			"Projection, whole vault: reaches $10.00 on 11-18 at the past week's pace",
+		);
+		expect(projectionOf(summary({ remainingUt: 0 }), week(2400), END, true)?.text).toBe(
+			"Projection, whole vault: the budget is already used",
+		);
+		expect(projectionOf(summary(), [], END, true)?.text).toBe(
+			"Projection, whole vault: no spend in the past week, so no date",
+		);
+		// Where there is no line to print, a filter makes none.
+		expect(projectionOf(null, week(2400), END, true)).toBeNull();
+		expect(projectionOf(summary(), [llm(END - HOUR, 2400)], END, true)).toBeNull();
+	});
+
 	it("no sentence promises or claims a check", () => {
 		const all = [
 			projectionOf(summary(), week(2400), END),

@@ -8,6 +8,9 @@
  * summary, or a past position's answer). The rate, its line, the projection and the last record are read NOW: from
  * every row the page holds, under the filters the list was drawn with, to the end of the current minute. A pin does
  * not cut them short, so the window has no "up to this point" of its own: the facts that are cut say so themselves.
+ *
+ * Under a filter, Spend is the sum of the records the Ledger lists, and the rate and the last record say they are
+ * filtered; the projection stays the whole vault's and says that.
  */
 
 import { memo, useMemo, useState } from "react";
@@ -38,10 +41,11 @@ function useChangeMark(signature: string): string {
 }
 
 function NowSmall(): React.JSX.Element {
-	const { rows, list, summary, live, at, nowMs } = useDeskData();
+	const { rows, list, summary, live, at, headAt, nowMs } = useDeskData();
 	const { range } = useRange();
 	const tint = useCategoryTint();
 	const filters = list.filters;
+	const filtering = isFiltering(filters);
 	// The chart's end, the end of the current minute whatever is pinned: it changes once a minute, not once a tick.
 	const minuteMs = Math.floor(nowMs / MINUTE_MS) * MINUTE_MS;
 	const endMs = useMemo(() => chartWindowOf(range, minuteMs, null).endMs, [range, minuteMs]);
@@ -51,26 +55,34 @@ function NowSmall(): React.JSX.Element {
 	// A whole-vault budget against a whole-vault pace: every row, whatever is filtered. Live only: a projection is
 	// of the vault now, not of a past position.
 	const projection = useMemo(
-		() => (at === null ? projectionOf(summary, rows, endMs) : null),
-		[at, summary, rows, endMs],
+		() => (at === null ? projectionOf(summary, rows, endMs, filtering) : null),
+		[at, summary, rows, endMs, filtering],
 	);
-	// Under a filter Spend is those records' sum, cut at the position, and its label says both.
-	const spentOverride = useMemo(
-		() =>
-			isFiltering(filters)
-				? {
-						ut: spendUpTo(chartRows, at === null ? null : at.pos),
-						label: at === null ? NOW_COPY.scopeFiltered : NOW_COPY.scopeFilteredPast,
-					}
-				: null,
-		[filters, chartRows, at],
-	);
+	// Under a filter Spend is the sum of the records the Ledger lists (`list.filtered`). At a position those are
+	// the list's own cut: the rows up to it, each with the status it had there, so a call whose status has changed
+	// since counts as the Ledger shows it. The label is the list's too: its position, and, when the list does not
+	// hold every record of the vault, that the sum is of the rows held. While the list waits for a point's own
+	// records it holds none: the vault's figure at the position stays, under its own label.
+	const cut = summary?.truncated === true;
+	const spentOverride = useMemo(() => {
+		if (!filtering || list.reloading) return null;
+		const label =
+			list.at === null
+				? cut
+					? NOW_COPY.scopeFilteredHeld
+					: NOW_COPY.scopeFiltered
+				: cut
+					? NOW_COPY.scopeFilteredHeldPast
+					: NOW_COPY.scopeFilteredPast;
+		return { ut: spendUpTo(list.filtered, null), label };
+	}, [filtering, list, cut]);
 	// Until the records have loaded there is no rate to state: a figure read from no rows would be a claim. Each of
 	// the three is then given nothing, and holds its box empty, so the first load moves nothing.
 	const loaded = list.phase === "loaded";
 	return (
 		<>
-			<SummaryStrip part="head" summary={summary} live={live} at={at} />
+			{/* The as-at line follows the header's position: a previewed one while the pointer is on the chart. */}
+			<SummaryStrip part="head" summary={summary} live={live} at={headAt} />
 			<SummaryStrip
 				part="facts"
 				summary={summary}
@@ -79,12 +91,12 @@ function NowSmall(): React.JSX.Element {
 				{...(spentOverride === null ? {} : { spentOverride })}
 				budgetNote={
 					<>
-						<RateNow view={loaded ? rate : null} color={tint} filled={false} />
+						<RateNow view={loaded ? rate : null} color={tint} filled={false} filtered={filtering} />
 						<ProjectionLine projection={loaded ? projection : null} />
 					</>
 				}
 			/>
-			<LastRecord row={loaded ? last : null} endMs={endMs} />
+			<LastRecord row={loaded ? last : null} endMs={endMs} filtered={filtering} />
 		</>
 	);
 }

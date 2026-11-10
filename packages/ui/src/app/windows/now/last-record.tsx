@@ -4,10 +4,11 @@
 /**
  * The newest record on one line: when, its model (or its kind, for a record with none), who, and its cost when it has
  * one. Props only. With no record to show, the line's place is held empty and unseen, so nothing moves when one
- * arrives.
+ * arrives. Under a filter it is the newest of the filtered records, and its label says so.
  */
 
 import { compactActor, formatUsdTotal, formatUtc } from "../../../shared/format.js";
+import { NOW_COPY } from "../../../shared/now-copy.js";
 import type { LedgerRow } from "../../../shared/rows.js";
 
 const DAY_MS = 86_400_000;
@@ -16,6 +17,8 @@ export function LastRecord(props: {
 	row: LedgerRow | null;
 	/** The end of the current minute: the day the line is read on. */
 	endMs: number;
+	/** The record is the newest under a filter, not the vault's newest. */
+	filtered?: boolean;
 }): React.JSX.Element {
 	const { row } = props;
 	if (row === null)
@@ -32,7 +35,7 @@ export function LastRecord(props: {
 	const cost = row.costUt === undefined ? "" : ` · ${formatUsdTotal(row.costUt)}`;
 	return (
 		<p className="ut-nw-last" title={`record ${row.pos + 1} · ${row.ts}`}>
-			<b>Last record</b>
+			<b>{props.filtered === true ? NOW_COPY.lastRecordFiltered : NOW_COPY.lastRecord}</b>
 			{` ${when} · ${row.model ?? row.kind} · ${compactActor(row.actor)}${cost}`}
 		</p>
 	);

@@ -2,9 +2,10 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * The summary strip drawn part by part. The page bar keeps the chain alarm (a broken chain shows whatever else is on
- * screen); the as-at line and the Window notice are a part of their own, `head`; the facts take a note after Budget
- * and a Spend figure of another scope, which is then labelled as that scope.
+ * The summary strip drawn part by part. The page bar keeps the chain alarm and the Window notice (a broken chain, and
+ * a list that does not hold every record, show whatever else is on screen); the as-at line is a part of its own,
+ * `head`; the facts take a note after Budget and a Spend figure of another scope, which is then labelled as that
+ * scope.
  */
 
 import { createHash } from "node:crypto";
@@ -127,14 +128,33 @@ describe("the page bar", () => {
 		}
 	});
 
-	it("has no as-at line and no Window notice: they are the head's", () => {
+	it("has no as-at line: it is the head's", () => {
 		const html = strip({ summary: TRUNCATED, at: at(), part: "bar" });
 		expect(text(html)).not.toContain("As recorded at");
 		expect(html).not.toContain("ut-asat");
-		expect(html).not.toContain("ut-notice");
 		expect(html).not.toContain("ut-facts");
 		expect(strip({ summary: null, part: "bar" })).not.toContain("ut-asat");
 		expect(strip({ summary: null, part: "bar" })).toContain('class="ut-top"');
+	});
+
+	it("carries the Window notice, once, after the alarm: the live one, or the position's own", () => {
+		const live = strip({ summary: TRUNCATED, part: "bar" });
+		expect(live).toContain('<div class="ut-notice" role="status"><b>Window</b>');
+		expect(live.split("ut-notice").length - 1).toBe(1);
+		expect(text(live)).toContain("Showing the newest 50 of 100 events");
+		const past = text(
+			strip({ summary: TRUNCATED, at: at({ pos: 10, windowStartPos: 50 }), part: "bar" }),
+		);
+		expect(past).toContain("The list holds records from position 51");
+		expect(past).not.toContain("Showing the newest");
+		expect(past).not.toContain("As recorded at");
+		// A vault held whole has none, and nor does one whose summary has not landed.
+		expect(strip({ part: "bar" })).not.toContain("ut-notice");
+		expect(strip({ summary: null, part: "bar" })).not.toContain("ut-notice");
+		// A broken chain's alarm comes first.
+		const both = strip({ summary: { ...BROKEN, truncated: true, rowCount: 50 }, part: "bar" });
+		expect(both.indexOf('role="alert"')).toBeGreaterThan(0);
+		expect(both.indexOf("ut-notice")).toBeGreaterThan(both.indexOf('role="alert"'));
 	});
 });
 
@@ -153,16 +173,18 @@ describe("the head", () => {
 		expect(strip({ summary: null, at: at(), part: "head" })).toBe(slot);
 	});
 
-	it("carries the Window notice: the live one, or the position's own", () => {
+	it("is the as-at line alone: the Window notice is the bar's, in a vault the list does not hold whole too", () => {
 		const live = strip({ summary: TRUNCATED, part: "head" });
-		expect(live).toContain('<div class="ut-notice" role="status">');
-		expect(text(live)).toContain("Showing the newest 50 of 100 events");
-		const past = text(
-			strip({ summary: TRUNCATED, at: at({ pos: 10, windowStartPos: 50 }), part: "head" }),
-		);
-		expect(past).toContain("The list holds records from position 51");
-		expect(past).not.toContain("Showing the newest");
-		expect(strip({ part: "head" })).not.toContain("ut-notice");
+		expect(live).toBe('<p class="ut-asat" data-live="true" aria-hidden="true">\u00a0</p>');
+		const past = strip({
+			summary: TRUNCATED,
+			at: at({ pos: 10, windowStartPos: 50 }),
+			part: "head",
+		});
+		expect(past).not.toContain("ut-notice");
+		expect(text(past)).not.toContain("The list holds records");
+		expect(text(past)).toContain("As recorded at");
+		expect(past).toMatch(/^<p class="ut-asat" data-live="false">[^<]*<\/p>$/);
 	});
 
 	it("has no page bar, no alarm and no facts", () => {
@@ -192,17 +214,26 @@ describe("all", () => {
 		["a truncated vault", { summary: TRUNCATED, at: at({ pos: 10, windowStartPos: 50 }) }],
 		["no summary yet", { summary: null }],
 	];
-	it.each(cases)("%s: is the bar, then the head, then the facts", (_name, over) => {
-		const all = strip({ ...over, part: "all" });
-		expect(all).toBe(strip(over));
-		expect(noIds(all)).toBe(
-			noIds(
-				strip({ ...over, part: "bar" }) +
-					strip({ ...over, part: "head" }) +
-					strip({ ...over, part: "facts" }),
-			),
-		);
-	});
+	it.each(cases)(
+		"%s: is the bar, then the head, then the facts, with the Window notice after the as-at line as it always was",
+		(_name, over) => {
+			const all = strip({ ...over, part: "all" });
+			expect(all).toBe(strip(over));
+			// Part by part the notice is the bar's; drawn whole, the strip keeps it where it was, after the as-at line.
+			const bar = strip({ ...over, part: "bar" });
+			const notice = /<div class="ut-notice" role="status">.*?<\/div>/.exec(bar)?.[0] ?? "";
+			expect(noIds(all)).toBe(
+				noIds(
+					bar.replace(notice, "") +
+						strip({ ...over, part: "head" }) +
+						notice +
+						strip({ ...over, part: "facts" }),
+				),
+			);
+			expect(notice === "").toBe(over.summary !== TRUNCATED);
+			expect(all.split("ut-notice").length - 1).toBe(over.summary === TRUNCATED ? 1 : 0);
+		},
+	);
 
 	// The markup as it was before the head became a part of its own, kept as a digest. What has changed since is
 	// undone before the comparison, so everything else is held byte for byte: the Budget fact's scope line is taken

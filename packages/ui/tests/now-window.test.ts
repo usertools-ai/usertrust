@@ -12,10 +12,13 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { chartWindow } from "../src/shared/chart-window.js";
 import { rankColors } from "../src/shared/colors.js";
-import { EMPTY_FILTERS, type FilterState } from "../src/shared/filters.js";
+import { DESK_GAP, HOME } from "../src/shared/desk-layout.js";
+import { applyFilters, EMPTY_FILTERS, type FilterState } from "../src/shared/filters.js";
 import { formatUsd, formatUsdTotal, formatUt } from "../src/shared/format.js";
+import { listView } from "../src/shared/list-view.js";
 import { projectionOf } from "../src/shared/now-burn.js";
 import { NOW_COPY } from "../src/shared/now-copy.js";
+import { spendUpTo } from "../src/shared/now-lists.js";
 import { rateNow } from "../src/shared/now-rate.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 import { allCss } from "./helpers/css.js";
@@ -25,7 +28,7 @@ import { NOW_MS, spend, text } from "./helpers/share.js";
 
 const END = chartWindow("1w", NOW_MS, null).endMs;
 const iso = (ms: number): string => new Date(ms).toISOString();
-const only = (field: "actors" | "providers", ...values: string[]): FilterState => ({
+const only = (field: "actors" | "providers" | "statuses", ...values: string[]): FilterState => ({
 	...EMPTY_FILTERS,
 	[field]: values,
 });
@@ -50,7 +53,13 @@ function fact(html: string, heading: string): string {
 	);
 }
 const rateFigure = (html: string): string =>
-	/<span class="v" data-fig="now\.rate">(.*?)<small>/.exec(html)?.[1] ?? "";
+	/<span class="v" data-fig="now\.rate"[^>]*><span class="ut-fit"[^>]*>(.*?)<small>/.exec(
+		html,
+	)?.[1] ?? "";
+/** The line under the Spend figure that says what the figure is the sum of. */
+const spendScope = (html: string): string =>
+	/<span class="ut-sub" title="([^"]*)">/.exec(fact(html, "Spend"))?.[1] ?? "";
+const asAtLine = (html: string): string => /<p class="ut-asat"[^>]*>.*?<\/p>/.exec(html)?.[0] ?? "";
 const lastLine = (html: string): string =>
 	/<p class="ut-nw-last"[^>]*>.*?<\/p>/.exec(html)?.[0] ?? "";
 const projLine = (html: string): string =>
@@ -121,6 +130,26 @@ describe("the Now window, live", () => {
 		);
 	});
 
+	it("the one use of the word held is the rows held, said once, of a filtered sum in a vault not all in the list", async () => {
+		const cut = dayOneSummary({ truncated: true, rowCount: 4 });
+		const y = only("actors", "y");
+		const states: [NowOver, number][] = [
+			[{ rows: ROWS }, 0],
+			[{ rows: ROWS, filters: y }, 0],
+			[{ rows: ROWS, summary: cut }, 0],
+			[{ rows: ROWS, summary: cut, filters: y }, 1],
+			[{ rows: ROWS, summary: cut, filters: y, at: atOf(Y_MID, 12_000) }, 1],
+		];
+		for (const [over, times] of states) {
+			const said = text(await renderNow(over));
+			expect(said.split("rows held only").length - 1).toBe(times);
+			// Nothing else is held: not a figure, not a record, not a budget.
+			expect(said.replaceAll("rows held only", "")).not.toMatch(
+				/this month|\bverified\b|\bheld\b|runaway|anomaly|\bloop\b|Rate at this point/i,
+			);
+		}
+	});
+
 	it("the rate is the last hour of every row, on the small line with its usual range", async () => {
 		const html = await renderNow({ rows: ROWS });
 		const view = rateNow(ROWS, END);
@@ -149,7 +178,7 @@ describe("the Now window, live", () => {
 		const minute = NOW_MS + 31 * 60_000;
 		const edge = spend("x", 0, 1_000, { ts: iso(minute - 3_600_000 + 60_000) });
 		const inside = spend("x", 0, 4_000, { ts: iso(minute + 30_000) });
-		// X_NEW and Y_NEW, at 11:02, are an hour and a half back; the records at 11:32:00 and 12:31:30 are in the hour.
+		// X_NEW and Y_NEW, at 11:01, are an hour and a half back; the records at 11:32:00 and 12:31:30 are in the hour.
 		const rows = [X_NEW, Y_NEW, edge, inside];
 		expect(rateNow(rows, chartWindow("1w", minute + 45_000, null).endMs).ratePerHourUt).toBe(5_000);
 		// The first instant of that minute, the middle of it and its last read the same hour.
@@ -188,11 +217,15 @@ describe("the Now window, live", () => {
 		expect(projLine(html)).toBe(
 			`<p class="ut-nw-proj" title="${escaped(p?.title ?? "")}">${escaped(p?.text ?? "")}</p>`,
 		);
-		// A filter narrows the rate, never the pace the whole vault's budget is set against.
+		// A filter narrows the rate, never the pace the whole vault's budget is set against: the date and the pace are
+		// the unfiltered ones, and the sentence says whose they are.
 		const y = ROWS.filter((r) => r.actor === "y");
 		expect(projectionOf(SUMMARY, y, END)?.text).not.toBe(p?.text);
+		const whole = projectionOf(SUMMARY, ROWS, END, true);
+		expect(whole?.text).toBe(p?.text.replace("Projection:", "Projection, whole vault:"));
+		expect(whole?.text.startsWith("Projection, whole vault: reaches ")).toBe(true);
 		expect(projLine(await renderNow({ rows: ROWS, filters: only("actors", "y") }))).toBe(
-			projLine(html),
+			`<p class="ut-nw-proj" title="${escaped(p?.title ?? "")}">${escaped(whole?.text ?? "")}</p>`,
 		);
 	});
 
@@ -200,6 +233,14 @@ describe("the Now window, live", () => {
 		const used = dayOneSummary({ spentUt: 1_200_000, remainingUt: -200_000 });
 		expect(text(await renderNow({ rows: ROWS, summary: used }))).toContain(NOW_COPY.projectionUsed);
 		expect(text(await renderNow({ rows: [] }))).toContain(NOW_COPY.projectionIdle);
+		// Under a filter each says it is the whole vault's.
+		const y = only("actors", "y");
+		expect(text(projLine(await renderNow({ rows: ROWS, summary: used, filters: y })))).toBe(
+			"Projection, whole vault: the budget is already used",
+		);
+		expect(text(projLine(await renderNow({ rows: [], filters: y })))).toBe(
+			"Projection, whole vault: no spend in the past week, so no date",
+		);
 		const unknown = dayOneSummary({ budget: null, remainingUt: null });
 		const html = await renderNow({ rows: ROWS, summary: unknown });
 		expect(projLine(html)).toBe(HELD_PROJ);
@@ -316,6 +357,32 @@ describe("the Now window at a past position", () => {
 	});
 });
 
+describe("the Now window's as-at line", () => {
+	it("follows the header's position: a previewed one, while the facts stay at the committed one", async () => {
+		const committed = atOf(Y_MID, 12_000);
+		const preview = atOf(X_OLD, 5_000);
+		const atPreview = asAtLine(await renderNow({ rows: ROWS, at: preview }));
+		const atCommitted = asAtLine(await renderNow({ rows: ROWS, at: committed }));
+		expect(text(atPreview)).toContain("As recorded at");
+		expect(atPreview).not.toBe(atCommitted);
+		const html = await renderNow({ rows: ROWS, at: committed, headAt: preview });
+		expect(asAtLine(html)).toBe(atPreview);
+		// The facts are not the header's: they stay where the view is.
+		expect(fact(html, "Spend")).toContain(`title="${formatUsd(12_000)}"`);
+		// A preview over the live view: the line says where the header is, the facts stay live.
+		const live = await renderNow({ rows: ROWS, headAt: preview });
+		expect(asAtLine(live)).toBe(atPreview);
+		expect(text(fact(live, "Spend"))).toContain("llm calls · whole vault");
+		// With no preview the header is back at the committed position, or live.
+		expect(asAtLine(await renderNow({ rows: ROWS, at: committed, headAt: committed }))).toBe(
+			atCommitted,
+		);
+		expect(asAtLine(await renderNow({ rows: ROWS, at: committed, headAt: null }))).toContain(
+			'data-live="true"',
+		);
+	});
+});
+
 describe("the Now window's budget at a past position", () => {
 	const provenance = "from usertrust.config.json; not confirmed as enforced";
 	const note = "budget history starts with the first budget record; this is today's budget";
@@ -369,6 +436,79 @@ describe("the Now window under a filter", () => {
 		expect(rateFigure(html)).toBe(formatUsdTotal(3_000));
 	});
 
+	it("at a position the sum is of the records the Ledger lists there, each with the status it had then", async () => {
+		// Four calls in the last hour. The first was settled at the position and has failed since; the second had no
+		// verdict there and is settled now.
+		const changed = spend("x", 167, 4_000, { status: "failed" });
+		const since = spend("x", 167, 1_000, { status: "settled" });
+		const pin = spend("x", 167, 2_000, { status: "settled" });
+		const after = spend("x", 167, 8_000, { status: "settled" });
+		const rows = [changed, since, pin, after];
+		const filters = only("statuses", "settled");
+		const at = atOf(pin, 99_000, {
+			statusAt: { [changed.hash]: "settled", [since.hash]: "unknown" },
+		});
+		// The Ledger's own list at the position, from the page's helper.
+		const listed = listView({ rows, at, filters, phase: "loaded", summary: SUMMARY }).filtered;
+		expect(listed.map((r) => r.pos)).toEqual([changed.pos, pin.pos]);
+		const want = spendUpTo(listed, null);
+		expect(want).toBe(6_000);
+		const html = await renderNow({ rows, filters, at });
+		expect(fact(html, "Spend")).toContain(`title="${formatUsd(want)}"`);
+		expect(text(fact(html, "Spend"))).toContain(formatUt(want));
+		expect(spendScope(html)).toBe(NOW_COPY.scopeFilteredPast);
+		// Read with today's statuses the sum to the position is another: the call settled since is counted, the one
+		// that has failed since is dropped.
+		expect(spendUpTo(applyFilters(rows, filters), pin.pos)).toBe(3_000);
+		// The rate and the last record read now, with today's statuses: the three calls settled today.
+		expect(rateFigure(html)).toBe(formatUsdTotal(11_000));
+		expect(lastLine(html)).toContain(`title="record ${after.pos + 1} `);
+	});
+
+	it("while the list waits for the position's own records, Spend stays the vault's figure there under its own label", async () => {
+		const html = await renderNow({
+			rows: ROWS,
+			filters: only("actors", "y"),
+			at: atOf(Y_MID, 12_000),
+			reloading: true,
+		});
+		expect(fact(html, "Spend")).toContain(`title="${formatUsd(12_000)}"`);
+		expect(spendScope(html)).toBe("llm calls · up to this point");
+		expect(text(fact(html, "Spend"))).not.toContain("filtered");
+	});
+
+	it("while the list still draws another position than the committed one, the sum and its label are both the list's", async () => {
+		const y = only("actors", "y");
+		const pin = atOf(Y_MID, 12_000);
+		// Back to live, the list not yet redrawn: the records up to the pin, and the label says so.
+		const lagging = await renderNow({ rows: ROWS, filters: y, at: null, listAt: pin });
+		expect(fact(lagging, "Spend")).toContain(`title="${formatUsd(7_000)}"`);
+		expect(spendScope(lagging)).toBe("llm calls · filtered, up to this point");
+		// A pin just set, the list still live: every filtered record, and no word of a point.
+		const ahead = await renderNow({ rows: ROWS, filters: y, at: pin, listAt: null });
+		expect(fact(ahead, "Spend")).toContain(`title="${formatUsd(10_000)}"`);
+		expect(spendScope(ahead)).toBe("llm calls · filtered");
+	});
+
+	it("the rate and the last record say they are filtered, before the records load too; with no filter they do not", async () => {
+		const y = only("actors", "y");
+		for (const over of [{}, { at: atOf(Y_MID, 12_000) }]) {
+			const html = await renderNow({ rows: ROWS, filters: y, ...over });
+			expect(html).toContain("<b>Rate now · filtered</b>");
+			expect(html).not.toContain("<b>Rate now</b>");
+			expect(lastLine(html)).toContain("<b>Last record · filtered</b> 11:01:00Z · ");
+		}
+		const live = await renderNow({ rows: ROWS });
+		expect(live).toContain("<b>Rate now</b>");
+		expect(lastLine(live)).toContain("<b>Last record</b> 11:01:00Z · ");
+		expect(text(live)).not.toContain("filtered");
+		expect(text(live)).not.toContain("Projection, whole vault");
+		// The heading is known before the rate is: the box held for it already says which rate it will be.
+		const loading = await renderNow({ rows: ROWS, filters: y, phase: "loading" });
+		expect(HELD_RATE).toContain("<b>Rate now</b>");
+		expect(loading).toContain(HELD_RATE.replace("<b>Rate now</b>", "<b>Rate now · filtered</b>"));
+	});
+
 	it("one value of a category tints the line: the provider's colour before the lane's", async () => {
 		expect(rateNow(STEADY, END).unusual).toBe(false);
 		const provider = rankColors(STEADY, "provider").of("anthropic");
@@ -381,6 +521,50 @@ describe("the Now window under a filter", () => {
 		expect(await stroke(EMPTY_FILTERS)).toBe("var(--dk-text)");
 		expect(await stroke(only("actors", "x"))).toBe(lane);
 		expect(await stroke({ ...only("actors", "x"), providers: ["anthropic"] })).toBe(provider);
+	});
+});
+
+describe("the Now window under a filter, in a vault the list does not hold whole", () => {
+	const CUT = dayOneSummary({ truncated: true, rowCount: ROWS.length });
+	const y = only("actors", "y");
+
+	it("the filtered sum says it is of the rows held, and at a position that it stops there", async () => {
+		const html = await renderNow({ rows: ROWS, summary: CUT, filters: y });
+		expect(spendScope(html)).toBe("llm calls · filtered, rows held only");
+		expect(fact(html, "Spend")).toContain(`title="${formatUsd(10_000)}"`);
+		const pinned = await renderNow({
+			rows: ROWS,
+			summary: CUT,
+			filters: y,
+			at: atOf(Y_MID, 12_000),
+		});
+		expect(spendScope(pinned)).toBe("llm calls · filtered, rows held only, up to this point");
+		expect(fact(pinned, "Spend")).toContain(`title="${formatUsd(7_000)}"`);
+	});
+
+	it("a position before the rows held: none of them is at or before it, and the label says whose sum the zero is", async () => {
+		const at = atOf(X_OLD, 5_000, { windowStartPos: Y_MID.pos });
+		const html = await renderNow({ rows: ROWS, summary: CUT, filters: only("actors", "x"), at });
+		expect(fact(html, "Spend")).toContain(`title="${formatUsd(0)}"`);
+		expect(text(fact(html, "Spend"))).toContain(formatUsdTotal(0));
+		expect(formatUsdTotal(0)).toBe("$0.00");
+		expect(spendScope(html)).toBe("llm calls · filtered, rows held only, up to this point");
+	});
+
+	it("with no filter the figure is the summary's, of the whole vault, as in a vault held whole", async () => {
+		const cut = await renderNow({ rows: ROWS, summary: CUT });
+		expect(spendScope(cut)).toBe("llm calls · whole vault");
+		expect(text(fact(cut, "Spend"))).toBe(text(fact(await renderNow({ rows: ROWS }), "Spend")));
+		const pinned = await renderNow({ rows: ROWS, summary: CUT, at: atOf(Y_MID, 12_000) });
+		expect(spendScope(pinned)).toBe("llm calls · up to this point");
+		expect(fact(pinned, "Spend")).toContain(`title="${formatUsd(12_000)}"`);
+	});
+
+	it("a vault held whole keeps the shorter labels under a filter", async () => {
+		expect(spendScope(await renderNow({ rows: ROWS, filters: y }))).toBe("llm calls · filtered");
+		expect(spendScope(await renderNow({ rows: ROWS, filters: y, at: atOf(Y_MID, 12_000) }))).toBe(
+			"llm calls · filtered, up to this point",
+		);
 	});
 });
 
@@ -409,7 +593,7 @@ describe("the Now window, filled", () => {
 			for (const part of [
 				'class="ut-facts"',
 				"<b>Spend</b>",
-				"<b>Rate now</b>",
+				"<b>Rate now",
 				"ut-nw-proj",
 				"ut-nw-last",
 			])
@@ -428,6 +612,27 @@ describe("the Now window's sheet", () => {
 	/** The declarations of the rule whose selector is exactly `selector`, outside any narrower-screen block. */
 	const rule = (selector: string): string => rules.find(([sel]) => sel === selector)?.[1] ?? "";
 	const NARROW = SHEET.slice(SHEET.indexOf("@media (max-width: 760px)"));
+	/** What the block opened by `prelude` holds: from its brace to the one that closes it. */
+	function block(prelude: string): string {
+		const from = SHEET.indexOf(prelude);
+		if (from < 0) return "";
+		const open = SHEET.indexOf("{", from);
+		let depth = 0;
+		for (let i = open; i < SHEET.length; i++) {
+			if (SHEET[i] === "{") depth++;
+			else if (SHEET[i] === "}" && --depth === 0) return SHEET.slice(open + 1, i);
+		}
+		return "";
+	}
+	/** The declarations of the rule for exactly `selector` inside `css`. */
+	const ruleIn = (css: string, selector: string): string =>
+		[...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].find(
+			(m) => (m[1] ?? "").replace(/\s+/g, " ").trim() === selector,
+		)?.[2] ?? "";
+	const px = (decls: string, prop: string): number =>
+		Number(new RegExp(`(?:^|[;\\s])${prop}:\\s*([0-9.]+)px;`).exec(decls)?.[1] ?? Number.NaN);
+	/** The window width at or under which the rate's line goes under its words. */
+	const BREAK = Number(/@container ut-nw \(max-width: (\d+)px\)/.exec(SHEET)?.[1] ?? Number.NaN);
 
 	it("keeps every rule in the components layer, under the window's prefix or its scope", () => {
 		expect(SHEET.trim().startsWith("@layer components {")).toBe(true);
@@ -494,9 +699,95 @@ describe("the Now window's sheet", () => {
 		expect(rule(".ut-nw-last")).toMatch(/text-overflow:\s*ellipsis;/);
 	});
 
+	it("the rate's heading runs the fact's width, and the line sits beside the figure and its words", () => {
+		// A heading longer than the words' column ("Rate now · filtered") never runs under the line.
+		expect(rule('[data-win="now"] .ut-nw-rate > b')).toMatch(/grid-column:\s*1 \/ -1;/);
+		const spark = rule('[data-win="now"] .ut-nw-rate > .ut-nw-spark');
+		expect(spark).toMatch(/grid-row:\s*2 \/ span 2;/);
+		expect(spark).toMatch(/align-self:\s*center;/);
+		expect(px(rule('[data-win="now"] .ut-nw-rate'), "column-gap")).toBe(8);
+	});
+
+	it("in a narrow window the line goes under the words, in the box it has beside them", () => {
+		// The window is the container asked: its own width, whatever the screen's.
+		expect(rule(".ut-nw")).toMatch(/container:\s*ut-nw \/ inline-size;/);
+		expect(SHEET.split("@container").length - 1).toBe(1);
+		const narrow = block(`@container ut-nw (max-width: ${BREAK}px)`);
+		expect(ruleIn(narrow, '[data-win="now"] .ut-nw-rate')).toMatch(
+			/^\s*grid-template-columns:\s*minmax\(0, 1fr\);\s*$/,
+		);
+		const spark = ruleIn(narrow, '[data-win="now"] .ut-nw-rate > .ut-nw-spark');
+		expect(spark).toMatch(/grid-column:\s*1;/);
+		expect(spark).toMatch(/grid-row:\s*auto;/);
+		expect(spark).toMatch(/justify-self:\s*start;/);
+		// The box is sized once, outside the block: under the words it is the box it is beside them, drawn or kept
+		// empty before the records load, so neither form moves when the line arrives.
+		expect(spark).not.toMatch(/width|height/);
+		expect(SHEET.split(".ut-nw-spark").length - 1).toBe(2);
+		// The heading may take two lines here, and holds two of its 11px lines always: a filter moves nothing.
+		const heading = ruleIn(narrow, '[data-win="now"] .ut-facts .ut-nw-rate > b');
+		expect(px(heading, "min-height")).toBe(22);
+		expect(heading).toMatch(/white-space:\s*normal;/);
+		expect(heading).toMatch(/align-items:\s*flex-start;/);
+		expect(allCss()).toMatch(/\.ut-fact > b\s*\{[^}]*font:\s*500 11px\/1 var\(--sans\);/);
+		// It follows the rules it changes: at the same weight, the later one is read.
+		const at = SHEET.indexOf("@container ut-nw");
+		expect(at).toBeGreaterThan(SHEET.indexOf('[data-win="now"] .ut-nw-rate > .ut-nw-spark'));
+		expect(at).toBeGreaterThan(SHEET.indexOf('[data-win="now"] .ut-facts .ut-fact > b'));
+	});
+
+	it("the line goes under where a figure stops fitting beside it: at 1000, 1024 and 1100px, not at 1440", () => {
+		expect(BREAK).toBe(444);
+		const older = allCss();
+		const frame = Number(/\.ut-win\s*\{[^}]*border:\s*([0-9.]+)px/.exec(older)?.[1]);
+		const [pad = Number.NaN, edge = Number.NaN] = (
+			/\.ut-facts\s*\{[^}]*padding:\s*14px ([0-9.]+)px 15px;[^}]*border:\s*([0-9.]+)px/.exec(
+				older,
+			) ?? []
+		)
+			.slice(1)
+			.map(Number);
+		const between = Number(
+			/gap:\s*12px ([0-9.]+)px;/.exec(rule('[data-win="now"] .ut-facts'))?.[1],
+		);
+		const line = px(rule('[data-win="now"] .ut-nw-rate > .ut-nw-spark'), "width");
+		const gap = px(rule('[data-win="now"] .ut-nw-rate'), "column-gap");
+		expect([DESK_GAP, HOME.now.span, frame, pad, edge, between, line, gap]).toEqual([
+			16, 4, 1, 18, 1, 16, 96, 8,
+		]);
+		// The window's data at a screen width: the desk inside the page's gaps, four of its twelve columns and the
+		// three gaps between them, less the frame's two edges.
+		const data = (screen: number): number =>
+			((screen - 2 * DESK_GAP - 11 * DESK_GAP) / 12) * HOME.now.span +
+			(HOME.now.span - 1) * DESK_GAP -
+			2 * frame;
+		// One of the two facts' columns in it.
+		const column = (width: number): number => (width - 2 * (pad + edge) - between) / 2;
+		const beside = (width: number): number => column(width) - line - gap;
+		// The figure keeps its 16px while its characters, "/h" included, fit at 0.62em each: the older sheet's rule for
+		// a figure that shrinks to fit.
+		const whole = (room: number, figure: string): boolean =>
+			room / (figure.length + 2) / 0.62 >= 16;
+		expect(older).toMatch(/font-size:\s*min\(1em, calc\(100cqi \/ var\(--n, 1\) \/ 0\.62\)\);/);
+		expect(older).toMatch(/\.ut-fact \.v\s*\{\s*font:\s*400 16px\//);
+		expect([1000, 1024, 1100].map(data).map((w) => Math.round(w * 100) / 100)).toEqual([
+			310, 318, 343.33,
+		]);
+		for (const screen of [1000, 1024, 1100]) {
+			expect(data(screen)).toBeLessThanOrEqual(BREAK);
+			// Beside the line there are 24 to 41px: not room for "$0.00/h". Under the fact's own width, there is.
+			expect(whole(beside(data(screen)), "$0.00")).toBe(false);
+			expect(whole(column(data(screen)), "$12,345.67")).toBe(true);
+		}
+		expect([1000, 1024].map((s) => column(data(s)))).toEqual([128, 132]);
+		// A window wider than the breakpoint keeps the line beside the figure, with room for $999.99/h whole.
+		expect(data(1440)).toBeGreaterThan(BREAK);
+		expect(beside(BREAK)).toBe(91);
+		expect(whole(beside(BREAK), "$999.99")).toBe(true);
+		expect(whole(beside(BREAK - 4), "$999.99")).toBe(false);
+	});
+
 	it("sets the facts' lines closer than the page-wide strip did, so the Budget fact is at most 170px tall", () => {
-		const px = (decls: string, prop: string): number =>
-			Number(new RegExp(`(?:^|[;\\s])${prop}:\\s*([0-9.]+)px;`).exec(decls)?.[1] ?? Number.NaN);
 		const gap = px(rule('[data-win="now"] .ut-facts .ut-fact'), "row-gap");
 		const label = px(rule('[data-win="now"] .ut-facts .ut-fact > b'), "min-height");
 		const value = rule(

@@ -2,7 +2,12 @@
 // Copyright 2026 Usertools, Inc.
 
 import { describe, expect, it } from "vitest";
-import { NOW_COPY, weekPaceWords, youngPaceWords } from "../src/shared/now-copy.js";
+import {
+	NOW_COPY,
+	weekPaceWords,
+	wholeVaultProjection,
+	youngPaceWords,
+} from "../src/shared/now-copy.js";
 import { HOUR_MS, RATE_HOURS, rateNow, rateWords } from "../src/shared/now-rate.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 
@@ -191,15 +196,23 @@ describe("NOW_COPY", () => {
 			scopeVault: "whole vault",
 			scopeFiltered: "llm calls · filtered",
 			scopeFilteredPast: "llm calls · filtered, up to this point",
+			scopeFilteredHeld: "llm calls · filtered, rows held only",
+			scopeFilteredHeldPast: "llm calls · filtered, rows held only, up to this point",
+			rateHeading: "Rate now",
+			rateHeadingFiltered: "Rate now · filtered",
 			rateUnknown: "too little history to call",
 			rateUnusual: "unusual spend rate",
 			rateNormal: "normal rate",
 			rateTip: "The last hour's spend against the usual range of the 24 hours before",
 			rateBandNote: "The shaded band is the usual range for those hours.",
+			projectionLead: "Projection:",
+			projectionLeadFiltered: "Projection, whole vault:",
 			projectionUsed: "Projection: the budget is already used",
 			projectionIdle: "Projection: no spend in the past week, so no date",
 			projectionPaceWeek: "the past week's pace",
 			projectionPaceYoung: "the pace so far",
+			lastRecord: "Last record",
+			lastRecordFiltered: "Last record · filtered",
 			integrityIntact: "hash links intact",
 			integrityMonitor: "The dashboard is a monitor: usertrust verify is the authoritative check.",
 			statusEmpty: "no records in this view",
@@ -216,6 +229,28 @@ describe("NOW_COPY", () => {
 			"the average of $1.00/day since the first spend record, under a day ago,",
 		);
 		expect(weekPaceWords("$0.24/day")).toBe("the past 7 days' average of $0.24/day");
+	});
+
+	it("a projection's sentence opens by saying it is the whole vault's when the figures beside it are a filter's", () => {
+		for (const sentence of [NOW_COPY.projectionUsed, NOW_COPY.projectionIdle]) {
+			expect(sentence.startsWith(`${NOW_COPY.projectionLead} `)).toBe(true);
+			expect(wholeVaultProjection(sentence)).toBe(
+				sentence.replace("Projection:", "Projection, whole vault:"),
+			);
+		}
+		expect(wholeVaultProjection("Projection: reaches $10.00 on 11-18 at the pace so far")).toBe(
+			"Projection, whole vault: reaches $10.00 on 11-18 at the pace so far",
+		);
+	});
+
+	it("the word held is said of rows only: the two labels of a filtered sum in a vault the list does not hold whole", () => {
+		const held = Object.entries(NOW_COPY).filter(([, value]) => /held/i.test(value));
+		expect(held.map(([key]) => key)).toEqual(["scopeFilteredHeld", "scopeFilteredHeldPast"]);
+		for (const [, value] of held) {
+			expect(value.split("rows held only").length - 1).toBe(1);
+			expect(value.replace("rows held only", "")).not.toMatch(/held/i);
+		}
+		for (const value of Object.values(NOW_COPY)) expect(value).not.toMatch(/this month/i);
 	});
 
 	it("claims no cause and no check it has not made", () => {

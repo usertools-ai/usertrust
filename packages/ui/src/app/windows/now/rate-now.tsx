@@ -3,7 +3,11 @@
 
 /**
  * Rate now: the last hour's spend, what it reads as against the usual range, and the past 24 hours as a small line.
- * Props only. It reads now wherever it is drawn (at a past position too), so its heading never changes.
+ * Props only. It reads now wherever it is drawn (at a past position too), so its heading never names a position;
+ * under a filter the heading says the rate is the filtered records'.
+ *
+ * The figure is never cut: it shrinks to fit its column as the other facts' figures do, and its title gives it in
+ * full.
  *
  * The line is the default ink, or the one filtered category's colour; an unusual rate is gold. The last hour always
  * has a dot, in the line's colour. The small form shades the usual range behind the line, and the line's name says
@@ -13,8 +17,9 @@
  * line are held empty and unseen in the boxes they will take, so nothing moves when they arrive.
  */
 
+import type { CSSProperties } from "react";
 import { monotone } from "../../../shared/curve.js";
-import { formatUsdTotal } from "../../../shared/format.js";
+import { formatUsd, formatUsdTotal } from "../../../shared/format.js";
 import { NOW_COPY } from "../../../shared/now-copy.js";
 import { type RateNowView, rateWords } from "../../../shared/now-rate.js";
 
@@ -29,12 +34,15 @@ export function RateNow(props: {
 	view: RateNowView | null;
 	color: string | null;
 	filled: boolean;
+	/** The rate is of the filtered records, not of the whole vault. */
+	filtered?: boolean;
 }): React.JSX.Element {
 	const { view } = props;
+	const heading = props.filtered === true ? NOW_COPY.rateHeadingFiltered : NOW_COPY.rateHeading;
 	if (view === null)
 		return (
 			<div className="ut-fact ut-nw-rate" aria-busy="true">
-				<b>Rate now</b>
+				<b>{heading}</b>
 				<span className="v na">…</span>
 				<span className="ut-nw-words" aria-hidden="true" data-reserve="true">
 					{"\u00a0"}
@@ -70,12 +78,16 @@ export function RateNow(props: {
 	}
 	const stroke = view.unusual ? "var(--dk-gold)" : (props.color ?? "var(--dk-text)");
 	const banded = shade && first < last;
+	const figure = formatUsdTotal(view.ratePerHourUt);
 	return (
 		<div className="ut-fact ut-nw-rate" data-unusual={view.unusual}>
-			<b>Rate now</b>
-			<span className="v" data-fig="now.rate">
-				{formatUsdTotal(view.ratePerHourUt)}
-				<small>/h</small>
+			<b>{heading}</b>
+			<span className="v" data-fig="now.rate" title={`${formatUsd(view.ratePerHourUt)}/h`}>
+				{/* The figure and its "/h", counted as characters of the figure's own size: a little more room than they take. */}
+				<span className="ut-fit" style={{ "--n": figure.length + 2 } as CSSProperties}>
+					{figure}
+					<small>/h</small>
+				</span>
 			</span>
 			<span className="ut-nw-words" title={NOW_COPY.rateTip}>
 				{rateWords(view)}

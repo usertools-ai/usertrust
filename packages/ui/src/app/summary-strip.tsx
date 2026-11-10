@@ -840,9 +840,10 @@ function LoadingFacts(props: { budgetNote?: ReactNode }): React.JSX.Element {
 }
 
 /**
- * Which part of the strip to draw: the page bar (the header and the chain alarm), the head (the as-at line and the
- * Window notice), the facts grid, or all three in that order. The alarm is the bar's: a broken chain shows wherever
- * the head and the facts are put.
+ * Which part of the strip to draw: the page bar (the header, the chain alarm and the Window notice), the head (the
+ * as-at line alone), the facts grid, or all three. The alarm and the notice are the bar's: a broken chain, and a list
+ * that does not hold every record, show wherever the head and the facts are put. Drawn whole (`all`), the strip
+ * keeps the order it always had: the notice follows the as-at line.
  */
 export type SummaryStripPart = "bar" | "head" | "facts" | "all";
 
@@ -895,6 +896,12 @@ export function SummaryStrip(props: {
 	// One note about the list's window: the position's own when it is before the rows held, else the live one.
 	const notice = windowNote(s, at);
 	const events = at === null ? s.chain.events : at.pos + 1;
+	const noticeLine = notice !== null && (
+		<div className="ut-notice" role="status">
+			<b>Window</b>
+			{notice}
+		</div>
+	);
 
 	return (
 		<>
@@ -919,18 +926,14 @@ export function SummaryStrip(props: {
 							)}
 						</div>
 					)}
+					{part === "bar" && noticeLine}
 				</>
 			)}
 			{showHead && (
 				<>
 					{/* The live alarm above stays: it is the vault now. Everything below this line is the vault then. */}
 					<AsAtLine at={at} head={s.chain.events - 1} />
-					{notice !== null && (
-						<div className="ut-notice" role="status">
-							<b>Window</b>
-							{notice}
-						</div>
-					)}
+					{part === "all" && noticeLine}
 				</>
 			)}
 			{showFacts && (
