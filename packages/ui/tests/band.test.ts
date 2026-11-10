@@ -126,6 +126,26 @@ describe("usualBand", () => {
 		expect(usualBand(values).mid[21]).toBeCloseTo((190 + 1000) / 21, 10);
 	});
 
+	it("counts only unskipped buckets toward the 6 buckets of history", () => {
+		// Bucket 9 sees buckets 0..8 (9 buckets).
+		const values = new Array(10).fill(4);
+		const skip4 = new Array<boolean>(10).fill(false);
+		for (const j of [0, 2, 4, 6]) skip4[j] = true;
+		const five = usualBand(values, skip4);
+		expect(five.from).toBe(BAND_MIN_HISTORY);
+		expect(five.mid[9]).toBeNaN();
+		expect(five.lo[9]).toBeNaN();
+		expect(five.hi[9]).toBeNaN();
+
+		const skip3 = new Array<boolean>(10).fill(false);
+		for (const j of [0, 2, 4]) skip3[j] = true;
+		const six = usualBand(values, skip3);
+		expect(Number.isFinite(six.mid[9])).toBe(true);
+		expect(Number.isFinite(six.lo[9])).toBe(true);
+		expect(Number.isFinite(six.hi[9])).toBe(true);
+		expect(six.hi[9]).toBe(4);
+	});
+
 	it("gives NaN, not 0, where every bucket of the history is skipped", () => {
 		const b = usualBand(new Array(8).fill(5), new Array<boolean>(8).fill(true));
 		for (let k = 0; k < 8; k++) {

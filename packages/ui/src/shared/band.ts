@@ -15,7 +15,10 @@
 
 /** How many buckets before a bucket make "the usual". */
 export const BAND_WINDOW = 24;
-/** Fewer buckets of history than this: no range yet (the bounds are NaN and drawing skips them). */
+/**
+ * Fewer buckets of history than this, counting only the buckets not in `skip`: no range (the bounds are NaN and
+ * drawing skips them).
+ */
 export const BAND_MIN_HISTORY = 6;
 /** The range's half-width, in standard deviations. */
 export const BAND_K = 2;
@@ -31,13 +34,18 @@ export interface UsualBand {
 	mid: Float64Array;
 	lo: Float64Array;
 	hi: Float64Array;
-	/** The first bucket with a range: min(n, BAND_MIN_HISTORY). The bounds are NaN before it. */
+	/**
+	 * The first bucket with enough history for a range: min(n, BAND_MIN_HISTORY). The bounds are NaN before it. A later
+	 * bucket can still be NaN when most of its window is in `skip`, so callers must test `Number.isFinite`.
+	 */
 	from: number;
 }
 
 /**
- * The usual range for every bucket of `values`. `hi >= mid >= lo >= 0` wherever it is defined; NaN before `from`, and
- * where every bucket of the history is in `skip`.
+ * The usual range for every bucket of `values`. `hi >= mid >= lo >= 0` wherever it is defined. The bounds are NaN
+ * before `from`, and wherever fewer than BAND_MIN_HISTORY buckets of the window are left once `skip` is applied:
+ * with only one or two buckets left the deviation is 0, so any spend above their mean would read as unusual, which so
+ * few buckets cannot support. So a bucket at or after `from` can still be NaN; callers must test `Number.isFinite`.
  *
  * `skip`: buckets marked `true` are left out of every history (the unusual ones), so a spike does not widen the range
  * the buckets after it are judged against.
@@ -59,7 +67,7 @@ export function usualBand(values: ArrayLike<number>, skip?: ArrayLike<boolean>):
 			sq += v * v;
 			c += 1;
 		}
-		if (c === 0) continue;
+		if (c < BAND_MIN_HISTORY) continue;
 		const mean = sum / c;
 		const sd = Math.sqrt(Math.max(0, sq / c - mean * mean));
 		mid[k] = mean;
