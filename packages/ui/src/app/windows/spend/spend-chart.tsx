@@ -666,7 +666,7 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 				? {
 						t: records.t[headI] as number,
 						pos: records.pos[headI] as number,
-						pinned: headI === pinIdx,
+						pinned: pinnedPos !== null && records.pos[headI] === pinnedPos,
 					}
 				: null;
 	const pinnedNoRecord = pinRead?.noRecord ?? false;

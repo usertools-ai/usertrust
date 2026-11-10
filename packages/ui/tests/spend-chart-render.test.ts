@@ -1067,6 +1067,13 @@ describe("spend chart: pinned on an undated row", () => {
 		expect(stripTags(textOf(own, "ut-sp-when")).endsWith(" · record 1")).toBe(true);
 		expect(stripTags(textOf(own, "ut-sp-when"))).not.toContain("unknown time");
 	});
+	it("pinned on a row that is not a spend record, names the last dated record before it", () => {
+		// Position 6 is a policy row: nothing undated lies between it and record 5, whose number the words keep.
+		const html = chart({ pinnedPos: 6 });
+		expect(headline(html)).toBe(formatUsdTotal(cumTo(5)));
+		expect(stripTags(textOf(html, "ut-sp-when")).endsWith(" · record 6")).toBe(true);
+		expect(attr(plotTag(html), "aria-valuenow")).toBe("6");
+	});
 	it("with undated spend before every dated record, does not say no spend was recorded", () => {
 		const rows = [
 			spendRow(0, { ts: "not a date", costUt: 20_000 }),
