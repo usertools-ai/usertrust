@@ -13,7 +13,18 @@ import { createElement } from "react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Dimension } from "../src/shared/breakdown.js";
 import { rankColors } from "../src/shared/colors.js";
-import { GROW, INNER, OUTLINE_INSET, RIM_W_HOT, VB } from "../src/shared/donut.js";
+import {
+	FADE,
+	GROW,
+	HALF_GAP,
+	INNER,
+	OUTLINE_INSET,
+	RIM_W_HOT,
+	rimPath,
+	ringPath,
+	ringShape,
+	VB,
+} from "../src/shared/donut.js";
 import { EMPTY_FILTERS } from "../src/shared/filters.js";
 import { categoryBus } from "../src/shared/hover-bus.js";
 import { appExport } from "./helpers/day-one.js";
@@ -180,6 +191,56 @@ describe("the ring", () => {
 			{ data: shareData(ROWS) },
 		);
 		expect(innerOf(pinned, /<text class="c1"[^>]*>/)).toBe("At 2026-11-07 18:00Z");
+	});
+
+	it("sets the centre's lines at their heights, and fades each slice out from its outer edge by the fade table", async () => {
+		const html = await withDesk(donut(), { data: shareData(ROWS) });
+		const ri = RO * INNER;
+		const y = (cls: string): string | null =>
+			attr(new RegExp(`<text class="${cls}"[^>]*>`).exec(html)?.[0] ?? "", "y");
+		expect(y("c1")).toBe(String(VB / 2 - ri * 0.3));
+		expect(y("c2")).toBe(String(VB / 2 + ri * 0.12));
+		expect(y("c3")).toBe(String(VB / 2 + ri * 0.4));
+		const first = html.slice(html.indexOf("<radialGradient"), html.indexOf("</radialGradient>"));
+		const offsets = [...first.matchAll(/<stop offset="([^"]*)"/g)].map((m) => m[1]);
+		expect(offsets).toEqual([...FADE].reverse().map(([band]) => String(1 - band * (1 - INNER))));
+	});
+
+	it("draws a slice's body and rim from the shared geometry, inset from the edge, at rest and grown", async () => {
+		const filters = { ...EMPTY_FILTERS, actors: ["b"] };
+		const html = await withDesk(donut(), { data: shareData(ROWS, filters), view: { filters } });
+		const arcs = ringShape(["a", "b", "c"], [500, 300, 200], () => false).arcs;
+		const rimOf = (key: string): string => {
+			const m = /<path class="rim"[^>]*\sd="([^"]*)"/.exec(
+				html.slice(html.indexOf(`data-key="${key}"`)),
+			);
+			return m?.[1] ?? "";
+		};
+		for (const [key, grown] of [
+			["a", 0],
+			["b", GROW],
+		] as const) {
+			const arc = arcs.get(key) ?? { a0: 0, a1: 0 };
+			expect(bodyOf(html, key)).toBe(
+				ringPath(
+					VB / 2,
+					VB / 2,
+					RO + grown - OUTLINE_INSET,
+					RO * INNER + OUTLINE_INSET,
+					arc.a0,
+					arc.a1,
+					HALF_GAP + OUTLINE_INSET,
+				),
+			);
+			expect(rimOf(key)).toBe(rimPath(VB / 2, VB / 2, RO + grown - 1, arc.a0, arc.a1, HALF_GAP));
+		}
+		const opacity = (key: string): string | null =>
+			attr(
+				/<path class="body"[^>]*>/.exec(html.slice(html.indexOf(`data-key="${key}"`)))?.[0] ?? "",
+				"style",
+			);
+		expect(opacity("a")).toContain("stroke-opacity:0.6");
+		expect(opacity("b")).toContain("stroke-opacity:0.9");
 	});
 
 	it("shortens a long name in the centre and keeps the whole of it in a title", async () => {
