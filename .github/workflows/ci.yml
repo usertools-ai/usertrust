@@ -186,7 +186,7 @@ jobs:
     name: test
     # Same-repo branches and pushes run on Blacksmith; a FORK pull request stays on a
     # GitHub-hosted runner (fork workflows still need maintainer approval per repo policy).
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2204' || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-16vcpu-ubuntu-2204' || 'ubuntu-latest' }}
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v7
@@ -232,7 +232,7 @@ jobs:
     name: sdk-1x
     # Same-repo branches and pushes run on Blacksmith; a FORK pull request stays on a
     # GitHub-hosted runner (fork workflows still need maintainer approval per repo policy).
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2204' || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-16vcpu-ubuntu-2204' || 'ubuntu-latest' }}
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     # The second SDK line. Every other job runs on the 0.116 floor (the lockfile's @anthropic-ai/sdk);
     # this one installs the 1.x line the peer range `>=0.116.0 <2` also promises, and runs the build,
