@@ -61,7 +61,6 @@ export function defaultDeskView(over: Partial<DeskView> = {}): DeskView {
 		openHash: null,
 		setOpenHash: () => undefined,
 		at: null,
-		headAt: null,
 		setAt: () => undefined,
 		preview: () => undefined,
 	};
