@@ -68,6 +68,20 @@ describe("rateNow", () => {
 		expect(rateNow(withLastHour(steady(48, 1000), 1000), END).unusual).toBe(false);
 	});
 
+	it("a rate inside a wide usual range is normal: it is read against the upper bound, not the lower", () => {
+		// 500 and 1,500 by turns: a mean of 1,000 and a deviation of 500, so the range is 0 to 2,000.
+		const uneven = steady(48, 0).map((r, i) => ({ ...r, costUt: i % 2 === 0 ? 500 : 1500 }));
+		const inside = rateNow(withLastHour(uneven, 1200), END);
+		expect(inside.band.lo[LAST]).toBe(0);
+		expect(inside.band.mid[LAST]).toBe(1000);
+		expect(inside.band.hi[LAST]).toBe(2000);
+		expect(inside.known).toBe(true);
+		expect(inside.unusual).toBe(false);
+		expect(rateWords(inside)).toBe(NOW_COPY.rateNormal);
+		expect(rateNow(withLastHour(uneven, 2000), END).unusual).toBe(false);
+		expect(rateNow(withLastHour(uneven, 2001), END).unusual).toBe(true);
+	});
+
 	it("a vault two hours old is too little history, however big the hour", () => {
 		const v = rateNow(withLastHour(steady(2, 1000), 50_000), END);
 		expect(v.ratePerHourUt).toBe(50_000);

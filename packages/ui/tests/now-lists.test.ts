@@ -110,8 +110,14 @@ describe("periodDelta", () => {
 		expect(periodDelta({ spendUt: 0, prevUt: 100 }).text).toBe(`${minus}100% vs before`);
 	});
 
-	it("no change is +0%", () => {
-		expect(periodDelta({ spendUt: 100, prevUt: 100 }).text).toBe("+0% vs before");
+	it("a change that rounds to 0 carries no sign, in either direction", () => {
+		expect(periodDelta({ spendUt: 100, prevUt: 100 }).text).toBe("0% vs before");
+		expect(periodDelta({ spendUt: 996, prevUt: 1000 }).text).toBe("0% vs before");
+		expect(periodDelta({ spendUt: 1004, prevUt: 1000 }).text).toBe("0% vs before");
+		expect(periodDelta({ spendUt: 990, prevUt: 1000 }).text).toBe(
+			`${String.fromCharCode(0x2212)}1% vs before`,
+		);
+		expect(periodDelta({ spendUt: 1010, prevUt: 1000 }).text).toBe("+1% vs before");
 	});
 
 	it("nothing before has no percent", () => {

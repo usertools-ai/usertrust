@@ -163,6 +163,11 @@ describe("projectionOf", () => {
 		expect(projectionOf(summary({ remainingUt: 1 }), week(2400), END)?.text).toContain("reaches");
 	});
 
+	it("a used-up budget says so even with no spend in the past week", () => {
+		expect(projectionOf(summary({ remainingUt: 0 }), [], END)?.text).toBe(NOW_COPY.projectionUsed);
+		expect(projectionOf(summary({ remainingUt: -5 }), [], END)?.text).toBe(NOW_COPY.projectionUsed);
+	});
+
 	it("no spend in the past week gives no date", () => {
 		expect(projectionOf(summary(), [llm(END - 8 * DAY, 500)], END)).toStrictEqual({
 			text: NOW_COPY.projectionIdle,

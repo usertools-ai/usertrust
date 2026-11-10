@@ -61,8 +61,9 @@ export function periodDelta(p: Pick<Period, "spendUt" | "prevUt">): {
 	if (p.prevUt === 0) return { text: "vs nothing before", title };
 	const delta = (p.spendUt - p.prevUt) / p.prevUt;
 	const pct = Math.abs(delta * 100).toFixed(0);
-	// A drop takes the minus sign, U+2212, not a hyphen.
-	return { text: `${delta >= 0 ? "+" : "−"}${pct}% vs before`, title };
+	// A change that rounds to 0 carries no sign. A drop takes the minus sign, U+2212, not a hyphen.
+	const sign = pct === "0" ? "" : delta > 0 ? "+" : "−";
+	return { text: `${sign}${pct}% vs before`, title };
 }
 
 /** The first `n` keys of a breakdown. `rel` is a key's spend over the largest key's: 0 when the largest is 0. */
