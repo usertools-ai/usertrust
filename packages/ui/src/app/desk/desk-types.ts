@@ -35,8 +35,8 @@ export interface DeskData {
 	resolvedPos: number | null;
 	/**
 	 * How the windows' rows were chosen against the shown answer (`pastRows`): `live` with none, `answered` when the
-	 * page's live rows are the answer's own vault, `snapshot` when the rows drawn are the answer's snapshot and the
-	 * page's live rows are another vault's (a chart that reads the live rows must not take the answer's total then),
+	 * page's live rows are the answer's own vault, `snapshot` when the list draws the answer's snapshot and the page's
+	 * live rows are another vault's (a chart that reads the live rows draws nothing then),
 	 * `held` while no rows of the answer's vault are held yet (`pastHeld`).
 	 */
 	pastKind: "live" | "answered" | "snapshot" | "held";
