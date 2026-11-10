@@ -57,19 +57,32 @@ export function usualBand(values: ArrayLike<number>, skip?: ArrayLike<boolean>):
 	const hi = new Float64Array(n).fill(Number.NaN);
 	const from = Math.min(n, BAND_MIN_HISTORY);
 	for (let k = from; k < n; k++) {
+		const j0 = Math.max(0, k - BAND_WINDOW);
 		let sum = 0;
-		let sq = 0;
+		let min = Number.POSITIVE_INFINITY;
+		let max = Number.NEGATIVE_INFINITY;
 		let c = 0;
-		for (let j = Math.max(0, k - BAND_WINDOW); j < k; j++) {
+		for (let j = j0; j < k; j++) {
 			if (skip?.[j] === true) continue;
 			const v = values[j] as number;
 			sum += v;
-			sq += v * v;
+			if (v < min) min = v;
+			if (v > max) max = v;
 			c += 1;
 		}
 		if (c < BAND_MIN_HISTORY) continue;
-		const mean = sum / c;
-		const sd = Math.sqrt(Math.max(0, sq / c - mean * mean));
+		// A mean lies between the least and the greatest of its values; only rounding can put it outside them. Held
+		// inside, a steady series has a mean exactly equal to its value, so a steady line never sits above its range.
+		const mean = Math.min(max, Math.max(min, sum / c));
+		// The deviation is taken from each value's difference from the mean, a sum of squares that cannot go below 0
+		// and does not lose the small differences that a mean of squares minus a squared mean would.
+		let dev = 0;
+		for (let j = j0; j < k; j++) {
+			if (skip?.[j] === true) continue;
+			const d = (values[j] as number) - mean;
+			dev += d * d;
+		}
+		const sd = Math.sqrt(dev / c);
 		mid[k] = mean;
 		hi[k] = mean + BAND_K * sd;
 		lo[k] = Math.max(0, mean - BAND_K * sd);

@@ -43,22 +43,25 @@ describe("usualBand", () => {
 		expect(b.hi[6]).toBe(3);
 	});
 
-	it("keeps the bounds defined on a flat series whose variance rounds below 0", () => {
-		// On a flat series the mean of the squares minus the square of the mean should be 0, but floating-point
-		// rounding can leave it a hair below 0 (about -2e-16 for 0.7, about -4e-12 for 123.456). The square root of
-		// a negative number is NaN, so the variance is floored at 0 before the root is taken.
+	it("gives bounds exactly equal to the value on a flat fractional series, so a steady line never reads as unusual", () => {
+		// Adding up a fractional value and dividing back can round the mean a hair off the value (0.37 comes back
+		// just below 0.37), and a mean of the squares minus the square of the mean can round a hair below 0. Either
+		// would put the upper bound under a steady line, or make it NaN.
 		for (const [v, n] of [
+			[0.1, 48],
+			[0.37, 48],
+			[13 / 7, 48],
 			[0.7, 7],
 			[123.456, 25],
 		] as const) {
-			const b = usualBand(new Array(n).fill(v));
-			const k = n - 1;
-			expect(Number.isFinite(b.mid[k])).toBe(true);
-			expect(Number.isFinite(b.hi[k])).toBe(true);
-			expect(Number.isFinite(b.lo[k])).toBe(true);
-			expect(b.mid[k] as number).toBeCloseTo(v, 9);
-			expect(b.hi[k] as number).toBeCloseTo(b.mid[k] as number, 9);
-			expect(b.lo[k] as number).toBeCloseTo(b.mid[k] as number, 9);
+			const values = new Array<number>(n).fill(v);
+			const b = usualBand(values);
+			for (let k = b.from; k < n; k++) {
+				expect(b.mid[k]).toBe(v);
+				expect(b.hi[k]).toBe(v);
+				expect(b.lo[k]).toBe(v);
+			}
+			expect(exceedRuns(values, b)).toEqual([]);
 		}
 	});
 
