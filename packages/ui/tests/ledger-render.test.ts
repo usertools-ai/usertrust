@@ -212,6 +212,27 @@ describe("the panel's arithmetic", () => {
 		expect(html).toContain(fig("panel-sum", "116 UT"));
 	});
 
+	it("a cache write shown in two parts has no one rate: its own row keeps the total tokens and cost only", () => {
+		const html = table(row({ costUt: 116, cacheWrite1h: { tokens: 40, ratePer1k: 60 } }));
+		const parent = html.slice(html.indexOf("Cache write"), html.indexOf("5-minute"));
+		const dash = String.fromCharCode(0x2014);
+		expect(parent).toContain(`<td class="na" aria-label="two rates, below">${dash}</td>`);
+		expect(parent).not.toContain("37.5 UT");
+		expect(parent).toContain("<td>100</td>");
+		expect(parent).toContain("4.65 UT");
+		// The two rates are on the rows below it.
+		const parts = html.slice(html.indexOf("5-minute"), html.indexOf("<tfoot>"));
+		expect(parts).toContain("<td>37.5 UT</td>");
+		expect(parts).toContain("<td>60 UT</td>");
+	});
+
+	it("a cache write in one part keeps its rate on its own row", () => {
+		const html = table(row());
+		const parent = html.slice(html.indexOf("Cache write"), html.indexOf("<tfoot>"));
+		expect(parent).toContain("<td>37.5 UT</td>");
+		expect(html).not.toContain("two rates, below");
+	});
+
 	it("a 1-hour share without its rate is partial, and the sentence names the rate", () => {
 		const html = table(row({ cacheWrite1h: { tokens: 40 } }));
 		expect(html).toContain("1-hour");
@@ -230,6 +251,30 @@ describe("the panel's arithmetic", () => {
 	it("a record with no cost has no table", () => {
 		const { costUt: _cost, ...bare } = row();
 		expect(table(bare)).toBe("");
+	});
+
+	it("only a call has a table: a record of another kind has none, whatever cost and model it carries", () => {
+		expect(table(row({ kind: "settlement_ambiguous", status: "ambiguous", costUt: 40 }))).toBe("");
+		expect(table(row({ kind: "policy_denied", status: "denied" }))).toBe("");
+		expect(table(row())).toContain("How this charge adds up");
+	});
+
+	it("an unresolved call's cost is a recorded cost, not a charge; every other status says Charged", () => {
+		const open = row({ status: "ambiguous", settled: false });
+		const html = table(open);
+		expect(html).toContain('<th scope="row" colSpan="3">Recorded cost</th>');
+		expect(html).not.toContain(">Charged<");
+		// The hooks stay on the same rows.
+		expect(html).toContain(fig("panel-sum", "115 UT"));
+		expect(html).toContain(fig("panel-cost", "115 UT"));
+		expect(table({ ...open, costUt: 120 })).toContain(
+			"The tiers add up to 115 UT; the record holds 120 UT; the charge is 5 UT higher. Shown as recorded.",
+		);
+		for (const status of ["settled", "failed", "unknown"] as const) {
+			const other = table(row({ status }));
+			expect(other).toContain('<th scope="row" colSpan="3">Charged</th>');
+			expect(other).not.toContain("Recorded cost");
+		}
 	});
 });
 

@@ -11,9 +11,11 @@
 import { type Charge, type ChargeLine, chargeOf } from "../../../shared/charge.js";
 import { usageView } from "../../../shared/display.js";
 import { formatUt } from "../../../shared/format.js";
-import { amountOf, type LedgerRow } from "../../../shared/rows.js";
+import { amountOf, type LedgerRow, statusOf } from "../../../shared/rows.js";
 
 const NOT_RECORDED = "not recorded";
+/** The one kind of record that is a call, and so the only one with tokens to add up. */
+const CALL_KIND = "llm_call";
 
 /** An exact usertoken figure as written by `chargeOf` (plain digits), with its whole part grouped and its unit. */
 function exactUt(text: string): string {
@@ -105,10 +107,14 @@ function Foot(props: { label: string; fig: string; value: string }): React.JSX.E
 	);
 }
 
-/** One row of tokens, rate and product: a tier, or (`part`) one of the two parts of a cache write under it. */
+/**
+ * One row of tokens, rate and product: a tier, or (`part`) one of the two parts of a cache write under it. A tier
+ * shown in two parts (`split`) was charged at two rates, so its own row prints none: its tokens and cost are totals.
+ */
 function Line(props: {
 	label: string | null;
 	part?: boolean;
+	split?: boolean;
 	of: Cells & Partial<Pick<ChargeLine, "utText" | "usdText">>;
 }): React.JSX.Element {
 	const { of } = props;
@@ -116,7 +122,13 @@ function Line(props: {
 		<tr className={props.part === true ? "ut-lg-part" : undefined}>
 			<th scope="row">{props.label}</th>
 			<td>{tokens(of.count)}</td>
-			<td>{rate(of.ratePer1k)}</td>
+			{props.split === true ? (
+				<td className="na" aria-label="two rates, below">
+					—
+				</td>
+			) : (
+				<td>{rate(of.ratePer1k)}</td>
+			)}
 			<Cost ut={of.utText ?? null} usd={of.usdText ?? null} />
 		</tr>
 	);
@@ -127,7 +139,7 @@ function TierRows(props: { line: ChargeLine; row: LedgerRow }): React.JSX.Elemen
 	const share = unusableShare(line, props.row);
 	return (
 		<>
-			<Line label={line.label} of={line} />
+			<Line label={line.label} split={line.parts.length > 1} of={line} />
 			{line.parts.length > 1 &&
 				line.parts.map((part) => <Line key={part.label} label={part.label} part of={part} />)}
 			{share !== null && <Line label="1-hour" part of={share} />}
@@ -137,9 +149,14 @@ function TierRows(props: { line: ChargeLine; row: LedgerRow }): React.JSX.Elemen
 
 export function ChargeTable(props: { row: LedgerRow }): React.JSX.Element | null {
 	const { row } = props;
+	// Only a call is added up from tokens. Another kind of record can carry a cost and a model too (an outcome that
+	// was never confirmed, a denial), and a table under it would read as a charge that was made.
+	if (row.kind !== CALL_KIND) return null;
 	const charge = chargeOf(row);
 	const { costUt, sumText, computedUt, differenceUt } = charge;
 	if (charge.state === "none" || costUt === null) return null;
+	// An unresolved call's cost is recorded, not confirmed: it is not said to have been charged.
+	const unresolved = statusOf(row) === "ambiguous";
 	const priced = sumText !== null && computedUt !== null && differenceUt !== null;
 	const sum = priced ? sumLine(sumText, computedUt, differenceUt === 0) : null;
 	const lacking = charge.state === "partial" ? missing(charge, row) : [];
@@ -178,7 +195,11 @@ export function ChargeTable(props: { row: LedgerRow }): React.JSX.Element | null
 							/>
 						</>
 					)}
-					<Foot label="Charged" fig="ledger.panel-cost" value={formatUt(costUt)} />
+					<Foot
+						label={unresolved ? "Recorded cost" : "Charged"}
+						fig="ledger.panel-cost"
+						value={formatUt(costUt)}
+					/>
 				</tfoot>
 			</table>
 			{charge.state === "no-counts" && (
@@ -196,7 +217,7 @@ export function ChargeTable(props: { row: LedgerRow }): React.JSX.Element | null
 					{sum.text}
 					{sum.text !== null && differenceUt !== 0 && " "}
 					{differenceUt !== 0 &&
-						`The tiers add up to ${formatUt(computedUt)}; the record charged ${formatUt(costUt)}; the charge is ${formatUt(Math.abs(differenceUt))} ${differenceUt > 0 ? "higher" : "lower"}. Shown as recorded.`}
+						`The tiers add up to ${formatUt(computedUt)}; the record ${unresolved ? "holds" : "charged"} ${formatUt(costUt)}; the charge is ${formatUt(Math.abs(differenceUt))} ${differenceUt > 0 ? "higher" : "lower"}. Shown as recorded.`}
 				</p>
 			)}
 			<p className="ut-lg-src">Pricing table version: {charge.version ?? NOT_RECORDED}</p>
