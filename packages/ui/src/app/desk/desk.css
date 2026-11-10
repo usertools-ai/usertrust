@@ -56,6 +56,12 @@
 		flex: 1 1 320px;
 	}
 
+	/* With a position pinned the bar carries a pill beside the connection pill, and needs more width before the search
+	   controls may sit beside it: a larger basis wraps them under the header sooner, so nothing runs into the search. */
+	.ut-dk-top > .ut-top[data-past="true"] {
+		flex-basis: 560px;
+	}
+
 	.ut-dk-top > .ut-alarm,
 	.ut-dk-top > .ut-notice {
 		flex: 1 1 100%;

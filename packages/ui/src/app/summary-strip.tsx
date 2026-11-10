@@ -111,7 +111,7 @@ function TopBar(props: {
 	const [copied, setCopied] = useState(false);
 	const path = props.vaultPath;
 	return (
-		<header className="ut-top">
+		<header className="ut-top" data-past={props.at != null ? "true" : undefined}>
 			{props.kit && <KitMark />}
 			{/* Bundled into the page as a data URL (`?inline`): it shows offline and costs no request. */}
 			<img className="ut-logo" src={markUrl} alt="usertrust" height={24} decoding="async" />

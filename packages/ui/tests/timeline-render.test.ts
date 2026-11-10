@@ -761,6 +761,17 @@ describe("the bar names a past position whichever window is open", () => {
 		expect(text(part("facts", at()))).not.toContain("past \u00b7");
 	});
 
+	it("marks the header while a position is pinned, so the desk can give it the room", () => {
+		expect(part("bar", at())).toContain('<header class="ut-top" data-past="true">');
+		expect(part("bar", null)).toContain('<header class="ut-top">');
+		const css = readFileSync(
+			join(import.meta.dirname, "..", "src", "app", "desk", "desk.css"),
+			"utf-8",
+		);
+		const rule = /\.ut-dk-top > \.ut-top\[data-past="true"\]\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";
+		expect(rule).toMatch(/flex-basis:\s*560px/);
+	});
+
 	it("is a pill that grows to its text and does not shrink", () => {
 		const css = readFileSync(join(import.meta.dirname, "..", "src", "app", "styles.css"), "utf-8");
 		const rule = /\.ut-past\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";
