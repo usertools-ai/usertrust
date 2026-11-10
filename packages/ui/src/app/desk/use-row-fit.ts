@@ -5,11 +5,13 @@
  * The desk's rows, fitted to the Now window: the lower row takes the rows Now's content needs, so Now never scrolls,
  * and the desk scrolls instead when it is too short for both rows.
  *
- * The page is read in an effect and in what the effect installs, never while rendering: a server render and the
- * tests have no page, and get `null` (the desk then keeps its first-paint rows). The arithmetic is `shared/desk-grid`.
+ * The page is read in a layout effect and in what it installs, never while rendering: a server render and the tests
+ * have no page, and get `null` (the desk then keeps its first-paint rows). A layout effect, so the first frame is
+ * already fitted: the Now window holds its boxes before its data loads, and its rows can be told before anything is
+ * painted. The arithmetic is `shared/desk-grid`.
  */
 
-import { type RefObject, useEffect, useState } from "react";
+import { type RefObject, useLayoutEffect, useState } from "react";
 import {
 	gridRowsStyle,
 	homeGrid,
@@ -117,15 +119,16 @@ export function rowFitEffect(
 }
 
 /**
- * The desk's `grid-template-rows`, fitted to the Now window; `null` before the first measure, while `paused` (a
- * window fills the desk) and in the compact column, where the caller keeps its first-paint rows.
+ * The desk's `grid-template-rows`, fitted to the Now window; `null` before the first measure and in the compact
+ * column, where the caller keeps its first-paint rows. While `paused` (a window fills the desk) nothing is measured
+ * and the rows stay as they were, so the windows are where they were when the fill started and when it ends.
  */
 export function useRowFit(deskRef: RefObject<HTMLElement | null>, paused: boolean): string | null {
 	const [fit, setFit] = useState<string | null>(null);
 	const compact = useMedia(COMPACT_QUERY, false);
-	useEffect(
+	useLayoutEffect(
 		() => rowFitEffect(deskRef.current, paused, compact, setFit),
 		[deskRef, paused, compact],
 	);
-	return paused || compact ? null : fit;
+	return compact ? null : fit;
 }

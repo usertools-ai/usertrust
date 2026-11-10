@@ -82,6 +82,20 @@ describe("the desk shell", () => {
 		for (const tag of panes) expect(classesOf(tag)).not.toContain("ut-glass");
 	});
 
+	it("red-first (no mark on the desk for a filled window): draws the desk with its first-paint rows, and says whether a window fills it", async () => {
+		// Without a page nothing is measured, so the rows are the ones the desk starts with: nine above and the twelve
+		// the Now window usually needs, the rows a measure usually gives.
+		const home = tagsWith(await shell(), "ut-dk-desk");
+		expect(home).toEqual([
+			'<main class="ut-dk-desk" data-filled="false" style="grid-template-rows:344px 464px">',
+		]);
+		for (const fill of ["spend", "share", "ledger", "now"] as const) {
+			expect(tagsWith(await shell({ fill }), "ut-dk-desk"), fill).toEqual([
+				'<main class="ut-dk-desk" data-filled="true" style="grid-template-rows:344px 464px">',
+			]);
+		}
+	});
+
 	it("a vault the list does not hold whole: the Window notice is on the page once, in the top bar, whichever window fills the desk", async () => {
 		const data = loadedData({ summary: dayOneSummary({ truncated: true, rowCount: 3 }) });
 		for (const fill of [null, "spend", "share", "ledger", "now"] as const) {
@@ -104,19 +118,6 @@ describe("the desk shell", () => {
 		}
 		// A vault held whole has no notice anywhere.
 		expect(await shell({ data: loadedData() })).not.toContain("ut-notice");
-	});
-
-	it("red-first (no mark on the desk for a filled window): draws the desk with its first-paint rows, and says whether a window fills it", async () => {
-		// Without a page nothing is measured, so the rows are the ones the desk starts with.
-		const home = tagsWith(await shell(), "ut-dk-desk");
-		expect(home).toEqual([
-			'<main class="ut-dk-desk" data-filled="false" style="grid-template-rows:minmax(0, 11fr) minmax(0, 9fr)">',
-		]);
-		for (const fill of ["spend", "share", "ledger", "now"] as const) {
-			expect(tagsWith(await shell({ fill }), "ut-dk-desk"), fill).toEqual([
-				'<main class="ut-dk-desk" data-filled="true" style="grid-template-rows:minmax(0, 11fr) minmax(0, 9fr)">',
-			]);
-		}
 	});
 
 	it("draws no slider and keeps the status under the header mounted, whatever the data", async () => {
@@ -251,7 +252,7 @@ describe("the page's source, now spread over the shell", () => {
 		const shellSrc = readFileSync(join(APP, "desk", "desk-shell.tsx"), "utf-8");
 		expect(shellSrc).toContain('import { useRowFit } from "./use-row-fit.js";');
 		expect(shellSrc).toContain("const deskRef = useRef<HTMLElement>(null);");
-		// Nothing is fitted while a window fills the desk.
+		// Nothing is measured while a window fills the desk; the rows it had stay.
 		expect(shellSrc).toContain("const fit = useRowFit(deskRef, fill !== null);");
 		expect(shellSrc.match(/useRowFit\(/g)).toHaveLength(1);
 		const main = /<main\b[^>]*>/.exec(shellSrc.replace(/\s+/g, " "))?.[0];

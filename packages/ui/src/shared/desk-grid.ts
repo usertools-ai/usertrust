@@ -10,10 +10,8 @@
  * its charts. When the desk is too short for both, the rows run past it and the desk scrolls.
  */
 
-import { DESK_GAP } from "./desk-layout.js";
-
-/** The gap between windows, in CSS px: the desk's own. */
-export const GAP = DESK_GAP;
+/** The gap between windows, in CSS px: the desk's own (`DESK_GAP` is this number). */
+export const GAP = 16;
 /** One row without its gap, in CSS px. */
 export const ROW_PX = 24;
 /** One row and its gap: the step the rows are counted in. */

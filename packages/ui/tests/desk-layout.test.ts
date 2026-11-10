@@ -2,6 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { describe, expect, it } from "vitest";
+import { GAP, gridRowsStyle, TOP_MIN_ROWS } from "../src/shared/desk-grid.js";
 import {
 	COMPACT_QUERY,
 	DESK_GAP,
@@ -16,6 +17,7 @@ import {
 	type Phase,
 	phaseDone,
 	placeStyle,
+	USUAL_NOW_ROWS,
 	WINDOW_IDS,
 	type WindowId,
 	windowOrder,
@@ -37,9 +39,18 @@ describe("the home layout", () => {
 		}
 	});
 
-	it("names the row split, the gap and the dock query", () => {
-		expect(HOME_ROWS).toBe("minmax(0, 11fr) minmax(0, 9fr)");
+	it("red-first (rows a fixed 11 to 9 until the first measure, then a jump to the fitted ones): the desk is first painted with the rows it usually ends with", () => {
+		// Nine rows above, and below the rows the Now window needs at the usual widths: where nothing can be measured
+		// (a static render), or a measure is late, the desk already has the rows the fit gives.
+		expect(USUAL_NOW_ROWS).toBe(12);
+		expect(HOME_ROWS).toBe("344px 464px");
+		expect(HOME_ROWS).toBe(gridRowsStyle({ top: TOP_MIN_ROWS, bottom: USUAL_NOW_ROWS }));
+	});
+
+	it("names the gap and the dock query", () => {
 		expect(DESK_GAP).toBe(16);
+		// One number: the rows are counted with the desk's own gap.
+		expect(DESK_GAP).toBe(GAP);
 		expect(DOCK_QUERY).toBe("(min-width: 1100px)");
 	});
 

@@ -57,8 +57,8 @@ export function DeskShell(): React.JSX.Element {
 	const { shownRows, filtered } = list;
 	// On a phone the facts come before the list, which flows in the page to its end (`windowOrder`).
 	const phone = useMedia(PHONE_QUERY, false);
-	// The rows fit the Now window, so it never scrolls. Nothing is fitted while a window fills the desk, nor before the
-	// first measure: the desk then has the rows it is first painted with.
+	// The rows fit the Now window, so it never scrolls. They are measured before the first paint and kept while a
+	// window fills the desk; where nothing can be measured the desk has the rows it is first painted with.
 	const deskRef = useRef<HTMLElement>(null);
 	const fit = useRowFit(deskRef, fill !== null);
 

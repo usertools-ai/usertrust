@@ -29,9 +29,9 @@
 		background: var(--dk-page);
 	}
 
-	/* The desk: twelve columns, two rows, the windows in their home cells. The rows are set inline: HOME_ROWS at
-	   first, then the rows that fit the Now window (useRowFit). Those can be taller than the desk (nine rows above,
-	   and all that Now needs below): the desk scrolls then, so neither row is squeezed or cut. */
+	/* The desk: twelve columns, two rows, the windows in their home cells. The rows are set inline: the rows that
+	   fit the Now window (useRowFit), or HOME_ROWS where nothing can be measured. They can be taller than the desk
+	   (nine rows above, and all that Now needs below): the desk scrolls then, so neither row is squeezed or cut. */
 	.ut-dk-desk {
 		flex: 1 1 0;
 		min-height: 480px;

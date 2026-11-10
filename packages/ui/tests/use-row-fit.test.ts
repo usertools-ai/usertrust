@@ -427,18 +427,25 @@ describe("useRowFit", () => {
 	const source = readFileSync(join(APP, "desk", "use-row-fit.ts"), "utf-8");
 	const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 
-	it("measures in a plain effect, through the one function the tests run, and keeps the rows it is told", () => {
-		expect(code).not.toContain("useLayoutEffect");
+	it("red-first (rows fitted after the first paint, so the page moved): measures in a layout effect, through the one function the tests run, and keeps the rows it is told", () => {
+		// A layout effect runs before the browser paints: the Now window's boxes are already reserved then, so the
+		// first frame has the fitted rows.
+		expect(code).toContain('import { type RefObject, useLayoutEffect, useState } from "react";');
+		expect(code).not.toMatch(/\buseEffect\b/);
 		expect(code).toContain("const [fit, setFit] = useState<string | null>(null);");
 		expect(code.replace(/\s+/g, " ")).toContain(
-			"useEffect( () => rowFitEffect(deskRef.current, paused, compact, setFit), [deskRef, paused, compact], );",
+			"useLayoutEffect( () => rowFitEffect(deskRef.current, paused, compact, setFit), [deskRef, paused, compact], );",
 		);
-		expect(code.match(/useEffect\(/g)).toHaveLength(1);
+		expect(code.match(/useLayoutEffect\(/g)).toHaveLength(1);
 	});
 
-	it("gives no rows while a window fills the desk or the desk is the compact column", () => {
+	it("red-first (the windows stepped to other rows when one filled the desk): keeps the fitted rows while a window fills the desk, and gives none in the compact column", () => {
 		expect(code).toContain("const compact = useMedia(COMPACT_QUERY, false);");
-		expect(code).toContain("return paused || compact ? null : fit;");
+		expect(code).toContain("return compact ? null : fit;");
+		// The rows are not a matter of `paused`: it stops the measuring, nothing else.
+		expect(
+			code.slice(code.indexOf("export function useRowFit(")).match(/\bpaused\b/g),
+		).toHaveLength(3);
 	});
 
 	it("touches the browser only where the effect runs: one listener put on and taken off, no frame, clock or document", () => {
