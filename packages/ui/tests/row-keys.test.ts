@@ -101,9 +101,11 @@ describe("the audit list is one tab stop", () => {
 		expect(html).toContain('role="listbox"');
 		expect(html).toContain('aria-label="Audit records"');
 		expect(tabStops(html)).toEqual(["0"]);
-		// Every row of a short list is drawn, as an option of the one listbox.
-		expect(html.match(/class="ut-row/g)).toHaveLength(60);
-		expect(html.match(/role="option"/g)).toHaveLength(60);
+		// The rows near the screen are drawn, not all sixty, each as an option of the one listbox.
+		const drawn = html.match(/role="option"/g)?.length ?? 0;
+		expect(drawn).toBeGreaterThan(0);
+		expect(drawn).toBeLessThan(60);
+		expect(html.match(/class="ut-row/g)).toHaveLength(drawn);
 	});
 
 	it("an empty list (skeleton, no-rows message) offers no listbox and no tab stop", async () => {
@@ -198,21 +200,19 @@ describe("the inspector takes focus from the list", () => {
 		expect(popoverOwnsEscape(page())).toBe(false);
 	});
 
-	it("the active row is drawn and scrolled back into view when keyboard focus returns, and when it moves while focused", async () => {
+	it("the active row is scrolled back among the rows drawn when keyboard focus returns, and when it moves while focused", async () => {
 		const src = await source("audit-table.tsx");
 		// the listbox takes onFocus; keyboard focus (focus-visible) brings the active row in, a mouse focus does not
 		const onFocus = src.slice(src.indexOf("const onFocus"), src.indexOf("const moveTo"));
-		expect(onFocus).toContain(':focus-visible")) showRow(activeIndex, "nearest")');
+		expect(onFocus).toContain(':focus-visible")) showRow(activeIndex, "auto")');
 		expect(src).toMatch(/onKeyDown,\s*onFocus,/);
 		// while focused, a sort, filter or insert that moves the active row brings it in
 		expect(src).toMatch(
-			/if \(activeRow !== undefined && listFocused\(\)\) showRow\(activeIndex, "nearest"\);\s*\}, \[activeIndex, sorted\]\);/,
+			/if \(activeRow !== undefined && listFocused\(\)\) showRow\(activeIndex, "auto"\);\s*\}, \[activeIndex, sorted\]\);/,
 		);
-		// bringing a row in draws its chunk first (it may be past the rows drawn), then scrolls to it
+		// bringing a row in scrolls the list to it, and the rows there are drawn
 		const showRow = src.slice(src.indexOf("const showRow"), src.indexOf("const listFocused"));
-		expect(showRow).toContain("chunkReveal(w.chunk, index, count)");
-		expect(showRow.indexOf("chunkReveal(")).toBeLessThan(showRow.indexOf("setScrollTo("));
-		expect(src).toContain("scrollIntoView({ block: scrollTo.block })");
+		expect(showRow).toContain("virtualizer.scrollToIndex(index, { align })");
 		// the active row is resolved by hash (see resolveActiveIndex in row-nav.test.ts)
 		expect(src).toContain("resolveActiveIndex(sorted, activeHash, props.selected)");
 	});
@@ -227,16 +227,18 @@ describe("the inspector takes focus from the list", () => {
 
 	it("PageUp and PageDown move by the rows that fit in view, every row being one height", async () => {
 		const src = await source("audit-table.tsx");
-		// On a phone the page is the scroller (the list flows in it and is as tall as its rows), so a screenful is never
-		// more than the window's.
-		expect(src).toContain("pageSizeForRows(Math.min(el.clientHeight, window.innerHeight))");
+		// On a phone the page is the scroller (the list flows in it), so a screenful is the window's, below the sort bar
+		// that sticks over the rows (its height as measured, capH); a row the keys bring in is placed below the bar.
 		const keys = src.slice(
 			src.indexOf("const onKeyDown"),
 			src.indexOf("// Focus returns to the list"),
 		);
+		expect(keys).toMatch(
+			/pageSizeForRows\(\s*phone \? window\.innerHeight - capH : \(el\?\.clientHeight \?\? 0\),?\s*\)/,
+		);
 		expect(keys).toContain("nextRowIndex(activeIndex, e.key, count, page)");
+		expect(src).toMatch(/useWindowVirtualizer<Element>\(\{[^}]*scrollPaddingStart: capH/);
 		expect(src).not.toContain("pageSizeFromItems");
-		expect(src).not.toContain("virtualizer");
 		expect(src).not.toContain("ROW_HEIGHT");
 	});
 

@@ -160,24 +160,27 @@
 		}
 	}
 
-	/* The list: one record a line, in columns. Every row is 30px whatever it holds, so a row the browser has not
-	   drawn yet (content-visibility) keeps its place and the scrollbar never jumps. The selectors carry the row's
-	   older class too, so they win over its older two-line rules wherever the list is drawn. */
+	/* The list: one record a line, in columns. Every row is 30px whatever it holds. The rows stand in one block as
+	   tall as all of them; only those near the screen are drawn, each placed in the block and moved down to its
+	   own place by the list. The selectors carry the row's older class too, so they win over its older two-line
+	   rules wherever the list is drawn. */
 	.ut-lg-rows {
-		padding: 8px 8px 24px;
+		position: relative;
 	}
 
 	.ut-row.ut-lg-row {
 		grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 64px 60px 116px minmax(96px, 0.9fr);
 		gap: 10px;
+		position: absolute;
+		top: 0;
+		left: 8px;
+		right: 8px;
 		box-sizing: border-box;
 		height: 30px;
 		padding: 0 12px;
 		border-radius: 0;
 		color: var(--dk-legend);
 		font: 400 12px/1 var(--sans);
-		content-visibility: auto;
-		contain-intrinsic-size: auto 30px;
 	}
 
 	/* A hairline under each row. Not on the open record, whose border is its own. */
@@ -258,32 +261,15 @@
 		color: var(--stakes);
 	}
 
-	/* The cost, right-aligned over a bar that grows from the right edge. */
+	/* The cost, right-aligned. */
 	.ut-lg-row .ut-lg-c {
-		position: relative;
 		text-align: right;
 	}
 
-	.ut-lg-bar {
-		position: absolute;
-		top: 50%;
-		right: 0;
-		height: 16px;
-		margin-top: -8px;
-		border-radius: 2px;
-		background: color-mix(in srgb, var(--dk-legend) 13%, transparent);
-	}
-
 	.ut-lg-c .ut-amt {
-		position: relative;
 		color: var(--dk-text);
 		font: 600 12px var(--fig);
 		font-variant-numeric: tabular-nums;
-	}
-
-	/* The mark after the last row drawn: the list watches it and draws more rows as it nears the screen. */
-	.ut-lg-more {
-		height: 1px;
 	}
 
 	/* The records of the hour a chart points at, then the one record it has pinned, then the row under the pointer:
@@ -319,6 +305,8 @@
 		.ut-row.ut-lg-row {
 			grid-template-columns: 102px minmax(0, 1fr) 80px 70px;
 			gap: 6px;
+			left: 2px;
+			right: 2px;
 			padding: 0 6px;
 		}
 
@@ -333,18 +321,6 @@
 
 		.ut-lg-row .ut-lg-t {
 			font-size: 11px;
-		}
-
-		.ut-lg-rows {
-			padding-inline: 2px;
-		}
-	}
-
-	/* A phone: the sort bar sticks to the top of the page over the rows, so a row scrolled to stops below it, by
-	   the bar's height as the list measures it. */
-	@media (max-width: 760px) {
-		.ut-lg-row {
-			scroll-margin-top: var(--ut-lg-cap, 0px);
 		}
 	}
 }

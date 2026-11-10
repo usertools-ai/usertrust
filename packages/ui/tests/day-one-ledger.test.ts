@@ -71,6 +71,23 @@ describe("the Ledger on day one", () => {
 		expect(html).toContain('aria-label="Ledger"');
 	});
 
+	it("with a position pinned, the list marks that record and its hour as the window first draws", async () => {
+		const pin = dayOneRows()[1] as LedgerRow;
+		const html = await withDesk(createElement(LedgerWindow), {
+			data: loadedData(),
+			view: { at: pin.pos },
+		});
+		const tag = new RegExp(`<div[^>]*id="ut-row-${pin.hash}"[^>]*>`).exec(html)?.[0] ?? "";
+		expect(tag).toContain('data-pinned="true"');
+		expect(tag).toContain('data-hour="true"');
+		// The three records are a day apart: no other is pinned, and none shares the hour.
+		expect(html.match(/data-pinned/g)).toHaveLength(1);
+		expect(html.match(/data-hour/g)).toHaveLength(1);
+		// Live, nothing is marked.
+		const live = await withDesk(createElement(LedgerWindow), { data: loadedData() });
+		expect(live).not.toMatch(/data-pinned|data-hour/);
+	});
+
 	it("filled with a record open, docks the panel beside the list", async () => {
 		const row = dayOneRows()[0] as LedgerRow;
 		const html = await withDesk(createElement(LedgerWindow), {

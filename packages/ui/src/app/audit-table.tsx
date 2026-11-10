@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizer, useWindowVirtualizer } from "@tanstack/react-virtual";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { MUTED, PROVIDER_COLOR } from "../shared/colors.js";
 import {
 	type ChainStatus,
@@ -14,22 +15,16 @@ import {
 } from "../shared/display.js";
 import { type SortKey, sortRows } from "../shared/filters.js";
 import { compactActor, formatUtc, UT_KEY } from "../shared/format.js";
-import {
-	type ChunkState,
-	chunkGrow,
-	chunkInit,
-	chunkReveal,
-	chunkSync,
-	pageSizeForRows,
-	pinAction,
-	shownCount,
-} from "../shared/list-chunk.js";
+import { hourSpanOf } from "../shared/hit.js";
+import { PHONE_QUERY } from "../shared/layout.js";
+import { DENSE_ROW_PX, pageSizeForRows, pinAction } from "../shared/list-chunk.js";
 import { type BeforeWindow, pastHeldNote } from "../shared/list-view.js";
 import { rowInSpan, stepRecord } from "../shared/peek.js";
 import { providerOf } from "../shared/provider.js";
 import { nextRowIndex, resolveActiveIndex, rowAccessibleName } from "../shared/row-nav.js";
 import { type LedgerRow, type RowStatus, statusOf } from "../shared/rows.js";
 import { statusWord, UNRESOLVED_TIP } from "../shared/status-word.js";
+import { useMediaQuery } from "./use-media-query.js";
 
 const SORTS: Array<{ key: SortKey; label: string }> = [
 	{ key: "seq", label: "Position" },
@@ -77,16 +72,13 @@ const NONE = "—";
 
 /**
  * One record on one line, in columns: time, model (with a short dash in its provider's colour), actor, kind, how its
- * usage was measured, status, and its cost in dollars over a bar in proportion to the costliest record of the list.
+ * usage was measured, status, and its cost in dollars.
  */
-function DenseRowBody(props: { row: LedgerRow; maxCost: number | undefined }): React.JSX.Element {
+function DenseRowBody(props: { row: LedgerRow }): React.JSX.Element {
 	const { row } = props;
 	const status = statusOf(row);
 	const cost = costView(row);
 	const provider = providerOf(row);
-	const max = props.maxCost ?? 0;
-	const share =
-		row.costUt !== undefined && max > 0 ? Math.min(1, Math.max(0, row.costUt / max)) : 0;
 	return (
 		<>
 			<span className="ut-lg-t" title={row.ts}>
@@ -148,13 +140,6 @@ function DenseRowBody(props: { row: LedgerRow; maxCost: number | undefined }): R
 				)}
 			</span>
 			<span className="ut-lg-c">
-				{share > 0 && (
-					<i
-						className="ut-lg-bar"
-						style={{ width: `${(share * 100).toFixed(1)}%` }}
-						aria-hidden="true"
-					/>
-				)}
 				{/* A record with no cost shows the dash: an unknown cost is not $0. */}
 				<span className="ut-amt">{cost === null ? NONE : cost.usd}</span>
 			</span>
@@ -240,7 +225,7 @@ export const AuditRow = memo(function AuditRow(props: {
 	row: LedgerRow;
 	/** Position in the sorted list, 0-based. */
 	index: number;
-	/** How many rows the list holds (it draws the first of them, and more as the reader scrolls). */
+	/** How many rows the list holds (it draws only those near the screen). */
 	setSize: number;
 	/** The row the arrow keys are on. */
 	active: boolean;
@@ -251,8 +236,8 @@ export const AuditRow = memo(function AuditRow(props: {
 	hour?: boolean;
 	/** The record a chart has pinned. */
 	pinned?: boolean;
-	/** The costliest record's cost, which this row's bar is drawn against. */
-	maxCost?: number;
+	/** How far down the list's one block this row stands, in px. */
+	top: number;
 }): React.JSX.Element {
 	const { row } = props;
 	const ms = Date.parse(row.ts);
@@ -269,8 +254,9 @@ export const AuditRow = memo(function AuditRow(props: {
 			aria-setsize={props.setSize}
 			aria-label={rowAccessibleName(row)}
 			className={`ut-row ut-lg-row${props.selected ? " sel" : ""}${props.active ? " act" : ""}${props.fresh ? " fresh" : ""}`}
+			style={{ transform: `translateY(${props.top}px)` }}
 		>
-			<DenseRowBody row={row} maxCost={props.maxCost} />
+			<DenseRowBody row={row} />
 		</div>
 	);
 });
@@ -361,12 +347,10 @@ function Empty(props: {
 	}
 }
 
-/** What the list has drawn: how many rows, and the open and pinned records it has already drawn down to. */
-interface Drawn {
-	chunk: ChunkState;
-	selected: string | null;
-	pinned: string | null;
-}
+/** Rows drawn past each edge of the screen: a list 1,400px tall draws 47 rows and these on either side. */
+const OVERSCAN = 6;
+/** The screen assumed until the list is measured (as it mounts): twenty rows. */
+const FIRST_RECT = { width: 0, height: 20 * DENSE_ROW_PX };
 
 /** Memoized: the page re-renders on every answer, and the rows it draws (deferred) change only after it. */
 export const AuditTable = memo(function AuditTable(props: {
@@ -388,11 +372,11 @@ export const AuditTable = memo(function AuditTable(props: {
 	onClearFilters(): void;
 	/** Set when the inspector closes and focus should go back to the row it showed; `n` makes a repeat count. */
 	restoreFocus?: { hash: string; n: number } | null;
-	/** The hour a chart points at, as `[from, until)` in ms: its records are marked. */
+	/** The hour a chart points at, as `[from, until)` in ms: its records are marked, in place of the pinned record's hour. */
 	hourSpan?: readonly [number, number] | null;
-	/** The position of the record a chart has pinned: it is marked, drawn, and scrolled to the middle once. */
+	/** The position of the record a chart has pinned: it is marked with the records of its hour, and scrolled to the middle once. */
 	pinnedPos?: number | null;
-	/** What the rows are a list of (the filters, as one string). A new key starts again at the first rows, at the top. */
+	/** What the rows are a list of (the filters, as one string). A new key starts again at the top. */
 	resetKey?: string;
 	/** The time (ms) of the record under the pointer, or null when the pointer is on none. Called only on a change. */
 	onHover?(ms: number | null): void;
@@ -403,55 +387,75 @@ export const AuditTable = memo(function AuditTable(props: {
 	const [desc, setDesc] = useState(true);
 	const sorted = useMemo(() => sortRows(props.rows, sortKey, desc), [props.rows, sortKey, desc]);
 	const count = sorted.length;
-	const parentRef = useRef<HTMLDivElement>(null);
-	// The sort bar. On a phone it sticks to the top of the page over the rows, so its height is measured wherever
-	// a row or the list's top is brought under it.
-	const capRef = useRef<HTMLDivElement>(null);
 
-	// Each bar is drawn against the costliest record of the whole list, drawn or not, so a bar never changes length
-	// as more rows are drawn.
-	const maxCost = useMemo(
-		() => sorted.reduce((max, r) => Math.max(max, r.costUt ?? 0), 0),
-		[sorted],
-	);
-	const selectedIndex = useMemo(
-		() => (props.selected === null ? -1 : sorted.findIndex((r) => r.hash === props.selected)),
-		[sorted, props.selected],
-	);
+	const parentRef = useRef<HTMLDivElement>(null);
+	// Stable while the rows are: the virtualizer's cache is keyed on this callback's identity, and a new one each
+	// render (a scroll re-renders) re-scanned every row of a large vault.
+	const getItemKey = useCallback((i: number) => (sorted[i] as LedgerRow).hash, [sorted]);
+	// On a phone the list has no scroller of its own: it flows in the page, so a swipe on it scrolls the page, and the
+	// window is what the virtualizer follows. It then needs the list's distance from the top of the page, which moves
+	// when anything above it changes height, so it is re-measured as the page resizes.
+	const phone = useMediaQuery(PHONE_QUERY);
+	const [scrollMargin, setScrollMargin] = useState(0);
+	// The sort bar sticks to the top of the window on a phone, over the rows that scroll under it: a row brought into
+	// view is placed below it (scrollPaddingStart), and a screenful counts only the rows below it.
+	const capRef = useRef<HTMLDivElement>(null);
+	const [capH, setCapH] = useState(0);
+	useLayoutEffect(() => {
+		if (!phone) return;
+		const measure = (): void => {
+			const top = parentRef.current?.getBoundingClientRect().top;
+			if (top !== undefined) setScrollMargin(Math.round(top + window.scrollY));
+			setCapH(capRef.current?.offsetHeight ?? 0);
+		};
+		measure();
+		if (typeof ResizeObserver === "undefined") return;
+		const watch = new ResizeObserver(measure);
+		watch.observe(document.body);
+		return () => watch.disconnect();
+	}, [phone]);
+
+	// Every row is one height, so none is measured: the rows stand in one block of that height times the row count,
+	// and only those near the screen are drawn.
+	const shared = {
+		count,
+		estimateSize: () => DENSE_ROW_PX,
+		getItemKey,
+		overscan: OVERSCAN,
+		initialRect: FIRST_RECT,
+	};
+	// Both hooks always run (hooks cannot be conditional); only the one in use observes anything.
+	const inList = useVirtualizer<HTMLDivElement, Element>({
+		...shared,
+		enabled: !phone,
+		getScrollElement: () => parentRef.current,
+	});
+	const inPage = useWindowVirtualizer<Element>({
+		...shared,
+		enabled: phone,
+		scrollMargin,
+		scrollPaddingStart: capH,
+	});
+	const virtualizer = phone ? inPage : inList;
+	const items = virtualizer.getVirtualItems();
+
 	const pinnedPos = props.pinnedPos ?? null;
 	const pinnedIndex = useMemo(
 		() => (pinnedPos === null ? -1 : sorted.findIndex((r) => r.pos === pinnedPos)),
 		[sorted, pinnedPos],
 	);
-	const pinnedHash = sorted[pinnedIndex]?.hash ?? null;
-
-	// The list draws its first rows and more as the reader scrolls: every row is one height, so the rows not yet
-	// drawn need no measuring. A new sort or a new set of filters is a new list, from its first rows.
-	const key = `${props.resetKey ?? ""}|${sortKey}|${desc ? "desc" : "asc"}`;
-	// The open record and the pinned one are drawn however deep they are. Each is brought in once, when it is first
-	// in the list: a later sort starts again at the first rows and does not draw down to it again.
-	const settle = (w: Drawn): Drawn => {
-		let chunk = chunkSync(w.chunk, key, count);
-		const mark = (done: string | null, hash: string | null, index: number): string | null => {
-			if (hash === null || index < 0) return null;
-			if (hash !== done) chunk = chunkReveal(chunk, index, count);
-			return hash;
-		};
-		const selected = mark(w.selected, props.selected, selectedIndex);
-		const pinned = mark(w.pinned, pinnedHash, pinnedIndex);
-		return chunk === w.chunk && selected === w.selected && pinned === w.pinned
-			? w
-			: { chunk, selected, pinned };
-	};
-	const [held, setHeld] = useState<Drawn>(() =>
-		settle({ chunk: chunkInit(key, count), selected: null, pinned: null }),
+	const pinnedRow = sorted[pinnedIndex];
+	const pinnedHash = pinnedRow?.hash ?? null;
+	// The hour marked: the one a chart points at, else the pinned record's own.
+	const pinnedMs = pinnedRow === undefined ? Number.NaN : Date.parse(pinnedRow.ts);
+	const hour = useMemo(
+		() => props.hourSpan ?? (Number.isFinite(pinnedMs) ? hourSpanOf(pinnedMs) : null),
+		[props.hourSpan, pinnedMs],
 	);
-	// Settled as it renders, not in an effect: the rows of a new list are never drawn at the old list's depth.
-	const drawn = settle(held);
-	if (drawn !== held) setHeld(drawn);
-	const shown = shownCount(drawn.chunk, count);
 
-	// A new list starts at the top. Not on the first draw, and not when a record arrives (the key is the same).
+	// A new sort or a new set of filters is a new list, from its top. Not on the first draw, and not when a record
+	// arrives (the key is the same).
+	const key = `${props.resetKey ?? ""}|${sortKey}|${desc ? "desc" : "asc"}`;
 	const drawnKey = useRef(key);
 	useEffect(() => {
 		if (drawnKey.current === key) return;
@@ -466,28 +470,6 @@ export const AuditTable = memo(function AuditTable(props: {
 		if (at < under) window.scrollBy(0, at - under);
 	}, [key]);
 
-	// One more set of rows when the mark after the last row comes near the screen. The observer is made again after
-	// each growth, so a mark still in view asks again until the screen is full.
-	const grow = (): void =>
-		setHeld((w) => {
-			const chunk = chunkGrow(w.chunk, count);
-			return chunk === w.chunk ? w : { ...w, chunk };
-		});
-	const more = shown < count;
-	const moreRef = useRef<HTMLDivElement>(null);
-	// biome-ignore lint/correctness/useExhaustiveDependencies: made again when the rows drawn or held change
-	useEffect(() => {
-		const el = moreRef.current;
-		if (!more || el === null || typeof IntersectionObserver === "undefined") return;
-		const watch = new IntersectionObserver(
-			(entries) => {
-				if (entries.some((entry) => entry.isIntersecting)) grow();
-			},
-			{ root: null, rootMargin: "400px" },
-		);
-		watch.observe(el);
-		return () => watch.disconnect();
-	}, [more, shown, count]);
 	// The row the arrow keys are on, by hash (an index would slide to another row when a live record arrives at the top).
 	// Until a key or a click sets one: the open row, else the first.
 	const [activeHash, setActiveHash] = useState<string | null>(null);
@@ -501,26 +483,9 @@ export const AuditTable = memo(function AuditTable(props: {
 		if (props.selected !== null) setActiveHash(props.selected);
 	}, [props.selected]);
 
-	// Bringing a row into view: its rows are drawn first (it may be past the rows drawn), and it is scrolled to once
-	// they are in the page, after the commit.
-	const [scrollTo, setScrollTo] = useState<{ hash: string; block: ScrollLogicalPosition } | null>(
-		null,
-	);
-	const showRow = (index: number, block: ScrollLogicalPosition): void => {
-		const target = sorted[index];
-		if (target === undefined) return;
-		setHeld((w) => {
-			const chunk = chunkReveal(w.chunk, index, count);
-			return chunk === w.chunk ? w : { ...w, chunk };
-		});
-		setScrollTo({ hash: target.hash, block });
-	};
-	useEffect(() => {
-		if (scrollTo === null) return;
-		// The sheet stops a row under the stuck sort bar by this height (on a phone only).
-		parentRef.current?.style.setProperty("--ut-lg-cap", `${capRef.current?.offsetHeight ?? 0}px`);
-		document.getElementById(rowDomId(scrollTo.hash))?.scrollIntoView({ block: scrollTo.block });
-	}, [scrollTo]);
+	// Bringing a row into view: the list scrolls to it, and the rows there are drawn.
+	const showRow = (index: number, align: "auto" | "center"): void =>
+		virtualizer.scrollToIndex(index, { align });
 
 	// The active row must be DRAWN to be named (aria-activedescendant) and shown. While the list holds focus, a sort,
 	// filter or live insert that moves it brings it back into view.
@@ -528,27 +493,28 @@ export const AuditTable = memo(function AuditTable(props: {
 		parentRef.current !== null && document.activeElement === parentRef.current;
 	// biome-ignore lint/correctness/useExhaustiveDependencies: re-run when the active row's index or the rows change
 	useEffect(() => {
-		if (activeRow !== undefined && listFocused()) showRow(activeIndex, "nearest");
+		if (activeRow !== undefined && listFocused()) showRow(activeIndex, "auto");
 	}, [activeIndex, sorted]);
 	// And when focus comes back by keyboard (Tab), the active row is scrolled in first. Only keyboard focus: a mouse
 	// click also focuses the list, and scrolling under the pointer before its click lands would open another row.
 	const onFocus = (e: React.FocusEvent<HTMLDivElement>): void => {
 		if (e.target !== e.currentTarget || activeRow === undefined) return;
-		if (e.currentTarget.matches(":focus-visible")) showRow(activeIndex, "nearest");
+		if (e.currentTarget.matches(":focus-visible")) showRow(activeIndex, "auto");
 	};
 
 	const moveTo = (index: number): void => {
 		const target = sorted[index];
 		if (target === undefined) return;
 		setActiveHash(target.hash);
-		showRow(index, "nearest");
+		showRow(index, "auto");
 	};
 
-	// One click handler on the list, not one a row: the row clicked is found by its id.
+	// One click handler on the list, not one a row: the row clicked is found by its id, among the rows drawn.
 	const onClick = (e: React.MouseEvent<HTMLDivElement>): void => {
 		const id = (e.target as Element).closest('[role="option"]')?.id;
 		if (id === undefined) return;
-		const target = sorted.find((r) => rowDomId(r.hash) === id);
+		const at = items.find((v) => rowDomId((sorted[v.index] as LedgerRow).hash) === id);
+		const target = at === undefined ? undefined : sorted[at.index];
 		if (target === undefined) return;
 		setActiveHash(target.hash);
 		props.onOpen(target, false);
@@ -578,9 +544,9 @@ export const AuditTable = memo(function AuditTable(props: {
 			return;
 		}
 		// A screenful is the rows that fit, every row being one height. On a phone the page is the scroller (the list
-		// flows in it and is as tall as its rows), so a screenful is never more than the window's.
+		// flows in it), so the screenful is the window's, below the sticky sort bar.
 		const el = parentRef.current;
-		const page = el ? pageSizeForRows(Math.min(el.clientHeight, window.innerHeight)) : 1;
+		const page = pageSizeForRows(phone ? window.innerHeight - capH : (el?.clientHeight ?? 0));
 		const next = nextRowIndex(activeIndex, e.key, count, page);
 		if (next === null) return;
 		e.preventDefault();
@@ -684,7 +650,7 @@ export const AuditTable = memo(function AuditTable(props: {
 							tabIndex: 0,
 							"aria-label": "Audit records",
 							"aria-activedescendant":
-								activeRow !== undefined && activeIndex >= 0 && activeIndex < shown
+								activeRow !== undefined && items.some((v) => v.index === activeIndex)
 									? rowDomId(activeRow.hash)
 									: undefined,
 							onKeyDown,
@@ -704,24 +670,25 @@ export const AuditTable = memo(function AuditTable(props: {
 						onClearFilters={props.onClearFilters}
 					/>
 				) : (
-					<div className="ut-lg-rows">
-						{sorted.slice(0, shown).map((row, index) => (
-							<AuditRow
-								// The event hash, unique on the chain: an id can repeat, and duplicate keys drop or duplicate rows.
-								key={row.hash}
-								row={row}
-								index={index}
-								setSize={count}
-								active={index === activeIndex}
-								selected={props.selected === row.hash}
-								fresh={props.liveIds?.has(row.hash) === true}
-								hour={rowInSpan(row.ts, props.hourSpan ?? null)}
-								pinned={index === pinnedIndex}
-								maxCost={maxCost}
-							/>
-						))}
-						{/* The mark the list watches: when it nears the screen, more rows are drawn. */}
-						{shown < count && <div ref={moreRef} className="ut-lg-more" />}
+					<div className="ut-lg-rows" style={{ height: virtualizer.getTotalSize() }}>
+						{items.map((item) => {
+							const row = sorted[item.index] as LedgerRow;
+							return (
+								<AuditRow
+									// The event hash, unique on the chain: an id can repeat, and duplicate keys drop or duplicate rows.
+									key={row.hash}
+									row={row}
+									index={item.index}
+									setSize={count}
+									active={item.index === activeIndex}
+									selected={props.selected === row.hash}
+									fresh={props.liveIds?.has(row.hash) === true}
+									hour={rowInSpan(row.ts, hour)}
+									pinned={item.index === pinnedIndex}
+									top={item.start - virtualizer.options.scrollMargin}
+								/>
+							);
+						})}
 					</div>
 				)}
 			</div>
