@@ -20,7 +20,7 @@ import { rateNow } from "../src/shared/now-rate.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 import { allCss } from "./helpers/css.js";
 import { dayOneSummary } from "./helpers/day-one.js";
-import { atOf, renderNow } from "./helpers/now-desk.js";
+import { atOf, type NowOver, renderNow } from "./helpers/now-desk.js";
 import { NOW_MS, spend, text } from "./helpers/share.js";
 
 const END = chartWindow("1w", NOW_MS, null).endMs;
@@ -56,6 +56,17 @@ const lastLine = (html: string): string =>
 const projLine = (html: string): string =>
 	/<p class="ut-nw-proj"[^>]*>.*?<\/p>/.exec(html)?.[0] ?? "";
 const escaped = (s: string): string => s.replaceAll("&", "&amp;").replaceAll("'", "&#x27;");
+/** A box held empty and unseen: its place is kept, so nothing moves when what it holds arrives or goes. */
+const held = (tag: string, cls: string, inner = "\u00a0"): string =>
+	`<${tag} class="${cls}" aria-hidden="true" data-reserve="true">${inner}</${tag}>`;
+const HELD_PROJ = held("p", "ut-nw-proj");
+const HELD_LAST = held("p", "ut-nw-last");
+const HELD_RATE = `<div class="ut-fact ut-nw-rate" aria-busy="true"><b>Rate now</b><span class="v na">…</span>${held("span", "ut-nw-words")}${held("span", "ut-nw-spark", "")}</div>`;
+/** The boxes the rate, the projection and the last record are drawn in, in the order the markup has them. */
+const boxes = (html: string): string[] =>
+	[...html.matchAll(/class="(?:ut-fact )?(ut-nw-(?:rate|words|spark|proj|last))"/g)].map(
+		(m) => m[1] ?? "",
+	);
 
 beforeEach(() => {
 	vi.useFakeTimers({ toFake: ["Date"] });
@@ -148,13 +159,13 @@ describe("the Now window, live", () => {
 		);
 	});
 
-	it("an overspent budget is already used, an idle vault has no date, an unknown budget has no line", async () => {
+	it("an overspent budget is already used, an idle vault has no date, an unknown budget holds the place empty", async () => {
 		const used = dayOneSummary({ spentUt: 1_200_000, remainingUt: -200_000 });
 		expect(text(await renderNow({ rows: ROWS, summary: used }))).toContain(NOW_COPY.projectionUsed);
 		expect(text(await renderNow({ rows: [] }))).toContain(NOW_COPY.projectionIdle);
 		const unknown = dayOneSummary({ budget: null, remainingUt: null });
 		const html = await renderNow({ rows: ROWS, summary: unknown });
-		expect(html).not.toContain("ut-nw-proj");
+		expect(projLine(html)).toBe(HELD_PROJ);
 		expect(text(html)).not.toContain("Projection");
 		expect(text(html)).toContain("Rate now");
 	});
@@ -197,17 +208,53 @@ describe("the Now window's last record", () => {
 		expect(free).toBe(`Last record 11:01:00Z · claude-sonnet-5 · x · ${formatUsdTotal(0)}`);
 	});
 
-	it("nothing is drawn when there is no record, or before the records have loaded", async () => {
-		expect(await renderNow({ rows: [] })).not.toContain("ut-nw-last");
-		const loading = await renderNow({ rows: ROWS, phase: "loading" });
-		for (const cls of ["ut-nw-last", "ut-nw-rate", "ut-nw-proj"])
-			expect(loading).not.toContain(cls);
-		expect(loading).toContain('aria-label="vault summary"');
+	it("with no record the line's place is held empty; without a summary the rate is still given", async () => {
+		expect(lastLine(await renderNow({ rows: [] }))).toBe(HELD_LAST);
 		// Records without a summary yet: the rate is theirs to give, the projection needs the budget.
 		const noSummary = await renderNow({ rows: ROWS, summary: null });
 		expect(noSummary).toContain("vault summary loading");
 		expect(rateFigure(noSummary)).toBe(formatUsdTotal(5_000));
-		expect(noSummary).not.toContain("ut-nw-proj");
+		expect(projLine(noSummary)).toBe(HELD_PROJ);
+	});
+});
+
+describe("the Now window before its records have loaded", () => {
+	it("holds a box for the rate, the projection and the last record, and states no figure", async () => {
+		for (const phase of ["loading", "failed"] as const) {
+			const html = await renderNow({ rows: ROWS, phase });
+			expect(html).toContain('aria-label="vault summary"');
+			expect(html).toContain(`${HELD_RATE}${HELD_PROJ}<button type="button" class="ut-more"`);
+			expect(html).toContain(`</section>${HELD_LAST}</div>`);
+			expect(html).not.toContain('data-fig="now.rate"');
+			expect(html).not.toContain("<svg role");
+			expect(text(html)).not.toContain("Projection");
+			expect(text(html)).not.toContain("Last record");
+		}
+	});
+
+	it("what loads takes the same boxes in the same order, whatever there is to say", async () => {
+		const loading = boxes(await renderNow({ rows: ROWS, phase: "loading" }));
+		expect(loading).toEqual([
+			"ut-nw-rate",
+			"ut-nw-words",
+			"ut-nw-spark",
+			"ut-nw-proj",
+			"ut-nw-last",
+		]);
+		const loaded = await renderNow({ rows: ROWS });
+		expect(loaded).toContain('<svg class="ut-nw-spark" role="img"');
+		expect(loaded).not.toContain("data-reserve");
+		const states: NowOver[] = [
+			{ rows: ROWS },
+			{ rows: ROWS, at: atOf(Y_MID, 12_000) },
+			{ rows: ROWS, filters: only("actors", "nobody") },
+			{ rows: ROWS, summary: dayOneSummary({ budget: null, remainingUt: null }) },
+			{ rows: ROWS, summary: null },
+			{ rows: [] },
+		];
+		for (const over of states) expect(boxes(await renderNow(over))).toEqual(loading);
+		// At a past position the projection's place is kept, empty: the facts under it do not move up.
+		expect(projLine(await renderNow({ rows: ROWS, at: atOf(Y_MID, 12_000) }))).toBe(HELD_PROJ);
 	});
 });
 
@@ -281,10 +328,37 @@ describe("the Now window under a filter", () => {
 });
 
 describe("the Now window, filled", () => {
-	it("draws its data container and nothing in it yet", async () => {
-		const html = await renderNow({ rows: ROWS, fill: "now" });
-		expect(html).toContain('<div class="ut-nw" data-gen="0"></div>');
-		expect(html).not.toContain("ut-facts");
+	/** What the window's body holds: everything inside it, the frame around it left out. */
+	const body = (html: string): string =>
+		/<div class="ut-win-body">([\s\S]*)<\/div><\/section>/.exec(html)?.[1] ?? "";
+
+	it("draws what the small form draws until its own parts land: live, at a position, under a filter", async () => {
+		const states: NowOver[] = [
+			{ rows: ROWS },
+			{ rows: ROWS, at: atOf(Y_MID, 12_000) },
+			{ rows: ROWS, filters: only("actors", "y") },
+			{ rows: ROWS, at: atOf(Y_MID, 7_000), filters: only("actors", "y") },
+			{ rows: ROWS, phase: "loading" },
+		];
+		for (const over of states) {
+			const small = await renderNow(over);
+			const filled = await renderNow({ ...over, fill: "now" });
+			// Only the frame says which form it is.
+			expect(small).toContain('data-win="now" data-filled="false" data-state="home"');
+			expect(filled).toContain('data-win="now" data-filled="true" data-state="filled"');
+			expect(filled).toContain('aria-label="Restore Now" aria-pressed="true"');
+			const inside = body(filled);
+			expect(inside.startsWith('<div class="ut-nw" data-gen="0"><')).toBe(true);
+			for (const part of [
+				'class="ut-facts"',
+				"<b>Spend</b>",
+				"<b>Rate now</b>",
+				"ut-nw-proj",
+				"ut-nw-last",
+			])
+				expect(inside).toContain(part);
+			expect(inside).toBe(body(small));
+		}
 	});
 });
 
@@ -349,7 +423,8 @@ describe("the Now window's sheet", () => {
 		expect(rule('[data-win="now"] .ut-nw-rate')).toMatch(
 			/grid-template-columns:\s*minmax\(0, 1fr\) auto;/,
 		);
-		expect(rule('[data-win="now"] .ut-nw-rate > svg')).toMatch(/grid-column:\s*2;/);
+		const spark = rule('[data-win="now"] .ut-nw-rate > .ut-nw-spark');
+		expect(spark).toMatch(/grid-column:\s*2;/);
 		expect(rule(".ut-nw-line")).toMatch(/fill:\s*none;/);
 		expect(rule('.ut-nw-rate[data-unusual="true"] .ut-nw-words')).toMatch(
 			/color:\s*var\(--dk-gold\);/,
@@ -357,5 +432,20 @@ describe("the Now window's sheet", () => {
 		expect(rule(".ut-nw-dot")).toMatch(/fill:\s*var\(--dk-gold\);/);
 		expect(rule(".ut-nw-proj")).toMatch(/font-variant-numeric:\s*tabular-nums;/);
 		expect(rule(".ut-nw-last")).toMatch(/text-overflow:\s*ellipsis;/);
+	});
+
+	it("gives each held box the size of what it will hold, and keeps it unseen", () => {
+		// The line's box is the drawn line's: 96 by 32, whether it is the line or its place.
+		const spark = rule('[data-win="now"] .ut-nw-rate > .ut-nw-spark');
+		expect(spark).toMatch(/width:\s*96px;/);
+		expect(spark).toMatch(/min-height:\s*32px;/);
+		// One line of their own text, at the least.
+		for (const line of [".ut-nw-proj", ".ut-nw-last"]) {
+			expect(rule(line)).toMatch(/font:\s*400 11\.5px\/1\.4 var\(--sans\);/);
+			expect(rule(line)).toMatch(/min-height:\s*calc\(11\.5px \* 1\.4\);/);
+		}
+		// Inside the facts the older sheet hides what is held; the last record sits outside them.
+		expect(allCss()).toMatch(/\.ut-facts \[data-reserve="true"\]\s*\{\s*visibility:\s*hidden;/);
+		expect(rule('.ut-nw-last[data-reserve="true"]')).toMatch(/visibility:\s*hidden;/);
 	});
 });

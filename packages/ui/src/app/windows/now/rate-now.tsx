@@ -8,6 +8,9 @@
  * The line is the default ink, or the one filtered category's colour; an unusual rate is gold, with a dot on the last
  * hour. The small form shades the usual range behind the line; the filled form's tile is the plain line (the week's
  * chart beside it shades the range).
+ *
+ * With no view (the records have not loaded) it states no figure: the fact keeps its heading, and its words and its
+ * line are held empty and unseen in the boxes they will take, so nothing moves when they arrive.
  */
 
 import { monotone } from "../../../shared/curve.js";
@@ -23,11 +26,22 @@ const H = 32;
 const PAD = 2;
 
 export function RateNow(props: {
-	view: RateNowView;
+	view: RateNowView | null;
 	color: string | null;
 	filled: boolean;
 }): React.JSX.Element {
 	const { view } = props;
+	if (view === null)
+		return (
+			<div className="ut-fact ut-nw-rate" aria-busy="true">
+				<b>Rate now</b>
+				<span className="v na">…</span>
+				<span className="ut-nw-words" aria-hidden="true" data-reserve="true">
+					{"\u00a0"}
+				</span>
+				<span className="ut-nw-spark" aria-hidden="true" data-reserve="true" />
+			</div>
+		);
 	const { hours, band } = view;
 	const from = hours.length - SPARK_HOURS;
 	const last = hours.length - 1;
@@ -66,6 +80,7 @@ export function RateNow(props: {
 				{rateWords(view)}
 			</span>
 			<svg
+				className="ut-nw-spark"
 				role="img"
 				aria-label="The past 24 hours, hour by hour"
 				width={W}

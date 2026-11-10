@@ -3,7 +3,8 @@
 
 /**
  * The newest record on one line: when, its model (or its kind, for a record with none), who, and its cost when it has
- * one. Props only. Nothing is drawn when there is no record.
+ * one. Props only. With no record to show, the line's place is held empty and unseen, so nothing moves when one
+ * arrives.
  */
 
 import { compactActor, formatUsdTotal, formatUtc } from "../../../shared/format.js";
@@ -15,9 +16,14 @@ export function LastRecord(props: {
 	row: LedgerRow | null;
 	/** The end of the current minute: the day the line is read on. */
 	endMs: number;
-}): React.JSX.Element | null {
+}): React.JSX.Element {
 	const { row } = props;
-	if (row === null) return null;
+	if (row === null)
+		return (
+			<p className="ut-nw-last" aria-hidden="true" data-reserve="true">
+				{"\u00a0"}
+			</p>
+		);
 	const at = Date.parse(row.ts);
 	// A time alone reads as today's, so only a record of this UTC day is given as one. Any other keeps its date, and a
 	// time that cannot be read is shown as it was written.

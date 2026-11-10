@@ -90,10 +90,13 @@
 		column-gap: 8px;
 	}
 
-	[data-win="now"] .ut-nw-rate > svg {
+	/* The line's box, the same whether it holds the line or keeps its place before the records load. */
+	[data-win="now"] .ut-nw-rate > .ut-nw-spark {
 		grid-column: 2;
 		grid-row: 1 / span 3;
 		align-self: center;
+		width: 96px;
+		min-height: 32px;
 	}
 
 	.ut-nw-words {
@@ -122,25 +125,33 @@
 		fill: var(--dk-gold);
 	}
 
-	/* The projection: beside the rate, under the budget it is about. */
+	/* The projection: beside the rate, under the budget it is about. Its place is kept, a line tall at the least, when
+	   there is none to make. */
 	.ut-nw-proj {
 		margin: 0;
 		align-self: start;
+		min-height: calc(11.5px * 1.4);
 		font: 400 11.5px/1.4 var(--sans);
 		font-variant-numeric: tabular-nums;
 		color: var(--dk-legend);
 		overflow-wrap: anywhere;
 	}
 
+	/* The last record: one line, and its place is kept before there is one. */
 	.ut-nw-last {
 		margin: 0;
 		padding: 6px 14px 10px;
+		min-height: calc(11.5px * 1.4);
 		font: 400 11.5px/1.4 var(--sans);
 		font-variant-numeric: tabular-nums;
 		color: var(--dk-legend);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+	}
+
+	.ut-nw-last[data-reserve="true"] {
+		visibility: hidden;
 	}
 
 	.ut-nw-last b {

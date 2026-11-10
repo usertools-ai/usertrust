@@ -65,7 +65,8 @@ function NowSmall(): React.JSX.Element {
 				: null,
 		[filters, chartRows, at],
 	);
-	// Until the records have loaded there is no rate to state: a figure read from no rows would be a claim.
+	// Until the records have loaded there is no rate to state: a figure read from no rows would be a claim. Each of
+	// the three is then given nothing, and holds its box empty, so the first load moves nothing.
 	const loaded = list.phase === "loaded";
 	return (
 		<>
@@ -77,22 +78,20 @@ function NowSmall(): React.JSX.Element {
 				at={at}
 				{...(spentOverride === null ? {} : { spentOverride })}
 				budgetNote={
-					loaded && (
-						<>
-							<RateNow view={rate} color={tint} filled={false} />
-							<ProjectionLine projection={projection} />
-						</>
-					)
+					<>
+						<RateNow view={loaded ? rate : null} color={tint} filled={false} />
+						<ProjectionLine projection={loaded ? projection : null} />
+					</>
 				}
 			/>
-			{loaded && <LastRecord row={last} endMs={endMs} />}
+			<LastRecord row={loaded ? last : null} endMs={endMs} />
 		</>
 	);
 }
 
-/** The filled form: tiles, charts and lists. Not built yet, so it draws nothing. */
-function NowFilled(): null {
-	return null;
+/** The filled form. Its own parts (tiles, charts and lists) are not built yet: until they are, it is the small form. */
+function NowFilled(): React.JSX.Element {
+	return <NowSmall />;
 }
 
 function NowBody({ filled }: { filled: boolean }): React.JSX.Element {
