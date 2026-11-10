@@ -158,6 +158,42 @@ describe("the legend's hover owner", () => {
 		expect(listedKey(["a", "b"])).toBe(listedKey(["a", "b"]));
 	});
 
+	it("hands the ring's hover back when a focus it took over from the pointer ends", () => {
+		const t = deferredIo();
+		const owner = createHoverOwner(t.io, "lane");
+		const ring: HoverCategory = { dim: "lane", key: "r", from: "share" };
+		t.other(ring);
+		owner.focus("a");
+		expect(t.sent.at(-1)).toEqual(mine("a"));
+		owner.focus("b");
+		owner.blur();
+		expect(t.sent.at(-1)).toEqual(ring);
+	});
+
+	it("hands the ring's hover back after a pointer visit to a row and back", () => {
+		const t = deferredIo();
+		const owner = createHoverOwner(t.io, "lane");
+		const ring: HoverCategory = { dim: "lane", key: "r", from: "share" };
+		t.other(ring);
+		owner.enter("a");
+		owner.leave();
+		expect(t.sent.at(-1)).toEqual(ring);
+	});
+
+	it("gives nothing back when no other hover was there, and not a hover the ring has since dropped", () => {
+		const t = deferredIo();
+		const owner = createHoverOwner(t.io, "lane");
+		owner.focus("a");
+		owner.blur();
+		expect(t.sent.at(-1)).toBeNull();
+		t.other({ dim: "lane", key: "r", from: "share" });
+		owner.focus("a");
+		t.other(null);
+		owner.blur();
+		expect(t.sent.at(-1)).toBeNull();
+		expect(t.sent.length).toBe(5);
+	});
+
 	it("clears its own hover when disposed, and only then", () => {
 		const t = deferredIo();
 		const owner = createHoverOwner(t.io, "lane");

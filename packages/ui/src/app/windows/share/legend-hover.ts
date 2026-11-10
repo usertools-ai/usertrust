@@ -64,15 +64,23 @@ export function createHoverOwner(io: HoverIo, level: Dimension): HoverOwner {
 	let published: string | null = null;
 	let pointer: string | null = null;
 	let focused: string | null = null;
+	// The hover another source (the ring's pointer) held when the legend took over; it comes back when the legend lets go.
+	let displaced: HoverCategory | null = null;
 	const publish = (key: string | null): void => {
 		if (key !== null) {
+			if (published === null) {
+				const now = io.latest();
+				displaced = now !== null && now.from !== LEGEND_FROM ? now : null;
+			}
 			published = key;
 			io.set({ dim: level, key, from: LEGEND_FROM });
 			return;
 		}
 		const ours = isOurs(io.latest(), level, published);
+		const back = displaced;
 		published = null;
-		if (ours) io.set(null);
+		displaced = null;
+		if (ours) io.set(back);
 	};
 	const settle = (): void => publish(rowToShow(pointer, focused));
 	return {
