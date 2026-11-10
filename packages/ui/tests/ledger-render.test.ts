@@ -103,29 +103,31 @@ describe("the panel's arithmetic", () => {
 		expect(html).toContain(fig("panel-sum-exact", "114.75 UT"));
 		expect(html).toContain(fig("panel-sum", "115 UT"));
 		expect(html).toContain(fig("panel-cost", "115 UT"));
-		expect(html).toContain("The tiers add up to the charged cost.");
+		// The three rows under the tiers say it: no sentence repeats the sum.
+		expect(html).not.toContain("ut-lg-sumnote");
+		expect(html).not.toContain("Sum ");
 		expect(html).toContain("Pricing table version: 2026-11-02");
 		expect(html).toContain("Usage source: provider-reported");
 		expect(html).not.toMatch(/verified|reconciled/i);
 	});
 
-	it("a fractional sum says what it was rounded up to", () => {
+	it("a fractional sum rounded up is told by the rows alone, with no sentence", () => {
 		const html = table(inputOnly(2500, 3));
-		expect(html).toContain("Sum 2.5 UT, rounded up to 3 UT.");
+		expect(html).not.toContain("ut-lg-sumnote");
+		expect(html).not.toContain("Sum 2.5");
 		expect(html).toContain(fig("panel-sum-exact", "2.5 UT"));
 		expect(html).toContain(fig("panel-sum", "3 UT"));
 		expect(html).not.toContain("ledger.panel-residue");
 	});
 
-	it("a whole sum charged at that number has no rounding words", () => {
+	it("a whole sum charged at that number is told by the rows alone, with no sentence", () => {
 		const html = table(inputOnly(3000, 3));
-		expect(html).toContain("Sum 3 UT.");
-		expect(html).not.toContain("rounded up to 3");
+		expect(html).not.toContain("ut-lg-sumnote");
+		expect(html).not.toContain("Sum 3");
 		expect(html).not.toContain("floating point");
 		expect(html).toContain(fig("panel-sum-exact", "3 UT"));
 		expect(html).toContain(fig("panel-sum", "3 UT"));
 		expect(html).not.toContain("ledger.panel-residue");
-		expect(html).toContain("The tiers add up to the charged cost.");
 	});
 
 	it("a whole sum charged one higher is explained, carries the residue hook and is not a difference", () => {
@@ -152,7 +154,7 @@ describe("the panel's arithmetic", () => {
 			"The tiers add up to 115 UT; the record charged 120 UT; the charge is 5 UT higher. Shown as recorded.",
 		);
 		expect(more).toContain(fig("panel-cost", "120 UT"));
-		expect(more).not.toContain("The tiers add up to the charged cost.");
+		expect(more).toContain('<p class="ut-lg-sumnote">The tiers add up to 115 UT;');
 		expect(table(row({ costUt: 112 }))).toContain("the charge is 3 UT lower");
 	});
 

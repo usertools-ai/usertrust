@@ -70,24 +70,24 @@ function missing(charge: Charge, row: LedgerRow): string[] {
 }
 
 /**
- * The sentence for the sum beside the whole usertokens a charge computes from it. A whole sum that computes one
- * higher is the floating-point case: the terms are exactly a whole number in decimals and land a hair above it when
- * summed as the charge sums them, and a charge rounds up. `residue` is true only then.
+ * The sentence for the sum, only where the rows under the tiers need words: a fractional sum rounded up and a whole
+ * sum charged as it is are told by the rows alone (`text` is null). A whole sum that computes one higher is the
+ * floating-point case: the terms are exactly a whole number in decimals and land a hair above it when summed as the
+ * charge sums them, and a charge rounds up. `residue` is true only then.
  */
 function sumLine(
 	sumText: string,
 	computedUt: number,
 	charged: boolean,
-): { text: string; residue: boolean } {
+): { text: string | null; residue: boolean } {
 	const sum = exactUt(sumText);
 	const computed = formatUt(computedUt);
-	if (sumText.includes("."))
-		return { text: `Sum ${sum}, rounded up to ${computed}.`, residue: false };
 	const whole = Number(sumText);
+	if (sumText.includes(".")) return { text: null, residue: false };
 	if (whole < 1 && computedUt === 1) {
 		return { text: `Sum ${sum}. A charge is at least ${computed}.`, residue: false };
 	}
-	if (computedUt !== whole + 1) return { text: `Sum ${sum}.`, residue: false };
+	if (computedUt !== whole + 1) return { text: null, residue: false };
 	const how = `computed in floating point, came out a hair above ${whole.toLocaleString("en-US")}, and charges round up`;
 	return {
 		// "Charged" only when the record's cost is that figure; a record that charged something else says so below.
@@ -206,12 +206,12 @@ export function ChargeTable(props: { row: LedgerRow }): React.JSX.Element | null
 					{lacking.length === 1 ? "was" : "were"} not recorded.
 				</p>
 			)}
-			{priced && sum !== null && (
-				<p>
-					{sum.text}{" "}
-					{differenceUt === 0
-						? "The tiers add up to the charged cost."
-						: `The tiers add up to ${formatUt(computedUt)}; the record charged ${formatUt(costUt)}; the charge is ${formatUt(Math.abs(differenceUt))} ${differenceUt > 0 ? "higher" : "lower"}. Shown as recorded.`}
+			{priced && sum !== null && (sum.text !== null || differenceUt !== 0) && (
+				<p className="ut-lg-sumnote">
+					{sum.text}
+					{sum.text !== null && differenceUt !== 0 && " "}
+					{differenceUt !== 0 &&
+						`The tiers add up to ${formatUt(computedUt)}; the record charged ${formatUt(costUt)}; the charge is ${formatUt(Math.abs(differenceUt))} ${differenceUt > 0 ? "higher" : "lower"}. Shown as recorded.`}
 				</p>
 			)}
 			<p className="ut-lg-src">Pricing table version: {charge.version ?? NOT_RECORDED}</p>
