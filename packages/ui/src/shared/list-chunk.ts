@@ -71,7 +71,8 @@ export interface PinAction {
  * filtered.
  * - Nothing pinned: nothing is handled any more, so pinning the same record again brings it into view again.
  * - The pin already handled: nothing to do. The reader may have scrolled away since, and is left where they are.
- * - The pinned record is not in the list (not loaded yet, or filtered out): it waits; `done` is kept.
+ * - Another record is pinned and is not in the list (not loaded yet, or filtered out): it waits, and nothing is
+ *   handled any more. The pin has moved, so the record pinned before is brought into view if it is pinned again.
  * - Otherwise the record is the target, at its index in `order`, and is now handled.
  */
 export function pinAction(
@@ -82,7 +83,7 @@ export function pinAction(
 	if (pinned === null) return { done: null, target: null };
 	if (pinned === done) return { done, target: null };
 	const index = order.findIndex((r) => r.hash === pinned);
-	if (index < 0) return { done, target: null };
+	if (index < 0) return { done: null, target: null };
 	return { done: pinned, target: { hash: pinned, index } };
 }
 

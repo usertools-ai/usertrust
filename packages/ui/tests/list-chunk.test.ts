@@ -162,15 +162,32 @@ describe("pinAction: the pinned record is brought into view once per pin", () =>
 		expect(pinAction("z", "z", order)).toEqual({ done: "z", target: null });
 	});
 
-	it("a pin whose record is not in the list yet: it waits, and what was handled is kept", () => {
+	it("a pin whose record is not in the list yet: it waits, and the pin before it is no longer the handled one", () => {
 		expect(pinAction(null, "z", order)).toEqual({ done: null, target: null });
-		expect(pinAction("a", "z", order)).toEqual({ done: "a", target: null });
+		expect(pinAction("a", "z", order)).toEqual({ done: null, target: null });
 		expect(pinAction(null, "a", [])).toEqual({ done: null, target: null });
 		// When the record arrives, the same call targets it.
 		expect(pinAction("a", "z", [...order, { hash: "z" }])).toEqual({
 			done: "z",
 			target: { hash: "z", index: 3 },
 		});
+		const waiting = pinAction("a", "z", order);
+		expect(pinAction(waiting.done, "z", [...order, { hash: "z" }])).toEqual({
+			done: "z",
+			target: { hash: "z", index: 3 },
+		});
+	});
+
+	it("a pin moved to a record not in the list and back again targets the first record again", () => {
+		const toA = { done: "a", target: { hash: "a", index: 0 } };
+		const first = pinAction(null, "a", order);
+		expect(first).toEqual(toA);
+		const away = pinAction(first.done, "z", order);
+		expect(away.target).toBeNull();
+		expect(pinAction(away.done, "a", order)).toEqual(toA);
+		// The same as when the record between was in the list.
+		const there = pinAction(first.done, "b", order);
+		expect(pinAction(there.done, "a", order)).toEqual(toA);
 	});
 
 	it("after the pin is let go, the same pin targets again", () => {
