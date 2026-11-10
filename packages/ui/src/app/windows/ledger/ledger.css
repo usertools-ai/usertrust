@@ -151,4 +151,171 @@
 			animation: none;
 		}
 	}
+
+	/* The list: one record a line, in columns. Every row is 30px whatever it holds, so a row the browser has not
+	   drawn yet (content-visibility) keeps its place and the scrollbar never jumps. The selectors carry the row's
+	   older class too, so they win over its older two-line rules wherever the list is drawn. */
+	.ut-lg-rows {
+		padding: 8px 8px 24px;
+	}
+
+	.ut-row.ut-lg-row {
+		grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 64px 60px 92px minmax(96px, 0.9fr);
+		gap: 10px;
+		box-sizing: border-box;
+		height: 30px;
+		padding: 0 12px;
+		border-radius: 0;
+		color: var(--dk-legend);
+		font: 400 12px/1 var(--sans);
+		content-visibility: auto;
+		contain-intrinsic-size: auto 30px;
+	}
+
+	/* A hairline under each row. Not on the open record, whose border is its own. */
+	.ut-row.ut-lg-row:not(.sel) {
+		border-bottom-color: color-mix(in srgb, var(--dk-text) 5%, transparent);
+	}
+
+	.ut-lg-row > span {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.ut-lg-row .ut-lg-t,
+	.ut-lg-row .ut-lg-k {
+		color: var(--dk-label);
+		font-family: var(--fig);
+		font-variant-numeric: tabular-nums;
+	}
+
+	/* The model: a short dash in its provider's colour (each row sets it), then the name, cut with an ellipsis. */
+	.ut-lg-row .ut-lg-m {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		color: var(--dk-text);
+	}
+
+	.ut-lg-dash {
+		flex: none;
+		width: 10px;
+		height: 2px;
+		border-radius: 1px;
+	}
+
+	.ut-lg-name {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.ut-lg-row .ut-lg-u {
+		color: var(--dk-label);
+	}
+
+	/* The status: the badge may be cut short in a narrow cell, the mark after a break in the chain never is. */
+	.ut-lg-row .ut-lg-s {
+		display: flex;
+		align-items: center;
+		gap: 5px;
+	}
+
+	.ut-lg-s .ut-badge {
+		min-width: 0;
+		flex: 0 1 auto;
+		overflow: hidden;
+		font-size: 10px;
+		letter-spacing: 0.8px;
+	}
+
+	.ut-lg-s .bad {
+		flex: none;
+		color: var(--stakes);
+	}
+
+	/* The cost, right-aligned over a bar that grows from the right edge. */
+	.ut-lg-row .ut-lg-c {
+		position: relative;
+		text-align: right;
+	}
+
+	.ut-lg-bar {
+		position: absolute;
+		top: 50%;
+		right: 0;
+		height: 16px;
+		margin-top: -8px;
+		border-radius: 2px;
+		background: color-mix(in srgb, var(--dk-legend) 13%, transparent);
+	}
+
+	.ut-lg-c .ut-amt {
+		position: relative;
+		color: var(--dk-text);
+		font: 600 12px var(--fig);
+		font-variant-numeric: tabular-nums;
+	}
+
+	/* The mark after the last row drawn: the list watches it and draws more rows as it nears the screen. */
+	.ut-lg-more {
+		height: 1px;
+	}
+
+	/* The records of the hour a chart points at, then the one record it has pinned, then the row under the pointer:
+	   in this order, so a pinned record in the hour reads as pinned. Only the row itself lights, never one beside it. */
+	.ut-row.ut-lg-row[data-hour="true"] {
+		background: color-mix(in srgb, var(--dk-gold) 5%, transparent);
+		box-shadow: inset 2px 0 0 var(--dk-gold);
+	}
+
+	.ut-row.ut-lg-row[data-pinned="true"] {
+		background: color-mix(in srgb, var(--dk-gold) 10%, transparent);
+		box-shadow: inset 3px 0 0 var(--dk-gold);
+	}
+
+	.ut-row.ut-lg-row:not(.sel):hover {
+		background: color-mix(in srgb, var(--dk-text) 6%, transparent);
+	}
+
+	/* A narrower list drops columns and never squeezes them: first the kind and the usage, then the actor. */
+	@container (max-width: 680px) {
+		.ut-row.ut-lg-row {
+			grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 92px minmax(96px, 0.9fr);
+		}
+
+		.ut-lg-row .ut-lg-k,
+		.ut-lg-row .ut-lg-u {
+			display: none;
+		}
+	}
+
+	@container (max-width: 520px) {
+		.ut-row.ut-lg-row {
+			grid-template-columns: 102px minmax(0, 1fr) 76px 70px;
+			gap: 6px;
+			padding: 0 6px;
+		}
+
+		.ut-lg-row .ut-lg-a {
+			display: none;
+		}
+
+		.ut-lg-row .ut-lg-t {
+			font-size: 11px;
+		}
+
+		.ut-lg-rows {
+			padding-inline: 2px;
+		}
+	}
+
+	/* A phone: the sort bar sticks to the top of the page over the rows, so a row scrolled to stops below it. */
+	@media (max-width: 760px) {
+		.ut-lg-row {
+			scroll-margin-top: 52px;
+		}
+	}
 }

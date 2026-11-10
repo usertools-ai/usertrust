@@ -39,10 +39,36 @@ interface PanelProps {
 let ChargeTable: Component<{ row: LedgerRow }>;
 let PeekExtra: Component<{ row: LedgerRow; rows: readonly LedgerRow[]; budget: Budget }>;
 let RowPanel: Component<PanelProps>;
+interface ListProps {
+	rows: LedgerRow[];
+	total: number;
+	phase: "loaded";
+	chain: "broken";
+	selected: string | null;
+	onOpen(): void;
+	onClearFilters(): void;
+	hourSpan?: readonly [number, number] | null;
+	pinnedPos?: number | null;
+}
+interface ListRowProps {
+	row: LedgerRow;
+	index: number;
+	setSize: number;
+	active: boolean;
+	selected: boolean;
+	fresh: boolean;
+	hour?: boolean;
+	pinned?: boolean;
+	maxCost?: number;
+}
+let AuditTable: Component<ListProps>;
+let AuditRow: Component<ListRowProps>;
 beforeAll(async () => {
 	ChargeTable = await load("windows/ledger/charge-table", "ChargeTable");
 	PeekExtra = await load("windows/ledger/peek-extra", "PeekExtra");
 	RowPanel = await load("row-panel", "RowPanel");
+	AuditTable = await load("audit-table", "AuditTable");
+	AuditRow = await load("audit-table", "AuditRow");
 });
 
 const appFile = (file: string): string =>
@@ -582,6 +608,361 @@ describe("the record panel", () => {
 	});
 });
 
+describe("the dense list", () => {
+	const T0 = Date.parse("2026-10-12T00:00:00.000Z");
+	const DASH = String.fromCharCode(0x2014);
+	/** `n` calls a minute apart, oldest first. The list draws the newest first: row `seq` is at place `n - seq`. */
+	const many = (n: number): LedgerRow[] =>
+		Array.from({ length: n }, (_, i) =>
+			row({
+				seq: i,
+				pos: i,
+				id: `id-${i}`,
+				hash: `${i}`.padStart(64, "c"),
+				ts: new Date(T0 + i * 60_000).toISOString(),
+				costUt: 100 + i,
+			}),
+		);
+	/** The row drawn at this place (counted from 1) of a list of `rows`. */
+	const placed = (rows: LedgerRow[], place: number): LedgerRow =>
+		rows[rows.length - place] as LedgerRow;
+	const list = (rows: LedgerRow[], over: Partial<ListProps> = {}): string =>
+		renderToStaticMarkup(
+			createElement(AuditTable, {
+				rows,
+				total: rows.length,
+				phase: "loaded",
+				chain: "broken",
+				selected: null,
+				onOpen: () => {},
+				onClearFilters: () => {},
+				...over,
+			}),
+		);
+	const count = (html: string, needle: string): number => html.split(needle).length - 1;
+	/** The opening tag of a record's row: where its attributes are. */
+	const tagOf = (html: string, r: LedgerRow): string =>
+		new RegExp(`<div[^>]*id="ut-row-${r.hash}"[^>]*>`).exec(html)?.[0] ?? "";
+	const one = (r: LedgerRow, over: Partial<ListRowProps> = {}): string =>
+		renderToStaticMarkup(
+			createElement(AuditRow, {
+				row: r,
+				index: 0,
+				setSize: 1,
+				active: false,
+				selected: false,
+				fresh: false,
+				...over,
+			}),
+		);
+	const words = (html: string): string => html.replace(/<[^>]*>/g, " ");
+
+	it("draws the first 150 records of 400, each saying its place among all 400", () => {
+		const html = list(many(400));
+		expect(count(html, 'role="option"')).toBe(150);
+		expect(count(html, 'aria-setsize="400"')).toBe(150);
+		expect(html).toContain('aria-posinset="1"');
+		expect(html).toContain('aria-posinset="150"');
+		expect(html).not.toContain('aria-posinset="151"');
+		// The newest record is first, and more are to come: one mark after the last row asks for them.
+		expect(html.indexOf(`ut-row-${placed(many(400), 1).hash}`)).toBeLessThan(
+			html.indexOf(`ut-row-${placed(many(400), 2).hash}`),
+		);
+		expect(count(html, 'class="ut-lg-more"')).toBe(1);
+		expect(html.indexOf('class="ut-lg-more"')).toBeGreaterThan(html.lastIndexOf('role="option"'));
+	});
+
+	it("a list of one chunk or less draws every record and asks for no more", () => {
+		for (const n of [1, 149, 150]) {
+			const html = list(many(n));
+			expect(count(html, 'role="option"'), String(n)).toBe(n);
+			expect(html, String(n)).not.toContain("ut-lg-more");
+		}
+		expect(count(list(many(151)), 'role="option"')).toBe(150);
+		expect(list(many(151))).toContain("ut-lg-more");
+	});
+
+	it("an open record past the first 150 is drawn, with the chunks up to it", () => {
+		const rows = many(400);
+		const open = placed(rows, 300);
+		const html = list(rows, { selected: open.hash });
+		expect(count(html, 'role="option"')).toBe(300);
+		expect(count(html, 'aria-selected="true"')).toBe(1);
+		expect(tagOf(html, open)).toContain('aria-selected="true"');
+		expect(tagOf(html, open)).toContain('aria-posinset="300"');
+		// The list names it as its active row: it is in the page.
+		expect(html).toContain(`aria-activedescendant="ut-row-${open.hash}"`);
+		// The 150th is in the first chunk; the 151st needs the second; the last needs them all.
+		expect(count(list(rows, { selected: placed(rows, 150).hash }), 'role="option"')).toBe(150);
+		expect(count(list(rows, { selected: placed(rows, 151).hash }), 'role="option"')).toBe(300);
+		const last = list(rows, { selected: placed(rows, 400).hash });
+		expect(count(last, 'role="option"')).toBe(400);
+		expect(last).not.toContain("ut-lg-more");
+		// A record the list does not hold changes nothing.
+		expect(count(list(rows, { selected: "f".repeat(64) }), 'role="option"')).toBe(150);
+	});
+
+	it("a pinned record past the first 150 is drawn and marked, and only it", () => {
+		const rows = many(400);
+		const pin = placed(rows, 160);
+		const html = list(rows, { pinnedPos: pin.pos });
+		expect(count(html, 'role="option"')).toBe(300);
+		expect(count(html, "data-pinned")).toBe(1);
+		expect(tagOf(html, pin)).toContain('data-pinned="true"');
+		// Nothing pinned, or a position the list does not hold: no mark and no more rows.
+		for (const pinnedPos of [null, 9_999]) {
+			const none = list(rows, { pinnedPos });
+			expect(none).not.toContain("data-pinned");
+			expect(count(none, 'role="option"')).toBe(150);
+		}
+		expect(list(rows)).not.toContain("data-pinned");
+		// An open record and a pin: the list is drawn as far as the deeper of the two.
+		const both = list(rows, { selected: placed(rows, 310).hash, pinnedPos: pin.pos });
+		expect(count(both, 'role="option"')).toBe(400);
+	});
+
+	it("marks the records of the hour a chart points at: from its start, up to its end and not at it", () => {
+		const rows = many(40);
+		const from = placed(rows, 12);
+		const until = placed(rows, 9);
+		const html = list(rows, { hourSpan: [Date.parse(from.ts), Date.parse(until.ts)] });
+		expect(count(html, "data-hour")).toBe(3);
+		for (const place of [10, 11, 12]) {
+			expect(tagOf(html, placed(rows, place)), String(place)).toContain('data-hour="true"');
+		}
+		expect(tagOf(html, until)).not.toContain("data-hour");
+		expect(tagOf(html, placed(rows, 13))).not.toContain("data-hour");
+		expect(list(rows, { hourSpan: null })).not.toContain("data-hour");
+		expect(list(rows)).not.toContain("data-hour");
+	});
+
+	it("a row is one line of seven cells, and carries its time for the pointer", () => {
+		const r = row({ model: "claude-sonnet-4-6", actor: "agent:1234567890" });
+		const html = one(r, { maxCost: 115 });
+		expect(html).toMatch(/^<div[^>]*class="ut-row ut-lg-row"/);
+		expect(html).toContain(`data-ms="${Date.parse(r.ts)}"`);
+		const cells = [...html.matchAll(/<span class="(ut-lg-[a-z])"/g)].map((m) => m[1]);
+		expect(cells).toEqual([
+			"ut-lg-t",
+			"ut-lg-m",
+			"ut-lg-a",
+			"ut-lg-k",
+			"ut-lg-u",
+			"ut-lg-s",
+			"ut-lg-c",
+		]);
+		expect(html).toContain(`<span class="ut-lg-t" title="${r.ts}">10-12 17:59:02Z</span>`);
+		expect(html).toContain('<span class="ut-lg-k">llm_call</span>');
+		expect(html).toMatch(/<span class="ut-lg-a" title="actor agent:1234567890">agent . 12345678</);
+		// The two-line body is gone from the list.
+		expect(html).not.toContain("ut-meta");
+		expect(html).not.toContain("ut-rtitle");
+		// A time that cannot be read gives the pointer nothing.
+		expect(one(row({ ts: "not a time" }))).not.toContain("data-ms");
+		// Neither mark unless it is asked for, and each on its own.
+		expect(html).not.toMatch(/data-hour|data-pinned/);
+		expect(one(r, { hour: true })).toMatch(/data-hour="true"/);
+		expect(one(r, { hour: true })).not.toContain("data-pinned");
+		expect(one(r, { pinned: true })).toMatch(/data-pinned="true"/);
+		expect(one(r, { pinned: true })).not.toContain("data-hour");
+		expect(one(r, { hour: false, pinned: false })).not.toMatch(/data-hour|data-pinned/);
+	});
+
+	it("the model has a short dash in its provider's colour, muted for a provider it cannot name", () => {
+		const dash = (r: LedgerRow): string =>
+			/<i class="ut-lg-dash" style="([^"]*)"/.exec(one(r))?.[1] ?? "";
+		expect(dash(row({ model: "claude-sonnet-4-6" }))).toBe("background:#BE804D");
+		expect(dash(row({ model: "gpt-5" }))).toBe("background:#5D6775");
+		expect(dash(row({ model: "some-other-model" }))).toBe("background:#8A877F");
+		const { model: _model, ...bare } = row();
+		expect(dash(bare)).toBe("background:#8A877F");
+		// With no model the cell shows the long dash, not the kind and not an empty cell.
+		expect(one(bare)).toContain(`<span class="ut-lg-name">${DASH}</span>`);
+		expect(one(row({ model: "gpt-5" }))).toContain('<span class="ut-lg-name">gpt-5</span>');
+	});
+
+	it("the cost is in dollars, with a bar against the costliest record drawn; no cost is a dash, never $0", () => {
+		const bar = (r: LedgerRow, maxCost?: number): string =>
+			/<i class="ut-lg-bar" style="([^"]*)"/.exec(
+				one(r, maxCost === undefined ? {} : { maxCost }),
+			)?.[1] ?? "none";
+		expect(one(row({ costUt: 3_800 }), { maxCost: 3_800 })).toContain(
+			'<span class="ut-amt">$0.3800</span>',
+		);
+		expect(bar(row({ costUt: 3_800 }), 3_800)).toBe("width:100.0%");
+		expect(bar(row({ costUt: 950 }), 3_800)).toBe("width:25.0%");
+		expect(bar(row({ costUt: 1 }), 3)).toBe("width:33.3%");
+		// Never wider than its cell, and no bar with nothing to measure against.
+		expect(bar(row({ costUt: 5_000 }), 3_800)).toBe("width:100.0%");
+		expect(bar(row({ costUt: 3_800 }), 0)).toBe("none");
+		expect(bar(row({ costUt: 3_800 }))).toBe("none");
+		expect(bar(row({ costUt: 0 }), 3_800)).toBe("none");
+		const { costUt: _cost, ...bare } = row();
+		const html = one(bare, { maxCost: 3_800 });
+		expect(html).toContain(`<span class="ut-amt">${DASH}</span>`);
+		expect(html).not.toContain("ut-lg-bar");
+		expect(html).not.toContain("$");
+		// In the list, the bars are against the costliest of all the records, drawn or not.
+		const rows = many(400);
+		const drawn = list(rows);
+		expect(drawn).toContain("width:100.0%");
+		expect(count(drawn, "width:100.0%")).toBe(1);
+		const oldest = { ...(rows[0] as LedgerRow), costUt: 4_990 };
+		const under = list([oldest, ...rows.slice(1)]);
+		expect(under).not.toContain(`ut-row-${oldest.hash}`);
+		expect(under).not.toContain("width:100.0%");
+		expect(tagOf(under, placed(rows, 1))).not.toBe("");
+		expect(under).toContain("width:10.0%");
+	});
+
+	it("says how the usage was measured: reported, est., or a dash when the record does not say", () => {
+		const usage = (r: LedgerRow): string =>
+			/<span class="ut-lg-u"[^>]*>[^<]*</.exec(one(r))?.[0] ?? "";
+		expect(usage(row())).toBe(
+			'<span class="ut-lg-u" title="usage as the provider reported it">reported<',
+		);
+		expect(usage(row({ usageSource: "estimated" }))).toBe(
+			'<span class="ut-lg-u" title="This cost rests on estimated usage">est.<',
+		);
+		const { usageSource: _source, ...bare } = row();
+		expect(usage(bare)).toBe(`<span class="ut-lg-u" title="source not recorded">${DASH}<`);
+	});
+
+	it("an unconfirmed outcome reads 'unresolved' in the badge and in the row's name", () => {
+		const html = one(row({ status: "ambiguous" }));
+		expect(html).toMatch(
+			/<span class="ut-badge" data-tone="info" title="the outcome isn&#x27;t confirmed yet"><i aria-hidden="true"><\/i>unresolved<\/span>/,
+		);
+		expect(words(html)).not.toMatch(/ambiguous|\bheld\b/);
+		expect(html).not.toMatch(/ambiguous|\bheld\b/);
+		expect(html).toMatch(/aria-label="[^"]*, unresolved"/);
+		const settled = one(row());
+		expect(settled).toMatch(/<span class="ut-badge"><i aria-hidden="true"><\/i>settled<\/span>/);
+		expect(settled).not.toContain("confirmed yet");
+		expect(settled).toMatch(/aria-label="[^"]*, settled"/);
+		expect(one(row({ status: "failed" }))).toMatch(
+			/<span class="ut-badge" data-tone="stakes"><i aria-hidden="true"><\/i>failed<\/span>/,
+		);
+	});
+
+	it("a record after a break in the chain keeps its mark, after the badge", () => {
+		const mark = String.fromCharCode(0x26a0);
+		const html = one(row({ integrity: "after-break" }));
+		expect(html).toContain(`<span class="bad" title="after a break in the chain">${mark}</span>`);
+		expect(html.indexOf(mark)).toBeGreaterThan(html.indexOf("ut-badge"));
+		expect(one(row())).not.toContain(mark);
+		expect(one(row())).not.toContain('class="bad"');
+	});
+
+	const src = appFile("audit-table.tsx");
+	const between = (from: string, to: string): string => {
+		const a = src.indexOf(from);
+		const b = src.indexOf(to, a);
+		return a < 0 || b < 0 ? "" : src.slice(a, b);
+	};
+
+	it("draws its own rows: no row window from a library, and no reading of the screen as it renders", () => {
+		for (const gone of ["useVirtualizer", "useWindowVirtualizer", "useMediaQuery", "matchMedia"]) {
+			expect(src, gone).not.toContain(gone);
+		}
+		expect(src).not.toContain("@tanstack");
+		// The observer, the document and the window are read only in effects and handlers: none before the list's
+		// first effect.
+		const render = between("export const AuditTable", "useEffect(");
+		expect(render.length).toBeGreaterThan(0);
+		expect(render).not.toMatch(/IntersectionObserver|document\.|window\./);
+	});
+
+	it("a new sort or a new filter starts again at the first chunk, at the top; a record arriving does not", () => {
+		// The chunk state is keyed by the caller's key and the sort: `chunkSync` keeps it for the same key.
+		expect(src).toContain(
+			// biome-ignore lint/suspicious/noTemplateCurlyInString: a line of the source, quoted as it is written
+			'const key = `${props.resetKey ?? ""}|${sortKey}|${desc ? "desc" : "asc"}`;',
+		);
+		expect(src).toContain("let chunk = chunkSync(w.chunk, key, count);");
+		expect(src).toContain("chunkInit(key, count)");
+		expect(src).toContain("const shown = shownCount(drawn.chunk, count);");
+		expect(src).toContain("sorted.slice(0, shown).map(");
+		const top = between("const drawnKey = useRef(key);", "}, [key]);");
+		expect(top).toContain("if (drawnKey.current === key) return;");
+		expect(top).toContain("parentRef.current.scrollTop = 0;");
+	});
+
+	it("an open or pinned record is revealed once, when it is first in the list, not again after a new sort", () => {
+		const mark = between("const mark = (", "return chunk === w.chunk");
+		expect(mark).toContain("if (hash === null || index < 0) return null;");
+		expect(mark).toContain("if (hash !== done) chunk = chunkReveal(chunk, index, count);");
+		expect(mark).toContain("mark(w.selected, props.selected, selectedIndex)");
+		expect(mark).toContain("mark(w.pinned, pinnedHash, pinnedIndex)");
+	});
+
+	it("grows by a chunk when the mark after the last row comes within 400px of the screen", () => {
+		const watch = between("const more = shown < count;", "}, [more, shown, count]);");
+		expect(watch).toContain('typeof IntersectionObserver === "undefined"');
+		expect(watch).toContain("if (entries.some((entry) => entry.isIntersecting)) grow();");
+		expect(watch).toContain('{ root: null, rootMargin: "400px" }');
+		expect(watch).toContain("watch.observe(el);");
+		expect(watch).toContain("return () => watch.disconnect();");
+		expect(between("const grow = ", "const more = ")).toContain("chunkGrow(w.chunk, count)");
+		expect(src).toContain('{shown < count && <div ref={moreRef} className="ut-lg-more"');
+	});
+
+	it("a move by key, by step or by pin draws the target's chunk first, then scrolls to it after the commit", () => {
+		const show = between("const showRow = (", "const listFocused");
+		expect(show).toContain("chunkReveal(w.chunk, index, count)");
+		expect(show).toContain("setScrollTo({ hash: target.hash, block });");
+		expect(src).toMatch(
+			/document\s*\.getElementById\(rowDomId\(scrollTo\.hash\)\)\s*\?\.scrollIntoView\(\{ block: scrollTo\.block \}\);\s*\}, \[scrollTo\]\);/,
+		);
+		const move = between("const moveTo = (", "const onClick");
+		expect(move).toContain("setActiveHash(target.hash);");
+		expect(move).toContain('showRow(index, "nearest");');
+		// The active row is named to assistive technology only while it is drawn.
+		expect(src).toContain("activeIndex >= 0 && activeIndex < shown");
+	});
+
+	it("the pinned record is centred and made the active row once per pin", () => {
+		const pin = between("const pinDone = useRef", "}, [pinnedHash, sorted]);");
+		expect(pin).toContain("const act = pinAction(pinDone.current, pinnedHash, sorted);");
+		expect(pin).toContain("pinDone.current = act.done;");
+		expect(pin).toContain("if (act.target === null) return;");
+		expect(pin).toContain("setActiveHash(act.target.hash);");
+		expect(pin).toContain('showRow(act.target.index, "center");');
+		expect(src).toContain("const pinnedHash = sorted[pinnedIndex]?.hash ?? null;");
+		expect(src).toContain("sorted.findIndex((r) => r.pos === pinnedPos)");
+	});
+
+	it("the open record steps to its neighbour in the order drawn, through the caller's ref", () => {
+		const step = between("const step = (", "const sortBy");
+		expect(step).toContain("const from = props.selected ?? activeRow?.hash;");
+		expect(step).toContain("stepRecord(sorted, from, dir)");
+		expect(step).toContain("moveTo(index);");
+		expect(step).toContain("props.onOpen(target, true);");
+		expect(step).toContain("ref.current = step;");
+		expect(step).toContain("ref.current = null;");
+		// The active row follows the open record, so the panel's keys and the list's are on the same row.
+		expect(src).toMatch(
+			/if \(props\.selected !== null\) setActiveHash\(props\.selected\);\s*\}, \[props\.selected\]\);/,
+		);
+	});
+
+	it("the pointer is read once, on the list: the row under it gives its time, and leaving gives none", () => {
+		const hover = between("const hovered = useRef", "const onKeyDown");
+		expect(hover).toContain("if (ms === hovered.current) return;");
+		expect(hover).toContain("props.onHover?.(ms);");
+		expect(hover).toContain('closest<HTMLElement>("[data-ms]")?.dataset.ms');
+		expect(hover).toContain("hoverTo(at === undefined ? null : Number(at));");
+		expect(hover).toContain("const onPointerLeave = (): void => hoverTo(null);");
+		expect(src).toMatch(/onClick,\s*onPointerOver,\s*onPointerLeave,/);
+		// A row has no pointer handler of its own, and no hovered state: hover is the sheet's.
+		const rowSrc = between("export const AuditRow", "export type { BeforeWindow }");
+		expect(rowSrc).not.toMatch(/onPointer|onClick|onMouse|hover/i);
+		const click = between("const onClick = (", "const hovered = useRef");
+		expect(click).toContain(`closest('[role="option"]')?.id`);
+		expect(click).toContain("props.onOpen(target, false);");
+	});
+});
+
 describe("the Ledger window's sheet", () => {
 	const css = appFile("windows/ledger/ledger.css").replace(/\/\*[\s\S]*?\*\//g, "");
 	/** The declarations of the first rule with this selector. */
@@ -609,5 +990,132 @@ describe("the Ledger window's sheet", () => {
 		expect(rule(".ut-lg-sums td")).toContain("text-align: right");
 		expect(rule(".ut-lg-sums td")).toContain("font-variant-numeric: tabular-nums");
 		expect(css).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(/);
+	});
+
+	/** The body of the first `@container (max-width: <px>px)` block. */
+	const narrow = (px: number): string => {
+		const head = `@container (max-width: ${px}px) {`;
+		const at = css.indexOf(head);
+		if (at < 0) return "";
+		let depth = 1;
+		let i = at + head.length;
+		while (i < css.length && depth > 0) {
+			if (css[i] === "{") depth++;
+			if (css[i] === "}") depth--;
+			i++;
+		}
+		return css.slice(at + head.length, i - 1);
+	};
+	const ruleIn = (block: string, selector: string): string => {
+		const at = block.indexOf(`${selector} {`);
+		return at < 0 ? "" : block.slice(at, block.indexOf("}", at));
+	};
+
+	it("a dense row is 30px on one line of seven columns, and keeps its place before it is drawn", () => {
+		const dense = rule(".ut-row.ut-lg-row");
+		expect(dense).toContain(
+			"grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 64px 60px 92px minmax(96px, 0.9fr);",
+		);
+		expect(dense).toContain("height: 30px;");
+		expect(dense).toContain("box-sizing: border-box;");
+		expect(dense).toContain("content-visibility: auto;");
+		expect(dense).toContain("contain-intrinsic-size: auto 30px;");
+		expect(dense).toContain("padding: 0 12px;");
+		expect(dense).toContain("border-radius: 0;");
+		// The hairline under a row is not drawn on the open record, whose border is its own.
+		expect(rule(".ut-row.ut-lg-row:not(.sel)")).toContain(
+			"border-bottom-color: color-mix(in srgb, var(--dk-text) 5%, transparent);",
+		);
+		const cell = rule(".ut-lg-row > span");
+		for (const decl of ["min-width: 0;", "overflow: hidden;", "text-overflow: ellipsis;"]) {
+			expect(cell).toContain(decl);
+		}
+		expect(cell).toContain("white-space: nowrap;");
+		expect(rule(".ut-lg-rows")).toContain("padding: 8px 8px 24px;");
+		expect(rule(".ut-lg-more")).toContain("height: 1px;");
+	});
+
+	it("the time and the kind are in the figure face; the cost is right-aligned and tabular over its bar", () => {
+		expect(rule(".ut-lg-row .ut-lg-t,\n\t.ut-lg-row .ut-lg-k")).toContain(
+			"font-family: var(--fig);",
+		);
+		expect(rule(".ut-lg-row .ut-lg-c")).toContain("text-align: right;");
+		expect(rule(".ut-lg-row .ut-lg-c")).toContain("position: relative;");
+		const amount = rule(".ut-lg-c .ut-amt");
+		expect(amount).toContain("position: relative;");
+		expect(amount).toContain("font: 600 12px var(--fig);");
+		expect(amount).toContain("font-variant-numeric: tabular-nums;");
+		const bar = rule(".ut-lg-bar");
+		for (const decl of ["position: absolute;", "right: 0;", "height: 16px;", "margin-top: -8px;"]) {
+			expect(bar).toContain(decl);
+		}
+		expect(bar).toContain("background: color-mix(in srgb, var(--dk-legend) 13%, transparent);");
+		const dash = rule(".ut-lg-dash");
+		for (const decl of ["flex: none;", "width: 10px;", "height: 2px;"])
+			expect(dash).toContain(decl);
+		// The dash has no colour in the sheet: each row gives it its provider's.
+		expect(dash).not.toMatch(/background|color/);
+		expect(rule(".ut-lg-row .ut-lg-m")).toContain("display: flex;");
+		expect(rule(".ut-lg-name")).toContain("text-overflow: ellipsis;");
+	});
+
+	it("the badge may be cut short in its cell; the mark after a break never is", () => {
+		expect(rule(".ut-lg-row .ut-lg-s")).toContain("display: flex;");
+		const badge = rule(".ut-lg-s .ut-badge");
+		expect(badge).toContain("min-width: 0;");
+		expect(badge).toContain("flex: 0 1 auto;");
+		expect(badge).toContain("font-size: 10px;");
+		const bad = rule(".ut-lg-s .bad");
+		expect(bad).toContain("flex: none;");
+		expect(bad).toContain("color: var(--stakes);");
+	});
+
+	it("a hovered row lights alone; the hour's rows carry a 5% tint and a 2px gold bar, the pinned record 10% and 3px", () => {
+		const hover = rule(".ut-row.ut-lg-row:not(.sel):hover");
+		expect(hover).toContain("background: color-mix(in srgb, var(--dk-text) 6%, transparent);");
+		// No selector with :hover reaches a sibling or a row beside it.
+		for (const m of css.matchAll(/([^{}]*ut-lg-row[^{}]*:hover[^{}]*)\{/g)) {
+			expect(m[1]).not.toMatch(/[~+]/);
+			expect((m[1] as string).trim().split(/\s+/)).toHaveLength(1);
+		}
+		const hour = rule('.ut-row.ut-lg-row[data-hour="true"]');
+		expect(hour).toContain("background: color-mix(in srgb, var(--dk-gold) 5%, transparent);");
+		expect(hour).toContain("box-shadow: inset 2px 0 0 var(--dk-gold);");
+		const pinned = rule('.ut-row.ut-lg-row[data-pinned="true"]');
+		expect(pinned).toContain("background: color-mix(in srgb, var(--dk-gold) 10%, transparent);");
+		expect(pinned).toContain("box-shadow: inset 3px 0 0 var(--dk-gold);");
+		// A record that is both pinned and in the hour reads as pinned; a hovered one lights over either.
+		expect(css.indexOf('[data-pinned="true"] {')).toBeGreaterThan(
+			css.indexOf('[data-hour="true"] {'),
+		);
+		expect(css.indexOf(":not(.sel):hover {")).toBeGreaterThan(
+			css.indexOf('[data-pinned="true"] {'),
+		);
+	});
+
+	it("a narrower list drops columns, never squeezes them: the kind and the usage, then the actor", () => {
+		const five = narrow(680);
+		expect(ruleIn(five, ".ut-row.ut-lg-row")).toContain(
+			"grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 92px minmax(96px, 0.9fr);",
+		);
+		expect(ruleIn(five, ".ut-lg-row .ut-lg-k,\n\t\t.ut-lg-row .ut-lg-u")).toContain(
+			"display: none;",
+		);
+		const four = narrow(520);
+		const dense = ruleIn(four, ".ut-row.ut-lg-row");
+		expect(dense).toContain("grid-template-columns: 102px minmax(0, 1fr) 76px 70px;");
+		expect(dense).toContain("gap: 6px;");
+		expect(dense).toContain("padding: 0 6px;");
+		expect(ruleIn(four, ".ut-lg-row .ut-lg-a")).toContain("display: none;");
+		expect(ruleIn(four, ".ut-lg-row .ut-lg-t")).toContain("font-size: 11px;");
+		expect(ruleIn(four, ".ut-lg-rows")).toContain("padding-inline: 2px;");
+		// The narrowest row's fixed columns, gaps and padding leave the model room at 340px: nothing scrolls sideways.
+		const fixed = 102 + 76 + 70 + 3 * 6 + 2 * 6 + 2 * 2;
+		expect(340 - fixed).toBeGreaterThanOrEqual(56);
+		// A row keeps its height at every width.
+		expect(`${five}${four}`).not.toMatch(/[^-]height:|white-space/);
+		// On a phone the sort bar sticks over the rows: a row scrolled to by the keys stops below it.
+		const phone = css.slice(css.lastIndexOf("@media (max-width: 760px)"));
+		expect(phone).toMatch(/\.ut-lg-row\s*\{\s*scroll-margin-top: 52px;/);
 	});
 });
