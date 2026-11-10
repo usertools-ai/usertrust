@@ -1,0 +1,102 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
+/**
+ * The month's spend day by day, and when the budget is reached: both carried forward at the past week's pace. Pure.
+ *
+ * Each is a projection, not a promise: it assumes the average of the 7 days before `endMs` holds, and says so. A
+ * budget that is not known gives no projection at all.
+ */
+
+import type { SummaryPayload } from "./api.js";
+import { budgetAsOf, budgetDisplay } from "./budget-display.js";
+import { formatUsdTotal, formatUtc } from "./format.js";
+import { NOW_COPY } from "./now-copy.js";
+import { HOUR_MS } from "./now-rate.js";
+import type { LedgerRow } from "./rows.js";
+import { bucketTotals } from "./spend-series.js";
+
+const DAY_MS = 24 * HOUR_MS;
+const WEEK_MS = 7 * DAY_MS;
+
+/** Spend per day over the 7 days before `endMs`, half-open. */
+function weekPace(rows: readonly LedgerRow[], endMs: number): number {
+	const week = bucketTotals(rows, { startMs: endMs - WEEK_MS, endMs }, WEEK_MS);
+	return (week[0] as number) / 7;
+}
+
+export interface MonthBurn {
+	/** Days in the UTC month of `endMs`. */
+	days: number;
+	/** Cumulative spend at the end of each UTC day begun so far; the last is up to `endMs`. */
+	pts: number[];
+	/** Where the curve starts: the vault's spend before the month, or 0 when that is not known. */
+	startUt: number;
+	inMonthUt: number;
+	paceUtPerDay: number;
+	/** The last point carried to the month's end at `paceUtPerDay`: a projection. */
+	endUt: number;
+}
+
+/**
+ * `wholeVaultSpentUt` is the vault's spend over every record, or null when `rows` are a filtered part of it: the
+ * curve then starts at 0 and is those records' month alone.
+ */
+export function monthBurn(
+	rows: readonly LedgerRow[],
+	endMs: number,
+	wholeVaultSpentUt: number | null,
+): MonthBurn {
+	const end = new Date(endMs);
+	const monthStart = Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), 1);
+	const monthEnd = Date.UTC(end.getUTCFullYear(), end.getUTCMonth() + 1, 1);
+	const perDay = bucketTotals(rows, { startMs: monthStart, endMs }, DAY_MS);
+	let inMonthUt = 0;
+	for (const ut of perDay) inMonthUt += ut;
+	const startUt = wholeVaultSpentUt === null ? 0 : Math.max(0, wholeVaultSpentUt - inMonthUt);
+	const pts: number[] = [];
+	let acc = startUt;
+	// One point per day begun: at a day's first instant that day has a point and no spend yet.
+	for (let i = 0; i < end.getUTCDate(); i++) {
+		acc += perDay[i] ?? 0;
+		pts.push(acc);
+	}
+	const paceUtPerDay = weekPace(rows, endMs);
+	return {
+		days: Math.round((monthEnd - monthStart) / DAY_MS),
+		pts,
+		startUt,
+		inMonthUt,
+		paceUtPerDay,
+		endUt: acc + (paceUtPerDay * (monthEnd - endMs)) / DAY_MS,
+	};
+}
+
+/**
+ * When the budget is reached at the past week's pace, as a sentence and its tooltip. `rows` are the whole vault's: a
+ * whole-vault budget is set against a whole-vault pace. Null when there is no summary, when the budget is not known
+ * (the Budget fact gives the reason), or when the day is past what a date can hold.
+ */
+export function projectionOf(
+	summary: SummaryPayload | null,
+	rows: readonly LedgerRow[],
+	endMs: number,
+): { text: string; title: string } | null {
+	if (summary === null || budgetDisplay(summary).kind === "unknown") return null;
+	const left = summary.remainingUt as number;
+	const paceUtPerDay = weekPace(rows, endMs);
+	// A controller's record is named by its age: its provenance sentence says more than an old record can.
+	const title = `A projection, not a forecast: it assumes the past 7 days' average of ${formatUsdTotal(paceUtPerDay / 24)}/h holds. Budget: ${budgetAsOf(summary, endMs).text}`;
+	if (left <= 0) return { text: NOW_COPY.projectionUsed, title };
+	if (!(paceUtPerDay > 0)) return { text: NOW_COPY.projectionIdle, title };
+	const daysLeft = left / paceUtPerDay;
+	const when = new Date(endMs + daysLeft * DAY_MS);
+	if (Number.isNaN(when.getTime())) return null;
+	const iso = when.toISOString();
+	// A month and a day name one date only within a year; further out the year is printed.
+	const date = daysLeft < 365 ? formatUtc(iso).slice(0, 5) : iso.slice(0, iso.indexOf("T"));
+	return {
+		text: `Projection: reaches ${formatUsdTotal(summary.budget as number)} on ${date} at the past week's pace`,
+		title,
+	};
+}
