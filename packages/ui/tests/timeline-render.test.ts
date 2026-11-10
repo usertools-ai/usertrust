@@ -392,6 +392,18 @@ describe("the header at a past position", () => {
 		expect(why?.[1]).toBe(why?.[2]);
 	});
 
+	it("the past Budget's today figure is followed by whole vault, the scope it has", () => {
+		const html = text(strip(at()));
+		const fact = html.slice(html.indexOf("Budget"), html.indexOf("Chain"));
+		const today = fact.lastIndexOf("today:");
+		expect(today).toBeGreaterThan(-1);
+		expect(fact.indexOf("whole vault")).toBeGreaterThan(today);
+		expect(fact).not.toContain("this month");
+		// A budget with no figure has nothing to scope.
+		const none = text(strip(at({ budget: pastBudget(UNPUBLISHED) })));
+		expect(none.slice(none.indexOf("Budget"), none.indexOf("Chain"))).not.toContain("whole vault");
+	});
+
 	it("the anchor file at T is today's, and says so", () => {
 		expect(text(strip(at()))).toMatch(/today: not set up/);
 		expect(text(strip(null))).not.toMatch(/today:/);

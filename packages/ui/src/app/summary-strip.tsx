@@ -38,6 +38,7 @@ import {
 	UT_KEY,
 } from "../shared/format.js";
 import { KIT_MARK_URL, KIT_TIMEOUT_MS } from "../shared/kit.js";
+import { NOW_COPY } from "../shared/now-copy.js";
 import {
 	type Box,
 	intersect,
@@ -318,19 +319,28 @@ function AnchorFact(props: {
  * The vault's spend: dollars lead (2 dp, the exact 4 dp figure on hover, counting to a new total as records arrive) and
  * the ledger's own unit, usertokens, follows on the line below, with an info button that gives the key to the unit.
  * At a past position (`past`) it is the spend up to there, and it jumps from value to value instead of counting; the
- * figure is remounted when the view switches between live and past, so that switch jumps too.
+ * figure is remounted when the view switches between live and past, so that switch jumps too. Given a `scope`, the
+ * figure is some other sum (the filtered records'), and the line under it reads that scope instead.
  */
-function SpendFact(props: { spentUt: number; past: boolean }): React.JSX.Element {
+export function SpendFact(props: {
+	spentUt: number;
+	past: boolean;
+	/** The figure's scope when it is not the vault's own (a filtered sum): it replaces the line under the figure. */
+	scope?: string;
+}): React.JSX.Element {
 	const { open, toggle, close, rootRef } = usePopover();
 	const popRef = useRef<HTMLDivElement>(null);
 	const placed = usePopPlace(open, popRef, close);
 	return (
 		<div
 			className="ut-fact"
+			// A figure of another scope is not every record's cost: its own line says what it is.
 			title={
-				props.past
-					? "The cost of every llm_call record up to this point"
-					: "The cost of every llm_call record in the vault"
+				props.scope !== undefined
+					? undefined
+					: props.past
+						? "The cost of every llm_call record up to this point"
+						: "The cost of every llm_call record in the vault"
 			}
 		>
 			<b>Spend</b>
@@ -359,7 +369,9 @@ function SpendFact(props: { spentUt: number; past: boolean }): React.JSX.Element
 			</div>
 			<FactLine
 				className="ut-sub"
-				text={props.past ? "llm calls · up to this point" : "llm calls · whole vault"}
+				text={
+					props.scope ?? (props.past ? "llm calls · up to this point" : "llm calls · whole vault")
+				}
 			/>
 		</div>
 	);
@@ -518,7 +530,7 @@ function FactLine(props: {
  * it was written; any other source has the provenance sentence in the line's tooltip. A budget that is unknown
  * (`several`, `unreadable`, `unpublished`) shows its reason and no figure.
  */
-function PastBudgetFact(props: { at: AtPayload }): React.JSX.Element {
+export function PastBudgetFact(props: { at: AtPayload }): React.JSX.Element {
 	const { budget } = props.at;
 	const now = useNow();
 	const word = budgetSourceWord(budget.source, budget.writtenAt, now).word;
@@ -546,6 +558,7 @@ function PastBudgetFact(props: { at: AtPayload }): React.JSX.Element {
 						<Units units={[`today: ${formatUsdTotal(budget.ut)}`]} />
 					</FactLine>
 					<FactLine className="ut-sub mono" text={`today: ${formatUt(budget.ut)}`} />
+					<FactLine className="ut-sub" text={NOW_COPY.scopeVault} />
 				</>
 			) : (
 				<>
@@ -556,6 +569,8 @@ function PastBudgetFact(props: { at: AtPayload }): React.JSX.Element {
 						text={budget.provenance.replace(/^unknown: /, "")}
 						title={budget.provenance}
 					/>
+					{/* No figure, so nothing to scope: the scope's line is held. */}
+					<Reserve line="sub" />
 				</>
 			)}
 			{/* Two lines (clamped): where the figure came from, then the whole note. The whole line is in its title, and a
@@ -610,6 +625,63 @@ function PastIntegrityFact(props: {
 				</>
 			)}
 			<FactLine className="ut-why" text={why} />
+		</div>
+	);
+}
+
+/** Under the chained pill when the vault has an anchor file, where the caller asks for the line. */
+const ANCHOR_RECORDED = "an anchor file is recorded";
+
+/**
+ * The Integrity fact: live, the hash links as the dashboard re-checked them; at a past position, the position's own
+ * chain. With `anchorLine`, a chained vault that has an anchor file says so under the pill (the file is recorded; the
+ * dashboard does not check it, so it is never called verified); without it that line is held empty.
+ */
+export function IntegrityFact(props: {
+	s: SummaryPayload;
+	at: AtPayload | null;
+	anchorLine?: boolean;
+}): React.JSX.Element {
+	const { s } = props;
+	if (props.at !== null) return <PastIntegrityFact at={props.at} anchorFile={s.anchorFile} />;
+	const status = chainStatus(s.chain);
+	return (
+		<div className="ut-fact">
+			<b>Integrity</b>
+			{/* "chained", never "verified": this is the hash links re-checked by the dashboard, not an explicit,
+			    anchored check. Without an anchor file it says so under the pill. */}
+			{status === "verified" && (
+				<span className="ut-pill" data-tone="approve" title={CHAINED_TITLE}>
+					<i />
+					chained
+				</span>
+			)}
+			{status === "broken" && (
+				<span className="ut-pill" data-tone="stakes">
+					<i />
+					broken
+				</span>
+			)}
+			{status === "empty" && (
+				<span className="ut-pill" title="No events yet: nothing to verify, nothing wrong">
+					<i />
+					no events
+				</span>
+			)}
+			{/* The pill's line under it, in every state (held empty when it has nothing to say), so the fact keeps its
+			    height. */}
+			{status === "verified" && s.anchorFile !== "present" ? (
+				<FactLine className="ut-sub" text={NOT_ANCHORED_NOTE} />
+			) : status === "verified" && props.anchorLine === true ? (
+				<FactLine className="ut-sub" text={ANCHOR_RECORDED} />
+			) : (
+				<Reserve line="sub" />
+			)}
+			<FactLine
+				className="ut-why"
+				text={verifiedAsOf(s.verifiedAt)}
+				title={`${verifiedAsOf(s.verifiedAt)}. The dashboard is a monitor: usertrust verify is the authoritative check of a vault`}
+			/>
 		</div>
 	);
 }
@@ -684,6 +756,8 @@ export function BudgetFact(props: { s: SummaryPayload }): React.JSX.Element {
 							</FactLine>
 						</>
 					)}
+					{/* The budget is the vault's, whatever is filtered and whatever range is shown. */}
+					<FactLine className="ut-sub" text={NOW_COPY.scopeVault} />
 					<FactLine className="ut-why" text={asOf.text} title={asOf.title ?? asOf.text} />
 				</>
 			) : (
@@ -693,6 +767,7 @@ export function BudgetFact(props: { s: SummaryPayload }): React.JSX.Element {
 					</span>
 					<Reserve line="meter" />
 					<Reserve line="amts" />
+					<Reserve line="sub" />
 					<Reserve line="sub" />
 					{/* A controller's record with no usable figure still must not call itself "enforced" once stale. */}
 					<FactLine
@@ -710,7 +785,7 @@ export function BudgetFact(props: { s: SummaryPayload }): React.JSX.Element {
  * The facts row before the first summary: each fact with the lines it will have once loaded, held empty and unseen
  * (and the phone's Details toggle held too), so the first load moves nothing. Only a "…" shows.
  */
-function LoadingFacts(): React.JSX.Element {
+function LoadingFacts(props: { budgetNote?: ReactNode }): React.JSX.Element {
 	return (
 		<section className="ut-facts" aria-busy="true" aria-label="vault summary loading">
 			<div className="ut-fact">
@@ -727,8 +802,10 @@ function LoadingFacts(): React.JSX.Element {
 				<Reserve line="meter" />
 				<Reserve line="amts" />
 				<Reserve line="sub" />
+				<Reserve line="sub" />
 				<Reserve line="why" />
 			</div>
+			{props.budgetNote}
 			<span className="ut-more" aria-hidden="true" data-reserve="true">
 				Details
 			</span>
@@ -755,20 +832,29 @@ function LoadingFacts(): React.JSX.Element {
 	);
 }
 
-/** Which part of the strip to draw: the page bar (header, alarm, as-at line, notice), the facts grid, or both. */
-export type SummaryStripPart = "bar" | "facts" | "all";
+/**
+ * Which part of the strip to draw: the page bar (the header and the chain alarm), the head (the as-at line and the
+ * Window notice), the facts grid, or all three in that order. The alarm is the bar's: a broken chain shows wherever
+ * the head and the facts are put.
+ */
+export type SummaryStripPart = "bar" | "head" | "facts" | "all";
 
 export function SummaryStrip(props: {
 	summary: SummaryPayload | null;
 	live: LiveState;
 	/** The vault as recorded at a past position, or null (or absent) for live. */
 	at?: AtPayload | null;
-	/** The bar, the facts, or both (the default). The desk puts them in different places. */
+	/** One part, or all of them (the default). The desk puts them in different places. */
 	part?: SummaryStripPart;
+	/** Drawn in the facts grid after the Budget fact, before the Details button. */
+	budgetNote?: ReactNode;
+	/** A Spend figure of another scope (the filtered records' sum) and the label that says so; Budget never swaps. */
+	spentOverride?: { ut: number; label: string };
 }): React.JSX.Element {
 	const part = props.part ?? "all";
-	const showBar = part !== "facts";
-	const showFacts = part !== "bar";
+	const showBar = part === "bar" || part === "all";
+	const showHead = part === "head" || part === "all";
+	const showFacts = part === "facts" || part === "all";
 	const s = props.summary;
 	const at = props.at ?? null;
 	// Phone only: the Chain and Anchor facts sit behind a button. Elsewhere every fact shows and the button does not.
@@ -789,13 +875,9 @@ export function SummaryStrip(props: {
 	if (!s)
 		return (
 			<>
-				{showBar && (
-					<>
-						<TopBar vaultPath={null} live={props.live} kit={false} past={at !== null} />
-						<AsAtLine at={null} head={-1} />
-					</>
-				)}
-				{showFacts && <LoadingFacts />}
+				{showBar && <TopBar vaultPath={null} live={props.live} kit={false} past={at !== null} />}
+				{showHead && <AsAtLine at={null} head={-1} />}
+				{showFacts && <LoadingFacts budgetNote={props.budgetNote} />}
 			</>
 		);
 	const status = chainStatus(s.chain);
@@ -826,6 +908,10 @@ export function SummaryStrip(props: {
 							)}
 						</div>
 					)}
+				</>
+			)}
+			{showHead && (
+				<>
 					{/* The live alarm above stays: it is the vault now. Everything below this line is the vault then. */}
 					<AsAtLine at={at} head={s.chain.events - 1} />
 					{notice !== null && (
@@ -843,8 +929,17 @@ export function SummaryStrip(props: {
 					data-details={detailsOpen}
 					onKeyDown={onKeyDown}
 				>
-					<SpendFact spentUt={at === null ? s.spentUt : at.spentUt} past={at !== null} />
+					{props.spentOverride === undefined ? (
+						<SpendFact spentUt={at === null ? s.spentUt : at.spentUt} past={at !== null} />
+					) : (
+						<SpendFact
+							spentUt={props.spentOverride.ut}
+							past={at !== null}
+							scope={props.spentOverride.label}
+						/>
+					)}
 					{at === null ? <BudgetFact s={s} /> : <PastBudgetFact at={at} />}
+					{props.budgetNote}
 					<button
 						ref={detailsRef}
 						type="button"
@@ -866,45 +961,7 @@ export function SummaryStrip(props: {
 							</Fit>
 						</span>
 					</div>
-					{at !== null ? (
-						<PastIntegrityFact at={at} anchorFile={s.anchorFile} />
-					) : (
-						<div className="ut-fact">
-							<b>Integrity</b>
-							{/* "chained", never "verified": this is the hash links re-checked by the dashboard, not an explicit,
-					    anchored check. Without an anchor file it says so under the pill. */}
-							{status === "verified" && (
-								<span className="ut-pill" data-tone="approve" title={CHAINED_TITLE}>
-									<i />
-									chained
-								</span>
-							)}
-							{status === "broken" && (
-								<span className="ut-pill" data-tone="stakes">
-									<i />
-									broken
-								</span>
-							)}
-							{status === "empty" && (
-								<span className="ut-pill" title="No events yet: nothing to verify, nothing wrong">
-									<i />
-									no events
-								</span>
-							)}
-							{/* The pill's line under it, in every state (held empty when it has nothing to say), so the fact keeps its
-						    height. */}
-							{status === "verified" && s.anchorFile !== "present" ? (
-								<FactLine className="ut-sub" text={NOT_ANCHORED_NOTE} />
-							) : (
-								<Reserve line="sub" />
-							)}
-							<FactLine
-								className="ut-why"
-								text={verifiedAsOf(s.verifiedAt)}
-								title={`${verifiedAsOf(s.verifiedAt)}. The dashboard is a monitor: usertrust verify is the authoritative check of a vault`}
-							/>
-						</div>
-					)}
+					<IntegrityFact s={s} at={at} />
 					<AnchorFact anchorFile={s.anchorFile} past={at !== null} />
 				</section>
 			)}

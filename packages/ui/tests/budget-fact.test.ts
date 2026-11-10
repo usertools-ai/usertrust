@@ -119,3 +119,42 @@ describe("the Budget fact", () => {
 		expect(html).toContain("from usertrust.config.json; not confirmed as enforced");
 	});
 });
+
+describe("the Budget fact's scope", () => {
+	const SCOPE = '<span class="ut-sub" title="whole vault">whole vault</span>';
+	const shown = (html: string): string => html.replace(/<[^>]*>/g, " ");
+
+	it("a known budget says it is the whole vault's, after the usertokens and before where it came from", async () => {
+		const html = await render({}, 12 * MIN);
+		expect(html.split(SCOPE)).toHaveLength(2);
+		expect(html.indexOf(SCOPE)).toBeGreaterThan(html.indexOf('class="ut-sub mono"'));
+		expect(html.indexOf(SCOPE)).toBeLessThan(html.indexOf('class="ut-why"'));
+		expect(shown(html)).not.toContain("this month");
+	});
+
+	it("an overspent budget says it too", async () => {
+		const html = await render({ spentUt: 1_500, remainingUt: -500 }, 12 * MIN);
+		expect(html).toContain("overspent by");
+		expect(html.split(SCOPE)).toHaveLength(2);
+		expect(html.indexOf(SCOPE)).toBeGreaterThan(html.indexOf('class="ut-sub mono"'));
+		expect(html.indexOf(SCOPE)).toBeLessThan(html.indexOf('class="ut-why"'));
+	});
+
+	it("an unknown budget has no figure, so nothing to scope: the line is held empty", async () => {
+		const html = await render(
+			{
+				budget: null,
+				remainingUt: null,
+				budgetSource: "unpublished",
+				budgetWrittenAt: null,
+				budgetProvenance: "unknown: not yet published",
+			},
+			12 * MIN,
+		);
+		expect(shown(html)).not.toContain("whole vault");
+		// The usertokens line and the scope line, both held: the fact keeps its lines.
+		expect(
+			html.match(/<span class="ut-sub" aria-hidden="true" data-reserve="true">/g),
+		).toHaveLength(2);
+	});
+});
