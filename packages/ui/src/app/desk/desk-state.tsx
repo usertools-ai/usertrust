@@ -248,7 +248,10 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 		rowsVault,
 		navigation,
 	);
-	const header = headerView(previewPos, atView, previewView);
+	const header = useMemo(
+		() => headerView(previewPos, atView, previewView),
+		[previewPos, atView, previewView],
+	);
 	// biome-ignore lint/correctness/useExhaustiveDependencies: `navigation` is a trigger, not a value the effect reads
 	useEffect(() => setPreviewPos(null), [navigation]);
 	// The past view reads each row's status against the rows the page held when the answer's request was SENT

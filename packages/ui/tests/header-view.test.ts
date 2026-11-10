@@ -63,6 +63,6 @@ describe("the provider's list reads the committed position only", () => {
 	});
 
 	it("a navigation clears the preview", () => {
-		expect(src).toMatch(/setPreviewPos\(null\)/);
+		expect(src).toContain("useEffect(() => setPreviewPos(null), [navigation]);");
 	});
 });

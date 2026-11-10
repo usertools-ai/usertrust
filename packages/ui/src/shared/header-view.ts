@@ -15,5 +15,5 @@ export function headerView(
 ): AtView {
 	if (previewPos === null) return committed;
 	if (previewed.at !== null) return previewed;
-	return { ...previewed, at: committed.at, rows: committed.rows, rowsVault: committed.rowsVault };
+	return { ...previewed, at: committed.at };
 }

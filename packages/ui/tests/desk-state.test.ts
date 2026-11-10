@@ -434,6 +434,14 @@ describe("the provider keeps what the page had", () => {
 		expect(src).toContain("const { view: atView } = useAt(");
 		// A6: the preview is its own state, read by the header only (`headerView`), never the committed view.
 		expect(src).toContain("const preview = setPreviewPos;");
+		// D7: the preview follower asks for the PREVIEWED position, not the address's.
+		expect(src).toMatch(/const \{ view: previewView \} = useAt\(\s*previewPos,/);
+		// D5: a navigation drops a preview, by an effect that depends on `navigation`.
+		expect(src).toContain("useEffect(() => setPreviewPos(null), [navigation]);");
+		// D6: going live drops a preview too.
+		const goLive =
+			/const goLive = useCallback\(\(\) => \{([\s\S]*?)\}, \[setAt\]\);/.exec(src)?.[1] ?? "";
+		expect(goLive.replace(/\s+/g, "")).toBe("setPreviewPos(null);setAt(null);");
 		const view = /const view = useMemo<DeskView>\(([\s\S]*?)\n\t\);/.exec(src)?.[1] ?? "";
 		expect(view).toMatch(/\bpreview,/);
 		// A function that sets the preview state, not a wrapper that could also move the address.
@@ -512,6 +520,17 @@ describe("colorLookup: the colours of any dimension", () => {
 		expect(spy).toHaveBeenCalledTimes(1);
 		expect(spy.mock.calls[0]?.[0]).toBe("kind");
 		expect(lookup("kind").of("never")).toBe(MUTED);
+	});
+
+	it("red-first (D3, D4): passes the rows, the loaded flag and the totals on to the book as they are", () => {
+		const book = new ColorBook();
+		const spy = vi.spyOn(book, "mapFor");
+		const pending = state.colorLookup(book, rows, false, "pending");
+		pending("lane");
+		expect(spy.mock.calls[0]?.slice(1)).toEqual([rows, false, "pending"]);
+		const totals = null;
+		state.colorLookup(book, rows, true, totals)("model");
+		expect(spy.mock.calls[1]?.slice(1)).toEqual([rows, true, null]);
 	});
 });
 
