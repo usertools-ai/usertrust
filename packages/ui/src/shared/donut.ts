@@ -203,6 +203,66 @@ export function blendArcs(
 	return out;
 }
 
+/** What the ring draws: each key's arc, and how far each slice has grown outward. */
+export interface RingShape {
+	arcs: ReadonlyMap<string, Arc>;
+	grow: ReadonlyMap<string, number>;
+}
+
+/** The shape at rest for `values` (one per key, in order): `sliceAngles`, and `GROW` for each key in focus. */
+export function ringShape(
+	keys: readonly string[],
+	values: readonly number[],
+	grown: (key: string) => boolean,
+): RingShape {
+	const angles = sliceAngles(keys.map((_, i) => values[i] ?? 0));
+	const arcs = new Map<string, Arc>();
+	const grow = new Map<string, number>();
+	keys.forEach((key, i) => {
+		arcs.set(key, angles[i] ?? { a0: 0, a1: 0 });
+		grow.set(key, grown(key) ? GROW : 0);
+	});
+	return { arcs, grow };
+}
+
+/** A shape as text: equal for two shapes that draw alike, so a change of target can be told from a redraw. */
+export function shapeKey(s: RingShape): string {
+	const parts: string[] = [];
+	for (const [key, arc] of s.arcs)
+		parts.push(`${key}\u0000${arc.a0.toFixed(5)}:${arc.a1.toFixed(5)}:${s.grow.get(key) ?? 0}`);
+	return parts.join("\u0001");
+}
+
+/**
+ * The shape `e` of the way from `from` to `to`: the arcs as `blendArcs`, the growth alongside. A key the ring did not
+ * have starts collapsed and not grown.
+ */
+export function blendShape(from: RingShape, to: RingShape, e: number): RingShape {
+	const t = unit(e, 1);
+	const grow = new Map<string, number>();
+	for (const [key, g] of to.grow) grow.set(key, (from.grow.get(key) ?? 0) * (1 - t) + g * t);
+	return { arcs: blendArcs(from.arcs, to.arcs, t), grow };
+}
+
+/**
+ * A tween from the shape on screen to a new target, as a function of a frame's time. The clock starts at the first
+ * frame it is asked for, so that frame draws `from` (no jump); it eases out over `ms` and ends on `to` itself. A time
+ * that is not a number ends it, so a frame loop can never run on for ever.
+ */
+export function startTween(
+	from: RingShape,
+	to: RingShape,
+	ms: number = TWEEN_MS,
+): (now: number) => { shape: RingShape; done: boolean } {
+	let t0: number | null = null;
+	return (now) => {
+		if (t0 === null) t0 = now;
+		const p = ms > 0 && Number.isFinite(ms) ? (now - t0) / ms : 1;
+		if (!(p < 1)) return { shape: to, done: true };
+		return { shape: blendShape(from, to, easeOutCubic(p)), done: false };
+	};
+}
+
 /** What the legend says when nothing in the range is spend. */
 export const SHARE_EMPTY = "No spend in this range";
 
