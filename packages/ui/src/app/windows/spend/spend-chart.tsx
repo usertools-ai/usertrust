@@ -29,6 +29,7 @@ import {
 	inWindow,
 	lastAtOrBefore,
 	type SpendRecords,
+	totalAtPos,
 } from "../../../shared/cumulative.js";
 import {
 	type CursorStore,
@@ -54,12 +55,14 @@ import {
 	type Geometry,
 	geometry,
 } from "../../../shared/spend-scale.js";
+import type { RangeId } from "../../../shared/spend-series.js";
 import { newSince } from "../../../shared/timeline-view.js";
 import { setHoverMoment, useHoverMoment } from "../../desk/desk-state.js";
 import { useBoxSize } from "../../desk/use-box-size.js";
 import { ChartFrame } from "./chart-frame.js";
 import {
 	bucketOf as bucketAt,
+	cursorResetKey,
 	drawnCursor,
 	escapeTarget,
 	frameKey,
@@ -113,6 +116,8 @@ export interface SpendChartProps {
 	/** The window is animating its size: keep the last settled width. */
 	settling: boolean;
 	layers?: readonly SpendLayer[];
+	/** The range drawn: a change of it clears a live cursor, since two ranges can share a bucket size. */
+	range: RangeId;
 	/** The line's bucket for the range: the model's bucket and the words' unit. */
 	bucket: LineBucket;
 	/** The filters the rows were drawn with, as one string: a change fades the marks in again. */
@@ -403,12 +408,15 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 	}, [store, sync, pin]);
 
 	// A range or filter change: no live cursor survives it, and no window keeps following this one.
-	const resetKey = `${bucket.ms}|${p.filterKey}`;
+	const resetKey = cursorResetKey(p.range, bucket.ms, p.filterKey);
 	const firstReset = useRef(resetKey);
 	useEffect(() => {
 		if (firstReset.current === resetKey) return;
 		firstReset.current = resetKey;
-		if (isLiveCursor(store.get())) store.set(latest.current?.fallback ?? null);
+		if (isLiveCursor(store.get())) {
+			store.set(latest.current?.fallback ?? null);
+			previewRef.current.unpreview();
+		}
 		publishRef.current(null);
 	}, [resetKey, store]);
 
@@ -571,7 +579,7 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 
 	const onKey = (e: KeyboardEvent<HTMLDivElement>): void => {
 		const L = latest.current;
-		if (L === null) return;
+		if (L === null || e.defaultPrevented) return;
 		if (dispatchKey(L.layers, { key: e.key }, L.ctx)) {
 			e.preventDefault();
 			return;
@@ -601,7 +609,7 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 		if (act.type === "toggle") {
 			if (s.i1 < s.i0) return;
 			e.preventDefault();
-			const to = toggleTarget(liveI, pinI, L.pinnedPos !== null);
+			const to = toggleTarget(liveI, L.model.records.pos[liveI] as number, L.pinnedPos);
 			if (to === "live") L.onPin(null);
 			else if (to === "pin") L.onPin(L.model.records.pos[liveI] as number);
 			return;
@@ -625,12 +633,15 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 
 	// ---- What is shown ----
 	const headI = live !== null ? live.i : pinned ? pinIdx : null;
+	// A live record's own cumulative; a pin's total is worked out by position, so undated spend at or before it counts.
 	const cum =
 		headI === null
 			? restSpend(records)
-			: headI >= 0
-				? (records.cum[headI] as number)
-				: records.before;
+			: live === null && pinnedPos !== null
+				? totalAtPos(records, pinnedPos)
+				: headI >= 0
+					? (records.cum[headI] as number)
+					: records.before;
 	const shown =
 		headI !== null && headI >= 0
 			? {

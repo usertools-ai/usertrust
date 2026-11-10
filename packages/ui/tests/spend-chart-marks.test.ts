@@ -52,6 +52,7 @@ function chart(over: Record<string, unknown> = {}): string {
 			markMs: null,
 			breakPos: null,
 			settling: false,
+			range: "1w",
 			bucket: LINE_BUCKETS["1w"],
 			filterKey: "{}",
 			onPin: () => undefined,

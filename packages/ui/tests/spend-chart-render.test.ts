@@ -38,6 +38,7 @@ import {
 	MIN_TOP,
 	niceTicks,
 } from "../src/shared/spend-scale.js";
+import type { RangeId } from "../src/shared/spend-series.js";
 import { appExport, type Component } from "./helpers/day-one.js";
 import {
 	type ChartFixture,
@@ -64,6 +65,7 @@ interface ChartProps {
 	breakPos: number | null;
 	settling: boolean;
 	layers?: readonly SpendLayer[];
+	range: RangeId;
 	bucket: LineBucket;
 	filterKey: string;
 	controls?: React.ReactNode;
@@ -761,6 +763,7 @@ function chart(over: Partial<ChartProps> = {}): string {
 			markMs: null,
 			breakPos: null,
 			settling: false,
+			range: "1w",
 			bucket: LINE_BUCKETS["1w"],
 			filterKey: "{}",
 			onPin: () => undefined,
@@ -1036,6 +1039,18 @@ describe("spend chart: nothing a row says is dropped", () => {
 
 const cumTo = (pos: number): number =>
 	Array.from({ length: pos + 1 }, (_, p) => COST(p)).reduce((a, b) => a + b, 0);
+
+describe("spend chart: pinned on an undated row", () => {
+	it("reads the position's total, undated spend included", () => {
+		const rows = [
+			spendRow(0, { ts: new Date(T0 + HOUR).toISOString(), costUt: 10_000 }),
+			spendRow(1, { ts: "not a date", costUt: 20_000 }),
+		];
+		const html = chart({ rows, head: 1, pinnedPos: 1 });
+		expect(headline(html)).toBe(formatUsdTotal(30_000));
+		expect(headline(chart({ rows, head: 1, pinnedPos: 0 }))).toBe(formatUsdTotal(10_000));
+	});
+});
 
 describe("spend chart: pinned", () => {
 	let pinned = "";

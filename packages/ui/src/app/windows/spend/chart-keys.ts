@@ -90,13 +90,19 @@ export function drawnCursor(
  * What Enter or Space does with the live cursor on record `i`: go live when that record is the one pinned, else pin
  * it; nothing without a live cursor.
  */
+/** What clears a live cursor: the range (3m, ytd and 1y share a bucket size), the bucket, or the filters. */
+export function cursorResetKey(range: string, bucketMs: number, filterKey: string): string {
+	return `${range}|${bucketMs}|${filterKey}`;
+}
+
 export function toggleTarget(
 	liveI: number,
-	pinI: number,
-	pinned: boolean,
+	livePos: number,
+	pinnedPos: number | null,
 ): "live" | "pin" | "none" {
 	if (liveI < 0) return "none";
-	return pinned && liveI === pinI ? "live" : "pin";
+	// Compare vault positions: a pin on an undated row has no record index, but it is the same spot all the same.
+	return pinnedPos !== null && livePos === pinnedPos ? "live" : "pin";
 }
 
 /** What Escape does: go live when pinned, else clear a keyboard cursor, else nothing (the page's own Escape runs). */

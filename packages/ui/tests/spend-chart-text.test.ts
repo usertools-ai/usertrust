@@ -6,6 +6,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	bucketOf,
+	cursorResetKey,
 	drawnCursor,
 	escapeTarget,
 	frameKey,
@@ -295,15 +296,32 @@ describe("drawnCursor", () => {
 	});
 });
 
+describe("cursorResetKey", () => {
+	it("changes with the range even when two ranges share a bucket, and with the bucket and the filters", () => {
+		const six = LINE_BUCKETS["3m"].ms;
+		expect(LINE_BUCKETS.ytd.ms).toBe(six);
+		expect(LINE_BUCKETS["1y"].ms).toBe(six);
+		const keys = ["3m", "ytd", "1y"].map((r) => cursorResetKey(r, six, "{}"));
+		expect(new Set(keys).size).toBe(3);
+		expect(cursorResetKey("1w", 1, "{}")).not.toBe(cursorResetKey("1w", 2, "{}"));
+		expect(cursorResetKey("1w", 1, "{}")).not.toBe(cursorResetKey("1w", 1, '{"a":1}'));
+		expect(cursorResetKey("1w", 1, "{}")).toBe(cursorResetKey("1w", 1, "{}"));
+	});
+});
+
 describe("toggleTarget and escapeTarget", () => {
+	it("compares positions: a pin on an undated row is still the live record's spot", () => {
+		expect(toggleTarget(2, 40, 40)).toBe("live");
+		expect(toggleTarget(2, 40, 39)).toBe("pin");
+	});
 	it("pins the record under a live cursor, or goes live when it is the pinned one", () => {
-		expect(toggleTarget(3, -1, false)).toBe("pin");
+		expect(toggleTarget(3, 30, null)).toBe("pin");
 		// The first record in the window is pinnable, and a record equal to a stale pin index is not the pin.
-		expect(toggleTarget(0, -1, false)).toBe("pin");
-		expect(toggleTarget(5, 5, false)).toBe("pin");
-		expect(toggleTarget(3, 5, true)).toBe("pin");
-		expect(toggleTarget(5, 5, true)).toBe("live");
-		expect(toggleTarget(-1, 5, true)).toBe("none");
+		expect(toggleTarget(0, 0, null)).toBe("pin");
+		expect(toggleTarget(5, 50, null)).toBe("pin");
+		expect(toggleTarget(3, 30, 50)).toBe("pin");
+		expect(toggleTarget(5, 50, 50)).toBe("live");
+		expect(toggleTarget(-1, 0, 50)).toBe("none");
 	});
 	it("goes live when pinned, clears a key cursor, and leaves Escape to the page otherwise", () => {
 		expect(escapeTarget(true, null)).toBe("live");
@@ -334,6 +352,8 @@ describe("reconcileCursor", () => {
 		total: 5,
 		rows: 5,
 		lastUndated: false,
+		spendPos: Int32Array.from(rows.map((r) => r.pos)),
+		spendCum: Float64Array.from([1, 2, 3, 4, 5]),
 	};
 	const bucketAt = (start: number) => (t: number) => Math.floor((t - start) / 3_600_000);
 	const live = (i: number, k: number): CursorValue => ({ k, via: "pointer", i });
@@ -398,6 +418,8 @@ describe("reconcileCursor: a key cursor resting on a bucket with no record", () 
 		total: 5,
 		rows: 5,
 		lastUndated: false,
+		spendPos: Int32Array.from(rows.map((r) => r.pos)),
+		spendCum: Float64Array.from([1, 2, 3, 4, 5]),
 	};
 	const onLine = (start: number, recordIn: (k: number) => number, prevStartMs = T + 3 * M5) => ({
 		records,
