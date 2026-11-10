@@ -240,7 +240,9 @@ describe("chart frame: where each mark sits and how it is drawn", () => {
 
 	it("fades the area from the 95th-percentile height to the base, with each stop's own opacity", () => {
 		const html = frame(fx);
-		const fade = areaFadeTop(fx.ctx.rate, fx.ctx.y, fx.ctx.baseY);
+		const fade = areaFadeTop(fx.ctx.drawn, fx.ctx.y, fx.ctx.baseY);
+		// The fade follows the drawn (smoothed) line, not the true rates behind it.
+		expect(fade).not.toBe(areaFadeTop(fx.ctx.rate, fx.ctx.y, fx.ctx.baseY));
 		expect(html).toMatch(new RegExp(`<linearGradient[^>]*y1="${fade}"[^>]*y2="${fx.ctx.baseY}"`));
 		const stops = [...html.matchAll(/<stop[^>]*stop-opacity="([^"]+)"/g)].map((m) => Number(m[1]));
 		expect(stops).toEqual(AREA_STOPS.map(([, o]) => o));

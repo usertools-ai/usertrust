@@ -2,9 +2,15 @@
 // Copyright 2026 Usertools, Inc.
 
 import { describe, expect, it } from "vitest";
-import { buildCtx, dispatchKey, resolveScale } from "../src/app/windows/spend/ctx.js";
-import type { ChartCtx, SpendLayer } from "../src/app/windows/spend/layers.js";
-import { HEADROOM, niceTicks } from "../src/shared/spend-scale.js";
+import {
+	buildCtx,
+	dispatchKey,
+	firstAreaClip,
+	peakRinged,
+	resolveScale,
+} from "../src/app/windows/spend/ctx.js";
+import { type ChartCtx, RING_SELECTOR, type SpendLayer } from "../src/app/windows/spend/layers.js";
+import { HEADROOM, MIN_TOP, niceTicks } from "../src/shared/spend-scale.js";
 import { chartFixture } from "./helpers/spend-fixture.js";
 
 type Scale = NonNullable<SpendLayer["scale"]>;
@@ -20,19 +26,20 @@ function layer(over: Partial<SpendLayer> = {}): SpendLayer {
 
 describe("resolveScale", () => {
 	const fx = chartFixture();
+	const peak = fx.model.drawnPeak;
 
 	it("gives no knee and no ticks when no layer has a scale", () => {
-		expect(resolveScale([], fx.model.rates)).toEqual({
+		expect(resolveScale([], fx.model.rates, peak)).toEqual({
 			knee: Number.POSITIVE_INFINITY,
 			ticks: null,
 		});
-		expect(resolveScale([layer()], fx.model.rates)).toEqual({
+		expect(resolveScale([layer()], fx.model.rates, peak)).toEqual({
 			knee: Number.POSITIVE_INFINITY,
 			ticks: null,
 		});
 	});
 
-	it("calls the first layer with a scale with the top and the tick function, and returns its answer", () => {
+	it("calls the first layer with a scale with the true rates, the smoothed peak's top and the tick function", () => {
 		let seen: Parameters<Scale>[0] | null = null;
 		const out = { knee: 100, ticks: [{ drawn: 50, label: 80 }] };
 		const first = layer({
@@ -42,11 +49,13 @@ describe("resolveScale", () => {
 			},
 		});
 		const second = layer({ id: "bands", scale: () => ({ knee: 5, ticks: [] }) });
-		const got = resolveScale([layer({ id: "unusual" }), first, second], fx.model.rates);
+		const got = resolveScale([layer({ id: "unusual" }), first, second], fx.model.rates, peak);
 		expect(got).toEqual(out);
 		const s = seen as unknown as Parameters<Scale>[0];
 		expect(s.rate).toBe(fx.model.rates);
-		expect(s.top).toBe(fx.model.peakRate * HEADROOM);
+		// The top is the passed (smoothed) peak's, never the largest true rate in `rate`.
+		expect(peak).toBeLessThan(fx.model.peakRate);
+		expect(s.top).toBe(peak * HEADROOM);
 		expect(s.ticks(37)).toEqual(niceTicks(37));
 	});
 
@@ -62,29 +71,57 @@ describe("resolveScale", () => {
 				}),
 			],
 			new Float64Array(4),
+			0,
 		);
 		expect(top).toBe(1);
 	});
 
-	it("sets the top from the highest rate even when it is in the last bucket", () => {
-		let top = -1;
-		resolveScale(
-			[
-				layer({
-					scale: (s) => {
-						top = s.top;
-						return { knee: Number.POSITIVE_INFINITY, ticks: [] };
-					},
-				}),
-			],
-			Float64Array.from([1, 2, 30]),
-		);
-		expect(top).toBe(30 * HEADROOM);
+	it("a peak that is NaN or infinite gives the smallest top, never NaN or infinity", () => {
+		for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+			let top = -1;
+			resolveScale(
+				[
+					layer({
+						scale: (s) => {
+							top = s.top;
+							return { knee: Number.POSITIVE_INFINITY, ticks: [] };
+						},
+					}),
+				],
+				Float64Array.from([1, 2, 3]),
+				bad,
+			);
+			expect(top).toBe(MIN_TOP);
+		}
+	});
+	it("sets the top from the peak it is given, not from the rates, whichever bucket is highest", () => {
+		const topFor = (rate: number[], peak: number): number => {
+			let top = -1;
+			resolveScale(
+				[
+					layer({
+						scale: (s) => {
+							top = s.top;
+							return { knee: Number.POSITIVE_INFINITY, ticks: [] };
+						},
+					}),
+				],
+				Float64Array.from(rate),
+				peak,
+			);
+			return top;
+		};
+		expect(topFor([1, 2, 30], 30)).toBe(30 * HEADROOM);
+		expect(topFor([1, 2, 30], 5)).toBe(5 * HEADROOM);
 	});
 
 	it("treats a knee that is NaN, zero or negative as none", () => {
 		for (const knee of [Number.NaN, 0, -0.5, -3]) {
-			const got = resolveScale([layer({ scale: () => ({ knee, ticks: [] }) })], fx.model.rates);
+			const got = resolveScale(
+				[layer({ scale: () => ({ knee, ticks: [] }) })],
+				fx.model.rates,
+				peak,
+			);
 			expect(got.knee).toBe(Number.POSITIVE_INFINITY);
 		}
 	});
@@ -95,7 +132,11 @@ describe("buildCtx", () => {
 
 	it("carries the model, the series and the geometry", () => {
 		const { ctx, model, series, geo } = fx;
+		// The TRUE rates, never the smoothed ones the path is drawn from.
 		expect(ctx.rate).toBe(model.rates);
+		expect(ctx.rate).not.toBe(model.drawn);
+		// The smoothed rates the line is drawn from, for a mark that sits on the line.
+		expect(ctx.drawn).toBe(model.drawn);
 		expect(ctx.nB).toBe(model.values.length);
 		expect(ctx.bucketMs).toBe(model.bucketMs);
 		expect(ctx.perHour).toBe(3_600_000 / model.bucketMs);
@@ -204,5 +245,70 @@ describe("dispatchKey", () => {
 		expect(dispatchKey([], { key: "x" }, ctx)).toBe(false);
 		expect(dispatchKey([layer()], { key: "x" }, ctx)).toBe(false);
 		expect(dispatchKey([layer({ onKey: () => false })], { key: "x" }, ctx)).toBe(false);
+	});
+});
+
+describe("firstAreaClip", () => {
+	const { ctx } = chartFixture();
+
+	it("is null when no layer clips the area", () => {
+		expect(firstAreaClip([], ctx)).toBeNull();
+		expect(firstAreaClip([layer()], ctx)).toBeNull();
+		expect(firstAreaClip([layer({ areaClip: () => null })], ctx)).toBeNull();
+	});
+
+	it("is the first path a layer returns, skipping layers that return none", () => {
+		const seen: ChartCtx[] = [];
+		const got = firstAreaClip(
+			[
+				layer({ id: "bands", areaClip: () => null }),
+				layer({
+					id: "unusual",
+					areaClip: (c) => {
+						seen.push(c);
+						return "M0 0H10V10Z";
+					},
+				}),
+				layer({ id: "knee", areaClip: () => "M1 1H2V2Z" }),
+			],
+			ctx,
+		);
+		expect(got).toBe("M0 0H10V10Z");
+		expect(seen).toEqual([ctx]);
+	});
+});
+
+describe("peakRinged", () => {
+	const { ctx } = chartFixture();
+
+	it("is false when no layer marks the peak", () => {
+		expect(peakRinged([], 3, ctx)).toBe(false);
+		expect(peakRinged([layer()], 3, ctx)).toBe(false);
+	});
+
+	it("is true when any layer says a ring already marks the bucket", () => {
+		const ringAt3 = layer({ id: "unusual", marksPeak: (k, c) => k === 3 && c === ctx });
+		expect(peakRinged([layer({ marksPeak: () => false }), ringAt3], 3, ctx)).toBe(true);
+		expect(peakRinged([ringAt3], 4, ctx)).toBe(false);
+	});
+});
+
+describe("the seam's optional members", () => {
+	it("names the ring buttons by one attribute", () => {
+		expect(RING_SELECTOR).toBe("[data-sp-ring]");
+	});
+
+	it("takes a layer with every optional member", () => {
+		const full: SpendLayer = layer({
+			id: "unusual",
+			z: "over",
+			scale: () => ({ knee: Number.POSITIVE_INFINITY, ticks: [] }),
+			onKey: () => false,
+			marksPeak: () => false,
+			Overlay: () => null,
+			Note: () => null,
+			areaClip: () => null,
+		});
+		expect(full.marksPeak?.(0, chartFixture().ctx)).toBe(false);
 	});
 });

@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { PositionIndex } from "../src/server/position-index.js";
 import { isHeaderSpend } from "../src/shared/aggregate.js";
 import {
+	breakRecord,
 	indexAtPos,
 	inWindow,
 	lastAtOrBefore,
@@ -247,5 +248,83 @@ describe("lookups", () => {
 		expect(stepIndex(2, 1, 1, { i0: 1, i1: 2 })).toBe(2);
 		// No record in the span: nothing to step to.
 		expect(stepIndex(0, 1, 1, { i0: 3, i1: 2 })).toBe(-1);
+	});
+});
+
+describe("breakRecord", () => {
+	// Records at positions 0 1 4 5 6 7; position 3 is spend with an unreadable time, position 2 is not spend.
+	const s = spendRecords(ROWS, null);
+	const all = { startMs: T0, endMs: T0 + 60 * MIN };
+
+	it("a break between two records is the first record after it", () => {
+		expect(breakRecord(s, 2, all)).toBe(2);
+		expect(s.pos[breakRecord(s, 2, all)]).toBe(4);
+	});
+	it("a break on a record is that record", () => {
+		expect(breakRecord(s, 5, all)).toBe(3);
+		expect(breakRecord(s, 0, all)).toBe(0);
+		expect(breakRecord(s, 7, all)).toBe(5);
+	});
+	it("a break on the unreadable-time row between records is the next record", () => {
+		expect(breakRecord(s, 3, all)).toBe(2);
+	});
+	it("a break past the last record is none", () => {
+		expect(breakRecord(s, 8, all)).toBe(-1);
+		expect(breakRecord(s, 1_000, all)).toBe(-1);
+	});
+	it("a break whose record is before the window is the window's first record: all of it is past the break", () => {
+		const later = { startMs: T0 + 5 * MIN, endMs: T0 + 60 * MIN };
+		const first = inWindow(s, later).i0;
+		expect(first).toBeGreaterThan(breakRecord(s, 2, all));
+		expect(breakRecord(s, 2, later)).toBe(first);
+		expect(breakRecord(s, 6, later)).toBe(4);
+	});
+	it("with two records at the window's start time, a break at the second is the second, not the window's first", () => {
+		// Positions 4 and 5 share a time (the out-of-order row takes the running maximum).
+		const start = { startMs: T0 + 4 * MIN, endMs: T0 + 60 * MIN };
+		expect(s.t[2]).toBe(s.t[3]);
+		expect(inWindow(s, start).i0).toBe(2);
+		expect(breakRecord(s, 5, start)).toBe(3);
+		expect(breakRecord(s, 4, start)).toBe(2);
+	});
+	it("a break before a window that holds exactly one record is that record", () => {
+		const one = { startMs: s.t[4] as number, endMs: (s.t[4] as number) + 1 };
+		expect(inWindow(s, one)).toEqual({ i0: 4, i1: 4 });
+		expect(breakRecord(s, 2, one)).toBe(4);
+	});
+	it("a break before a window that holds no record is none", () => {
+		const empty = { startMs: T0 + 500 * MIN, endMs: T0 + 600 * MIN };
+		expect(inWindow(s, empty).i1).toBeLessThan(inWindow(s, empty).i0);
+		expect(breakRecord(s, 2, empty)).toBe(-1);
+	});
+	it("a break whose record is at or past the window's end is none: the window has nothing after the break", () => {
+		const cut = { startMs: T0, endMs: s.t[2] as number };
+		expect(inWindow(s, cut).i1).toBe(1);
+		expect(breakRecord(s, 2, cut)).toBe(-1);
+		// The record exactly at endMs is outside the half-open window.
+		expect(breakRecord(s, 4, cut)).toBe(-1);
+		expect(breakRecord(s, 1, cut)).toBe(1);
+	});
+	it("a window whose records all precede the break gives none", () => {
+		const early = { startMs: T0, endMs: (s.t[1] as number) + 1 };
+		expect(inWindow(s, early)).toEqual({ i0: 0, i1: 1 });
+		expect(breakRecord(s, 5, early)).toBe(-1);
+		expect(breakRecord(s, 7, early)).toBe(-1);
+	});
+	it("an empty window before the break gives none", () => {
+		const before = { startMs: T0 - 100 * MIN, endMs: T0 - 50 * MIN };
+		expect(inWindow(s, before).i1).toBeLessThan(inWindow(s, before).i0);
+		expect(breakRecord(s, 2, before)).toBe(-1);
+		expect(breakRecord(s, 0, before)).toBe(-1);
+	});
+	it("a break whose record is exactly at the window's start is that record", () => {
+		const i = breakRecord(s, 2, all);
+		const edge = { startMs: s.t[i] as number, endMs: T0 + 60 * MIN };
+		expect(breakRecord(s, 2, edge)).toBe(i);
+	});
+	it("no break, or no records, is none", () => {
+		expect(breakRecord(s, null, all)).toBe(-1);
+		expect(breakRecord(s, Number.NaN, all)).toBe(-1);
+		expect(breakRecord(spendRecords([], null), 0, all)).toBe(-1);
 	});
 });
