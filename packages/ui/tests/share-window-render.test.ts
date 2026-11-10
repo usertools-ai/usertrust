@@ -29,6 +29,7 @@ import {
 	HOUR,
 	innerOf,
 	legendFigures,
+	NOW_MS,
 	pinnedData,
 	shareData,
 	spend,
@@ -143,6 +144,27 @@ describe("the Share of spend window", () => {
 		const html = await win({ data: shareData(rows) });
 		expect(centre(html).amount).toBe(formatUsdTotal(1_200));
 		expect(sum(legendFigures(html))).toBe(1_200);
+	});
+
+	it("follows the range chips: a change of range changes the total and the legend", async () => {
+		const ago = (h: number): string => iso(NOW_MS - h * HOUR);
+		const rows = [
+			spend("recent", 0, 1_000, { ts: ago(3) }),
+			spend("lastweek", 0, 5_000, { ts: ago(72) }),
+			spend("lastmonth", 0, 7_000, { ts: ago(20 * 24) }),
+		];
+		const at = (range: "1d" | "1w" | "1m"): Promise<string> =>
+			win({ data: shareData(rows), view: { range } });
+		const day = await at("1d");
+		const week = await at("1w");
+		const month = await at("1m");
+		expect(centre(day).amount).toBe(formatUsdTotal(1_000));
+		expect(centre(week).amount).toBe(formatUsdTotal(6_000));
+		expect(centre(month).amount).toBe(formatUsdTotal(13_000));
+		expect(sliceKeys(day)).toEqual(["recent"]);
+		expect(sliceKeys(week)).toEqual(["lastweek", "recent"]);
+		expect(sliceKeys(month)).toEqual(["lastmonth", "lastweek", "recent"]);
+		expect(sum(legendFigures(month))).toBe(13_000);
 	});
 
 	it("at rest shows the range: the centre is the total, and the legend adds up to it", async () => {

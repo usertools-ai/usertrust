@@ -47,13 +47,21 @@ import {
 	xToMs,
 } from "../../../shared/hit.js";
 import type { LedgerRow } from "../../../shared/rows.js";
-import { buildSpendModel, type LineBucket, type SpendModel } from "../../../shared/spend-model.js";
+import {
+	buildSpendModel,
+	type LineBucket,
+	perShort,
+	type SpendModel,
+	toBucket,
+} from "../../../shared/spend-model.js";
 import {
 	bucketCenterMs,
 	type DrawnSeries,
 	drawSeries,
 	type Geometry,
 	geometry,
+	peakLabelPlace,
+	peakLabelShown,
 } from "../../../shared/spend-scale.js";
 import type { RangeId } from "../../../shared/spend-series.js";
 import { newSince } from "../../../shared/timeline-view.js";
@@ -81,11 +89,12 @@ import {
 	pinnedShown,
 	plotLabel,
 	stamp,
+	stampShiftPct,
 	subLine,
 	valueText,
 	whenLine,
 } from "./chart-text.js";
-import { buildCtx, dispatchKey, resolveScale } from "./ctx.js";
+import { buildCtx, dispatchKey, peakRinged, resolveScale } from "./ctx.js";
 import { type ChartCtx, LAYERS, RING_SELECTOR, type SpendLayer } from "./layers.js";
 
 export interface SpendChartProps {
@@ -100,6 +109,8 @@ export interface SpendChartProps {
 	truncated: boolean;
 	/** The pinned position, or null for live. */
 	pinnedPos: number | null;
+	/** The vault's own total at the pinned position (the snapshot's), when the rows are unfiltered and it has answered. */
+	pinTotalUt?: number | null;
 	/** The answer for the pinned position, for the count of records added since it was chosen. */
 	at: AtPayload | null;
 	/** The vault's last position; -1 before a summary. */
@@ -112,6 +123,8 @@ export interface SpendChartProps {
 	filterNote: string | null;
 	/** The moment of the record open in the Ledger's panel, ms, for its ring. */
 	markMs: number | null;
+	/** The open record's position: a spend record is ringed where the line and the cursor put it. */
+	markPos?: number | null;
 	/** The vault position of the first record that breaks the chain, for the dashed line and its ring. */
 	breakPos: number | null;
 	/** The window is animating its size: keep the last settled width. */
@@ -126,8 +139,6 @@ export interface SpendChartProps {
 	/** Drawn at the right of the headline row, after the Now button. */
 	controls?: ReactNode;
 	onPin(pos: number | null): void;
-	/** Moves the page header to a position while the line is read, without moving the list. */
-	onPreview(pos: number | null): void;
 }
 
 const SELF = "spend";
@@ -212,7 +223,6 @@ interface Latest {
 	layers: readonly SpendLayer[];
 	ctx: ChartCtx;
 	onPin(pos: number | null): void;
-	onPreview(pos: number | null): void;
 }
 
 export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JSX.Element {
@@ -271,8 +281,6 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 	const latest = useRef<Latest | null>(null);
 	const published = useRef(false);
 	const raf = useRef(0);
-	const previewRaf = useRef(0);
-	const previewing = useRef(false);
 	const point = useRef<{ x: number; y: number } | null>(null);
 	const rect = useRef<DOMRect | null>(null);
 	const dpr = useRef(1);
@@ -292,34 +300,6 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 	const publishRef = useRef(publish);
 	publishRef.current = publish;
 
-	/** The header follows the record read, at most once a frame; the newest position wins. */
-	const pendingPreview = useRef<number | null>(null);
-	const preview = (pos: number | null): void => {
-		pendingPreview.current = pos;
-		previewing.current = true;
-		if (previewRaf.current !== 0) return;
-		if (typeof requestAnimationFrame !== "function") {
-			latest.current?.onPreview(pos);
-			return;
-		}
-		previewRaf.current = requestAnimationFrame(() => {
-			previewRaf.current = 0;
-			latest.current?.onPreview(pendingPreview.current);
-		});
-	};
-	/** The header back to what is pinned (or live), at once: a pending preview must not land after it. */
-	const unpreview = (): void => {
-		if (previewRaf.current !== 0 && typeof cancelAnimationFrame === "function") {
-			cancelAnimationFrame(previewRaf.current);
-		}
-		previewRaf.current = 0;
-		previewing.current = false;
-		const L = latest.current;
-		L?.onPreview(L.pinnedPos);
-	};
-	const previewRef = useRef({ preview, unpreview });
-	previewRef.current = { preview, unpreview };
-
 	/** Put the live cursor on record `i`, in bucket `k` (the record's own unless a bucket step chose another). */
 	const setLive = (i: number, via: "pointer" | "key", k?: number): void => {
 		const L = latest.current;
@@ -329,7 +309,6 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 		store.set({ k: k ?? bucketOf(t, L.win, L.model), via, i });
 		if (!(isLiveCursor(prev) && prev.i === i)) {
 			publishRef.current(t);
-			previewRef.current.preview(L.model.records.pos[i] as number);
 		}
 	};
 	/** Drop the live cursor: what is drawn falls back to another window's moment or the pin. */
@@ -337,7 +316,6 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 		if (!isLiveCursor(store.get())) return;
 		store.set(latest.current?.fallback ?? null);
 		publishRef.current(null);
-		previewRef.current.unpreview();
 	};
 	const setLiveRef = useRef(setLive);
 	setLiveRef.current = setLive;
@@ -396,7 +374,6 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 		layers,
 		ctx,
 		onPin: p.onPin,
-		onPreview: p.onPreview,
 	};
 
 	// What is drawn: a live cursor still inside this model's records, else the fallback.
@@ -416,13 +393,12 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 		firstReset.current = resetKey;
 		if (isLiveCursor(store.get())) {
 			store.set(latest.current?.fallback ?? null);
-			previewRef.current.unpreview();
 		}
 		publishRef.current(null);
 	}, [resetKey, store]);
 
 	// A new model (a live append, a filter, a later window): keep the live cursor on its record, in that record's bucket
-	// on the new line, or drop it, and the header's preview with it, when the record is gone.
+	// on the new line, or drop it when the record is gone.
 	const prevModel = useRef(model);
 	const prevWin = useRef(win);
 	useLayoutEffect(() => {
@@ -453,7 +429,6 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 		}
 		store.set(latest.current?.fallback ?? null);
 		publishRef.current(null);
-		previewRef.current.unpreview();
 	}, [store, model, win]);
 
 	// The plot's place on the page, read when it can have moved, never inside the pointer frame.
@@ -478,16 +453,9 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 		() => () => {
 			if (typeof cancelAnimationFrame === "function") {
 				if (raf.current !== 0) cancelAnimationFrame(raf.current);
-				if (previewRaf.current !== 0) cancelAnimationFrame(previewRaf.current);
 			}
 			raf.current = 0;
-			previewRaf.current = 0;
 			publishRef.current(null);
-			// The page header leaves a position this chart moved it to.
-			if (previewing.current) {
-				previewing.current = false;
-				latest.current?.onPreview(null);
-			}
 		},
 		[],
 	);
@@ -600,8 +568,6 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 				e.stopPropagation();
 				clearLive();
 				L.onPin(null);
-				// The header leaves any preview too: it shows the vault as it is now.
-				L.onPreview(null);
 				return;
 			}
 			clearLive();
@@ -639,7 +605,7 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 		headI === null
 			? restSpend(records)
 			: live === null && pinnedPos !== null
-				? totalAtPos(records, pinnedPos)
+				? (p.pinTotalUt ?? totalAtPos(records, pinnedPos))
 				: headI >= 0
 					? (records.cum[headI] as number)
 					: records.before;
@@ -702,6 +668,18 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 		[pinInRange, pinIdx, records, win, geo, series],
 	);
 	const { breakPos } = p;
+	// A spend record is ringed at the time the line and the cursor give it (the running latest time), which an
+	// out-of-order record's own time is not; any other record is placed by its own time.
+	const markI = p.markPos == null ? -1 : indexAtPos(records, p.markPos);
+	const markMs =
+		markI >= 0 && records.pos[markI] === p.markPos ? (records.t[markI] as number) : p.markMs;
+	const ringMark = useMemo(
+		() =>
+			markMs !== null && geo.w > 0 && markMs >= win.startMs && markMs <= win.endMs
+				? onLine(series, geo, msToX(markMs, win, geo.w))
+				: null,
+		[markMs, win, geo, series],
+	);
 	const brkMark = useMemo(() => {
 		const i = breakRecord(records, breakPos, win);
 		return i < 0
@@ -735,7 +713,13 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 					className="ut-sp-dot"
 					style={{ transform: `translate(${liveX - DOT_HALF}px, ${y - DOT_HALF}px)` }}
 				/>
-				<div className="ut-sp-time" style={{ transform: `translateX(${liveX}px)` }}>
+				<div
+					className="ut-sp-time"
+					style={{
+						transform: `translateX(${liveX}px)`,
+						translate: `-${stampShiftPct(liveX, geo.w)}% 2px`,
+					}}
+				>
 					{stamp(records.t[live.i] as number)}
 				</div>
 			</>
@@ -747,6 +731,32 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 				className="ut-sp-xh ut-sp-sync"
 				style={{ transform: `translateX(${snapPx(glideX - 0.5, dpr.current)}px)` }}
 			/>
+		);
+	}
+
+	// The peak's own label, at rest only.
+	const showPeak = peakLabelShown({
+		w: geo.w,
+		peakRate: model.peakRate,
+		hasCursor: live !== null,
+		morphing: false,
+		knee: ctx.knee,
+		ringed: peakRinged(layers, model.peakAt, ctx),
+	});
+	let peakLabel: ReactNode = null;
+	if (showPeak) {
+		const px = geo.centerX(model.peakAt);
+		const place = peakLabelPlace({ x: px, y: finiteOr(series.curve.at(px), geo.baseY), w: geo.w });
+		const shift = place.anchor === "end" ? "-100%" : place.anchor === "middle" ? "-50%" : "0";
+		peakLabel = (
+			<div
+				className="ut-sp-peak"
+				aria-hidden="true"
+				data-anchor={place.anchor}
+				style={{ transform: `translate(${place.x}px, ${place.y}px) translate(${shift}, -100%)` }}
+			>
+				{`peak ${formatUsdTotal(toBucket(model.peakRate, bucket))}${perShort(bucket.per)}`}
+			</div>
 		);
 	}
 
@@ -785,7 +795,6 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 						title="Back to the vault as it is now (Escape)"
 						onClick={() => {
 							p.onPin(null);
-							p.onPreview(null);
 							plotRef.current?.focus();
 						}}
 					>
@@ -828,7 +837,7 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 						live={!pinned}
 						hover={live !== null}
 						pin={pinMark}
-						mark={null}
+						mark={ringMark}
 						brk={brkMark}
 						ghost={ghost}
 						note={ghost === null ? null : p.filterNote}
@@ -836,13 +845,10 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 					/>
 				</div>
 				{cross}
+				{peakLabel}
 				{layers.map((l) => (
 					<SlotFor key={l.id} layer={l} ctx={ctx} />
 				))}
-			</div>
-			<div className="ut-sp-axis" aria-hidden="true">
-				<span>{stamp(win.startMs)}</span>
-				<span>{stamp(win.endMs)}</span>
 			</div>
 		</div>
 	);
