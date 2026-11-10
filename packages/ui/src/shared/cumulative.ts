@@ -26,6 +26,8 @@ export interface SpendRecords {
 	hash: string[];
 	/** Spend older than the rows held: `totalUt` less every spend row held, never below 0; 0 with no total. */
 	before: number;
+	/** `before` plus every spend row held, dated or not: what has been spent by the newest row. */
+	total: number;
 }
 
 /**
@@ -76,7 +78,7 @@ export function spendRecords(
 		hash[i] = row.hash;
 		i += 1;
 	}
-	return { n: readable, pos, t, cum, hash, before };
+	return { n: readable, pos, t, cum, hash, before, total: carry };
 }
 
 /** The first index in `[0, n)` where `past(index)` holds, `n` when none; `past` must be monotone. */

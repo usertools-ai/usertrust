@@ -16,6 +16,7 @@ import {
 	type PointerEvent,
 	type ReactNode,
 	useEffect,
+	useLayoutEffect,
 	useMemo,
 	useRef,
 	useSyncExternalStore,
@@ -28,7 +29,7 @@ import {
 	type CursorValue,
 	createCursorStore,
 } from "../../../shared/cursor-store.js";
-import { formatUsd, formatUsdTotal, formatUtc } from "../../../shared/format.js";
+import { formatUsd, formatUsdTotal } from "../../../shared/format.js";
 import {
 	hourSpanOf,
 	msToX,
@@ -49,8 +50,14 @@ import {
 import { setHoverMoment } from "../../desk/desk-state.js";
 import { useBoxSize } from "../../desk/use-box-size.js";
 import { ChartFrame } from "./chart-frame.js";
-import { bucketOf as bucketAt, frameKey, isLiveCursor, stepBucket } from "./chart-keys.js";
-import { headLabel, subLine, whenLine } from "./chart-text.js";
+import {
+	bucketOf as bucketAt,
+	frameKey,
+	isLiveCursor,
+	reconcileCursor,
+	stepBucket,
+} from "./chart-keys.js";
+import { headLabel, stamp, subLine, whenLine } from "./chart-text.js";
 import { buildCtx, resolveScale } from "./ctx.js";
 import { type ChartCtx, LAYERS, RING_SELECTOR, type SpendLayer } from "./layers.js";
 
@@ -100,7 +107,6 @@ const DOT_HALF = 4.5;
 
 type Span = { i0: number; i1: number };
 
-const iso = (ms: number): string => new Date(ms).toISOString();
 const inSpan = (i: number, s: Span): boolean => i >= 0 && i >= s.i0 && i <= s.i1;
 const finiteOr = (v: number, d: number): number => (Number.isFinite(v) ? v : d);
 
@@ -121,10 +127,9 @@ function recordInBucket(k: number, win: SpendWindow, m: SpendModel): number {
 	return span.i0 + nearestIndex(records.t.subarray(span.i0, span.i1 + 1), centre);
 }
 
-/** Spend at rest: what was spent before the rows held plus every spend record, which is the last `cum`. */
-function restSpend(records: SpendRecords, totalUt: number | null): number {
-	if (records.n > 0) return records.cum[records.n - 1] as number;
-	return totalUt ?? 0;
+/** Spend at rest: what was spent before the rows held plus every spend row, whether its time reads or not. */
+function restSpend(records: SpendRecords): number {
+	return records.total;
 }
 
 /**
@@ -229,6 +234,7 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 	const published = useRef(false);
 	const raf = useRef(0);
 	const previewRaf = useRef(0);
+	const previewing = useRef(false);
 	const point = useRef<{ x: number; y: number } | null>(null);
 	const rect = useRef<DOMRect | null>(null);
 	const dpr = useRef(1);
@@ -252,6 +258,7 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 	const pendingPreview = useRef<number | null>(null);
 	const preview = (pos: number | null): void => {
 		pendingPreview.current = pos;
+		previewing.current = true;
 		if (previewRaf.current !== 0) return;
 		if (typeof requestAnimationFrame !== "function") {
 			latest.current?.onPreview(pos);
@@ -268,6 +275,7 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 			cancelAnimationFrame(previewRaf.current);
 		}
 		previewRaf.current = 0;
+		previewing.current = false;
 		latest.current?.onPreview(null);
 	};
 	const previewRef = useRef({ preview, unpreview });
@@ -321,6 +329,29 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 	const stored = useSyncExternalStore(store.subscribe, store.get, () => null);
 	const live: CursorValue | null = isLiveCursor(stored) && inSpan(stored.i, span) ? stored : null;
 
+	// A new model (a live append, a filter, a later window): keep the live cursor on its record, in that record's bucket
+	// on the new line, or drop it, and the header's preview with it, when the record is gone.
+	const prevModel = useRef(model);
+	useLayoutEffect(() => {
+		const was = prevModel.current;
+		prevModel.current = model;
+		if (was === model) return;
+		const v = store.get();
+		if (!isLiveCursor(v)) return;
+		const next = reconcileCursor(v, was.records.pos[v.i], {
+			records: model.records,
+			span: model.span,
+			bucketOf: (t) => bucketOf(t, win, model),
+		});
+		if (next !== null) {
+			store.set(next);
+			return;
+		}
+		store.set(null);
+		publishRef.current(null);
+		previewRef.current.unpreview();
+	}, [store, model, win]);
+
 	// The plot's place on the page, read when it can have moved, never inside the pointer frame.
 	// biome-ignore lint/correctness/useExhaustiveDependencies: re-read on a box-size change and when settling ends
 	useEffect(() => {
@@ -348,6 +379,11 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 			raf.current = 0;
 			previewRaf.current = 0;
 			publishRef.current(null);
+			// The page header leaves a position this chart moved it to.
+			if (previewing.current) {
+				previewing.current = false;
+				latest.current?.onPreview(null);
+			}
 		},
 		[],
 	);
@@ -425,19 +461,21 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 
 	// ---- What is shown ----
 	const headI = live !== null ? live.i : null;
-	const cum = headI === null ? restSpend(records, totalUt) : (records.cum[headI] as number);
+	const cum = headI === null ? restSpend(records) : (records.cum[headI] as number);
 	const shown =
 		headI === null
 			? null
 			: { t: records.t[headI] as number, pos: records.pos[headI] as number, pinned: false };
-	const empty = span.i1 < span.i0;
+	// The words say no spend only when the range holds none: the span can be empty while out-of-order times still
+	// put spend in its buckets.
+	const empty = !(model.rangeUt > 0);
 	const label = headLabel({ shown: headI !== null, filtered });
 	const sub = subLine({
 		empty,
 		rangeUt: model.rangeUt,
 		peakRate: model.peakRate,
 		bucket,
-		shownUt: live !== null ? (model.values[live.k] as number) : null,
+		shownUt: live !== null ? (model.values[live.k] ?? null) : null,
 		filtered,
 		truncated,
 	});
@@ -470,7 +508,7 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 					style={{ transform: `translate(${liveX - DOT_HALF}px, ${y - DOT_HALF}px)` }}
 				/>
 				<div className="ut-sp-time" style={{ transform: `translateX(${liveX}px)` }}>
-					{formatUtc(iso(records.t[live.i] as number))}
+					{stamp(records.t[live.i] as number)}
 				</div>
 			</>
 		);
@@ -531,8 +569,8 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 				))}
 			</div>
 			<div className="ut-sp-axis" aria-hidden="true">
-				<span>{formatUtc(iso(win.startMs))}</span>
-				<span>{formatUtc(iso(win.endMs))}</span>
+				<span>{stamp(win.startMs)}</span>
+				<span>{stamp(win.endMs)}</span>
 			</div>
 		</div>
 	);

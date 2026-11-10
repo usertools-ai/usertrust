@@ -330,3 +330,43 @@ describe("breakRecord", () => {
 		expect(breakRecord(spendRecords([], null), 0, all)).toBe(-1);
 	});
 });
+
+describe("spendRecords: the total", () => {
+	const at = (min: number): string => new Date(T0 + min * MIN).toISOString();
+	it("counts a spend row whose time does not read, which has no record of its own", () => {
+		const r = spendRecords(
+			rowsOf([
+				{ kind: "llm_call", cost: 100, ts: at(1) },
+				{ kind: "llm_call", cost: 200, ts: "not a date" },
+			]),
+			null,
+		);
+		expect(r.n).toBe(1);
+		expect(r.cum[0]).toBe(100);
+		expect(r.total).toBe(300);
+	});
+	it("is the anchor when the anchor covers the rows held", () => {
+		const rows = rowsOf([
+			{ kind: "llm_call", cost: 100, ts: at(1) },
+			{ kind: "llm_call", cost: 200, ts: "x" },
+		]);
+		expect(spendRecords(rows, 1000).total).toBe(1000);
+		expect(spendRecords(rows, 1000).before).toBe(700);
+	});
+	it("is the rows' own spend when the anchor is below it, or is not a number", () => {
+		const rows = rowsOf([
+			{ kind: "llm_call", cost: 100, ts: at(1) },
+			{ kind: "llm_call", cost: 200, ts: at(2) },
+		]);
+		const low = spendRecords(rows, 100);
+		expect(low.before).toBe(0);
+		expect(low.total).toBe(300);
+		expect(spendRecords(rows, Number.NaN).total).toBe(300);
+		expect(spendRecords(rows, Number.POSITIVE_INFINITY).total).toBe(300);
+	});
+	it("is the anchor, or zero, with no rows, and the whole fixture's spend with none", () => {
+		expect(spendRecords([], null).total).toBe(0);
+		expect(spendRecords([], 5000).total).toBe(5000);
+		expect(spendRecords(rowsOf(SPECS), null).total).toBe(SPEND_SUM);
+	});
+});

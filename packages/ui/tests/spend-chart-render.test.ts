@@ -984,6 +984,33 @@ describe("spend chart: the record a bucket lands on", () => {
 	});
 });
 
+describe("spend chart: nothing a row says is dropped", () => {
+	const dated = (pos: number, cost: number, ms: number): LedgerRow =>
+		spendRow(pos, { costUt: cost, ts: new Date(ms).toISOString() });
+	it("rests on every spend row, including one whose time does not read", () => {
+		const rows = [dated(0, 100_000, T0 + HOUR), spendRow(1, { costUt: 200_000, ts: "not a time" })];
+		expect(headline(chart({ rows }))).toBe(formatUsdTotal(300_000));
+		expect(headline(chart({ rows: [spendRow(0, { costUt: 200_000, ts: "x" })] }))).toBe(
+			formatUsdTotal(200_000),
+		);
+	});
+	it("says no spend only when the range holds none, not when the span is empty", () => {
+		// The first row is written after the window and the second inside it: the second's record takes the running
+		// maximum time, so it is outside the span, but its cost is in the range.
+		const rows = [dated(0, 100_000, WEEK_WIN.endMs + 2 * HOUR), dated(1, 50_000, T0 + HOUR)];
+		const m = buildSpendModel(rows, WEEK_WIN, LINE_BUCKETS["1w"], null);
+		expect(m.span.i1).toBeLessThan(m.span.i0);
+		expect(m.rangeUt).toBe(50_000);
+		const sub = stripTags(textOf(chart({ rows }), "ut-sp-sub"));
+		expect(sub).not.toContain("No spend recorded");
+		expect(sub.startsWith(`+${formatUsdTotal(50_000)} in this range`)).toBe(true);
+	});
+	it("writes the axis for a window that does not read, instead of throwing", () => {
+		const html = chart({ win: { startMs: Number.NaN, endMs: Number.NaN } });
+		expect(html).toContain("<span>unknown time</span><span>unknown time</span>");
+	});
+});
+
 describe("spend chart: the plot at rest", () => {
 	it("marks the when-line as live, not past, with no cursor", () => {
 		expect(chart()).toContain('class="ut-sp-when" data-past="false"');

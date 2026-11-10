@@ -6,6 +6,7 @@
  * between the live cursor, another window's moment and the pin. The component only applies the answers.
  */
 
+import { indexAtPos, type SpendRecords } from "../../../shared/cumulative.js";
 import type { CursorValue } from "../../../shared/cursor-store.js";
 
 /** What a key on the plot asks for; null when the plot leaves the key alone. */
@@ -113,4 +114,24 @@ export function escapeTarget(
  */
 export function frameKey(filterKey: string, empty: boolean): string {
 	return `${filterKey}|${empty}`;
+}
+
+/**
+ * A live cursor against a newer model of the same rows (a live append, a filter, a window one bucket later): the same
+ * record when it is still inside the span, in the bucket of its time on the new line; null when the record is gone,
+ * and the cursor must be dropped. `prevPos` is the position of the record the cursor was on, read from the old model.
+ */
+export function reconcileCursor(
+	v: CursorValue | null,
+	prevPos: number | undefined,
+	next: {
+		records: SpendRecords;
+		span: { i0: number; i1: number };
+		bucketOf(t: number): number;
+	},
+): CursorValue | null {
+	if (!isLiveCursor(v) || prevPos === undefined) return null;
+	const i = indexAtPos(next.records, prevPos);
+	if (i < next.span.i0 || i > next.span.i1 || next.records.pos[i] !== prevPos) return null;
+	return { k: next.bucketOf(next.records.t[i] as number), via: v.via, i };
 }

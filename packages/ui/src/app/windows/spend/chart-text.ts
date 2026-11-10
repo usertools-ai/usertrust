@@ -14,7 +14,7 @@ import { bucketPhrase, type LineBucket, perShort, toBucket } from "../../../shar
 export const SEP = " · ";
 
 /** A time as the page writes it; a time that is not one (NaN, out of range) reads as such, never throws. */
-const stamp = (ms: number): string => {
+export const stamp = (ms: number): string => {
 	const d = new Date(ms);
 	return Number.isNaN(d.getTime()) ? "unknown time" : formatUtc(d.toISOString());
 };

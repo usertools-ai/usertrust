@@ -10,6 +10,7 @@ import {
 	escapeTarget,
 	frameKey,
 	keyAction,
+	reconcileCursor,
 	stepBucket,
 	toggleTarget,
 } from "../src/app/windows/spend/chart-keys.js";
@@ -306,5 +307,65 @@ describe("frameKey", () => {
 		expect(frameKey('{"actors":["a"]}', false)).not.toBe(frameKey('{"actors":["b"]}', false));
 		expect(frameKey("{}", false)).not.toBe(frameKey("{}", true));
 		expect(frameKey("{}", false)).toBe(frameKey("{}", false));
+	});
+});
+
+describe("reconcileCursor", () => {
+	const rows = [0, 1, 2, 3, 4].map((i) => ({ t: T + i * 600_000, pos: 10 + i }));
+	const records = {
+		n: rows.length,
+		pos: Int32Array.from(rows.map((r) => r.pos)),
+		t: Float64Array.from(rows.map((r) => r.t)),
+		cum: Float64Array.from([1, 2, 3, 4, 5]),
+		hash: rows.map((r) => `h${r.pos}`),
+		before: 0,
+		total: 5,
+	};
+	const bucketAt = (start: number) => (t: number) => Math.floor((t - start) / 3_600_000);
+	const live = (i: number, k: number): CursorValue => ({ k, via: "pointer", i });
+	const next = (span = { i0: 0, i1: 4 }, start = T) => ({
+		records,
+		span,
+		bucketOf: bucketAt(start),
+	});
+	it("keeps the record by position and puts it in its bucket on the new line", () => {
+		// The record at position 12 was index 1 in the old model and is index 2 here.
+		expect(reconcileCursor(live(1, 0), 12, next())).toEqual({ k: 0, via: "pointer", i: 2 });
+	});
+	it("reads the bucket against the new window, one bucket on", () => {
+		// Position 14 is 40 minutes in: bucket 0 of a window starting at T, bucket 1 when it starts an hour earlier.
+		expect(reconcileCursor(live(4, 0), 14, next({ i0: 0, i1: 4 }, T))?.k).toBe(0);
+		expect(reconcileCursor(live(4, 0), 14, next({ i0: 0, i1: 4 }, T - 3_600_000))?.k).toBe(1);
+		expect(reconcileCursor(live(4, 0), 14, next({ i0: 0, i1: 4 }, T - 7_200_000))?.k).toBe(2);
+	});
+	it("keeps a record sitting exactly at the span's first index", () => {
+		expect(reconcileCursor(live(3, 0), 10, next({ i0: 0, i1: 4 }))).toEqual({
+			k: 0,
+			via: "pointer",
+			i: 0,
+		});
+		expect(reconcileCursor(live(3, 0), 12, next({ i0: 2, i1: 4 }))?.i).toBe(2);
+		expect(reconcileCursor(live(3, 0), 14, next({ i0: 4, i1: 4 }))?.i).toBe(4);
+	});
+	it("reads the bucket of the record itself, not of its neighbour", () => {
+		// Records are ten minutes apart; with 15-minute buckets record 2 (20 min) is in bucket 1, record 1 in bucket 0.
+		const quarter = { ...next(), bucketOf: (t: number) => Math.floor((t - T) / 900_000) };
+		expect(reconcileCursor(live(0, 0), 12, quarter)?.k).toBe(1);
+		expect(reconcileCursor(live(0, 0), 11, quarter)?.k).toBe(0);
+		expect(reconcileCursor(live(0, 0), 14, quarter)?.k).toBe(2);
+	});
+	it("keeps the way the cursor was set", () => {
+		expect(reconcileCursor({ k: 0, via: "key", i: 1 }, 11, next())?.via).toBe("key");
+	});
+	it("drops the cursor when its record is gone or outside the span", () => {
+		expect(reconcileCursor(live(1, 0), 99, next())).toBeNull();
+		expect(reconcileCursor(live(1, 0), 12, next({ i0: 3, i1: 4 }))).toBeNull();
+		expect(reconcileCursor(live(1, 0), 12, next({ i0: 0, i1: 1 }))).toBeNull();
+		expect(reconcileCursor(live(1, 0), 5, next())).toBeNull();
+		expect(reconcileCursor(live(1, 0), undefined, next())).toBeNull();
+	});
+	it("has nothing to keep when the cursor is not a live one", () => {
+		expect(reconcileCursor(null, 12, next())).toBeNull();
+		expect(reconcileCursor({ k: 0, via: "pin", i: 1 }, 12, next())).toBeNull();
 	});
 });
