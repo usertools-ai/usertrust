@@ -48,8 +48,10 @@
 		overflow: hidden;
 	}
 
-	/* The top bar: the page bar (mark, vault, live state, alarm), the search box and Export, on glass because they are
-	   controls. The bar's own header takes the room, the rest follows and wraps on a narrow window. */
+	/* The top bar: the page bar (its header with the mark, the vault and the live state; the chain alarm; the Window
+	   notice), the search box and Export, on glass because they are controls. The header takes the room, the search
+	   box and Export follow and wrap on a narrow window, and the alarm and the notice are each a row of their own.
+	   The as-at line is not here: it is the Now window's. */
 	.ut-dk-top {
 		flex: 0 0 auto;
 		display: flex;
@@ -65,7 +67,8 @@
 		flex: 1 1 320px;
 	}
 
-	.ut-dk-top > .ut-alarm {
+	.ut-dk-top > .ut-alarm,
+	.ut-dk-top > .ut-notice {
 		flex: 1 1 100%;
 		margin: 0;
 	}

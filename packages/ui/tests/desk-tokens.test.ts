@@ -267,10 +267,20 @@ describe("the desk's stylesheets", () => {
 		expect(legacyCss()).toMatch(/position:\s*sticky/);
 	});
 
-	it("red-first (a rule for a notice the top bar no longer draws): the top bar's own rules are for the bar and the alarm", () => {
+	it("red-first (the Window notice drawn in the top bar with no rule for it there): the alarm and the notice each take the bar's whole width", () => {
 		const desk = sheet("desk/desk.css");
-		expect(desk).not.toContain(".ut-dk-top > .ut-notice");
-		expect(ruleOf(desk, ".ut-dk-top > .ut-alarm")).toMatch(/flex:\s*1 1 100%;/);
+		// The top bar draws the header, the chain alarm and the Window notice. The last two are rows of their own under
+		// the header: without the rule they sat beside it, squeezed between the mark and Export.
+		const decls =
+			/\.ut-dk-top > \.ut-alarm,\s*\.ut-dk-top > \.ut-notice\s*\{([^}]*)\}/.exec(desk)?.[1] ?? "";
+		expect(decls).toMatch(/flex:\s*1 1 100%;/);
+		expect(decls).toMatch(/margin:\s*0;/);
+		// The rule is for what the bar draws: the strip's `bar` part holds the notice, and the as-at line is not the
+		// bar's (it is the Now window's), so the bar has no rule for it.
+		const strip = readFileSync(join(APP, "summary-strip.tsx"), "utf-8");
+		expect(strip).toContain('{part === "bar" && noticeLine}');
+		expect(strip).toContain('<div className="ut-notice" role="status">');
+		expect(desk).not.toContain(".ut-dk-top > .ut-asat");
 	});
 
 	it("red-first (rows drawn over the next window): on a phone the Ledger's list flows in the page, as the page's own list does", () => {
