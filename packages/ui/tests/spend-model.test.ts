@@ -5,6 +5,7 @@ import type { PersistedAuditEvent } from "usertrust";
 import { describe, expect, it } from "vitest";
 import { TransferIndex } from "../src/server/verdicts.js";
 import { breakdown } from "../src/shared/breakdown.js";
+import { LINE_BUCKETS as CHART_BUCKETS } from "../src/shared/chart-window.js";
 import { inWindow } from "../src/shared/cumulative.js";
 import { formatUsdTotal } from "../src/shared/format.js";
 import { type LedgerRow, type RowStatus, toLedgerRows } from "../src/shared/rows.js";
@@ -224,6 +225,11 @@ describe("the line's fixed buckets", () => {
 			"1y": { ms: 6 * HOUR, per: "6 h" },
 		};
 		expect(LINE_BUCKETS).toEqual(expected);
+	});
+
+	it("the line's bucket at every range is the chart window's table, so the ring and the line name one moment", () => {
+		for (const range of Object.keys(CHART_BUCKETS) as RangeId[])
+			expect(LINE_BUCKETS[range].ms).toBe(CHART_BUCKETS[range]);
 	});
 
 	it("a week of exactly 7 days is 168 hour buckets, whatever the plot's width", () => {

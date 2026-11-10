@@ -9,4 +9,73 @@
 	[data-win="share"] .ut-split {
 		grid-template-columns: minmax(0, 1fr);
 	}
+
+	/* Drawn once in a fixed box and sized here: a resize or a fill never rebuilds it. */
+	.ut-sh-ring {
+		display: block;
+		flex: 0 0 auto;
+		width: min(100%, 180px);
+		aspect-ratio: 1 / 1;
+		margin: 0 auto;
+		overflow: visible;
+	}
+
+	.ut-sh[data-filled="true"] .ut-sh-ring {
+		width: min(100%, 360px);
+	}
+
+	.ut-sh-hair {
+		fill: none;
+		stroke: var(--dk-text);
+		stroke-opacity: 0.07;
+	}
+
+	.ut-sh-slice {
+		cursor: pointer;
+		transition: opacity 0.18s cubic-bezier(0.16, 0.84, 0.3, 1);
+	}
+
+	.ut-sh-slice .body {
+		stroke-width: 1;
+		stroke-linejoin: round;
+		transition: stroke-opacity 0.18s cubic-bezier(0.16, 0.84, 0.3, 1);
+	}
+
+	.ut-sh-slice .rim {
+		fill: none;
+		stroke-linecap: butt;
+		transition: stroke-width 0.18s cubic-bezier(0.16, 0.84, 0.3, 1);
+	}
+
+	/* A chosen slice quiets the others; so does a pointer on one. */
+	.ut-sh-slice[data-lit="dim"] {
+		opacity: 0.4;
+	}
+
+	.ut-sh-slices[data-hot="true"] .ut-sh-slice[data-lit="rest"] {
+		opacity: 0.4;
+	}
+
+	.ut-sh-ring text {
+		font-family: var(--sans);
+		font-variant-numeric: tabular-nums;
+	}
+
+	.ut-sh-ring .c1 {
+		fill: var(--dk-label);
+		font-size: 13px;
+	}
+
+	.ut-sh-ring .c2 {
+		fill: var(--dk-text);
+		font-size: 30px;
+		font-weight: 650;
+		font-family: var(--fig, var(--sans));
+	}
+
+	.ut-sh-ring .c3 {
+		fill: var(--dk-label);
+		font: 400 12px var(--fig, var(--sans));
+	}
+
 }
