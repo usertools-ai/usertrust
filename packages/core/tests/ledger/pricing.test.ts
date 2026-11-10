@@ -26,8 +26,8 @@ function makeCloudConfig(): TrustConfig {
 }
 
 describe("PRICING_TABLE", () => {
-	it("contains 50 models", () => {
-		expect(Object.keys(PRICING_TABLE)).toHaveLength(56);
+	it("contains 58 models", () => {
+		expect(Object.keys(PRICING_TABLE)).toHaveLength(58);
 	});
 
 	it("all rates are positive", () => {
@@ -411,7 +411,9 @@ describe("PRICING_TABLE_VERSION", () => {
 		// 2026-11-02: the current xAI models (grok-4.7, 4.6, 4.5, 4.3, the three 4.20-0309 ids and
 		// grok-build-0.1) from xAI's published pricing, each with its 200,000-token tier; grok-3 and
 		// the six other retired slugs on xAI's May 15, 2026 retirement notice repriced to grok-4.3's; the xAI tier starts at 200,000 tokens (threshold 199_999).
-		expect(PRICING_TABLE_VERSION).toBe("2026-11-02");
+		// 2026-11-10: claude-fable-5-2 and claude-mythos-5-2 added at their published $8 / $40 /
+		// $0.20 hit / $10 and $16 writes; until then both ids were priced at the fallback rate.
+		expect(PRICING_TABLE_VERSION).toBe("2026-11-10");
 	});
 });
 
@@ -616,6 +618,19 @@ const AUDITED_RATES: Record<string, ModelRates> = {
 		outputPer1k: 500,
 		cacheReadPer1k: 2.5,
 		cacheWritePer1k: 125,
+	},
+	// $8 / $40 / $0.20 hit (0.025x, footnote 1) / $10 5m write. Read 2026-11-10.
+	"claude-fable-5-2": {
+		inputPer1k: 80,
+		outputPer1k: 400,
+		cacheReadPer1k: 2,
+		cacheWritePer1k: 100,
+	},
+	"claude-mythos-5-2": {
+		inputPer1k: 80,
+		outputPer1k: 400,
+		cacheReadPer1k: 2,
+		cacheWritePer1k: 100,
 	},
 	// Limited availability. Mythos 5: $10 / $50 / $1 hit / $12.50; Mythos 5.1: hit $0.25.
 	"claude-mythos-5": {
@@ -891,8 +906,10 @@ describe("PRICING_TABLE rates audit (D1)", () => {
 		"claude-sonnet-5-5",
 		"claude-opus-5-5",
 		"claude-fable-5-1",
+		"claude-fable-5-2",
 		"claude-mythos-5",
 		"claude-mythos-5-1",
+		"claude-mythos-5-2",
 		"claude-haiku-5-5",
 		"claude-mythos-preview",
 		"claude-opus-4-8",
@@ -942,12 +959,14 @@ describe("PRICING_TABLE rates audit (D1)", () => {
 	// The 5.5 / 5.1 generation reads cache at 0.05x / 0.025x, NOT the 0.1x every
 	// older row uses. A 0.1x row overstates reads 2x-4x on exactly the traffic
 	// (cache-read-dominated sessions) that dominates a Claude Code bill.
-	it("cache-read-multiplier: 0.05x on opus-5-5 / sonnet-5-5, 0.025x on fable-5-1 / mythos-5-1, 0.1x elsewhere", () => {
+	it("cache-read-multiplier: 0.05x on opus-5-5 / sonnet-5-5, 0.025x on fable and mythos 5-1 / 5-2, 0.1x elsewhere", () => {
 		const mult: Record<string, number> = {
 			"claude-opus-5-5": 0.05,
 			"claude-sonnet-5-5": 0.05,
 			"claude-fable-5-1": 0.025,
 			"claude-mythos-5-1": 0.025,
+			"claude-fable-5-2": 0.025,
+			"claude-mythos-5-2": 0.025,
 		};
 		for (const [id, rates] of Object.entries(PRICING_TABLE)) {
 			if (!id.startsWith("claude-")) continue;
@@ -1384,6 +1403,28 @@ describe("dated-snapshot canonicalization (F2)", () => {
 		expect(getModelRates("claude-fable-5-1")).not.toBe(PRICING_TABLE["claude-fable-5"]);
 	});
 
+	// fable-5-2-is-not-10-50. Fable 5.2 and Mythos 5.2 are cheaper than 5.1 ($8 / $40 against
+	// $10 / $50), so a row copied from 5.1, or a lookup that reduces the id to an older row,
+	// overstates every call by 25%.
+	it("fable-5-2-is-not-10-50: fable-5-2 and mythos-5-2 price at the published $8 / $40", () => {
+		for (const id of ["claude-fable-5-2", "claude-mythos-5-2"]) {
+			const rates = getModelRates(id);
+			expect(rates, id).toBe(PRICING_TABLE[id]);
+			expect(rates, id).not.toBe(FALLBACK_RATE);
+			expect(rates, id).toStrictEqual({
+				inputPer1k: 80,
+				outputPer1k: 400,
+				cacheReadPer1k: 2,
+				cacheWritePer1k: 100,
+				cacheWrite1hPer1k: 160,
+			});
+			expect(isModelPriced(id), id).toBe(true);
+			expect(getModelRates(`${id}-20261105`), `${id} dated`).toBe(PRICING_TABLE[id]);
+		}
+		expect(getModelRates("claude-fable-5-2")).not.toBe(PRICING_TABLE["claude-fable-5-1"]);
+		expect(getModelRates("claude-fable-5-2")).not.toBe(PRICING_TABLE["claude-fable-5"]);
+	});
+
 	it("a 7-digit, non-numeric or -fast suffix falls to the flagged fallback", () => {
 		for (const id of [
 			"claude-opus-5-2026010",
@@ -1447,6 +1488,8 @@ describe("claude-mythos-preview (deprecated, still callable)", () => {
 // itself. claude-mythos-preview is not on the page: its entry is 2x its $25 input
 // (the page's published 1-hour multiple for a model without an exception).
 const PAGE_1H_WRITE_PER_1K: Record<string, number> = {
+	"claude-fable-5-2": 160,
+	"claude-mythos-5-2": 160,
 	"claude-fable-5-1": 200,
 	"claude-fable-5": 200,
 	"claude-mythos-5-1": 200,
