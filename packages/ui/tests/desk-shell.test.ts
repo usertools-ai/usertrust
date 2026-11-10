@@ -106,6 +106,19 @@ describe("the desk shell", () => {
 		expect(await shell({ data: loadedData() })).not.toContain("ut-notice");
 	});
 
+	it("red-first (no mark on the desk for a filled window): draws the desk with its first-paint rows, and says whether a window fills it", async () => {
+		// Without a page nothing is measured, so the rows are the ones the desk starts with.
+		const home = tagsWith(await shell(), "ut-dk-desk");
+		expect(home).toEqual([
+			'<main class="ut-dk-desk" data-filled="false" style="grid-template-rows:minmax(0, 11fr) minmax(0, 9fr)">',
+		]);
+		for (const fill of ["spend", "share", "ledger", "now"] as const) {
+			expect(tagsWith(await shell({ fill }), "ut-dk-desk"), fill).toEqual([
+				'<main class="ut-dk-desk" data-filled="true" style="grid-template-rows:minmax(0, 11fr) minmax(0, 9fr)">',
+			]);
+		}
+	});
+
 	it("draws no slider and keeps the status under the header mounted, whatever the data", async () => {
 		for (const data of [{}, loadedData(), { summary: dayOneSummary() }]) {
 			const html = await shell({ data });
@@ -232,6 +245,19 @@ describe("the page's source, now spread over the shell", () => {
 		expect(shellSrc).toContain("useEscapePeel(");
 		expect(shellSrc).toContain("document.activeElement");
 		expect(shellSrc).toContain(".ut-win-fill");
+	});
+
+	it("red-first (rows a fixed 11 to 9, so Now scrolled inside its window): the desk takes its rows from the fit, and its first-paint rows until there is one", () => {
+		const shellSrc = readFileSync(join(APP, "desk", "desk-shell.tsx"), "utf-8");
+		expect(shellSrc).toContain('import { useRowFit } from "./use-row-fit.js";');
+		expect(shellSrc).toContain("const deskRef = useRef<HTMLElement>(null);");
+		// Nothing is fitted while a window fills the desk.
+		expect(shellSrc).toContain("const fit = useRowFit(deskRef, fill !== null);");
+		expect(shellSrc.match(/useRowFit\(/g)).toHaveLength(1);
+		const main = /<main\b[^>]*>/.exec(shellSrc.replace(/\s+/g, " "))?.[0];
+		expect(main).toBe(
+			'<main ref={deskRef} className="ut-dk-desk" data-filled={fill !== null} style={{ gridTemplateRows: fit ?? HOME_ROWS }} >',
+		);
 	});
 
 	it("red-first (a phone's facts after the whole list): lays the windows out in the order the screen shows them", () => {

@@ -248,6 +248,31 @@ describe("the desk's stylesheets", () => {
 		);
 	});
 
+	it("red-first (rows that ran past a short desk were cut off): the desk scrolls its rows, never under a filled window, and never in the column", () => {
+		const desk = sheet("desk/desk.css");
+		// The rows can be taller than the desk (nine above, and all the Now window needs below): the desk scrolls then.
+		const wide = ruleOf(desk, ".ut-dk-desk");
+		expect(wide).toMatch(/overflow-y:\s*auto;/);
+		expect(wide).toMatch(/scrollbar-width:\s*thin;/);
+		// A filled window lies over the desk, so the desk is not scrolled under it.
+		expect(ruleOf(desk, '.ut-dk-desk[data-filled="true"]')).toMatch(/overflow:\s*hidden;/);
+		expect(desk.indexOf('.ut-dk-desk[data-filled="true"]')).toBeLessThan(
+			desk.indexOf("@media (max-width: 999px)"),
+		);
+		// In the column the page is the scroller, filled or not (fill is ignored there): a desk that scrolled on its own
+		// would also hold the phone's pinned sort bar, which sticks to the page.
+		const narrow = mediaBlock(desk, 999);
+		expect(ruleOf(narrow, ".ut-dk-desk")).toMatch(/overflow:\s*visible;/);
+		expect(ruleOf(narrow, '.ut-dk-desk[data-filled="true"]')).toMatch(/overflow:\s*visible;/);
+		expect(legacyCss()).toMatch(/position:\s*sticky/);
+	});
+
+	it("red-first (a rule for a notice the top bar no longer draws): the top bar's own rules are for the bar and the alarm", () => {
+		const desk = sheet("desk/desk.css");
+		expect(desk).not.toContain(".ut-dk-top > .ut-notice");
+		expect(ruleOf(desk, ".ut-dk-top > .ut-alarm")).toMatch(/flex:\s*1 1 100%;/);
+	});
+
 	it("red-first (rows drawn over the next window): on a phone the Ledger's list flows in the page, as the page's own list does", () => {
 		// Above the phone width the list fills the window's body. On a phone it takes its content's height and the page
 		// is its scroller (styles.css): the window's override kept it at no height, and its rows ran over the next window.
