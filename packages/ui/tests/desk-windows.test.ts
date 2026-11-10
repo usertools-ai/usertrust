@@ -105,13 +105,22 @@ describe("an empty or still-loading vault", () => {
 });
 
 describe("Now", () => {
-	it("holds the summary strip's facts for the same props", async () => {
+	it("holds the summary strip's facts for the same props, with Rate now and its projection inside the grid after Budget", async () => {
 		const data = loadedData();
-		const html = await drawn("now", { data });
-		const facts = renderToStaticMarkup(
-			createElement(SummaryStrip, { summary: data.summary ?? null, live: "live", part: "facts" }),
+		const html = noIds(await drawn("now", { data }));
+		const facts = noIds(
+			renderToStaticMarkup(
+				createElement(SummaryStrip, { summary: data.summary ?? null, live: "live", part: "facts" }),
+			),
 		);
 		expect(facts.length).toBeGreaterThan(0);
-		expect(noIds(html)).toContain(noIds(facts));
+		const rate = /<div class="ut-fact ut-nw-rate".*?<\/svg><\/div>/.exec(html)?.[0] ?? "";
+		const projection = /<p class="ut-nw-proj"[^>]*>[^<]*<\/p>/.exec(html)?.[0] ?? "";
+		expect(rate).toContain("<b>Rate now</b>");
+		expect(projection).toContain("Projection:");
+		// What Now adds sits between the Budget fact and the Details button; without it, the grid is the strip's.
+		expect(html).toContain(`${rate}${projection}<button type="button" class="ut-more"`);
+		expect(html).not.toContain(facts);
+		expect(html.replace(`${rate}${projection}`, "")).toContain(facts);
 	});
 });
