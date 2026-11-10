@@ -8,7 +8,14 @@ import {
 	wholeVaultProjection,
 	youngPaceWords,
 } from "../src/shared/now-copy.js";
-import { HOUR_MS, RATE_HOURS, rateNow, rateWords } from "../src/shared/now-rate.js";
+import {
+	HOUR_MS,
+	RANGE_REACH_MS,
+	RATE_HOURS,
+	rateNow,
+	rateWords,
+	reachesBack,
+} from "../src/shared/now-rate.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 
 const END = Date.UTC(2026, 10, 8, 12);
@@ -177,6 +184,54 @@ describe("rateNow", () => {
 		expect(v.ratePerHourUt).toBe(0);
 		expect([...v.hours].every((h) => h === 0)).toBe(true);
 		expect(v.known).toBe(false);
+	});
+});
+
+describe("reachesBack", () => {
+	it("holds from a record exactly the span before the end, and not from one a millisecond after", () => {
+		expect(RANGE_REACH_MS).toBe(25 * HOUR_MS);
+		expect(reachesBack([llm(END - RANGE_REACH_MS, 1)], END, RANGE_REACH_MS)).toBe(true);
+		expect(reachesBack([llm(END - RANGE_REACH_MS + 1, 1)], END, RANGE_REACH_MS)).toBe(false);
+		expect(reachesBack([llm(END - HOUR_MS, 1), llm(END - 3 * HOUR_MS, 1)], END, 2 * HOUR_MS)).toBe(
+			true,
+		);
+	});
+
+	it("reads the oldest record of any kind, and is false with none or none readable", () => {
+		expect(
+			reachesBack(
+				[llm(END - HOUR_MS, 1), llm(END - 9 * HOUR_MS, 0, { kind: "tool_use" })],
+				END,
+				5 * HOUR_MS,
+			),
+		).toBe(true);
+		expect(reachesBack([], END, HOUR_MS)).toBe(false);
+		expect(reachesBack([llm(END - 9 * HOUR_MS, 1, { ts: "not a time" })], END, HOUR_MS)).toBe(
+			false,
+		);
+	});
+});
+
+describe("rateNow on a cut vault", () => {
+	// 40 steady hours, then the last hour 50 times larger: far above the usual range, where one is known.
+	const rows = withLastHour(steady(40, 1000), 50_000);
+
+	it("gives no usual range when the rows do not reach back over the hours it reads, whatever they hold", () => {
+		const v = rateNow(rows, END, false);
+		expect(v.known).toBe(false);
+		expect(v.unusual).toBe(false);
+		expect(rateWords(v)).toBe(NOW_COPY.rateUnknown);
+		for (const a of [v.band.mid, v.band.lo, v.band.hi]) expect(a.every(Number.isNaN)).toBe(true);
+		// The hours themselves are the rows' own.
+		expect(v.ratePerHourUt).toBe(50_000);
+		expect(v.hours).toEqual(rateNow(rows, END).hours);
+	});
+
+	it("reads the range as before when they do, or when nothing says they are cut", () => {
+		const v = rateNow(rows, END);
+		expect(v.known).toBe(true);
+		expect(v.unusual).toBe(true);
+		expect(rateNow(rows, END, true)).toEqual(v);
 	});
 });
 

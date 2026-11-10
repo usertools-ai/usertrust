@@ -620,6 +620,43 @@ describe("the Now window on a cut vault", () => {
 		expect(text(projLine(await renderNow({ rows: ROWS })))).toContain("Projection");
 	});
 
+	it("states no usual range from rows that stop short of the hours it reads, and states it from rows that reach them", async () => {
+		const wordsOf = (html: string): string =>
+			/<span class="ut-nw-words"[^>]*>(.*?)<\/span>/.exec(html)?.[1] ?? "";
+		// Twelve hours held, the last far above the rest: on a vault that is not cut this is "unusual"; on a cut one
+		// the oldest row is where the cut falls, so there is no range to say it against.
+		const short = [
+			...Array.from({ length: 11 }, (_, i) => spend("x", 156 + i, 1_000)),
+			spend("x", 167, 90_000),
+		];
+		const uncut = await renderNow({ rows: short });
+		expect(text(wordsOf(uncut))).toBe(NOW_COPY.rateUnusual);
+		const cutShort = await renderNow({ rows: short, summary: cut });
+		expect(text(wordsOf(cutShort))).toBe(NOW_COPY.rateUnknown);
+		// Held back over the 25 hours the range reads: the range is as on any vault.
+		const reaching = [...STEADY, spend("x", 167, 90_000)];
+		for (const over of [{}, { summary: cut }]) {
+			expect(text(wordsOf(await renderNow({ rows: reaching, ...over })))).toBe(
+				NOW_COPY.rateUnusual,
+			);
+		}
+		// The reach is of every row held, not of a filter's: a lane whose own rows start late is read against the range
+		// when another lane's row reaches back over the hours it reads, and not when none does.
+		const late = [
+			...Array.from({ length: 7 }, (_, i) => spend("y", 160 + i, 1_000)),
+			spend("y", 167, 90_000),
+		];
+		const onlyY = only("actors", "y");
+		const early = await renderNow({
+			rows: [spend("x", -1, 1), ...late],
+			summary: cut,
+			filters: onlyY,
+		});
+		expect(text(wordsOf(early))).toBe(NOW_COPY.rateUnusual);
+		const noEarly = await renderNow({ rows: late, summary: cut, filters: onlyY });
+		expect(text(wordsOf(noEarly))).toBe(NOW_COPY.rateUnknown);
+	});
+
 	it("states it from rows that reach back over the week", async () => {
 		const reaching = [spend("x", -1, 1_000), ...ROWS];
 		const html = await renderNow({ rows: reaching, summary: cut });

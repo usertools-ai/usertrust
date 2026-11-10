@@ -16,7 +16,7 @@ import type { SummaryPayload } from "./api.js";
 import { budgetAsOf, budgetDisplay } from "./budget-display.js";
 import { formatUsdTotal, formatUtc } from "./format.js";
 import { NOW_COPY, weekPaceWords, wholeVaultProjection, youngPaceWords } from "./now-copy.js";
-import { HOUR_MS } from "./now-rate.js";
+import { HOUR_MS, reachesBack } from "./now-rate.js";
 import type { LedgerRow } from "./rows.js";
 import { bucketTotals } from "./spend-series.js";
 
@@ -49,19 +49,9 @@ function weekPace(rows: readonly LedgerRow[], endMs: number, wholeWeek = false):
 	};
 }
 
-/**
- * Whether `rows` reach back over the whole week before `endMs`: the oldest record held, of any kind, is at or before
- * its start. A list that holds only the newest of a vault's records (a cut one) can say nothing of a week it does not
- * reach; one that does reach it has the week's spend whole, and the vault is at least a week old. With no record
- * held, or none with a readable time, it does not.
- */
+/** Whether `rows` reach back over the whole week before `endMs` (see `reachesBack`). */
 export function coversWeek(rows: readonly LedgerRow[], endMs: number): boolean {
-	let firstMs = Number.POSITIVE_INFINITY;
-	for (const row of rows) {
-		const t = Date.parse(row.ts);
-		if (t < firstMs) firstMs = t;
-	}
-	return firstMs <= endMs - WEEK_MS;
+	return reachesBack(rows, endMs, WEEK_MS);
 }
 
 export interface MonthBurn {

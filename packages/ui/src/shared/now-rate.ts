@@ -32,11 +32,36 @@ export interface RateNowView {
 	band: { mid: Float64Array; lo: Float64Array; hi: Float64Array };
 }
 
-export function rateNow(rows: readonly LedgerRow[], endMs: number): RateNowView {
+/** The hours the last hour's usual range reads, and the last hour itself: the span a cut list must reach back over. */
+export const RANGE_REACH_MS = 25 * HOUR_MS;
+
+/**
+ * Whether `rows` reach back over `spanMs` before `endMs`: the oldest record held, of any kind, is at or before that
+ * point. A list that holds only the newest of a vault's records (a cut one) says nothing of a span it does not
+ * reach, and where its cut falls is not where the vault began. With no record held, or none with a readable time, it
+ * does not.
+ */
+export function reachesBack(rows: readonly LedgerRow[], endMs: number, spanMs: number): boolean {
+	let firstMs = Number.POSITIVE_INFINITY;
+	for (const row of rows) {
+		const t = Date.parse(row.ts);
+		if (t < firstMs) firstMs = t;
+	}
+	return firstMs <= endMs - spanMs;
+}
+
+/**
+ * `reaches` is false when `rows` are the newest part of a vault that the cut stops short of the hours the usual range
+ * reads: the oldest row held is then where the cut falls, not where spend began, so the hours before it are not
+ * known to be quiet and the hour it falls in is partial. There is then no range ("not known"), whatever the rows say.
+ */
+export function rateNow(rows: readonly LedgerRow[], endMs: number, reaches = true): RateNowView {
 	const startMs = endMs - RATE_HOURS * HOUR_MS;
 	const hours = bucketTotals(rows, { startMs, endMs }, HOUR_MS);
 	const skip = skipBeforeFirstSpend(rows, startMs, HOUR_MS, RATE_HOURS);
-	const { mid, lo, hi } = usualBand(hours, skip);
+	const band = usualBand(hours, skip);
+	if (!reaches) for (const a of [band.mid, band.lo, band.hi]) a.fill(Number.NaN);
+	const { mid, lo, hi } = band;
 	const last = RATE_HOURS - 1;
 	const ratePerHourUt = hours[last] as number;
 	const top = hi[last] as number;

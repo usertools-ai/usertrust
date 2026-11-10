@@ -19,7 +19,7 @@ import { applyFilters, isFiltering } from "../../../shared/filters.js";
 import { projectionOf } from "../../../shared/now-burn.js";
 import { NOW_COPY } from "../../../shared/now-copy.js";
 import { lastRecord, spendUpTo } from "../../../shared/now-lists.js";
-import { rateNow } from "../../../shared/now-rate.js";
+import { RANGE_REACH_MS, rateNow, reachesBack } from "../../../shared/now-rate.js";
 import { useDeskData, useRange } from "../../desk/desk-state.js";
 import { useCategoryTint } from "../../desk/use-tint.js";
 import { Window } from "../../desk/window.js";
@@ -50,12 +50,20 @@ function NowSmall(): React.JSX.Element {
 	const minuteMs = Math.floor(nowMs / MINUTE_MS) * MINUTE_MS;
 	const endMs = useMemo(() => chartWindowOf(range, minuteMs, null).endMs, [range, minuteMs]);
 	const chartRows = useMemo(() => applyFilters(rows, filters), [rows, filters]);
-	const rate = useMemo(() => rateNow(chartRows, endMs), [chartRows, endMs]);
 	const last = useMemo(() => lastRecord(chartRows), [chartRows]);
 	// A whole-vault budget against a whole-vault pace: every row, whatever is filtered. Live only: a projection is
 	// of the vault now, not of a past position.
-	// On a cut vault the rows are only the newest: the pace is stated only when they reach back over the week.
+	// On a cut vault the rows are only the newest: the pace is stated only when they reach back over the week, and the
+	// usual range only when they reach back over the hours it reads. The reach is of every row held, not of a filter's.
 	const cut = summary?.truncated === true;
+	const rangeReached = useMemo(
+		() => !cut || reachesBack(rows, endMs, RANGE_REACH_MS),
+		[cut, rows, endMs],
+	);
+	const rate = useMemo(
+		() => rateNow(chartRows, endMs, rangeReached),
+		[chartRows, endMs, rangeReached],
+	);
 	const projection = useMemo(
 		() => (at === null ? projectionOf(summary, rows, endMs, filtering, cut) : null),
 		[at, summary, rows, endMs, filtering, cut],
