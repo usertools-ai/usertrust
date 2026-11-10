@@ -9,7 +9,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { type AtView, LIVE_VIEW } from "../src/shared/at-follow.js";
+import { type AtView, LIVE_VIEW, pointLoading } from "../src/shared/at-follow.js";
 import { headerView } from "../src/shared/header-view.js";
 
 function viewAt(pos: number): AtView {
@@ -32,8 +32,21 @@ describe("headerView", () => {
 		expect(headerView(null, LIVE_VIEW, hovered)).toBe(LIVE_VIEW);
 	});
 
-	it("keeps the committed header until the preview's own answer lands, never flashing live", () => {
-		expect(headerView(9, pinned, LIVE_VIEW)).toBe(pinned);
+	it("keeps the committed payload until the preview's own answer lands, never flashing live", () => {
+		const waiting = { ...LIVE_VIEW, wanted: 9 };
+		expect(headerView(9, pinned, waiting).at).toBe(pinned.at);
+	});
+
+	it("red-first (Codex P2): a preview that is loading or has failed says so, over the committed payload", () => {
+		const loading = headerView(9, pinned, { ...LIVE_VIEW, wanted: 9 });
+		expect(pointLoading(loading)).toBe(true);
+		const failed = headerView(9, pinned, {
+			...LIVE_VIEW,
+			wanted: 9,
+			error: "the dashboard did not answer",
+		});
+		expect(failed.error).toBe("the dashboard did not answer");
+		expect(failed.at).toBe(pinned.at);
 	});
 });
 
