@@ -1,20 +1,35 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { breakdown, categoryRows } from "../src/shared/breakdown.js";
 import {
 	type Arc,
+	atTime,
+	atWhen,
 	blendArcs,
+	bucketAt,
+	bucketStartMs,
+	centreOf,
 	easeOutCubic,
+	formatShare,
 	HALF_GAP,
 	INNER,
+	legendOf,
+	legendTitle,
 	type Pt,
 	rimPath,
 	ringEdges,
 	ringPath,
+	SHARE_EMPTY,
+	type ShareValues,
 	SLIVER,
+	shareValues,
 	sliceAngles,
 } from "../src/shared/donut.js";
+import type { LedgerRow } from "../src/shared/rows.js";
 
 const TAU = Math.PI * 2;
 const C = 150;
@@ -106,6 +121,10 @@ describe("donut geometry", () => {
 			[TAU / 2, TAU],
 		]);
 		expect(arcs.at(-1)?.a1).toBe(TAU);
+		expect(sliceAngles([-5, 5])).toEqual([
+			{ a0: 0, a1: 0 },
+			{ a0: 0, a1: TAU },
+		]);
 	});
 
 	it("eases out: 0 at 0, 1 at 1, ahead of linear in between", () => {
@@ -130,5 +149,170 @@ describe("donut geometry", () => {
 		const half = blendArcs(from, to, 0.5);
 		expect(half.get("a")?.a1).toBeCloseTo(0.65, 12);
 		expect(half.has("gone")).toBe(false);
+	});
+});
+
+const T0 = Date.parse("2026-11-07T00:00:00.000Z");
+const HOUR = 3_600_000;
+const WIN = { startMs: T0, endMs: T0 + 24 * HOUR };
+
+function row(actor: string, hour: number, costUt: number, kind = "llm_call"): LedgerRow {
+	return {
+		seq: 1,
+		pos: 0,
+		id: `${actor}-${hour}-${costUt}`,
+		ts: new Date(T0 + hour * HOUR + 60_000).toISOString(),
+		kind,
+		actor,
+		hash: "a".repeat(64),
+		previousHash: "0".repeat(64),
+		integrity: "verified",
+		costUt,
+	};
+}
+
+/** `n` categories with distinct spends, highest first. */
+function valuesOf(n: number): ShareValues {
+	const keys = Array.from({ length: n }, (_, i) => `k${i}`);
+	const values = keys.map((_, i) => (n - i) * 10 + 3);
+	return { keys, values, total: values.reduce((a, v) => a + v, 0) };
+}
+
+describe("share values, legend, percentages and centre", () => {
+	it("folds the legend to the top five plus Other only when two or more are left", () => {
+		const eight = legendOf(valuesOf(8));
+		expect(eight.rows.map((r) => r.key)).toEqual(["k0", "k1", "k2", "k3", "k4"]);
+		expect(eight.other?.count).toBe(3);
+		expect(eight.other?.spendUt).toBe(33 + 23 + 13);
+		const sum = eight.rows.reduce((a, r) => a + r.spendUt, 0) + (eight.other?.spendUt ?? 0);
+		expect(sum).toBe(valuesOf(8).total);
+		expect(eight.other?.share).toBeCloseTo(69 / valuesOf(8).total, 12);
+		expect(eight.rows[0]?.share).toBeCloseTo(83 / valuesOf(8).total, 12);
+		const six = legendOf(valuesOf(6));
+		expect(six.rows).toHaveLength(6);
+		expect(six.other).toBeNull();
+		const seven = legendOf(valuesOf(7));
+		expect(seven.rows).toHaveLength(5);
+		expect(seven.other?.count).toBe(2);
+		const one = legendOf(valuesOf(1));
+		expect(one.rows).toEqual([{ key: "k0", spendUt: 13, share: 1 }]);
+		expect(one.other).toBeNull();
+		expect(legendOf(valuesOf(3), 2).other).toBeNull();
+		expect(legendOf(valuesOf(4), 2).other?.count).toBe(2);
+	});
+
+	it("reads one breakdown idle, and one bucket at a moment, in the breakdown's key order", () => {
+		const rows = [
+			row("a", 0, 50),
+			row("a", 2, 1),
+			row("b", 2, 7),
+			row("b", 5, 30),
+			row("c", 2, 4),
+			row("c", 9, 2),
+			row("d", 3, 9),
+			row("a", 2, 100, "info"),
+		];
+		const bd = breakdown(rows, WIN, "lane");
+		expect(bd.keys).toEqual(["a", "b", "d", "c"]);
+		const idle = shareValues(bd, null, null);
+		expect(idle.keys).toEqual(bd.keys);
+		expect(idle.values).toEqual([51, 37, 9, 6]);
+		expect(idle.total).toBe(bd.totalUt);
+		const buckets = categoryRows(rows, WIN, "lane", HOUR);
+		const at2 = shareValues(bd, buckets, 2);
+		expect(at2.keys).toEqual(bd.keys);
+		expect(at2.values).toEqual([1, 7, 0, 4]);
+		expect(at2.total).toBe(12);
+		expect(shareValues(bd, buckets, null)).toEqual(idle);
+		expect(shareValues(bd, null, 2)).toEqual(idle);
+		expect(shareValues(bd, new Map(), 2).values).toEqual([0, 0, 0, 0]);
+	});
+
+	it("places a moment in its bucket, clamping the end and refusing anything outside the window", () => {
+		const n = 24;
+		expect(bucketAt(WIN.startMs - 1, WIN, HOUR, n)).toBeNull();
+		expect(bucketAt(WIN.startMs, WIN, HOUR, n)).toBe(0);
+		expect(bucketAt(WIN.startMs + HOUR - 1, WIN, HOUR, n)).toBe(0);
+		expect(bucketAt(WIN.startMs + HOUR, WIN, HOUR, n)).toBe(1);
+		expect(bucketAt(WIN.endMs, WIN, HOUR, n)).toBe(n - 1);
+		expect(bucketAt(WIN.endMs + 1, WIN, HOUR, n)).toBeNull();
+		expect(bucketAt(WIN.startMs, WIN, HOUR, 0)).toBeNull();
+		expect(bucketAt(WIN.startMs + 15 * HOUR, WIN, HOUR, 10)).toBe(9);
+		expect(bucketAt(Number.NaN, WIN, HOUR, n)).toBeNull();
+	});
+
+	it("never prints a nonzero share as zero", () => {
+		expect(formatShare(0.423, 0)).toBe("42%");
+		expect(formatShare(0.423, 1)).toBe("42.3%");
+		expect(formatShare(0.002, 0)).toBe("<1%");
+		expect(formatShare(0.0004, 1)).toBe("<0.1%");
+		expect(formatShare(0.002, 1)).toBe("0.2%");
+		expect(formatShare(0, 0)).toBe("0%");
+		expect(formatShare(0, 1)).toBe("0.0%");
+		expect(formatShare(1, 0)).toBe("100%");
+		expect(formatShare(1, 1)).toBe("100.0%");
+		expect(formatShare(0.4256, 0)).toBe("43%");
+		expect(formatShare(0.4256, 1)).toBe("42.6%");
+	});
+
+	it("shows no spend as $0.00 and an empty legend, with no NaN", () => {
+		const empty = shareValues(breakdown([], WIN, "lane"), null, null);
+		expect(empty).toEqual({ keys: [], values: [], total: 0 });
+		expect(legendOf(empty)).toEqual({ rows: [], other: null });
+		// A category whose calls cost nothing: it is listed, at a share of 0, never NaN.
+		expect(legendOf({ keys: ["a"], values: [0], total: 0 }).rows).toEqual([
+			{ key: "a", spendUt: 0, share: 0 },
+		]);
+		const c = centreOf({ hot: null, total: 0, spending: 0, noun: "lane", startMs: null });
+		expect(c).toEqual({ name: "This range", amount: "$0.00", sub: "0 lanes" });
+		const hot = centreOf({
+			hot: { key: "a", spendUt: 0 },
+			total: 0,
+			spending: 0,
+			noun: "lane",
+			startMs: null,
+		});
+		expect(hot.sub).toBe("0.0% this range");
+		expect(JSON.stringify([c, hot])).not.toMatch(/NaN/);
+		expect(SHARE_EMPTY).toBe("No spend in this range");
+	});
+
+	it("words the centre for the range and for a bucket, lit or not", () => {
+		const at = T0 + 2 * HOUR;
+		const base = { total: 10_000, spending: 3, noun: "lane" };
+		const lit = { key: "a", spendUt: 4_230 };
+		expect(centreOf({ ...base, hot: lit, startMs: null })).toEqual({
+			name: "a",
+			amount: "$0.42",
+			sub: "42.3% this range",
+		});
+		expect(centreOf({ ...base, hot: lit, startMs: at }).sub).toBe("42.3% at 2026-11-07 02:00Z");
+		expect(centreOf({ ...base, hot: null, startMs: at })).toEqual({
+			name: "At 2026-11-07 02:00Z",
+			amount: "$1.00",
+			sub: "3 lanes",
+		});
+		expect(centreOf({ ...base, hot: null, startMs: null }).name).toBe("This range");
+		expect(centreOf({ ...base, spending: 1, hot: null, startMs: null }).sub).toBe("1 lane");
+		const src = readFileSync(join(import.meta.dirname, "..", "src", "shared", "donut.ts"), "utf-8");
+		expect(src).not.toMatch(/up to/i);
+	});
+
+	it("labels a moment and titles a legend row", () => {
+		expect(bucketStartMs(WIN, 3_600_000, 2)).toBe(WIN.startMs + 7_200_000);
+		expect(atTime(T0 + 2 * HOUR)).toBe("At 2026-11-07 02:00Z");
+		expect(atWhen(T0 + 2 * HOUR)).toBe("at 2026-11-07 02:00Z");
+		expect(atWhen(null)).toBe("this range");
+		expect(legendTitle("a", 1.5e9, 0.423, "this range")).toBe(
+			"a: $150,000.00, 42.3% this range. Click to filter the desk to it.",
+		);
+		expect(legendTitle("b", 4, 0.0004, atWhen(T0 + 2 * HOUR))).toBe(
+			"b: $0.0004, <0.1% at 2026-11-07 02:00Z. Click to filter the desk to it.",
+		);
+	});
+
+	it("offers no additive click", async () => {
+		const mod = await import("../src/shared/donut.js");
+		expect(Object.keys(mod)).not.toContain("additive");
 	});
 });

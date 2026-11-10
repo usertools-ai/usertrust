@@ -2,12 +2,16 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * The share window's donut, as numbers: its fixed drawing box, the slice geometry and the tween. Pure.
+ * The share window's donut, as numbers: its fixed drawing box, the slice geometry, the tween, and the values, legend,
+ * percentages and centre text, all read from one set of values. Pure.
  *
  * The ring is drawn once in a `VB` x `VB` box and sized by CSS. Angles are radians, clockwise from 12 o'clock. The
  * slices' angles have no gaps; the gaps are cut when a slice's path is built, half a gap either side of each boundary
  * at every radius, so the gap between two slices is a band of the same width all the way through the ring.
  */
+
+import type { Breakdown, SpendWindow } from "./breakdown.js";
+import { formatUsdTotal, formatUtcMinute } from "./format.js";
 
 /** The drawing box's side. */
 export const VB = 300;
@@ -187,4 +191,135 @@ export function blendArcs(
 		out.set(key, { a0: f.a0 * (1 - e) + t.a0 * e, a1: f.a1 * (1 - e) + t.a1 * e });
 	}
 	return out;
+}
+
+/** What the legend says when nothing in the range is spend. */
+export const SHARE_EMPTY = "No spend in this range";
+
+/** The values the window shows, one per key, in the breakdown's order; `total` is their sum. */
+export interface ShareValues {
+	keys: string[];
+	values: number[];
+	total: number;
+}
+
+/**
+ * The breakdown's spend per key over its window, or, at a moment, bucket `k` of `buckets` (`categoryRows` over the
+ * same rows and window). The keys and their order are always the breakdown's, so a moment never reorders the ring.
+ */
+export function shareValues(
+	bd: Breakdown,
+	buckets: ReadonlyMap<string, Float64Array> | null,
+	k: number | null,
+): ShareValues {
+	const keys = [...bd.keys];
+	const values = keys.map((key) =>
+		buckets === null || k === null
+			? (bd.byKey.get(key)?.spendUt ?? 0)
+			: (buckets.get(key)?.[k] ?? 0),
+	);
+	let total = 0;
+	for (const v of values) total += v;
+	return { keys, values, total };
+}
+
+/**
+ * The bucket a moment falls in: `floor((ms - startMs) / bucketMs)`, the end of the window (or an index past `n`) in the
+ * last bucket. Null outside the window, for a window or bucket that cannot be bucketed, or with no buckets.
+ */
+export function bucketAt(ms: number, win: SpendWindow, bucketMs: number, n: number): number | null {
+	if (n <= 0 || !(bucketMs > 0) || !Number.isFinite(win.startMs) || !Number.isFinite(win.endMs))
+		return null;
+	if (!(ms >= win.startMs && ms <= win.endMs)) return null;
+	return Math.min(n - 1, Math.floor((ms - win.startMs) / bucketMs));
+}
+
+/** Bucket `k`'s first instant. */
+export function bucketStartMs(win: SpendWindow, bucketMs: number, k: number): number {
+	return win.startMs + k * bucketMs;
+}
+
+const minute = (ms: number): string => formatUtcMinute(new Date(ms).toISOString());
+
+/** The centre's first line at a moment: "At 2026-11-07 18:00Z". */
+export function atTime(startMs: number): string {
+	return `At ${minute(startMs)}`;
+}
+
+/** When the values are read: "at 2026-11-07 18:00Z" at a moment, "this range" for the range. */
+export function atWhen(startMs: number | null): string {
+	return startMs === null ? "this range" : `at ${minute(startMs)}`;
+}
+
+export interface LegendRow {
+	key: string;
+	spendUt: number;
+	share: number;
+}
+
+/**
+ * The legend: every key when at most one would be left over (a lone leftover is shown as itself), else the first
+ * `limit` and the rest folded into one Other line. A share is 0 when there is no spend.
+ */
+export function legendOf(
+	v: ShareValues,
+	limit = LEGEND_ROWS,
+): { rows: LegendRow[]; other: { count: number; spendUt: number; share: number } | null } {
+	const share = (ut: number): number => (v.total > 0 ? ut / v.total : 0);
+	const shown = v.keys.length <= limit + 1 ? v.keys.length : limit;
+	const rows = v.keys.slice(0, shown).map((key, i) => {
+		const spendUt = v.values[i] ?? 0;
+		return { key, spendUt, share: share(spendUt) };
+	});
+	if (shown === v.keys.length) return { rows, other: null };
+	let rest = 0;
+	for (const x of v.values.slice(shown)) rest += x;
+	return { rows, other: { count: v.keys.length - shown, spendUt: rest, share: share(rest) } };
+}
+
+/**
+ * A share as a percent, whole or to one decimal. A nonzero share never prints as zero: it reads "<1%" ("<0.1%").
+ */
+export function formatShare(share: number, decimals: 0 | 1): string {
+	if (share === 0) return decimals === 0 ? "0%" : "0.0%";
+	const pct = share * 100;
+	if (decimals === 0) {
+		const whole = Math.round(pct);
+		return whole === 0 ? "<1%" : `${whole}%`;
+	}
+	const tenth = pct.toFixed(1);
+	return Number(tenth) === 0 ? "<0.1%" : `${tenth}%`;
+}
+
+/** A legend row's tooltip: its dollars and share, when they were read, and what a click does. */
+export function legendTitle(name: string, spendUt: number, share: number, when: string): string {
+	return `${name}: ${formatUsdTotal(spendUt)}, ${formatShare(share, 1)} ${when}. Click to filter the desk to it.`;
+}
+
+/**
+ * The centre's three lines. With a lit key: its name, its dollars, its share and when. Without: the moment ("At
+ * <time>") or "This range", the shown total, and how many categories spent. `startMs` is the shown bucket's start,
+ * null for the range.
+ */
+export function centreOf(a: {
+	hot: { key: string; spendUt: number } | null;
+	total: number;
+	spending: number;
+	noun: string;
+	startMs: number | null;
+}): { name: string; amount: string; sub: string } {
+	const { hot, total, startMs } = a;
+	if (hot !== null) {
+		const share = total > 0 ? hot.spendUt / total : 0;
+		return {
+			name: hot.key,
+			amount: formatUsdTotal(hot.spendUt),
+			sub: `${formatShare(share, 1)} ${atWhen(startMs)}`,
+		};
+	}
+	return {
+		name: startMs === null ? "This range" : atTime(startMs),
+		amount: formatUsdTotal(total),
+		sub: `${a.spending} ${a.noun}${a.spending === 1 ? "" : "s"}`,
+	};
 }
