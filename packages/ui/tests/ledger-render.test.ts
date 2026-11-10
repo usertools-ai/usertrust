@@ -259,7 +259,7 @@ describe("the panel's arithmetic", () => {
 		expect(table(row())).toContain("How this charge adds up");
 	});
 
-	it("an unresolved call's cost is a recorded cost, not a charge; every other status says Charged", () => {
+	it("an unresolved call's cost is a recorded cost, not a charge, in the rows and in the sentences", () => {
 		const open = row({ status: "ambiguous", settled: false });
 		const html = table(open);
 		expect(html).toContain('<th scope="row" colSpan="3">Recorded cost</th>');
@@ -277,11 +277,30 @@ describe("the panel's arithmetic", () => {
 			"Sum 3 UT. Recorded 4 UT: the cost was computed in floating point, came out a hair above 3, and costs round up.",
 		);
 		expect(residue).not.toMatch(/Charged|the charge was|charges round up/);
-		for (const status of ["settled", "failed", "unknown"] as const) {
-			const other = table(row({ status }));
-			expect(other).toContain('<th scope="row" colSpan="3">Charged</th>');
-			expect(other).not.toContain("Recorded cost");
+	});
+
+	it("only a settled call says Charged: any other status, or none, is a recorded cost", () => {
+		const settled = table(row({ status: "settled" }));
+		expect(settled).toContain('<th scope="row" colSpan="3">Charged</th>');
+		expect(settled).not.toContain("Recorded cost");
+		// "unknown" is a call with no verdict on its transfer, the same as a row that carries no status at all.
+		const { status: _status, ...bare } = row({ settled: false });
+		const rows = [
+			bare,
+			...(["unknown", "unrecoverable", "failed"] as const).map((s) => row({ status: s })),
+		];
+		for (const r of rows) {
+			const html = table(r);
+			expect(html).toContain('<th scope="row" colSpan="3">Recorded cost</th>');
+			expect(html).not.toContain(">Charged<");
+			expect(html).toContain(fig("panel-cost", "115 UT"));
 		}
+		expect(table(row({ status: "unknown", costUt: 120 }))).toContain(
+			"the record holds 120 UT; the recorded cost is 5 UT higher.",
+		);
+		expect(table({ ...RESIDUE, status: "unknown" })).toContain(
+			"Sum 3 UT. Recorded 4 UT: the cost was",
+		);
 	});
 });
 

@@ -84,7 +84,7 @@ function sumLine(
 		return { text: `Sum ${sum}. A charge is at least ${computed}.`, residue: false };
 	}
 	if (computedUt !== whole + 1) return { text: null, residue: false };
-	// An unresolved call's cost is recorded, not confirmed, so the sentence speaks of a cost and never of a charge.
+	// A call that is not settled has a recorded cost, so the sentence speaks of a cost and never of a charge.
 	const noun = unresolved && charged ? "cost" : "charge";
 	const how = `computed in floating point, came out a hair above ${whole.toLocaleString("en-US")}, and ${noun}s round up`;
 	return {
@@ -158,8 +158,9 @@ export function ChargeTable(props: { row: LedgerRow }): React.JSX.Element | null
 	const charge = chargeOf(row);
 	const { costUt, sumText, computedUt, differenceUt } = charge;
 	if (charge.state === "none" || costUt === null) return null;
-	// An unresolved call's cost is recorded, not confirmed: it is not said to have been charged.
-	const unresolved = statusOf(row) === "ambiguous";
+	// "Charged" is said only of a settled call. With any other status, or none, the cost is recorded and not
+	// confirmed, and nothing is said to have been charged.
+	const unresolved = statusOf(row) !== "settled";
 	const priced = sumText !== null && computedUt !== null && differenceUt !== null;
 	const sum = priced ? sumLine(sumText, computedUt, differenceUt === 0, unresolved) : null;
 	const lacking = charge.state === "partial" ? missing(charge, row) : [];
