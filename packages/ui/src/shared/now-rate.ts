@@ -36,7 +36,8 @@ export function rateNow(rows: readonly LedgerRow[], endMs: number): RateNowView 
 	const startMs = endMs - RATE_HOURS * HOUR_MS;
 	const hours = bucketTotals(rows, { startMs, endMs }, HOUR_MS);
 	const skip = skipBeforeFirstSpend(rows, startMs, HOUR_MS, RATE_HOURS);
-	const { mid, lo, hi } = usualBand(hours, skip);
+	// The whole week is the history: the last hour is read against the 167 hours before it, not the day before.
+	const { mid, lo, hi } = usualBand(hours, skip, RATE_HOURS);
 	const last = RATE_HOURS - 1;
 	const ratePerHourUt = hours[last] as number;
 	const top = hi[last] as number;

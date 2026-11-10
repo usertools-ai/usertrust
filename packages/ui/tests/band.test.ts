@@ -120,6 +120,47 @@ describe("usualBand", () => {
 		expect(other.lo[BAND_WINDOW + 1]).toBe(b.lo[BAND_WINDOW + 1]);
 	});
 
+	it("looks back as many buckets as the caller asks, 24 when it does not say", () => {
+		const values = Array.from({ length: 60 }, (_, i) => (i * 7) % 5);
+		const changed = [100, ...values.slice(1)];
+		expect(usualBand(values, undefined, BAND_WINDOW)).toStrictEqual(usualBand(values));
+		const b = usualBand(values, undefined, 48);
+		const other = usualBand(changed, undefined, 48);
+		// Bucket 48 sees indices 0..47; bucket 49 sees 1..48, so index 0 does not move it.
+		expect(other.mid[48]).not.toBe(b.mid[48]);
+		expect(other.mid[49]).toBe(b.mid[49]);
+		expect(other.hi[49]).toBe(b.hi[49]);
+		// The default stops at 24: index 0 has left bucket 25's history, and is still in it with 48.
+		expect(usualBand(changed).mid[25]).toBe(usualBand(values).mid[25]);
+		expect(other.mid[25]).not.toBe(b.mid[25]);
+	});
+
+	it("a lookback longer than the series takes every bucket before each one", () => {
+		const values = Array.from({ length: 30 }, (_, i) => (i === 0 ? 290 : 0));
+		const b = usualBand(values, undefined, 1000);
+		// Bucket 29 sees all 29 buckets before it: a mean of 10.
+		expect(b.mid[29]).toBe(10);
+		expect(b.from).toBe(BAND_MIN_HISTORY);
+	});
+
+	it("a lookback shorter than the least history gives no range anywhere", () => {
+		const values = new Array(30).fill(10);
+		const short = usualBand(values, undefined, BAND_MIN_HISTORY - 1);
+		expect([...short.hi].every((v) => Number.isNaN(v))).toBe(true);
+		const least = usualBand(values, undefined, BAND_MIN_HISTORY);
+		expect(least.hi[BAND_MIN_HISTORY]).toBe(10);
+		expect(least.hi[29]).toBe(10);
+	});
+
+	it("counts the least history after `skip`, inside the lookback asked for", () => {
+		const values = new Array(40).fill(10);
+		const skip = Array.from({ length: 40 }, (_, k) => k < 30);
+		// Bucket 36 sees 30..35 unskipped, six buckets; bucket 35 sees five.
+		const b = usualBand(values, skip, 36);
+		expect(Number.isNaN(b.hi[35] as number)).toBe(true);
+		expect(b.hi[36]).toBe(10);
+	});
+
 	it("leaves the buckets marked in `skip` out of every history", () => {
 		const values = Array.from({ length: 22 }, (_, i) => (i === 20 ? 1000 : i));
 		const skip = new Array<boolean>(22).fill(false);

@@ -71,8 +71,45 @@ describe("monthBurn", () => {
 		const pace = (ts: number): number => monthBurn([llm(ts, 700)], END, null).paceUtPerDay;
 		expect(pace(END - 7 * DAY)).toBe(100);
 		expect(pace(END - 7 * DAY - 1)).toBe(0);
-		expect(pace(END - 1)).toBe(100);
+		// A record a millisecond old: the vault is under a day old, so the pace is over one day.
+		expect(pace(END - 1)).toBe(700);
 		expect(pace(END)).toBe(0);
+	});
+
+	it("a vault younger than a week is paced over its own age, never under a day", () => {
+		const b = (ageMs: number, ut: number) => monthBurn([llm(END - ageMs, ut)], END, null);
+		expect(b(DAY, 2400).paceUtPerDay).toBe(2400);
+		expect(b(DAY, 2400).endUt).toBe(2400 + 2400 * 22.5);
+		expect(b(3 * DAY, 2400).paceUtPerDay).toBe(800);
+		expect(b(3 * DAY, 2400).endUt).toBe(2400 + 800 * 22.5);
+		expect(b(7 * DAY, 2400).paceUtPerDay).toBe(2400 / 7);
+		expect(b(7 * DAY - HOUR, 167).paceUtPerDay).toBeCloseTo(24, 9);
+		// Under 24 hours the pace is the spend so far over one day, not over the hours seen.
+		expect(b(DAY - 1, 2400).paceUtPerDay).toBe(2400);
+		expect(b(HOUR, 2400).paceUtPerDay).toBe(2400);
+	});
+
+	it("the vault's age is read from its first spend record, whenever the rest came", () => {
+		const first = llm(END - 3 * DAY, 300);
+		const later = llm(END - HOUR, 900);
+		expect(monthBurn([later, first], END, null).paceUtPerDay).toBe(400);
+		// A record that carries no spend, or no readable time, does not age the vault.
+		const noSpend = llm(END - 6 * DAY, 0, { kind: "tool_use" });
+		const noTime = llm(END - 6 * DAY, 0, { ts: "not a time" });
+		expect(monthBurn([noSpend, noTime, later, first], END, null).paceUtPerDay).toBe(400);
+		// A first record older than the week leaves the week whole.
+		expect(monthBurn([llm(END - 30 * DAY, 1), later, first], END, null).paceUtPerDay).toBe(
+			1200 / 7,
+		);
+	});
+
+	it("spend with no readable time, or dated at or after the end, is drawn as spent before the month", () => {
+		const noTime = llm(END - DAY, 50, { ts: "not a time" });
+		const atEnd = llm(END, 70);
+		const b = monthBurn([...MONTH_ROWS, noTime, atEnd], END, 10_120);
+		expect(b.inMonthUt).toBe(3600);
+		expect(b.startUt).toBe(6520);
+		expect(b.pts).toEqual([6620, 6820, 7120, 7520, 8020, 8620, 9320, 10_120]);
 	});
 
 	it("has one point per UTC day begun, the day that has only begun included", () => {
@@ -88,8 +125,9 @@ describe("monthBurn", () => {
 		const dec = monthBurn([llm(end - HOUR, 1400)], end, null);
 		expect(dec.days).toBe(31);
 		expect(dec.pts).toHaveLength(31);
-		expect(dec.paceUtPerDay).toBe(200);
-		expect(dec.endUt).toBe(1400 + 200 * 0.5);
+		// The vault is an hour old: its pace is over one day.
+		expect(dec.paceUtPerDay).toBe(1400);
+		expect(dec.endUt).toBe(1400 + 1400 * 0.5);
 	});
 
 	it("never decreases, and is flat with no spend", () => {
@@ -127,9 +165,9 @@ function summary(over: Partial<SummaryPayload> = {}): SummaryPayload {
 	};
 }
 
-/** `ut` a day for the seven days before END. */
+/** `ut` a day for the seven days before END, the first exactly a week before it. */
 function week(ut: number): LedgerRow[] {
-	return Array.from({ length: 7 }, (_, i) => llm(END - i * DAY - HOUR, ut));
+	return Array.from({ length: 7 }, (_, i) => llm(END - (i + 1) * DAY, ut));
 }
 
 describe("projectionOf", () => {
@@ -143,7 +181,53 @@ describe("projectionOf", () => {
 		expect(projectionOf(summary(), week(2400), END)).toStrictEqual({
 			text: "Projection: reaches $10.00 on 11-18 at the past week's pace",
 			title:
-				"A projection, not a forecast: it assumes the past 7 days' average of $0.01/h holds. Budget: from the vault config",
+				"A projection, not a forecast: it assumes the past 7 days' average of $0.24/day holds. Budget: from the vault config",
+		});
+	});
+
+	it("names a small pace by the day, where an hourly figure would round to nothing", () => {
+		// 12 UT a day is half a UT an hour.
+		expect(projectionOf(summary(), week(12), END)?.title).toBe(
+			"A projection, not a forecast: it assumes the past 7 days' average of $0.0012/day holds. Budget: from the vault config",
+		);
+	});
+
+	it("a vault a day old reaches the budget at its own pace, not a seventh of it", () => {
+		const p = projectionOf(summary({ remainingUt: 24_000 }), [llm(END - DAY, 2400)], END);
+		expect(p).toStrictEqual({
+			text: "Projection: reaches $10.00 on 11-18 at the pace so far",
+			title:
+				"A projection, not a forecast: it assumes the average of $0.24/day since the first spend record, 1.0 days ago, holds. Budget: from the vault config",
+		});
+	});
+
+	it("a vault three days old is paced over three days", () => {
+		const rows = [llm(END - 3 * DAY, 3600), llm(END - HOUR, 3600)];
+		const p = projectionOf(summary({ remainingUt: 24_000 }), rows, END);
+		expect(p?.text).toBe("Projection: reaches $10.00 on 11-18 at the pace so far");
+		expect(p?.title).toContain(
+			"the average of $0.24/day since the first spend record, 3.0 days ago, holds",
+		);
+	});
+
+	it("a vault exactly a week old is read as a week", () => {
+		const p = projectionOf(summary({ remainingUt: 24_000 }), [llm(END - 7 * DAY, 16_800)], END);
+		expect(p?.text).toBe("Projection: reaches $10.00 on 11-18 at the past week's pace");
+		expect(p?.title).toContain("the past 7 days' average of $0.24/day holds");
+		const younger = projectionOf(summary(), [llm(END - 7 * DAY + 1, 16_800)], END);
+		expect(younger?.text).toContain("at the pace so far");
+	});
+
+	it("under 24 hours of history gives no line: one day's spend is too little to date a budget by", () => {
+		expect(projectionOf(summary(), [llm(END - DAY + 1, 2400)], END)).toBeNull();
+		expect(projectionOf(summary(), [llm(END - HOUR, 2400)], END)).toBeNull();
+		expect(projectionOf(summary(), [llm(END - DAY, 2400)], END)).not.toBeNull();
+		// A budget already used is a fact, not a projection: it is said at any age.
+		const used = projectionOf(summary({ remainingUt: 0 }), [llm(END - HOUR, 2400)], END);
+		expect(used).toStrictEqual({
+			text: NOW_COPY.projectionUsed,
+			title:
+				"A projection, not a forecast: it assumes the average of $0.24/day since the first spend record, under a day ago, holds. Budget: from the vault config",
 		});
 	});
 
@@ -154,7 +238,7 @@ describe("projectionOf", () => {
 
 	it("a budget with nothing left is already used", () => {
 		const title =
-			"A projection, not a forecast: it assumes the past 7 days' average of $0.01/h holds. Budget: from the vault config";
+			"A projection, not a forecast: it assumes the past 7 days' average of $0.24/day holds. Budget: from the vault config";
 		for (const remainingUt of [-5, 0])
 			expect(projectionOf(summary({ remainingUt }), week(2400), END)).toStrictEqual({
 				text: NOW_COPY.projectionUsed,
@@ -172,8 +256,15 @@ describe("projectionOf", () => {
 		expect(projectionOf(summary(), [llm(END - 8 * DAY, 500)], END)).toStrictEqual({
 			text: NOW_COPY.projectionIdle,
 			title:
-				"A projection, not a forecast: it assumes the past 7 days' average of $0.00/h holds. Budget: from the vault config",
+				"A projection, not a forecast: it assumes the past 7 days' average of $0.00/day holds. Budget: from the vault config",
 		});
+		// A vault with no spend record before the end has no age to name.
+		for (const rows of [[], [llm(END, 500)], [llm(END + DAY, 500)]])
+			expect(projectionOf(summary(), rows, END)).toStrictEqual({
+				text: NOW_COPY.projectionIdle,
+				title:
+					"A projection, not a forecast: it assumes the past 7 days' average of $0.00/day holds. Budget: from the vault config",
+			});
 	});
 
 	it("an unknown budget, or no summary, gives no line", () => {

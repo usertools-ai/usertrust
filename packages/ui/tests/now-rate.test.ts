@@ -70,7 +70,8 @@ describe("rateNow", () => {
 
 	it("a rate inside a wide usual range is normal: it is read against the upper bound, not the lower", () => {
 		// 500 and 1,500 by turns: a mean of 1,000 and a deviation of 500, so the range is 0 to 2,000.
-		const uneven = steady(48, 0).map((r, i) => ({ ...r, costUt: i % 2 === 0 ? 500 : 1500 }));
+		// 49 hours: the last hour is judged against the 48 before it, 24 of each.
+		const uneven = steady(49, 0).map((r, i) => ({ ...r, costUt: i % 2 === 0 ? 500 : 1500 }));
 		const inside = rateNow(withLastHour(uneven, 1200), END);
 		expect(inside.band.lo[LAST]).toBe(0);
 		expect(inside.band.mid[LAST]).toBe(1000);
@@ -80,6 +81,35 @@ describe("rateNow", () => {
 		expect(rateWords(inside)).toBe(NOW_COPY.rateNormal);
 		expect(rateNow(withLastHour(uneven, 2000), END).unusual).toBe(false);
 		expect(rateNow(withLastHour(uneven, 2001), END).unusual).toBe(true);
+	});
+
+	it("the last hour is read against the week, not only the day before it", () => {
+		// Six days of 500 and 1,500 by turns, then a quiet day of 100 an hour, then an hour of 300.
+		const rows = steady(RATE_HOURS, 0).map((r, i) => ({
+			...r,
+			costUt: i <= 24 ? 100 : i % 2 === 0 ? 500 : 1500,
+		}));
+		const v = rateNow(withLastHour(rows, 300), END);
+		// Against the day before alone the range would be 100 to 100, and 300 would read as unusual.
+		expect(v.known).toBe(true);
+		expect(v.band.hi[LAST] as number).toBeGreaterThan(1500);
+		expect(v.unusual).toBe(false);
+		expect(rateWords(v)).toBe(NOW_COPY.rateNormal);
+	});
+
+	it("the week's history starts at the oldest hour of the week and counts all of it", () => {
+		const quiet = steady(RATE_HOURS, 0);
+		const oldest = quiet.map((r, i) => (i === RATE_HOURS - 1 ? { ...r, costUt: 16_700 } : r));
+		// 16,700 in the oldest hour and 166 hours of nothing: a mean of 100 over the 167 hours before the last.
+		expect(rateNow(oldest, END).band.mid[LAST]).toBe(100);
+	});
+
+	it("a vault 100 hours old is read against its own 99 hours, not a week padded with nothing", () => {
+		const v = rateNow(steady(100, 1000), END);
+		expect(v.band.mid[LAST]).toBe(1000);
+		expect(v.band.hi[LAST]).toBe(1000);
+		expect(v.unusual).toBe(false);
+		expect(rateNow(withLastHour(steady(100, 1000), 1001), END).unusual).toBe(true);
 	});
 
 	it("a vault two hours old is too little history, however big the hour", () => {

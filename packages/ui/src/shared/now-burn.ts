@@ -6,8 +6,12 @@
  *
  * Each is a projection, not a promise: it assumes the average of the 7 days before `endMs` holds, and says so. A
  * budget that is not known gives no projection at all.
+ *
+ * A vault whose first spend record is under 7 days old has no week to average: its spend is averaged over its own
+ * age, and never over less than one day. Under one day of history there is no date for the budget at all.
  */
 
+import { isHeaderSpend } from "./aggregate.js";
 import type { SummaryPayload } from "./api.js";
 import { budgetAsOf, budgetDisplay } from "./budget-display.js";
 import { formatUsdTotal, formatUtc } from "./format.js";
@@ -19,10 +23,25 @@ import { bucketTotals } from "./spend-series.js";
 const DAY_MS = 24 * HOUR_MS;
 const WEEK_MS = 7 * DAY_MS;
 
-/** Spend per day over the 7 days before `endMs`, half-open. */
-function weekPace(rows: readonly LedgerRow[], endMs: number): number {
+interface Pace {
+	/** Spend per day over the 7 days before `endMs`, half-open, averaged over `days`. */
+	utPerDay: number;
+	/** Days since the first spend record: 7 or more is a whole week of history. With no such record, infinite. */
+	ageDays: number;
+}
+
+function weekPace(rows: readonly LedgerRow[], endMs: number): Pace {
 	const week = bucketTotals(rows, { startMs: endMs - WEEK_MS, endMs }, WEEK_MS);
-	return (week[0] as number) / 7;
+	let firstMs = Number.POSITIVE_INFINITY;
+	for (const row of rows) {
+		if (!isHeaderSpend(row.kind, row.costUt)) continue;
+		const t = Date.parse(row.ts);
+		// A time that cannot be read is NaN, and NaN is below nothing: such a record does not age the vault. Nor
+		// does one dated at or after `endMs`.
+		if (t < endMs && t < firstMs) firstMs = t;
+	}
+	const ageDays = Number.isFinite(firstMs) ? (endMs - firstMs) / DAY_MS : Number.POSITIVE_INFINITY;
+	return { utPerDay: (week[0] as number) / Math.min(7, Math.max(1, ageDays)), ageDays };
 }
 
 export interface MonthBurn {
@@ -53,6 +72,8 @@ export function monthBurn(
 	const perDay = bucketTotals(rows, { startMs: monthStart, endMs }, DAY_MS);
 	let inMonthUt = 0;
 	for (const ut of perDay) inMonthUt += ut;
+	// What the vault has spent beyond this month's dated records is drawn as spent before the month. That takes in
+	// spend with no readable time and spend dated at or after `endMs`: neither can be placed on a day drawn here.
 	const startUt = wholeVaultSpentUt === null ? 0 : Math.max(0, wholeVaultSpentUt - inMonthUt);
 	const pts: number[] = [];
 	let acc = startUt;
@@ -61,7 +82,7 @@ export function monthBurn(
 		acc += perDay[i] ?? 0;
 		pts.push(acc);
 	}
-	const paceUtPerDay = weekPace(rows, endMs);
+	const paceUtPerDay = weekPace(rows, endMs).utPerDay;
 	return {
 		days: Math.round((monthEnd - monthStart) / DAY_MS),
 		pts,
@@ -84,11 +105,20 @@ export function projectionOf(
 ): { text: string; title: string } | null {
 	if (summary === null || budgetDisplay(summary).kind === "unknown") return null;
 	const left = summary.remainingUt as number;
-	const paceUtPerDay = weekPace(rows, endMs);
+	const { utPerDay: paceUtPerDay, ageDays } = weekPace(rows, endMs);
+	const young = ageDays < 7;
+	// The pace is named by the day: by the hour a small one would print as nothing.
+	const perDay = `${formatUsdTotal(paceUtPerDay)}/day`;
+	const age = ageDays < 1 ? "under a day ago" : `${ageDays.toFixed(1)} days ago`;
+	const assumes = young
+		? `the average of ${perDay} since the first spend record, ${age},`
+		: `the past 7 days' average of ${perDay}`;
 	// A controller's record is named by its age: its provenance sentence says more than an old record can.
-	const title = `A projection, not a forecast: it assumes the past 7 days' average of ${formatUsdTotal(paceUtPerDay / 24)}/h holds. Budget: ${budgetAsOf(summary, endMs).text}`;
+	const title = `A projection, not a forecast: it assumes ${assumes} holds. Budget: ${budgetAsOf(summary, endMs).text}`;
 	if (left <= 0) return { text: NOW_COPY.projectionUsed, title };
 	if (!(paceUtPerDay > 0)) return { text: NOW_COPY.projectionIdle, title };
+	// Under a day of history is too little to date a budget by: no line, as with a budget that is not known.
+	if (ageDays < 1) return null;
 	const daysLeft = left / paceUtPerDay;
 	const when = new Date(endMs + daysLeft * DAY_MS);
 	if (Number.isNaN(when.getTime())) return null;
@@ -96,7 +126,7 @@ export function projectionOf(
 	// A month and a day name one date only within a year; further out the year is printed.
 	const date = daysLeft < 365 ? formatUtc(iso).slice(0, 5) : iso.slice(0, iso.indexOf("T"));
 	return {
-		text: `Projection: reaches ${formatUsdTotal(summary.budget as number)} on ${date} at the past week's pace`,
+		text: `Projection: reaches ${formatUsdTotal(summary.budget as number)} on ${date} at ${young ? "the pace so far" : "the past week's pace"}`,
 		title,
 	};
 }
