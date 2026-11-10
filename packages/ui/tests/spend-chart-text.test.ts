@@ -10,6 +10,7 @@ import {
 	escapeTarget,
 	frameKey,
 	keyAction,
+	movedTime,
 	reconcileCursor,
 	stepBucket,
 	toggleTarget,
@@ -90,15 +91,15 @@ describe("whenLine", () => {
 		).toBe("11-07 18:00:05Z · record 5");
 	});
 	it("is live at rest", () => {
-		expect(whenLine({ shown: null, pinnedNoRecord: false, lastT: T })).toBe(
+		expect(whenLine({ shown: null, pinnedNoRecord: false, lastT: T, spent: true })).toBe(
 			"Live · last spend 11-07 18:00:05Z",
 		);
-		expect(whenLine({ shown: null, pinnedNoRecord: false, lastT: null })).toBe(
+		expect(whenLine({ shown: null, pinnedNoRecord: false, lastT: null, spent: false })).toBe(
 			"Live · no spend recorded yet",
 		);
 	});
 	it("says so for a pin with no spend at or before it", () => {
-		expect(whenLine({ shown: null, pinnedNoRecord: true, lastT: T })).toBe(
+		expect(whenLine({ shown: null, pinnedNoRecord: true, lastT: T, spent: true })).toBe(
 			"Pinned · no spend recorded by then",
 		);
 	});
@@ -148,7 +149,7 @@ describe("valueText and whenLine with a pin that has no record", () => {
 	it("never reads the time of a pin with no spend record at or before it", () => {
 		const v = { empty: false, shown: nan, pinnedNoRecord: true, head: 11, cumUt: 0 };
 		expect(valueText(v)).toBe("Pinned · $0.00 spent");
-		expect(whenLine({ shown: nan, pinnedNoRecord: true, lastT: T })).toBe(
+		expect(whenLine({ shown: nan, pinnedNoRecord: true, lastT: T, spent: true })).toBe(
 			"Pinned · no spend recorded by then",
 		);
 	});
@@ -168,10 +169,10 @@ describe("valueText and whenLine with a pin that has no record", () => {
 describe("words with a time that is not one, and a record past the stale head", () => {
 	it("never throws on a NaN time, with or without the no-record flag", () => {
 		const nan = { t: Number.NaN, pos: 4, pinned: false };
-		expect(whenLine({ shown: nan, pinnedNoRecord: false, lastT: T })).toBe(
+		expect(whenLine({ shown: nan, pinnedNoRecord: false, lastT: T, spent: true })).toBe(
 			"unknown time · record 5",
 		);
-		expect(whenLine({ shown: null, pinnedNoRecord: false, lastT: Number.NaN })).toBe(
+		expect(whenLine({ shown: null, pinnedNoRecord: false, lastT: Number.NaN, spent: true })).toBe(
 			"Live · last spend unknown time",
 		);
 		expect(
@@ -367,5 +368,33 @@ describe("reconcileCursor", () => {
 	it("has nothing to keep when the cursor is not a live one", () => {
 		expect(reconcileCursor(null, 12, next())).toBeNull();
 		expect(reconcileCursor({ k: 0, via: "pin", i: 1 }, 12, next())).toBeNull();
+	});
+});
+
+describe("whenLine at rest with spend the time cannot name", () => {
+	it("says the time is unknown when spend exists but no dated row names it", () => {
+		expect(whenLine({ shown: null, pinnedNoRecord: false, lastT: null, spent: true })).toBe(
+			"Live · last spend time unknown",
+		);
+	});
+	it("says no spend only when there is none, and names a dated last spend otherwise", () => {
+		expect(whenLine({ shown: null, pinnedNoRecord: false, lastT: null, spent: false })).toBe(
+			"Live · no spend recorded yet",
+		);
+		expect(whenLine({ shown: null, pinnedNoRecord: false, lastT: T, spent: true })).toBe(
+			"Live · last spend 11-07 18:00:05Z",
+		);
+	});
+});
+
+describe("movedTime", () => {
+	it("is the new time when a kept record's time changed, null when it did not", () => {
+		expect(movedTime(100, 200)).toBe(200);
+		expect(movedTime(100, 100)).toBeNull();
+		expect(movedTime(undefined, 200)).toBe(200);
+	});
+	it("is null with no readable new time", () => {
+		expect(movedTime(100, undefined)).toBeNull();
+		expect(movedTime(100, Number.NaN)).toBeNull();
 	});
 });

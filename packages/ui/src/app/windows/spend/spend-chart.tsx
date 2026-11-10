@@ -54,6 +54,7 @@ import {
 	bucketOf as bucketAt,
 	frameKey,
 	isLiveCursor,
+	movedTime,
 	reconcileCursor,
 	stepBucket,
 } from "./chart-keys.js";
@@ -345,6 +346,9 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 		});
 		if (next !== null) {
 			store.set(next);
+			// A running maximum can move a surviving record's time when a filter drops an earlier row: say so.
+			const moved = movedTime(was.records.t[v.i], model.records.t[next.i]);
+			if (moved !== null) publishRef.current(moved);
 			return;
 		}
 		store.set(null);
@@ -482,7 +486,8 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 	const when = whenLine({
 		shown,
 		pinnedNoRecord: false,
-		lastT: records.n > 0 ? (records.t[records.n - 1] as number) : null,
+		lastT: records.n > 0 && !records.lastUndated ? (records.t[records.n - 1] as number) : null,
+		spent: records.rows > 0 || records.total > 0,
 	});
 
 	const plotStyle = useMemo(

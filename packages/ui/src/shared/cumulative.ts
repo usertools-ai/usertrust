@@ -28,6 +28,10 @@ export interface SpendRecords {
 	before: number;
 	/** `before` plus every spend row held, dated or not: what has been spent by the newest row. */
 	total: number;
+	/** How many spend rows are held, dated or not. */
+	rows: number;
+	/** Whether the newest spend row (highest position) has no readable time. */
+	lastUndated: boolean;
 }
 
 /**
@@ -78,7 +82,18 @@ export function spendRecords(
 		hash[i] = row.hash;
 		i += 1;
 	}
-	return { n: readable, pos, t, cum, hash, before, total: carry };
+	const last = order.length > 0 ? (order[order.length - 1] as number) : -1;
+	return {
+		n: readable,
+		pos,
+		t,
+		cum,
+		hash,
+		before,
+		total: carry,
+		rows: spend.length,
+		lastUndated: last >= 0 && Number.isNaN(times[last] as number),
+	};
 }
 
 /** The first index in `[0, n)` where `past(index)` holds, `n` when none; `past` must be monotone. */

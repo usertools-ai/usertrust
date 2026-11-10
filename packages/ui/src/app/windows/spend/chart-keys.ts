@@ -135,3 +135,9 @@ export function reconcileCursor(
 	if (i < next.span.i0 || i > next.span.i1 || next.records.pos[i] !== prevPos) return null;
 	return { k: next.bucketOf(next.records.t[i] as number), via: v.via, i };
 }
+
+/** The time to republish when a kept cursor's record now reads a different time (a running maximum shifts when a filter drops an earlier row); null when it is unchanged. */
+export function movedTime(was: number | undefined, now: number | undefined): number | null {
+	if (now === undefined || Number.isNaN(now)) return null;
+	return now === was ? null : now;
+}

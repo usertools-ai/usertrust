@@ -802,6 +802,24 @@ describe("spend chart: the headline is an exact sum", () => {
 		expect(html).toContain('<span class="ut-sp-lbl">Spend</span>');
 		expect(stripTags(textOf(html, "ut-sp-when"))).toBe(`Live · last spend ${"11-04 00:00:00Z"}`);
 	});
+	it("with only undated spend rows, or only older spend, never says no spend beside a headline that reads some", () => {
+		const a = chart({ rows: [spendRow(0, { ts: "not a date", costUt: 5000 })] });
+		expect(headline(a)).toBe(formatUsdTotal(5000));
+		expect(stripTags(textOf(a, "ut-sp-when"))).toBe("Live · last spend time unknown");
+		const b = chart({ rows: [], totalUt: 7000, truncated: true });
+		expect(headline(b)).toBe(formatUsdTotal(7000));
+		expect(stripTags(textOf(b, "ut-sp-when"))).toBe("Live · last spend time unknown");
+		expect(stripTags(textOf(chart({ rows: [] }), "ut-sp-when"))).toBe(
+			"Live · no spend recorded yet",
+		);
+	});
+	it("does not name the previous dated row when the newest spend row is undated", () => {
+		const rows = [
+			spendRow(0, { ts: new Date(T0).toISOString(), costUt: 1000 }),
+			spendRow(1, { ts: "not a date", costUt: 2000 }),
+		];
+		expect(stripTags(textOf(chart({ rows }), "ut-sp-when"))).toBe("Live · last spend time unknown");
+	});
 	it("names the bucket in the sub-line at each range", () => {
 		expect(stripTags(textOf(chart(), "ut-sp-sub"))).toMatch(
 			/^\+\$8\.40 in this range · peak \$\S+\/h$/,
