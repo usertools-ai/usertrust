@@ -3,15 +3,16 @@
 
 /**
  * What the record panel shows about one charge: each tier's tokens, rate and product, the sum beside the charged
- * cost, and the lines the Ledger window adds under the status. Rendered to static markup, so what is asserted is
- * what a reader sees.
+ * cost, and the lines and actions the Ledger window adds under the status. Rendered to static markup, so what is
+ * asserted is what a reader sees.
  */
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createElement, type ReactNode } from "react";
+import { createElement, isValidElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, describe, expect, it } from "vitest";
+import { EMPTY_FILTERS, type FilterState } from "../src/shared/filters.js";
 import { budgetOf } from "../src/shared/peek.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 
@@ -63,9 +64,16 @@ interface ListRowProps {
 }
 let AuditTable: Component<ListProps>;
 let AuditRow: Component<ListRowProps>;
+let PeekActions: Component<{
+	row: LedgerRow;
+	filters: FilterState;
+	onPin(pos: number): void;
+	onFilters(f: FilterState): void;
+}>;
 beforeAll(async () => {
 	ChargeTable = await load("windows/ledger/charge-table", "ChargeTable");
 	PeekExtra = await load("windows/ledger/peek-extra", "PeekExtra");
+	PeekActions = await load("windows/ledger/peek-extra", "PeekActions");
 	RowPanel = await load("row-panel", "RowPanel");
 	AuditTable = await load("audit-table", "AuditTable");
 	AuditRow = await load("audit-table", "AuditRow");
@@ -162,9 +170,11 @@ describe("the panel's arithmetic", () => {
 	it("a whole sum charged one higher is explained, carries the residue hook and is not a difference", () => {
 		const html = table(RESIDUE);
 		expect(html).toContain(
-			"Sum 3 UT. Recorded 4 UT: the cost was computed in floating point, came out a hair above 3, and costs round up.",
+			"Sum 3 UT. Recorded 4 UT: the cost was computed in floating point, came out a hair above 3, and charges round up.",
 		);
-		expect(html).not.toMatch(/Charged|the charge was|charges round up/);
+		// "charges round up" is the rule for any charge; nothing says this record was charged.
+		expect(html).not.toMatch(/Charged|the charge was/);
+		expect(html).not.toContain("costs round up");
 		expect(html).toContain(fig("panel-sum-exact", "3 UT"));
 		expect(html).toContain(fig("panel-sum", "4 UT"));
 		expect(html).toContain(fig("panel-residue", "1 UT"));
@@ -302,9 +312,10 @@ describe("the panel's arithmetic", () => {
 		// A whole sum recorded one higher: the cost was recorded, so nothing is said to have been charged.
 		const residue = table({ ...RESIDUE, status: "ambiguous", settled: false });
 		expect(residue).toContain(
-			"Sum 3 UT. Recorded 4 UT: the cost was computed in floating point, came out a hair above 3, and costs round up.",
+			"Sum 3 UT. Recorded 4 UT: the cost was computed in floating point, came out a hair above 3, and charges round up.",
 		);
-		expect(residue).not.toMatch(/Charged|the charge was|charges round up/);
+		expect(residue).not.toMatch(/Charged|the charge was/);
+		expect(residue).not.toContain("costs round up");
 	});
 
 	it("no status says Charged: the last row is the recorded cost for a settled call and for every other", () => {
@@ -968,6 +979,136 @@ describe("the dense list", () => {
 	});
 });
 
+describe("the record's actions", () => {
+	interface Pressed {
+		pins: number[];
+		filters: FilterState[];
+	}
+	interface Button {
+		text: string;
+		onClick(): void;
+	}
+	const textOf = (node: ReactNode): string =>
+		Array.isArray(node)
+			? node.map(textOf).join("")
+			: typeof node === "string" || typeof node === "number"
+				? String(node)
+				: "";
+	/** The buttons of a returned element, in order, with their text and click handler. */
+	const buttonsOf = (node: ReactNode): Button[] => {
+		if (Array.isArray(node)) return node.flatMap(buttonsOf);
+		if (!isValidElement(node)) return [];
+		const p = node.props as { children?: ReactNode; onClick?: () => void };
+		if (node.type === "button")
+			return [{ text: textOf(p.children), onClick: p.onClick ?? (() => {}) }];
+		return buttonsOf(p.children);
+	};
+	const props = (r: LedgerRow, filters: FilterState = EMPTY_FILTERS) => {
+		const pressed: Pressed = { pins: [], filters: [] };
+		return {
+			pressed,
+			props: {
+				row: r,
+				filters,
+				onPin: (pos: number) => pressed.pins.push(pos),
+				onFilters: (f: FilterState) => pressed.filters.push(f),
+			},
+		};
+	};
+	const markup = (r: LedgerRow): string =>
+		renderToStaticMarkup(createElement(PeekActions, props(r).props));
+	const press = (r: LedgerRow, text: string, filters: FilterState = EMPTY_FILTERS): Pressed => {
+		const { pressed, props: p } = props(r, filters);
+		const button = buttonsOf(PeekActions(p)).find((b) => b.text === text);
+		expect(button, text).toBeDefined();
+		button?.onClick();
+		return pressed;
+	};
+
+	it("a row of tier-3 buttons: show on the chart, only this lane, only this model", () => {
+		expect(markup(row())).toBe(
+			'<div class="ut-lg-actions">' +
+				'<button type="button" class="ut-t3">Show on chart</button>' +
+				'<button type="button" class="ut-t3" aria-pressed="false">Only a</button>' +
+				'<button type="button" class="ut-t3" aria-pressed="false">Only m</button>' +
+				"</div>",
+		);
+	});
+
+	it("an Only button is pressed when its value is the facet's only one; Show on chart is not a toggle", () => {
+		const pressed = (filters: FilterState): string[] => {
+			const html = renderToStaticMarkup(createElement(PeekActions, props(row(), filters).props));
+			return [...html.matchAll(/<button([^>]*)>([^<]*)</g)].map(
+				([, attrs, text]) => `${text}=${/aria-pressed="(\w+)"/.exec(attrs ?? "")?.[1] ?? "none"}`,
+			);
+		};
+		expect(pressed({ ...EMPTY_FILTERS, actors: ["a"] })).toEqual([
+			"Show on chart=none",
+			"Only a=true",
+			"Only m=false",
+		]);
+		expect(pressed({ ...EMPTY_FILTERS, models: ["m"] })).toEqual([
+			"Show on chart=none",
+			"Only a=false",
+			"Only m=true",
+		]);
+		expect(pressed({ ...EMPTY_FILTERS, actors: ["a", "b"], models: ["m", "x"] })).toEqual([
+			"Show on chart=none",
+			"Only a=false",
+			"Only m=false",
+		]);
+		expect(pressed(EMPTY_FILTERS)).toEqual(["Show on chart=none", "Only a=false", "Only m=false"]);
+	});
+
+	it("a record with no model, or an empty one, has no second Only button", () => {
+		const { model: _model, ...bare } = row();
+		for (const r of [bare, row({ model: "" }), row({ model: "  " })]) {
+			const html = markup(r);
+			expect(html).toContain(">Show on chart<");
+			expect(html).toContain(">Only a<");
+			expect(html.match(/>Only/g)).toHaveLength(1);
+		}
+	});
+
+	it("never a button with an empty name: an empty lane has no Only button", () => {
+		const html = markup(row({ actor: "" }));
+		expect(html).toContain(">Show on chart<");
+		expect(html).not.toMatch(/>Only a</);
+		expect(html.match(/>Only/g)).toHaveLength(1);
+		expect(html).toContain(">Only m<");
+		for (const blank of ["", " "]) {
+			const names = buttonsOf(PeekActions(props(row({ actor: blank, model: blank })).props)).map(
+				(b) => b.text,
+			);
+			expect(names, JSON.stringify(blank)).toEqual(["Show on chart"]);
+		}
+	});
+
+	it("Show on chart pins the record's position, and sets no filter", () => {
+		const pressed = press(row({ pos: 42 }), "Show on chart");
+		expect(pressed.pins).toEqual([42]);
+		expect(pressed.filters).toEqual([]);
+	});
+
+	it("Only <lane> keeps that lane alone, and a second press clears it", () => {
+		const others = { ...EMPTY_FILTERS, actors: ["b"], models: ["x"] };
+		const once = press(row(), "Only a", others);
+		expect(once.pins).toEqual([]);
+		expect(once.filters).toEqual([{ ...others, actors: ["a"] }]);
+		const again = press(row(), "Only a", { ...EMPTY_FILTERS, actors: ["a"] });
+		expect(again.filters).toEqual([EMPTY_FILTERS]);
+	});
+
+	it("Only <model> keeps that model alone, and leaves the lanes", () => {
+		const others = { ...EMPTY_FILTERS, actors: ["b"], models: ["x", "y"] };
+		const once = press(row(), "Only m", others);
+		expect(once.pins).toEqual([]);
+		expect(once.filters).toEqual([{ ...others, models: ["m"] }]);
+		const again = press(row(), "Only m", { ...EMPTY_FILTERS, models: ["m"] });
+		expect(again.filters).toEqual([EMPTY_FILTERS]);
+	});
+});
+
 describe("the Ledger window's sheet", () => {
 	const css = appFile("windows/ledger/ledger.css").replace(/\/\*[\s\S]*?\*\//g, "");
 	/** The declarations of the first rule with this selector. */
@@ -988,7 +1129,8 @@ describe("the Ledger window's sheet", () => {
 	});
 
 	it("every new class has a rule, the figures are right-aligned and tabular, and no colour is written out", () => {
-		const names = "lg-charge lg-sums lg-part lg-src lg-extra lg-unusual lg-share lg-peek chainnote";
+		const names =
+			"lg-charge lg-sums lg-part lg-src lg-extra lg-unusual lg-share lg-peek chainnote lg-actions";
 		for (const name of names.split(" ")) {
 			expect(css, name).toMatch(new RegExp(`\\.ut-${name}[^{}]*\\{`));
 		}
@@ -1122,5 +1264,12 @@ describe("the Ledger window's sheet", () => {
 		// On a phone the sort bar sticks over the rows: a row scrolled to by the keys stops below it.
 		const phone = css.slice(css.lastIndexOf("@media (max-width: 760px)"));
 		expect(phone).toMatch(/\.ut-lg-row\s*\{\s*scroll-margin-top: 52px;/);
+	});
+
+	it("the record's actions sit in one wrapping row", () => {
+		const actions = rule(".ut-lg-actions");
+		expect(actions).toContain("display: flex");
+		expect(actions).toContain("flex-wrap: wrap");
+		expect(actions).toMatch(/gap: \d+px/);
 	});
 });
