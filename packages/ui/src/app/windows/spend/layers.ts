@@ -19,7 +19,8 @@ export interface ChartCtx {
 	bucketMs: number;
 	win: SpendWindow;
 	rows: readonly LedgerRow[]; // the fully filtered rows the line is built from
-	rate: Float64Array; // TRUE spend rate per bucket, UT/h (length nB)
+	rate: Float64Array; // TRUE spend rate per bucket, UT/h (length nB); figures read it
+	drawn: Float64Array; // the SMOOTHED rate the line is drawn from and `y` is fit to (length nB); a mark on the line reads it
 	perHour: number; // 3_600_000 / bucketMs
 	idx: readonly number[]; // the bucket indices the drawn line passes through (lttb)
 	x(k: number): number; // bucket k's drawn centre

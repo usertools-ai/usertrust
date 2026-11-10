@@ -105,12 +105,17 @@ export function indexAtPos(s: SpendRecords, pos: number): number {
 
 /**
  * The first record at or after the chain's break: the line is dashed from there on. -1 when there is no break, no
- * record at or after it, or that record is before the window (the break is then off the drawn line).
+ * record at or after it, or the window holds no record. A break whose record is before the window leaves the whole
+ * window after the break, so it is the window's first record: the whole drawn line is dashed.
  */
 export function breakRecord(s: SpendRecords, breakPos: number | null, win: SpendWindow): number {
 	if (breakPos === null || !Number.isFinite(breakPos)) return -1;
 	const i = indexAtPos(s, breakPos - 1) + 1;
-	if (i >= s.n || (s.t[i] as number) < win.startMs) return -1;
+	if (i >= s.n) return -1;
+	if ((s.t[i] as number) < win.startMs) {
+		const w = inWindow(s, win);
+		return w.i1 < w.i0 ? -1 : w.i0;
+	}
 	return i;
 }
 

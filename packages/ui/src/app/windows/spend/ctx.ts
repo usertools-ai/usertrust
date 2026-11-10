@@ -89,6 +89,7 @@ export function buildCtx(a: {
 		win: a.win,
 		rows: a.rows,
 		rate: model.rates,
+		drawn: model.drawn,
 		perHour: 3_600_000 / model.bucketMs,
 		idx: series.idx,
 		x: geo.centerX,

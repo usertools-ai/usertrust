@@ -135,6 +135,8 @@ describe("buildCtx", () => {
 		// The TRUE rates, never the smoothed ones the path is drawn from.
 		expect(ctx.rate).toBe(model.rates);
 		expect(ctx.rate).not.toBe(model.drawn);
+		// The smoothed rates the line is drawn from, for a mark that sits on the line.
+		expect(ctx.drawn).toBe(model.drawn);
 		expect(ctx.nB).toBe(model.values.length);
 		expect(ctx.bucketMs).toBe(model.bucketMs);
 		expect(ctx.perHour).toBe(3_600_000 / model.bucketMs);

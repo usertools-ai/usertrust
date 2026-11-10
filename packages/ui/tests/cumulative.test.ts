@@ -272,10 +272,30 @@ describe("breakRecord", () => {
 		expect(breakRecord(s, 8, all)).toBe(-1);
 		expect(breakRecord(s, 1_000, all)).toBe(-1);
 	});
-	it("a break whose record is before the window is none", () => {
+	it("a break whose record is before the window is the window's first record: all of it is past the break", () => {
 		const later = { startMs: T0 + 5 * MIN, endMs: T0 + 60 * MIN };
-		expect(breakRecord(s, 2, later)).toBe(-1);
+		const first = inWindow(s, later).i0;
+		expect(first).toBeGreaterThan(breakRecord(s, 2, all));
+		expect(breakRecord(s, 2, later)).toBe(first);
 		expect(breakRecord(s, 6, later)).toBe(4);
+	});
+	it("with two records at the window's start time, a break at the second is the second, not the window's first", () => {
+		// Positions 4 and 5 share a time (the out-of-order row takes the running maximum).
+		const start = { startMs: T0 + 4 * MIN, endMs: T0 + 60 * MIN };
+		expect(s.t[2]).toBe(s.t[3]);
+		expect(inWindow(s, start).i0).toBe(2);
+		expect(breakRecord(s, 5, start)).toBe(3);
+		expect(breakRecord(s, 4, start)).toBe(2);
+	});
+	it("a break before a window that holds exactly one record is that record", () => {
+		const one = { startMs: s.t[4] as number, endMs: (s.t[4] as number) + 1 };
+		expect(inWindow(s, one)).toEqual({ i0: 4, i1: 4 });
+		expect(breakRecord(s, 2, one)).toBe(4);
+	});
+	it("a break before a window that holds no record is none", () => {
+		const empty = { startMs: T0 + 500 * MIN, endMs: T0 + 600 * MIN };
+		expect(inWindow(s, empty).i1).toBeLessThan(inWindow(s, empty).i0);
+		expect(breakRecord(s, 2, empty)).toBe(-1);
 	});
 	it("a break whose record is exactly at the window's start is that record", () => {
 		const i = breakRecord(s, 2, all);
