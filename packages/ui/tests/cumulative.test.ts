@@ -325,6 +325,8 @@ describe("breakRecord", () => {
 	it("no break, or no records, is none", () => {
 		expect(breakRecord(s, null, all)).toBe(-1);
 		expect(breakRecord(s, Number.NaN, all)).toBe(-1);
+		expect(breakRecord(s, Number.NEGATIVE_INFINITY, all)).toBe(-1);
+		expect(breakRecord(s, Number.POSITIVE_INFINITY, all)).toBe(-1);
 		expect(breakRecord(spendRecords([], null), 0, all)).toBe(-1);
 	});
 });

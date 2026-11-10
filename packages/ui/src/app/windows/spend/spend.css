@@ -38,4 +38,79 @@
 			height: 240px;
 		}
 	}
+
+	/* The chart frame's marks. Colour comes from here, so a theme change is one rule; the frame draws the shapes. */
+
+	/* From the chain's break on, the line is dashed: a pane-coloured copy hides the solid stroke between the dashes. */
+	.ut-sp-line.ut-sp-gap {
+		stroke: var(--dk-pane);
+		stroke-width: 3.5;
+		stroke-linejoin: round;
+	}
+
+	/* The dashed copy is its own element: the main line's paint is inline on that one, so it is stated here. */
+	.ut-sp-line.ut-sp-dashed {
+		stroke: var(--sp-ink);
+		stroke-width: 1.6;
+		stroke-linejoin: round;
+		stroke-linecap: butt;
+		stroke-dasharray: 4 4;
+	}
+
+	.ut-sp-break circle {
+		fill: var(--dk-pane);
+		stroke: var(--stakes);
+		stroke-width: 1.5;
+	}
+
+	.ut-sp-break text {
+		font: 500 10.5px var(--sans);
+		fill: var(--stakes);
+		stroke: var(--dk-pane);
+		stroke-width: 3px;
+		stroke-linejoin: round;
+		paint-order: stroke;
+	}
+
+	/* Under a filter: all spend as a faint line on the same scale, and the words that say so. */
+	.ut-sp-ghost {
+		fill: none;
+		stroke: var(--dk-legend);
+		stroke-opacity: 0.32;
+		stroke-width: 1.2;
+		stroke-dasharray: 2 3;
+		pointer-events: none;
+	}
+
+	.ut-sp-fcap {
+		font: 500 10.5px var(--sans);
+		fill: var(--dk-legend);
+		stroke: var(--dk-pane);
+		stroke-width: 3px;
+		stroke-linejoin: round;
+		paint-order: stroke;
+		pointer-events: none;
+	}
+
+	/* The record open in the panel: a gold ring on the line, nothing moved. */
+	.ut-sp-mark {
+		fill: none;
+		stroke: var(--dk-gold);
+		stroke-width: 2;
+		pointer-events: none;
+	}
+
+	/* The pinned record: a quiet gold dotted rule and a flat gold dot. */
+	.ut-sp-pin line {
+		stroke: color-mix(in srgb, var(--dk-gold) 45%, transparent);
+		stroke-width: 1.25;
+		stroke-dasharray: 1.5 6;
+		stroke-linecap: round;
+	}
+
+	.ut-sp-pin circle {
+		fill: var(--dk-gold);
+		stroke: var(--dk-pane);
+		stroke-width: 1.5;
+	}
 }

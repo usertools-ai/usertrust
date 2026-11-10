@@ -78,8 +78,10 @@ export interface ChartFixture {
 }
 
 /**
- * The chart's pieces for `rows` over `win` in a `w` by `h` plot, with no knee unless one is given. The bucket is the
- * week's own (the default window is a week) unless one is given.
+ * The chart's pieces for `rows` over `win` in a `w` by `h` plot, built as the chart builds them: the y scale fits the
+ * model's smoothed peak (`drawnPeak`) and the path draws the smoothed rates (`drawn`), while the context carries the
+ * true rates. No knee unless one is given; the bucket is the week's own (the default window is a week) unless one is
+ * given. `ticks` are the plain ticks of the scale's top, each labelled with its own value.
  */
 export function chartFixture(
 	o: {
@@ -97,8 +99,8 @@ export function chartFixture(
 	const h = o.h ?? 220;
 	const knee = o.knee ?? Number.POSITIVE_INFINITY;
 	const model = buildSpendModel(rows, win, o.bucket ?? LINE_BUCKETS["1w"], null);
-	const geo = geometry({ w, h, win, bucketMs: model.bucketMs, peakRate: model.peakRate, knee });
-	const series = drawSeries(geo, model.rates);
+	const geo = geometry({ w, h, win, bucketMs: model.bucketMs, peakRate: model.drawnPeak, knee });
+	const series = drawSeries(geo, model.drawn);
 	const ticks = niceTicks(geo.top).map((t) => ({ drawn: t, label: t }));
 	const ctx = buildCtx({
 		geo,
