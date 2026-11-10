@@ -11,7 +11,6 @@
 
 import { useMemo } from "react";
 import { isHeaderSpend } from "../../../shared/aggregate.js";
-import type { AtPayload } from "../../../shared/api.js";
 import type { SpendWindow } from "../../../shared/breakdown.js";
 import { chartWindow as windowFor } from "../../../shared/chart-window.js";
 import { applyFilters } from "../../../shared/filters.js";
@@ -56,12 +55,13 @@ export function firstRecordMs(rows: readonly LedgerRow[]): number | null {
 
 /**
  * The position the chart draws as pinned. The address's position can be past the vault's end (a link written when the
- * vault was longer, or a typed one): the pin stands for the head the answer knew of (whatever position that answer
- * is for), so records that arrive later are not counted into it. Until an answer has come, the address's own.
+ * vault was longer, or a typed one): the pin stands for the record the follower answered it with, which it keeps
+ * across reconnects, so records that arrive later (or a higher head after a reconnect) do not move it. Until the
+ * first answer, the address's own.
  */
-export function resolvedPin(addressPos: number | null, at: AtPayload | null): number | null {
+export function resolvedPin(addressPos: number | null, resolvedPos: number | null): number | null {
 	if (addressPos === null) return null;
-	return at !== null && addressPos > at.head ? at.head : addressPos;
+	return resolvedPos ?? addressPos;
 }
 
 /** The chart's window: the range ending at the end of the current minute, never at a pinned position. */

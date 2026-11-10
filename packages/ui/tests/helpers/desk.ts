@@ -30,6 +30,7 @@ export function defaultDeskData(over: Partial<DeskData> = {}): DeskData {
 		live: "live",
 		liveIds: new Set(),
 		at: null,
+		resolvedPos: null,
 		headAt: null,
 		head: -1,
 		held: false,

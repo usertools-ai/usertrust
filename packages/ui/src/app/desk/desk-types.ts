@@ -28,6 +28,11 @@ export interface DeskData {
 	liveIds: Set<string>;
 	/** The position shown in the header (the vault as recorded there), or null for live. */
 	at: AtPayload | null;
+	/**
+	 * The record the address's position was answered with (a position past the head is answered with the head), kept
+	 * across reconnects; null before the first answer for the current address, and live.
+	 */
+	resolvedPos: number | null;
 	/** What the header shows: a previewed position (none is asked for now), else the committed `at` (A6). */
 	headAt: AtPayload | null;
 	/** The last position of the vault, or -1 before a summary lands. */

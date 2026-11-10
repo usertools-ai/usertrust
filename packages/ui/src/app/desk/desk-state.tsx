@@ -21,7 +21,7 @@ import {
 	useState,
 } from "react";
 import { createCutter, pastRows } from "../../shared/asof.js";
-import { AT_TIMEOUT_MS, pointLoading } from "../../shared/at-follow.js";
+import { AT_TIMEOUT_MS, pointLoading, resolvedFor } from "../../shared/at-follow.js";
 import type { Dimension } from "../../shared/breakdown.js";
 import type { ColorMap } from "../../shared/colors.js";
 import {
@@ -343,6 +343,8 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 	if (!sameList(order, nextOrder)) setOrder(nextOrder);
 	const newest = nextOrder.length === 0 ? null : (nextOrder[nextOrder.length - 1] as string);
 
+	// The record the address was answered with, for the Spend chart's pin (kept across reconnects).
+	const resolvedPos = resolvedFor(atView, at);
 	const data = useMemo<DeskData>(
 		() => ({
 			rows,
@@ -352,6 +354,7 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 			liveIds,
 			at: shownAt,
 			headAt: header.at,
+			resolvedPos,
 			head,
 			held,
 			holdNote,
@@ -373,6 +376,7 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 			liveIds,
 			shownAt,
 			header.at,
+			resolvedPos,
 			head,
 			held,
 			holdNote,

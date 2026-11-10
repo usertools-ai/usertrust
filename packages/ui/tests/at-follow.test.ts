@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AtPayload } from "../src/shared/api.js";
 import { cutRows, pastRows, rowsAsAnswered } from "../src/shared/asof.js";
-import { AtFollower, type AtView, pointLoading } from "../src/shared/at-follow.js";
+import { AtFollower, type AtView, pointLoading, resolvedFor } from "../src/shared/at-follow.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 import { newSince } from "../src/shared/timeline-view.js";
 
@@ -621,6 +621,24 @@ describe("AtFollower", () => {
 			await h.flush();
 			expect(h.last()).toMatchObject({ wanted: 500, resolved: 99 });
 			expect(h.last().at).toMatchObject({ pos: 99, clamped: false });
+		});
+
+		it("resolvedFor reads the follower's record only for the address it answered, across a reconnect with a higher head", async () => {
+			const h = harness();
+			h.follower.want(20);
+			// Wanted, not yet answered.
+			expect(resolvedFor(h.last(), 20)).toBeNull();
+			h.calls[0]?.resolve(at({ pos: 12, head: 12, clamped: true }));
+			await h.flush();
+			expect(resolvedFor(h.last(), 20)).toBe(12);
+			h.follower.reconnected();
+			h.calls[1]?.resolve(at({ pos: 12, head: 30, clamped: false }));
+			await h.flush();
+			// The baseline is {pos 12, head 30}; the pin stays on 12, where an address-vs-head test would say 20.
+			expect(resolvedFor(h.last(), 20)).toBe(12);
+			// Another address's record is never read as this one's.
+			expect(resolvedFor(h.last(), 7)).toBeNull();
+			expect(resolvedFor(h.last(), null)).toBeNull();
 		});
 
 		it("a new position starts unresolved", async () => {

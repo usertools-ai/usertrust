@@ -92,6 +92,16 @@ export function pointLoading(view: AtView): boolean {
 	return view.wanted !== null && view.resolved === null && view.error === null;
 }
 
+/**
+ * The record the view's answer stands for, when the view is for `address` (the page address's position): the
+ * follower's own resolved record, so a clamped position stays on its record across a reconnect that raises the head.
+ * Null before the first answer, and while the view is still for another position (an earlier address's answer is
+ * never read as this one's).
+ */
+export function resolvedFor(view: AtView, address: number | null): number | null {
+	return address !== null && view.wanted === address ? view.resolved : null;
+}
+
 /** How long a request may go unanswered before it is given up. */
 export const AT_TIMEOUT_MS = 10_000;
 

@@ -47,7 +47,7 @@ let filterNoteOf: (order: readonly string[]) => string;
 let chartWindowOf: (range: RangeId, nowMs: number, firstMs: number | null) => RangeWindow;
 let firstRecordMs: (rows: readonly LedgerRow[]) => number | null;
 let minuteOf: (nowMs: number) => number;
-let resolvedPin: (addressPos: number | null, at: AtPayload | null) => number | null;
+let resolvedPin: (addressPos: number | null, resolvedPos: number | null) => number | null;
 
 beforeAll(async () => {
 	SpendWindow = await appExport("windows/spend/spend-window", "SpendWindow");
@@ -267,19 +267,17 @@ describe("the chart data's pure parts", () => {
 		expect(d.chartWindow.startMs).toBeLessThanOrEqual(NOW - 20 * HOUR);
 	});
 
-	it("resolves the pin: an address past the vault's end is the head the server answered", () => {
-		const at = (pos: number, head: number): AtPayload => ({ pos, head }) as AtPayload;
-		expect(resolvedPin(null, at(12, 12))).toBeNull();
-		expect(resolvedPin(20, at(12, 12))).toBe(12);
-		expect(resolvedPin(13, at(12, 12))).toBe(12);
-		expect(resolvedPin(12, at(12, 12))).toBe(12);
-		expect(resolvedPin(4, at(4, 12))).toBe(4);
-		// Another position's answer still on screen changes nothing for a position inside the vault...
-		expect(resolvedPin(4, at(3, 12))).toBe(4);
-		expect(resolvedPin(12, at(3, 12))).toBe(12);
-		// ...and a position past the end stands for the head that answer knew of, not for the answer's own position.
-		expect(resolvedPin(20, at(3, 12))).toBe(12);
+	it("resolves the pin: the follower's resolved record, else the address's own", () => {
+		expect(resolvedPin(null, 12)).toBeNull();
+		expect(resolvedPin(null, null)).toBeNull();
+		// An address past the vault's end is answered with the head: the pin stands there...
+		expect(resolvedPin(20, 12)).toBe(12);
+		// ...and a reconnect that raises the head does not move it (the resolved record is kept, not re-derived).
+		expect(resolvedPin(20, 12)).toBe(12);
+		expect(resolvedPin(4, 4)).toBe(4);
+		// Before the first answer, the address's own.
 		expect(resolvedPin(4, null)).toBe(4);
+		expect(resolvedPin(20, null)).toBe(20);
 	});
 
 	it("reads the same window through the hook at two moments of one minute", async () => {
@@ -303,6 +301,8 @@ interface WinCase {
 	range?: RangeId;
 	/** What the past view answered for the pin: its head is the vault's head when the position was chosen. */
 	at?: { head: number; pos?: number; spentUt?: number } | null;
+	/** The record the follower answered the pin with (kept across reconnects), or null before the first answer. */
+	resolved?: number | null;
 }
 
 /** The Spend window inside the desk, as static markup. */
@@ -322,6 +322,7 @@ function spend(o: WinCase = {}): Promise<string> {
 		}),
 		summary: o.summary === undefined ? null : o.summary,
 		...(o.at === undefined || o.at === null ? {} : { at: o.at as unknown as DeskData["at"] }),
+		resolvedPos: o.resolved ?? null,
 		filterOrder: o.order ?? [],
 		colorsFor: (dim) => rankColors(rows, dim),
 	};
@@ -538,10 +539,29 @@ describe("Spend: a pin that the address names past, or before, what the page hol
 			pin: 20,
 			filters: alpha,
 			at: { head: 9, pos: 9, spentUt: 55_000 },
+			resolved: 9,
 		});
 		const lane = rows.filter((r) => r.actor === "alpha");
 		expect(headline(html)).toBe(formatUsdTotal(cumTo(lane, 9)));
 		expect(cumTo(lane, 9)).not.toBe(cumTo(lane, 12));
+	});
+
+	it("keeps a clamped pin on its record after a reconnect raises the head, in the header's step", async () => {
+		const rows = thirteen();
+		const lane = rows.filter((r) => r.actor === "alpha");
+		// Address 20 was answered with record 4; the re-read after a reconnect holds {pos 4, head 30}.
+		const html = await spend({
+			rows,
+			pin: 20,
+			filters: alpha,
+			at: { head: 30, pos: 4, spentUt: 10_000 },
+			resolved: 4,
+		});
+		expect(headline(html)).toBe(formatUsdTotal(cumTo(lane, 4)));
+		expect(cumTo(lane, 4)).not.toBe(cumTo(lane, 12));
+		// Before any answer the address's own position is drawn.
+		const first = await spend({ rows, pin: 4, filters: alpha });
+		expect(headline(first)).toBe(formatUsdTotal(cumTo(lane, 4)));
 	});
 
 	it("reads an unfiltered pin's total from the snapshot, which counts what the rows held begin after", async () => {

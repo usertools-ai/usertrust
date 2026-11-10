@@ -27,7 +27,7 @@ function momentOf(ts: string): number | null {
 }
 
 const SpendBody = memo(function SpendBody(): React.JSX.Element {
-	const { rows, list, summary, at, head } = useDeskData();
+	const { rows, list, summary, at, head, resolvedPos } = useDeskData();
 	const { chartRows, allRows, chartWindow, filterNote } = useChartData();
 	const { range, setRange } = useRange();
 	const { at: addressPos, setAt: onPin } = usePosition();
@@ -50,8 +50,9 @@ const SpendBody = memo(function SpendBody(): React.JSX.Element {
 	}
 
 	const filtered = chartRows.length !== rows.length;
-	// The pin the chart draws is the answered position, which an address past the vault's end is clamped to.
-	const pinnedPos = resolvedPin(addressPos, at);
+	// The pin the chart draws is the record the follower answered the address with (an address past the vault's end
+	// is answered with the head), which stays put when a reconnect raises the head.
+	const pinnedPos = resolvedPin(addressPos, resolvedPos);
 	// Unfiltered, the pinned headline is the snapshot's own total: the rows held may begin after the pin (a cut vault).
 	const pinTotalUt =
 		!filtered && pinnedPos !== null && at !== null && at.pos === pinnedPos ? at.spentUt : null;
