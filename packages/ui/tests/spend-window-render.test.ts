@@ -639,6 +639,13 @@ describe("Spend: the stylesheet", () => {
 		expect(ruleOf(".ut-sp-time")).toContain("top: 100%");
 	});
 
+	it("lets the chart take its content's height on a phone, so the stamp's room stays inside the window", () => {
+		const phone = /@media \(max-width: 900px\)\s*\{([\s\S]*?\n\t\})/.exec(own);
+		expect(phone).not.toBeNull();
+		const rule = /\[data-win="spend"\] \.ut-sp-chart\s*\{([^}]*)\}/.exec(phone?.[1] ?? "");
+		expect(rule?.[1]).toContain("flex: 0 0 auto");
+	});
+
 	it("is read with the page's stylesheets", () => {
 		expect(css).toContain(own);
 	});
@@ -715,7 +722,7 @@ describe("Spend: the stylesheet", () => {
 		}
 	});
 
-	it("keeps the one narrow-column block as it was and adds no other width query", () => {
+	it("keeps the one narrow-column block, with the chart's own rule added, and no other width query", () => {
 		expect(own.match(/@media \(max-width/g)).toHaveLength(1);
 		expect(own).toContain(
 			[
@@ -731,6 +738,12 @@ describe("Spend: the stylesheet", () => {
 				'\t\t[data-win="spend"] .ut-chart-box {',
 				"\t\t\tflex: 0 0 auto;",
 				"\t\t\theight: 240px;",
+				"\t\t}",
+				"",
+				"\t\t/* The chart takes its content's height here too, so the room under the plot for the cursor's time stamp is",
+				"\t\t   inside the window and not hanging over the gap below it. */",
+				'\t\t[data-win="spend"] .ut-sp-chart {',
+				"\t\t\tflex: 0 0 auto;",
 				"\t\t}",
 				"\t}",
 			].join("\n"),

@@ -37,6 +37,12 @@
 			flex: 0 0 auto;
 			height: 240px;
 		}
+
+		/* The chart takes its content's height here too, so the room under the plot for the cursor's time stamp is
+		   inside the window and not hanging over the gap below it. */
+		[data-win="spend"] .ut-sp-chart {
+			flex: 0 0 auto;
+		}
 	}
 
 	/* The line's ink and its glow. A one-category filter tints both on the plot itself. */
