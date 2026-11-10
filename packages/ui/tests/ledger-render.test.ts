@@ -894,6 +894,11 @@ describe("the dense list", () => {
 		expect(mark).toContain("if (hash !== done) chunk = chunkReveal(chunk, index, count);");
 		expect(mark).toContain("mark(w.selected, props.selected, selectedIndex)");
 		expect(mark).toContain("mark(w.pinned, pinnedHash, pinnedIndex)");
+		// What was revealed is kept (or every later draw would reveal it again), from the first draw on.
+		expect(src).toContain("if (drawn !== held) setHeld(drawn);");
+		expect(src).toContain(
+			"settle({ chunk: chunkInit(key, count), selected: null, pinned: null }),",
+		);
 	});
 
 	it("grows by a chunk when the mark after the last row comes within 400px of the screen", () => {
