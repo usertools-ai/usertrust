@@ -36,4 +36,119 @@
 			flex: 0 0 auto;
 		}
 	}
+
+	/* The record panel floating over the window. It sits over the list, so its glass is near opaque (97%, an 18px
+	   blur) and no figure of the list shows through. The older rules for the panel's inside apply as they are. */
+	.ut-glass.ut-lg-peek {
+		position: absolute;
+		top: 8px;
+		right: 8px;
+		bottom: 8px;
+		z-index: 20;
+		width: min(400px, 86%);
+		overflow: auto;
+		border-radius: var(--dk-radius);
+		background: color-mix(in srgb, var(--dk-raised) 97%, transparent);
+		backdrop-filter: blur(18px);
+		-webkit-backdrop-filter: blur(18px);
+		animation: ut-lg-peek-in 0.22s cubic-bezier(0.16, 0.84, 0.3, 1) both;
+	}
+
+	/* Held (the header already shows another position): dimmed inside, as the docked panel is. */
+	.ut-lg-peek[data-held="true"] > .ut-insp-in {
+		opacity: 0.55;
+	}
+
+	@keyframes ut-lg-peek-in {
+		from {
+			transform: translateX(24px);
+			opacity: 0;
+		}
+	}
+
+	.ut-chainnote {
+		margin: 2px 0 6px;
+		color: var(--approve);
+		font: 500 12px var(--sans);
+	}
+
+	.ut-chainnote[data-ok="false"] {
+		color: var(--stakes);
+	}
+
+	/* The lines under the status, and the sentences under the charge's table. */
+	.ut-lg-extra p,
+	.ut-lg-charge p {
+		margin: 4px 0;
+		color: var(--dk-legend);
+		font: 400 12px/1.45 var(--sans);
+		overflow-wrap: anywhere;
+	}
+
+	.ut-lg-extra .ut-lg-unusual {
+		color: var(--dk-gold);
+		font-weight: 600;
+	}
+
+	.ut-lg-share .prov,
+	.ut-lg-charge .ut-lg-src {
+		color: var(--dk-label);
+	}
+
+	.ut-lg-sums {
+		width: 100%;
+		margin-top: 8px;
+		border-collapse: collapse;
+		color: var(--dk-legend);
+		font: 400 12px/1.4 var(--sans);
+	}
+
+	.ut-lg-sums caption {
+		color: var(--dk-text);
+		font-weight: 500;
+		text-align: left;
+	}
+
+	.ut-lg-sums th {
+		padding: 3px 4px 3px 0;
+		color: var(--dk-label);
+		font-weight: 400;
+		text-align: left;
+		vertical-align: top;
+	}
+
+	/* Every figure is right-aligned and tabular, and so is the heading over it. */
+	.ut-lg-sums td {
+		padding: 3px 0 3px 4px;
+		color: var(--dk-text);
+		font-family: var(--fig, var(--sans));
+		font-variant-numeric: tabular-nums;
+		text-align: right;
+		vertical-align: top;
+	}
+
+	.ut-lg-sums thead th + th {
+		text-align: right;
+	}
+
+	.ut-lg-sums small {
+		display: block;
+		color: var(--dk-label);
+		font-size: 11px;
+	}
+
+	/* The two parts of a cache write sit indented under their tier. */
+	.ut-lg-part th {
+		padding-left: 12px;
+	}
+
+	.ut-lg-sums tfoot tr:first-child > * {
+		border-top: 1px solid var(--dk-grid);
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.ut-glass.ut-lg-peek {
+			animation: none;
+		}
+	}
 }

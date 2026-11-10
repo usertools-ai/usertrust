@@ -6,10 +6,12 @@
 import { describe, expect, it } from "vitest";
 import {
 	bucketOf,
+	cursorResetKey,
 	drawnCursor,
 	escapeTarget,
 	frameKey,
 	keyAction,
+	keyMove,
 	movedTime,
 	reconcileCursor,
 	stepBucket,
@@ -19,6 +21,7 @@ import {
 	brokenFrom,
 	headLabel,
 	newText,
+	pinnedShown,
 	plotLabel,
 	recordNumber,
 	subLine,
@@ -294,15 +297,55 @@ describe("drawnCursor", () => {
 	});
 });
 
+describe("pinnedShown", () => {
+	const rec = { t: 1000, pos: 3, cumUt: 500 };
+	it("reads the dated record when the pin's total is that record's cumulative", () => {
+		expect(pinnedShown({ pos: 5, cumUt: 500, record: rec, beforeUt: 0 })).toEqual({
+			shown: { t: 1000, pos: 3, pinned: true },
+			noRecord: false,
+		});
+	});
+	it("reads the pinned position with no time when undated spend lies between", () => {
+		const r = pinnedShown({ pos: 5, cumUt: 700, record: rec, beforeUt: 0 });
+		expect(r.noRecord).toBe(false);
+		expect(r.shown?.pos).toBe(5);
+		expect(Number.isNaN(r.shown?.t)).toBe(true);
+	});
+	it("names no record only when nothing but the spend before the rows is behind it", () => {
+		expect(pinnedShown({ pos: 0, cumUt: 40, record: null, beforeUt: 40 })).toEqual({
+			shown: null,
+			noRecord: true,
+		});
+		expect(pinnedShown({ pos: 0, cumUt: 90, record: null, beforeUt: 40 }).noRecord).toBe(false);
+	});
+});
+
+describe("cursorResetKey", () => {
+	it("changes with the range even when two ranges share a bucket, and with the bucket and the filters", () => {
+		const six = LINE_BUCKETS["3m"].ms;
+		expect(LINE_BUCKETS.ytd.ms).toBe(six);
+		expect(LINE_BUCKETS["1y"].ms).toBe(six);
+		const keys = ["3m", "ytd", "1y"].map((r) => cursorResetKey(r, six, "{}"));
+		expect(new Set(keys).size).toBe(3);
+		expect(cursorResetKey("1w", 1, "{}")).not.toBe(cursorResetKey("1w", 2, "{}"));
+		expect(cursorResetKey("1w", 1, "{}")).not.toBe(cursorResetKey("1w", 1, '{"a":1}'));
+		expect(cursorResetKey("1w", 1, "{}")).toBe(cursorResetKey("1w", 1, "{}"));
+	});
+});
+
 describe("toggleTarget and escapeTarget", () => {
+	it("compares positions: a pin on an undated row is still the live record's spot", () => {
+		expect(toggleTarget(2, 40, 40)).toBe("live");
+		expect(toggleTarget(2, 40, 39)).toBe("pin");
+	});
 	it("pins the record under a live cursor, or goes live when it is the pinned one", () => {
-		expect(toggleTarget(3, -1, false)).toBe("pin");
+		expect(toggleTarget(3, 30, null)).toBe("pin");
 		// The first record in the window is pinnable, and a record equal to a stale pin index is not the pin.
-		expect(toggleTarget(0, -1, false)).toBe("pin");
-		expect(toggleTarget(5, 5, false)).toBe("pin");
-		expect(toggleTarget(3, 5, true)).toBe("pin");
-		expect(toggleTarget(5, 5, true)).toBe("live");
-		expect(toggleTarget(-1, 5, true)).toBe("none");
+		expect(toggleTarget(0, 0, null)).toBe("pin");
+		expect(toggleTarget(5, 50, null)).toBe("pin");
+		expect(toggleTarget(3, 30, 50)).toBe("pin");
+		expect(toggleTarget(5, 50, 50)).toBe("live");
+		expect(toggleTarget(-1, 0, 50)).toBe("none");
 	});
 	it("goes live when pinned, clears a key cursor, and leaves Escape to the page otherwise", () => {
 		expect(escapeTarget(true, null)).toBe("live");
@@ -333,6 +376,8 @@ describe("reconcileCursor", () => {
 		total: 5,
 		rows: 5,
 		lastUndated: false,
+		spendPos: Int32Array.from(rows.map((r) => r.pos)),
+		spendCum: Float64Array.from([1, 2, 3, 4, 5]),
 	};
 	const bucketAt = (start: number) => (t: number) => Math.floor((t - start) / 3_600_000);
 	const live = (i: number, k: number): CursorValue => ({ k, via: "pointer", i });
@@ -383,6 +428,110 @@ describe("reconcileCursor", () => {
 	});
 });
 
+describe("reconcileCursor: a key cursor resting on a bucket with no record", () => {
+	// Records ten minutes apart, five-minute buckets: record i sits in bucket 2i, so bucket 3 holds none.
+	const M5 = 300_000;
+	const rows = [0, 1, 2, 3, 4].map((i) => ({ t: T + i * 600_000, pos: 10 + i }));
+	const records = {
+		n: rows.length,
+		pos: Int32Array.from(rows.map((r) => r.pos)),
+		t: Float64Array.from(rows.map((r) => r.t)),
+		cum: Float64Array.from([1, 2, 3, 4, 5]),
+		hash: rows.map((r) => `h${r.pos}`),
+		before: 0,
+		total: 5,
+		rows: 5,
+		lastUndated: false,
+		spendPos: Int32Array.from(rows.map((r) => r.pos)),
+		spendCum: Float64Array.from([1, 2, 3, 4, 5]),
+	};
+	const onLine = (start: number, recordIn: (k: number) => number, prevStartMs = T + 3 * M5) => ({
+		records,
+		span: { i0: 0, i1: 4 },
+		bucketOf: (t: number) => Math.max(0, Math.floor((t - start) / M5)),
+		key: { prevStartMs, startMs: start, bucketMs: M5, recordIn },
+	});
+	const key = (k: number, i: number): CursorValue => ({ k, via: "key", i });
+	it("keeps the bucket the key chose while it still resolves to the same record", () => {
+		// Bucket 3 resolved to record 1 (position 11); the record's own bucket is 2.
+		expect(
+			reconcileCursor(
+				key(3, 1),
+				11,
+				onLine(T, () => 1),
+			),
+		).toEqual({ k: 3, via: "key", i: 1 });
+	});
+	it("finds that bucket again by its start time when the window moves one bucket on", () => {
+		expect(
+			reconcileCursor(
+				key(3, 1),
+				11,
+				onLine(T + M5, () => 1),
+			),
+		).toEqual({
+			k: 2,
+			via: "key",
+			i: 1,
+		});
+	});
+	it("falls back to the record's own bucket when the bucket now resolves to another record", () => {
+		// A record arrived in that bucket: stepping there would now read it, so the old cursor goes to its own.
+		expect(
+			reconcileCursor(
+				key(3, 1),
+				11,
+				onLine(T, () => 2),
+			),
+		).toEqual({ k: 2, via: "key", i: 1 });
+	});
+	it("falls back when the bucket's start time is no longer on the line", () => {
+		const earlier = T + 3 * M5 - 10 * M5;
+		expect(
+			reconcileCursor(
+				key(3, 1),
+				11,
+				onLine(T, () => 1, earlier),
+			),
+		).toEqual({
+			k: 2,
+			via: "key",
+			i: 1,
+		});
+		expect(
+			reconcileCursor(
+				key(3, 1),
+				11,
+				onLine(T, () => 1, Number.NaN),
+			)?.k,
+		).toBe(2);
+	});
+	it("falls back when the bucket's start time is past the line's last bucket", () => {
+		const line = onLine(T, () => 1, T + 20 * M5);
+		const clamped = { ...line, bucketOf: (t: number) => Math.min(5, line.bucketOf(t)) };
+		expect(reconcileCursor(key(3, 1), 11, clamped)).toEqual({ k: 2, via: "key", i: 1 });
+	});
+	it("never carries a pointer cursor's bucket", () => {
+		const pointer: CursorValue = { k: 3, via: "pointer", i: 1 };
+		expect(
+			reconcileCursor(
+				pointer,
+				11,
+				onLine(T, () => 1),
+			)?.k,
+		).toBe(2);
+	});
+	it("still drops the cursor when its record is gone", () => {
+		expect(
+			reconcileCursor(
+				key(3, 1),
+				99,
+				onLine(T, () => 1),
+			),
+		).toBeNull();
+	});
+});
+
 describe("whenLine at rest with spend the time cannot name", () => {
 	it("says the time is unknown when spend exists but no dated row names it", () => {
 		expect(whenLine({ shown: null, pinnedNoRecord: false, lastT: null, spent: true })).toBe(
@@ -408,5 +557,74 @@ describe("movedTime", () => {
 	it("is null with no readable new time", () => {
 		expect(movedTime(100, undefined)).toBeNull();
 		expect(movedTime(100, Number.NaN)).toBeNull();
+	});
+});
+
+describe("keyMove", () => {
+	const span = { i0: 2, i1: 9 };
+	const st = (o: Partial<Parameters<typeof keyMove>[1]> = {}): Parameters<typeof keyMove>[1] => ({
+		liveI: -1,
+		liveK: null,
+		pinI: -1,
+		span,
+		buckets: 24,
+		...o,
+	});
+	it("moves nothing in an empty span", () => {
+		const empty = { i0: 0, i1: -1 };
+		for (const act of [
+			{ type: "bucket", by: 1 },
+			{ type: "record", by: 1 },
+			{ type: "home" },
+			{ type: "end" },
+		] as const) {
+			expect(keyMove(act, st({ span: empty }))).toBeNull();
+		}
+	});
+	it("shows the cursor first on the newest record with no pin", () => {
+		expect(keyMove({ type: "bucket", by: 1 }, st())).toEqual({ to: "record", i: 9 });
+		expect(keyMove({ type: "record", by: -1 }, st())).toEqual({ to: "record", i: 9 });
+	});
+	it("shows the cursor first on the pin when it is inside the span", () => {
+		expect(keyMove({ type: "bucket", by: 1 }, st({ pinI: 4 }))).toEqual({ to: "record", i: 4 });
+		expect(keyMove({ type: "bucket", by: 1 }, st({ pinI: 2 }))).toEqual({ to: "record", i: 2 });
+		expect(keyMove({ type: "bucket", by: 1 }, st({ pinI: 9 }))).toEqual({ to: "record", i: 9 });
+		expect(keyMove({ type: "bucket", by: 1 }, st({ pinI: 1 }))).toEqual({ to: "record", i: 9 });
+		expect(keyMove({ type: "bucket", by: 1 }, st({ pinI: 10 }))).toEqual({ to: "record", i: 9 });
+	});
+	it("steps the bucket from a live cursor, clamped", () => {
+		expect(keyMove({ type: "bucket", by: 1 }, st({ liveI: 5, liveK: 7 }))).toEqual({
+			to: "bucket",
+			k: 8,
+		});
+		expect(keyMove({ type: "bucket", by: -10 }, st({ liveI: 5, liveK: 3 }))).toEqual({
+			to: "bucket",
+			k: 0,
+		});
+		expect(keyMove({ type: "bucket", by: 10 }, st({ liveI: 5, liveK: 20 }))).toEqual({
+			to: "bucket",
+			k: 23,
+		});
+	});
+	it("reads a live cursor with no bucket as no live cursor", () => {
+		expect(keyMove({ type: "bucket", by: 1 }, st({ liveI: 5, liveK: null }))).toEqual({
+			to: "record",
+			i: 5,
+		});
+	});
+	it("steps the record from a live cursor, up forward, clamped to the span", () => {
+		expect(keyMove({ type: "record", by: 1 }, st({ liveI: 5 }))).toEqual({ to: "record", i: 6 });
+		expect(keyMove({ type: "record", by: -1 }, st({ liveI: 5 }))).toEqual({ to: "record", i: 4 });
+		expect(keyMove({ type: "record", by: 100 }, st({ liveI: 5 }))).toEqual({ to: "record", i: 9 });
+		expect(keyMove({ type: "record", by: -100 }, st({ liveI: 5 }))).toEqual({ to: "record", i: 2 });
+	});
+	it("sends Home to the first bucket and End to the last", () => {
+		expect(keyMove({ type: "home" }, st({ liveI: 5, liveK: 7 }))).toEqual({ to: "bucket", k: 0 });
+		expect(keyMove({ type: "end" }, st({ liveI: 5, liveK: 7 }))).toEqual({ to: "bucket", k: 23 });
+		expect(keyMove({ type: "end" }, st({ buckets: 1 }))).toEqual({ to: "bucket", k: 0 });
+	});
+	it("leaves a pin or escape to the caller", () => {
+		expect(keyMove({ type: "toggle" }, st({ liveI: 5, liveK: 7 }))).toBeNull();
+		expect(keyMove({ type: "escape" }, st({ liveI: 5, liveK: 7 }))).toBeNull();
 	});
 });

@@ -6,9 +6,10 @@ import { costView, transferView, usageView } from "../shared/display.js";
 import { formatUtc, UT_KEY } from "../shared/format.js";
 import { popoverOwnsEscape } from "../shared/row-nav.js";
 import { JOB_TYPE_CAVEAT, type LedgerRow, statusOf } from "../shared/rows.js";
-import { statusWord } from "../shared/status-word.js";
+import { statusWord, UNRESOLVED_TIP } from "../shared/status-word.js";
 import { type Held, heldFor, type VerifyOutcome, verifyOutcome } from "../shared/verify-view.js";
 import { STATUS_TONE } from "./audit-table.js";
+import { ChargeTable } from "./windows/ledger/charge-table.js";
 
 /** The badge tone as a pill tone: the pill colours only the loud states. */
 function pillTone(tone: string | undefined): string | undefined {
@@ -160,8 +161,20 @@ export function RowPanel(props: {
 	 * view labels it as running today; its verdict text is unchanged.
 	 */
 	past: boolean;
+	/**
+	 * The panel floats over the Ledger window, in the controls' glass and with no scrim. It behaves as the docked one
+	 * (a region, no focus trap) and adds a line saying where the record stands on the chain.
+	 */
+	inWindow?: boolean;
+	/** Lines and controls the window puts under the status: `extra` first, then `actions`. */
+	extra?: React.ReactNode;
+	actions?: React.ReactNode;
+	/** Up (`-1`) and Down (`1`) step through the records while focus is in the Ledger window, outside its list. */
+	onStep?(dir: -1 | 1): void;
 }): React.JSX.Element {
-	const { row, docked, onClose, focusNonce, onFocusHandled, past } = props;
+	const { row, onClose, focusNonce, onFocusHandled, past, onStep } = props;
+	const inWindow = props.inWindow === true;
+	const docked = props.docked || inWindow;
 	const held = props.held === true;
 	// A verify response is held for the row VERSION it was requested for (the row object: a status correction replaces
 	// it) and shown only while the row is still that version. Clearing the panel when the status changed ran BEFORE an
@@ -194,6 +207,21 @@ export function RowPanel(props: {
 
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent): void => {
+			if ((e.key === "ArrowUp" || e.key === "ArrowDown") && onStep !== undefined) {
+				// Leave the browser's and the system's chords alone (Cmd+Up, Alt+Down), and a selection's Shift+arrow.
+				if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+				// Only from inside the Ledger window: an arrow anywhere else keeps its own meaning. The list, a field and a
+				// menu keep theirs too (the list's arrows move its active row and open nothing).
+				const target = e.target instanceof Element ? e.target : null;
+				if (target === null || target.closest('[data-win="ledger"]') === null) return;
+				if (target.closest("input, textarea, select, [role='listbox'], [role='menu']") !== null) {
+					return;
+				}
+				e.preventDefault();
+				e.stopPropagation();
+				onStep(e.key === "ArrowUp" ? -1 : 1);
+				return;
+			}
 			if (e.key === "Escape") {
 				// An open popover (a filter's choices, an explainer) owns this Escape: it closes, the inspector stays.
 				if (popoverOwnsEscape(document)) return;
@@ -231,7 +259,7 @@ export function RowPanel(props: {
 		// Capture: this sees Escape before a popover's own listener closes it, whichever of them was registered first.
 		document.addEventListener("keydown", onKey, true);
 		return () => document.removeEventListener("keydown", onKey, true);
-	}, [onClose, docked]);
+	}, [onClose, docked, onStep]);
 
 	const runVerify = async (): Promise<void> => {
 		const forRow = row;
@@ -296,7 +324,11 @@ export function RowPanel(props: {
 						updating…
 					</span>
 				) : (
-					<span className="ut-pill" data-tone={pillTone(STATUS_TONE[status])}>
+					<span
+						className="ut-pill"
+						data-tone={pillTone(STATUS_TONE[status])}
+						title={status === "ambiguous" ? UNRESOLVED_TIP : undefined}
+					>
 						<i />
 						{statusWord(status)}
 					</span>
@@ -317,6 +349,16 @@ export function RowPanel(props: {
 					</span>
 				)}
 			</div>
+			{inWindow && (
+				// From the record's own chain verdict at its position (the server's), never asserted here.
+				<p className="ut-chainnote" data-ok={row.integrity === "verified"}>
+					{row.integrity === "verified"
+						? "Tamper-evident chain intact through this record"
+						: "This record comes after a break in the chain"}
+				</p>
+			)}
+			{props.extra}
+			{props.actions}
 			<section className="ut-sec">
 				<div className="ut-lbl">Call</div>
 				<dl className="ut-dl">
@@ -394,6 +436,7 @@ export function RowPanel(props: {
 								{usage.text}
 							</span>
 						</div>
+						<ChargeTable row={row} />
 					</>
 				)}
 			</section>
@@ -444,7 +487,7 @@ export function RowPanel(props: {
 		return (
 			<aside
 				ref={panelRef}
-				className="ut-insp"
+				className={inWindow ? "ut-lg-peek ut-glass" : "ut-insp"}
 				aria-label={`transaction ${row.kind} seq ${row.seq ?? "?"}`}
 				data-held={held}
 				aria-busy={held}
