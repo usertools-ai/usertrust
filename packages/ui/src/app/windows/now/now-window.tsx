@@ -54,16 +54,17 @@ function NowSmall(): React.JSX.Element {
 	const last = useMemo(() => lastRecord(chartRows), [chartRows]);
 	// A whole-vault budget against a whole-vault pace: every row, whatever is filtered. Live only: a projection is
 	// of the vault now, not of a past position.
+	// On a cut vault the rows are only the newest: the pace is stated only when they reach back over the week.
+	const cut = summary?.truncated === true;
 	const projection = useMemo(
-		() => (at === null ? projectionOf(summary, rows, endMs, filtering) : null),
-		[at, summary, rows, endMs, filtering],
+		() => (at === null ? projectionOf(summary, rows, endMs, filtering, cut) : null),
+		[at, summary, rows, endMs, filtering, cut],
 	);
 	// Under a filter Spend is the sum of the records the Ledger lists (`list.filtered`). At a position those are
 	// the list's own cut: the rows up to it, each with the status it had there, so a call whose status has changed
 	// since counts as the Ledger shows it. The label is the list's too: its position, and, when the list does not
 	// hold every record of the vault, that the sum is of the rows held. While the list waits for a point's own
 	// records it holds none: the vault's figure at the position stays, under its own label.
-	const cut = summary?.truncated === true;
 	const spentOverride = useMemo(() => {
 		if (!filtering || list.reloading) return null;
 		const label =

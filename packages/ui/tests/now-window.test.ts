@@ -605,6 +605,29 @@ describe("the Now window, filled", () => {
 	});
 });
 
+describe("the Now window on a cut vault", () => {
+	const cut = { ...dayOneSummary(), truncated: true };
+
+	it("states no projection from rows that do not reach back over the week", async () => {
+		// ROWS start 10 hours into the week: the pace of the week would be read from a part of it.
+		for (const over of [{}, { filters: only("actors", "y") }]) {
+			const html = await renderNow({ rows: ROWS, summary: cut, ...over });
+			expect(projLine(html)).toBe(HELD_PROJ);
+			expect(text(html)).not.toContain("Projection");
+			expect(text(html)).toContain("Rate now");
+			expect(lastLine(html)).not.toBe(HELD_LAST);
+		}
+		expect(text(projLine(await renderNow({ rows: ROWS })))).toContain("Projection");
+	});
+
+	it("states it from rows that reach back over the week", async () => {
+		const reaching = [spend("x", -1, 1_000), ...ROWS];
+		const html = await renderNow({ rows: reaching, summary: cut });
+		expect(text(projLine(html))).toContain("Projection");
+		expect(text(projLine(html))).toContain(NOW_COPY.projectionPaceWeek);
+	});
+});
+
 describe("the Now window's body keeps one component through a fill", () => {
 	const SRC = readFileSync(
 		join(import.meta.dirname, "..", "src", "app", "windows", "now", "now-window.tsx"),

@@ -30,7 +30,7 @@ interface Pace {
 	ageDays: number;
 }
 
-function weekPace(rows: readonly LedgerRow[], endMs: number): Pace {
+function weekPace(rows: readonly LedgerRow[], endMs: number, wholeWeek = false): Pace {
 	const week = bucketTotals(rows, { startMs: endMs - WEEK_MS, endMs }, WEEK_MS);
 	let firstMs = Number.POSITIVE_INFINITY;
 	for (const row of rows) {
@@ -41,7 +41,27 @@ function weekPace(rows: readonly LedgerRow[], endMs: number): Pace {
 		if (t < endMs && t < firstMs) firstMs = t;
 	}
 	const ageDays = Number.isFinite(firstMs) ? (endMs - firstMs) / DAY_MS : Number.POSITIVE_INFINITY;
-	return { utPerDay: (week[0] as number) / Math.min(7, Math.max(1, ageDays)), ageDays };
+	// Rows that reach back over the week say the vault is at least a week old, whatever its oldest held spend says.
+	const days = wholeWeek ? 7 : Math.min(7, Math.max(1, ageDays));
+	return {
+		utPerDay: (week[0] as number) / days,
+		ageDays: wholeWeek ? Math.max(7, ageDays) : ageDays,
+	};
+}
+
+/**
+ * Whether `rows` reach back over the whole week before `endMs`: the oldest record held, of any kind, is at or before
+ * its start. A list that holds only the newest of a vault's records (a cut one) can say nothing of a week it does not
+ * reach; one that does reach it has the week's spend whole, and the vault is at least a week old. With no record
+ * held, or none with a readable time, it does not.
+ */
+export function coversWeek(rows: readonly LedgerRow[], endMs: number): boolean {
+	let firstMs = Number.POSITIVE_INFINITY;
+	for (const row of rows) {
+		const t = Date.parse(row.ts);
+		if (t < firstMs) firstMs = t;
+	}
+	return firstMs <= endMs - WEEK_MS;
 }
 
 export interface MonthBurn {
@@ -100,16 +120,22 @@ export function monthBurn(
  *
  * `filtered`: the figures beside the sentence are a filter's. The projection is not, and its opening then says it
  * is the whole vault's.
+ *
+ * `cut`: `rows` are only the newest of the vault's records. They give the week's pace only when they reach back over
+ * the whole week (the vault is then at least a week old, whatever its oldest held spend says); when they do not, no
+ * pace can be stated of the vault and there is no projection.
  */
 export function projectionOf(
 	summary: SummaryPayload | null,
 	rows: readonly LedgerRow[],
 	endMs: number,
 	filtered = false,
+	cut = false,
 ): { text: string; title: string } | null {
 	if (summary === null || budgetDisplay(summary).kind === "unknown") return null;
+	if (cut && !coversWeek(rows, endMs)) return null;
 	const left = summary.remainingUt as number;
-	const { utPerDay: paceUtPerDay, ageDays } = weekPace(rows, endMs);
+	const { utPerDay: paceUtPerDay, ageDays } = weekPace(rows, endMs, cut);
 	const young = ageDays < 7;
 	// The pace is named by the day: by the hour a small one would print as nothing.
 	const perDay = `${formatUsdTotal(paceUtPerDay)}/day`;
