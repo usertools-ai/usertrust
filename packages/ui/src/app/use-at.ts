@@ -29,7 +29,7 @@ async function loadAt(pos: number, signal: AbortSignal): Promise<AtPayload> {
 
 /**
  * The vault as recorded at `pos` (the address's; null: live), from `/api/at`, one request at a time with the latest
- * position winning (`AtFollower`). A hover on the chart previews a position through a second
+ * position winning (`AtFollower`). A preview of another position (none is asked for now) goes through a second
  * `useAt` of its own (`DeskProvider`), never this one. Each new summary (every append, status change and reload sends one) re-reads the position: a later record
  * can change the status a row had there, and a reload can change what the position names. When the live stream comes
  * back after dropping, the server may have restarted and restarted its epochs, so the follower forgets the epoch and

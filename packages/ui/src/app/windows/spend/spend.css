@@ -1,12 +1,12 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* Copyright 2026 Usertools, Inc. */
 
-/* The Spend window's rules (prefix ut-sp-). Scoped overrides of the older classes use [data-win="spend"]. */
+/* The Spend window's rules (prefix ut-sp-). Scoped overrides of the older classes use [data-win="spend"].
+   Gold is for four marks only: the live dot, the pin, the Now button and the open record's ring. */
 
 @layer components {
-	/* Day one the window holds Trends' chart card. On a wide desk Trends, the card and the chart's box take the body's
-	   height, so the chart grows when the window fills and nothing in them scrolls or clips. Without these the card was
-	   its 30px header, and the chart was clipped in a 62px scroller at every size. */
+	/* The earlier body's rules: the window held the older chart card, and these gave it the body's height. Nothing in
+	   the window draws those classes now; the rules stay until the desk's stylesheet checks stop pinning them. */
 	[data-win="spend"] .ut-trends {
 		flex: 1 1 0;
 	}
@@ -37,6 +37,263 @@
 			flex: 0 0 auto;
 			height: 240px;
 		}
+
+		/* The chart takes its content's height here too, so the room under the plot for the cursor's time stamp is
+		   inside the window and not hanging over the gap below it. */
+		[data-win="spend"] .ut-sp-chart {
+			flex: 0 0 auto;
+		}
+	}
+
+	/* The line's ink and its glow. A one-category filter tints both on the plot itself. */
+	[data-win="spend"] {
+		--sp-ink: #F7FAFF;
+		--sp-glow: #A9C8F2;
+	}
+
+	/* The settled value the headline writes for assistive tech: out of the layout, so the figure is drawn once. */
+	[data-win="spend"] .sr-only {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		margin: -1px;
+		padding: 0;
+		overflow: hidden;
+		clip-path: inset(50%);
+		white-space: nowrap;
+		border: 0;
+	}
+
+	/* The chart fills the window's body: the headline row, then the plot taking what is left. The bottom padding holds
+	   the cursor's time stamp, which hangs below the plot (17px), so the body never clips it or scrolls. */
+	.ut-sp-chart {
+		display: flex;
+		flex-direction: column;
+		flex: 1 1 0;
+		min-height: 0;
+		gap: 8px;
+		padding: 10px 14px 20px;
+		background: var(--dk-pane);
+		color: var(--dk-text);
+	}
+
+	/* The headline row: the figure block, the sub-lines, then the Now button and the range capsule at the right. */
+	.ut-sp-head {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 8px 14px;
+		min-width: 0;
+		flex: 0 0 auto;
+	}
+
+	.ut-sp-hl {
+		display: flex;
+		flex-direction: column;
+		justify-content: center;
+		flex: 0 0 auto;
+		min-width: 13ch;
+	}
+
+	.ut-sp-lbl {
+		font: 600 10.5px/1.2 var(--sans);
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+		color: var(--dk-label);
+	}
+
+	.ut-sp-fig {
+		font-family: var(--mono);
+		font-size: 24px;
+		font-weight: 600;
+		line-height: 1.1;
+		font-variant-numeric: tabular-nums;
+		letter-spacing: -0.02em;
+		text-align: right;
+		color: var(--dk-text);
+	}
+
+	.ut-sp-subs {
+		display: flex;
+		flex-direction: column;
+		justify-content: center;
+		gap: 2px;
+		flex: 0 1 auto;
+		min-width: 0;
+	}
+
+	.ut-sp-sub {
+		font: 500 12px/1.3 var(--mono);
+		font-variant-numeric: tabular-nums;
+		color: var(--dk-legend);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	/* A layer's words, after the sub-line. */
+	.ut-sp-note {
+		margin-left: 6px;
+		color: var(--dk-legend);
+	}
+
+	.ut-sp-when {
+		font: 400 11.5px/1.3 var(--mono);
+		font-variant-numeric: tabular-nums;
+		color: var(--dk-label);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.ut-sp-when[data-past="true"] {
+		color: var(--dk-legend);
+	}
+
+	.ut-sp-broke {
+		color: var(--stakes);
+	}
+
+	.ut-sp-grow {
+		flex: 1 1 auto;
+	}
+
+	/* Back to now: the primary control while pinned, so it is the one gold control. */
+	.ut-sp-now {
+		height: 32px;
+		padding: 0 12px;
+		border: 1px solid;
+		border-color: var(--dk-gold);
+		border-radius: 999px;
+		background: transparent;
+		color: var(--dk-gold);
+		font: 600 12px/1 var(--sans);
+		cursor: pointer;
+	}
+
+	.ut-sp-new {
+		color: var(--dk-legend);
+		font-family: var(--mono);
+		font-variant-numeric: tabular-nums;
+	}
+
+	/* The range capsule. The chosen range is brighter, never gold: gold is for the primary control. */
+	.ut-sp-chips {
+		display: inline-flex;
+		gap: 2px;
+		padding: 2px;
+		border-radius: 999px;
+	}
+
+	.ut-sp-chips button {
+		height: 32px;
+		min-width: 38px;
+		padding: 0 10px;
+		border: 0;
+		border-radius: 999px;
+		background: transparent;
+		color: var(--dk-label);
+		font: 600 12px/1 var(--mono);
+		font-variant-numeric: tabular-nums;
+		cursor: pointer;
+	}
+
+	.ut-sp-chips button:hover {
+		color: var(--dk-legend);
+	}
+
+	.ut-sp-chips button[aria-pressed="true"] {
+		color: var(--dk-text);
+		background: var(--dk-hover);
+		box-shadow: inset 0 0 0 1px var(--dk-base);
+	}
+
+	.ut-sp-chips button:focus-visible,
+	.ut-sp-now:focus-visible {
+		outline: 2px solid var(--dk-text);
+		outline-offset: -2px;
+	}
+
+	/* The plot takes the body's height: no fixed pixel height, only a floor below which the line is unreadable. */
+	.ut-sp-plot {
+		position: relative;
+		flex: 1 1 0;
+		min-height: 120px;
+		cursor: crosshair;
+		touch-action: pan-y;
+		border-radius: 8px;
+	}
+
+	.ut-sp-plot[data-pinned="true"] {
+		cursor: pointer;
+	}
+
+	.ut-sp-plot[aria-disabled="true"] {
+		cursor: default;
+	}
+
+	/* Focus drawn inside the plot, so it never overlaps what sits around it. */
+	.ut-sp-plot:focus-visible {
+		outline: 2px solid var(--dk-text);
+		outline-offset: -2px;
+	}
+
+	/* The drawing sits over the plot's box, so its size never feeds back into the box it was measured from. It is
+	   remounted when the filters change, and that is the one fade a change of data gets. */
+	.ut-sp-frame {
+		position: absolute;
+		inset: 0;
+		animation: ut-sp-fade 0.22s cubic-bezier(.16, .84, .3, 1) both;
+	}
+
+	@keyframes ut-sp-fade {
+		from {
+			opacity: 0;
+		}
+	}
+
+	.ut-sp-svg {
+		display: block;
+		overflow: visible;
+	}
+
+	.ut-sp-svg path {
+		shape-rendering: geometricPrecision;
+	}
+
+	.ut-sp-grid {
+		stroke-width: 1;
+		shape-rendering: crispEdges;
+	}
+
+	.ut-sp-tick {
+		font: 400 10px var(--mono);
+		font-variant-numeric: tabular-nums;
+	}
+
+	.ut-sp-area {
+		stroke: none;
+	}
+
+	/* The line: a soft glow, a pane-coloured knock-out, then the line itself (the numbers are the line's recipe). */
+	.ut-sp-glow {
+		fill: none;
+		stroke-width: 3;
+		opacity: 0.38;
+	}
+
+	.ut-sp-knock {
+		fill: none;
+		stroke-width: 3.6;
+		opacity: 0.75;
+	}
+
+	.ut-sp-line {
+		fill: none;
+		stroke: var(--sp-ink);
+		stroke-width: 1.6;
+		stroke-linejoin: round;
+		stroke-linecap: round;
 	}
 
 	/* The chart frame's marks. Colour comes from here, so a theme change is one rule; the frame draws the shapes. */
@@ -112,5 +369,102 @@
 		fill: var(--dk-gold);
 		stroke: var(--dk-pane);
 		stroke-width: 1.5;
+	}
+
+	/* The live end of the line breathes, slowly, while the chart reads now. */
+	.ut-sp-live {
+		animation: ut-sp-breathe 2.4s ease-in-out infinite;
+	}
+
+	@keyframes ut-sp-breathe {
+		50% {
+			opacity: 0.55;
+		}
+	}
+
+	/* The cursor: a 1px rule that snaps to its record, a dot on the line and the record's time under the plot. They
+	   are moved by transform only, and the rule never animates: it is where the pointer is. */
+	.ut-sp-xh {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		left: 0;
+		width: 1px;
+		background: color-mix(in srgb, var(--dk-legend) 45%, transparent);
+		pointer-events: none;
+		transition: none;
+	}
+
+	/* Another window's moment: the same rule, quieter. */
+	.ut-sp-xh.ut-sp-sync {
+		background: color-mix(in srgb, var(--dk-legend) 25%, transparent);
+	}
+
+	.ut-sp-dot {
+		position: absolute;
+		top: 0;
+		left: 0;
+		width: 9px;
+		height: 9px;
+		border-radius: 50%;
+		background: var(--sp-ink);
+		box-shadow:
+			0 0 0 1.5px var(--dk-pane),
+			0 0 8px color-mix(in srgb, var(--sp-glow) 40%, transparent);
+		pointer-events: none;
+	}
+
+	.ut-sp-time {
+		position: absolute;
+		top: 100%;
+		left: 0;
+		/* The chart sets the shift in the style: the stamp slides from left-aligned at the plot's left edge to
+		   right-aligned at its right edge, so it never leaves the plot. This is its value in the middle. */
+		translate: -50% 2px;
+		padding: 0 6px;
+		border-radius: 4px;
+		background: var(--dk-raised);
+		box-shadow: 0 0 0 1px var(--dk-base);
+		font: 400 11px/15px var(--mono);
+		font-variant-numeric: tabular-nums;
+		color: var(--dk-legend);
+		white-space: nowrap;
+		pointer-events: none;
+		z-index: 1;
+	}
+
+	/* The peak's own label, at rest. */
+	.ut-sp-peak {
+		position: absolute;
+		top: 0;
+		left: 0;
+		font: 500 11px var(--mono);
+		font-variant-numeric: tabular-nums;
+		color: var(--dk-label);
+		white-space: nowrap;
+		pointer-events: none;
+	}
+
+	/* No records under the filters: said where the plot would be. */
+	.ut-sp-empty {
+		margin: auto;
+		font: 400 13px/1.4 var(--sans);
+		color: var(--dk-label);
+	}
+
+	/* While the vault loads: the plot's room, and nothing said about the records. */
+	.ut-sp-wait {
+		flex: 1 1 0;
+		min-height: 120px;
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.ut-sp-frame {
+			animation: none;
+		}
+
+		.ut-sp-live {
+			animation: none;
+		}
 	}
 }

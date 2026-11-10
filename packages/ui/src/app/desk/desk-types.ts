@@ -28,7 +28,19 @@ export interface DeskData {
 	liveIds: Set<string>;
 	/** The position shown in the header (the vault as recorded there), or null for live. */
 	at: AtPayload | null;
-	/** What the header shows: the previewed position, else the committed `at` (A6: a hover moves only the header). */
+	/**
+	 * The record the address's position was answered with (a position past the head is answered with the head), kept
+	 * across reconnects; null before the first answer for the current address, and live.
+	 */
+	resolvedPos: number | null;
+	/**
+	 * How the windows' rows were chosen against the shown answer (`pastRows`): `live` with none, `answered` when the
+	 * page's live rows are the answer's own vault, `snapshot` when the list draws the answer's snapshot and the page's
+	 * live rows are another vault's (a chart that reads the live rows draws nothing then),
+	 * `held` while no rows of the answer's vault are held yet (`pastHeld`).
+	 */
+	pastKind: "live" | "answered" | "snapshot" | "held";
+	/** What the header shows: a previewed position (none is asked for now), else the committed `at` (A6). */
 	headAt: AtPayload | null;
 	/** The last position of the vault, or -1 before a summary lands. */
 	head: number;

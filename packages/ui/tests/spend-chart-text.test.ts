@@ -209,7 +209,7 @@ describe("newText and plotLabel", () => {
 	});
 	it("names the plot in its bucket", () => {
 		expect(plotLabel("5 min")).toBe(
-			"Spend per 5 min over time: hover to preview, click to pin a record, click again for now",
+			"Spend per 5 min over time: hover to read a record, click to pin it, click again for now",
 		);
 	});
 	it("groups a record number the same everywhere", () => {

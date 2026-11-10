@@ -19,6 +19,16 @@ export const stamp = (ms: number): string => {
 	return Number.isNaN(d.getTime()) ? "unknown time" : formatUtc(d.toISOString());
 };
 
+/**
+ * How far the cursor's time stamp is pulled left of its anchor, as a percentage of its own width: 0 at the plot's
+ * left edge, 50 in the middle (centred), 100 at the right edge, so the box stays inside the plot whatever its width and
+ * the crosshair still stands under the stamp's proportional point. A plot with no width centres it.
+ */
+export function stampShiftPct(x: number, plotW: number): number {
+	if (!(plotW > 0) || !Number.isFinite(x)) return 50;
+	return Math.min(1, Math.max(0, x / plotW)) * 100;
+}
+
 /** A record's number as the Ledger shows it: its vault position plus one, grouped the same on every machine. */
 export function recordNumber(pos: number): string {
 	return (pos + 1).toLocaleString("en-US");
@@ -128,5 +138,5 @@ export function newText(fresh: number): string {
 
 /** The plot's name for assistive tech, in the line's own bucket. */
 export function plotLabel(per: string): string {
-	return `Spend per ${per} over time: hover to preview, click to pin a record, click again for now`;
+	return `Spend per ${per} over time: hover to read a record, click to pin it, click again for now`;
 }
