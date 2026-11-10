@@ -126,6 +126,9 @@ describe("level", () => {
 		expect(levelSubtitle("lane", "lane", null)).toBe("lanes");
 		expect(levelSubtitle("model", "model", null)).toBe("models");
 		expect(levelSubtitle("kind", "kind", null)).toBe("kinds");
+		// A drilled level with no scope says the level alone, never "Models · null".
+		expect(levelSubtitle("provider", "model", null)).toBe("Models");
+		expect(levelSubtitle("provider", "lane", null)).toBe("Lanes");
 	});
 
 	it("scopes a drilled level to the provider, or the model, of the first spend in the window", () => {
@@ -137,6 +140,13 @@ describe("level", () => {
 		expect(scopeOf("provider", "lane", [], WIN)).toBe("unknown");
 		expect(scopeOf("lane", "lane", rows, WIN)).toBeNull();
 		expect(scopeOf("provider", "provider", rows, WIN)).toBeNull();
+		expect(scopeOf("provider", "model", [], WIN)).toBeNull();
+	});
+
+	it("scopes to the first spend INSIDE the window, past an earlier one outside it", () => {
+		const rows = [row({ model: "grok-4", ts: new Date(T0 - HOUR).toISOString() }), row()];
+		expect(scopeOf("provider", "model", rows, WIN)).toBe("Anthropic");
+		expect(scopeOf("provider", "lane", rows, WIN)).toBe("claude-x");
 	});
 
 	it("captions roles as declared, naming any source but the caller", () => {
@@ -158,6 +168,15 @@ describe("level", () => {
 			),
 		).toBe("Roles as declared, not checked · source: agent, caller");
 		expect(roleCaption(new Map())).toBe("Roles as declared by the caller, not checked");
+		// A source counted zero times declared nothing, so it is not named.
+		expect(
+			roleCaption(
+				new Map([
+					["explicit", 1],
+					["agent", 0],
+				]),
+			),
+		).toBe("Roles as declared by the caller, not checked");
 	});
 
 	it("counts role sources over spend-bearing rows inside the half-open window only", () => {
