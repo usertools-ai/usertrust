@@ -775,5 +775,9 @@ describe("the ring's shape and its tween", () => {
 		broken(0);
 		expect(broken(Number.NaN)).toEqual({ shape: to, done: true });
 		expect(startTween(from, to, 0)(1)).toEqual({ shape: to, done: true });
+		expect(startTween(from, to, Number.POSITIVE_INFINITY)(1)).toEqual({ shape: to, done: true });
+		const negative = startTween(from, to, -5);
+		negative(0);
+		expect(negative(1)).toEqual({ shape: to, done: true });
 	});
 });

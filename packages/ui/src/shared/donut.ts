@@ -258,7 +258,7 @@ export function startTween(
 	let t0: number | null = null;
 	return (now) => {
 		if (t0 === null) t0 = now;
-		const p = ms > 0 ? (now - t0) / ms : 1;
+		const p = ms > 0 && Number.isFinite(ms) ? (now - t0) / ms : 1;
 		if (!(p < 1)) return { shape: to, done: true };
 		return { shape: blendShape(from, to, easeOutCubic(p)), done: false };
 	};
@@ -310,8 +310,10 @@ const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 
 /**
- * The bucket a pinned or hovered moment is read in, per range. It is the Spend line's own bucket, so "At <time>" names
- * the same moment on both charts.
+ * The bucket a pinned or hovered moment is read in, per range: 5 min, 1 h, 4 h, then 6 h. These are the Spend line's
+ * bucket sizes at those ranges (the line's `LINE_BUCKETS` table), so "At <time>" names the same moment on both charts.
+ * This is a copy until that table is on master; the part that follows it compares the two in a test. Until then the
+ * line's own bucket also depends on its width, and the two may differ at an unusual width.
  */
 export const MOMENT_BUCKET_MS: Readonly<Record<RangeId, number>> = {
 	"1d": 5 * MINUTE_MS,
