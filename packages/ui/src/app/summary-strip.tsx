@@ -51,7 +51,7 @@ import {
 	readableHeight,
 	whenMoved,
 } from "../shared/pop-place.js";
-import { shownLabel } from "../shared/timeline-view.js";
+import { recordedAt, shownLabel } from "../shared/timeline-view.js";
 import { useWindowDimmed } from "./desk/window.js";
 import type { LiveState } from "./store.js";
 import { TickingFigure } from "./ticking-figure.js";
@@ -153,9 +153,10 @@ function TopBar(props: {
  */
 function PastChip(props: { at: AtPayload; head: number }): React.JSX.Element {
 	const now = useNow();
-	const whole = `${shownLabel(props.at, props.head, new Date(now).toISOString())}, up to record ${props.at.pos + 1}`;
-	const full = formatUtc(props.at.ts);
-	const minute = Number.isNaN(Date.parse(props.at.ts)) ? full : `${full.slice(0, 11)}Z`;
+	const whole = `${shownLabel(props.at, props.head, new Date(now).toISOString())}, up to record ${COUNT.format(props.at.pos + 1)}`;
+	// The line's own time (the year in front when it is not this year's), cut to the minute.
+	const full = recordedAt(props.at.ts, new Date(now).toISOString());
+	const minute = Number.isNaN(Date.parse(props.at.ts)) ? full : full.replace(/:\d\d(?=Z$)/, "");
 	return (
 		<span className="ut-past" title={whole} role="img" aria-label={whole}>
 			{`past \u00b7 ${minute}`}

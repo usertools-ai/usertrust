@@ -673,6 +673,14 @@ describe("Trends while the point's records are reloading", () => {
 });
 
 describe("the bar names a past position whichever window is open", () => {
+	// The year the pill leaves out is the clock's, so the clock is fixed.
+	beforeEach(() => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		vi.setSystemTime(Date.parse("2026-11-10T12:00:00.000Z"));
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+	});
 	// A filled window dims the Now window, which carries the as-at line; the bar is drawn by the shell above every
 	// window, so the position must be named there. A committed position only: no pin, no chip.
 	const part = (p: "bar" | "head" | "facts", a: AtPayload | null): string =>
@@ -712,6 +720,11 @@ describe("the bar names a past position whichever window is open", () => {
 		expect(c).toContain("As recorded at not a time, up to record 41");
 	});
 
+	it("shows an unreadable time whole even when it ends like a time, never cutting its seconds", () => {
+		const c = chip(part("bar", at({ ts: "2026-13-40T10:04:09Z" })));
+		expect(text(c)).toBe("past \u00b7 2026-13-40T10:04:09Z");
+	});
+
 	it("is drawn while the summary is still loading, from the position itself", () => {
 		const html = renderToStaticMarkup(
 			createElement(SummaryStrip, { summary: null, live: "live", at: at(), part: "bar" }),
@@ -721,6 +734,16 @@ describe("the bar names a past position whichever window is open", () => {
 			createElement(SummaryStrip, { summary: null, live: "live", at: null, part: "bar" }),
 		);
 		expect(chip(none)).toBe("");
+	});
+
+	it("puts the year first when the position is not this year's, as the line does", () => {
+		const c = chip(part("bar", at({ ts: "2025-03-02T04:05:06.000Z" })));
+		expect(text(c)).toBe("past \u00b7 2025-03-02 04:05Z");
+		expect(c).toContain("As recorded at 2025-03-02 04:05:06Z, up to record 41");
+	});
+
+	it("groups the record number in the name like the desk's other figures", () => {
+		expect(chip(part("bar", at({ pos: 10_000 })))).toContain("up to record 10,001");
 	});
 
 	it("is not drawn live: no chip without a pin, and the bar's other words are unchanged", () => {
