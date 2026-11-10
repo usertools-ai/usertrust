@@ -56,10 +56,13 @@
 		flex: 1 1 320px;
 	}
 
-	/* With a position pinned the bar carries a pill beside the connection pill, and needs more width before the search
-	   controls may sit beside it: a larger basis wraps them under the header sooner, so nothing runs into the search. */
+	/* With a position shown the bar carries a pill beside the connection pill. The header wraps rather than overflows
+	   there, so what does not fit beside the search controls (the pill, the vault path) drops to a line of its own and
+	   the header's own basis, and so the outer row, stay as they are (a hover on the Spend chart shows the position too,
+	   and must not move the search). */
 	.ut-dk-top > .ut-top[data-past="true"] {
-		flex-basis: 560px;
+		flex-wrap: wrap;
+		row-gap: 6px;
 	}
 
 	.ut-dk-top > .ut-alarm,

@@ -761,7 +761,7 @@ describe("the bar names a past position whichever window is open", () => {
 		expect(text(part("facts", at()))).not.toContain("past \u00b7");
 	});
 
-	it("marks the header while a position is pinned, so the desk can give it the room", () => {
+	it("marks the header while a position is pinned, so the desk lets it wrap", () => {
 		expect(part("bar", at())).toContain('<header class="ut-top" data-past="true">');
 		expect(part("bar", null)).toContain('<header class="ut-top">');
 		const css = readFileSync(
@@ -769,7 +769,9 @@ describe("the bar names a past position whichever window is open", () => {
 			"utf-8",
 		);
 		const rule = /\.ut-dk-top > \.ut-top\[data-past="true"\]\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";
-		expect(rule).toMatch(/flex-basis:\s*560px/);
+		expect(rule).toMatch(/flex-wrap:\s*wrap;/);
+		expect(rule).toMatch(/(?<![-\w])row-gap:\s*6px;/);
+		expect(rule).not.toMatch(/flex-basis|column-gap/);
 	});
 
 	it("is a pill that grows to its text and does not shrink", () => {
