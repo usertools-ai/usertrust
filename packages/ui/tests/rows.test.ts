@@ -413,3 +413,158 @@ describe("spendFactsOf", () => {
 		expect(Object.keys(spendFactsOf(e)).sort()).toEqual(Object.keys(pick(row)).sort());
 	});
 });
+
+describe("a charge's inputs", () => {
+	const OK = { valid: true, breakIndex: null } as const;
+	const rowOf = (data: Record<string, unknown>) =>
+		toLedgerRows([evt({ data })], OK, undefined, 0)[0] as LedgerRow;
+	const USAGE = {
+		inputTokens: 1000,
+		outputTokens: 500,
+		cacheReadTokens: 2000,
+		cacheWriteTokens: 100,
+	};
+	const RATES = { inputPer1k: 30, outputPer1k: 150, cacheReadPer1k: 3, cacheWritePer1k: 37.5 };
+
+	it("a row carries its record's token counts, applied rates and pricing table version", () => {
+		const row = rowOf({ usage: USAGE, appliedRates: RATES, pricingTableVersion: "2026-11-02" });
+		expect(row.usage).toEqual(USAGE);
+		expect(row.appliedRates).toEqual(RATES);
+		expect(row.pricingTableVersion).toBe("2026-11-02");
+		expect("cacheWrite1h" in row).toBe(false);
+	});
+
+	it("a record with none of them gives a row with none of the keys", () => {
+		const row = rowOf({ model: "m", cost: 5 });
+		expect("usage" in row).toBe(false);
+		expect("appliedRates" in row).toBe(false);
+		expect("cacheWrite1h" in row).toBe(false);
+		expect("pricingTableVersion" in row).toBe(false);
+	});
+
+	it("keeps only the counts that are whole numbers >= 0, and fills nothing in", () => {
+		expect(
+			rowOf({
+				usage: { inputTokens: 5, outputTokens: "x", cacheReadTokens: -1, cacheWriteTokens: 1.5 },
+			}).usage,
+		).toEqual({ inputTokens: 5 });
+		expect(
+			rowOf({
+				usage: {
+					inputTokens: Number.POSITIVE_INFINITY,
+					outputTokens: Number.NaN,
+					cacheReadTokens: null,
+					cacheWriteTokens: 7,
+				},
+			}).usage,
+		).toEqual({ cacheWriteTokens: 7 });
+	});
+
+	it("a recorded 0 is kept: 0 is a count and a rate, not an absence", () => {
+		expect(rowOf({ usage: { cacheReadTokens: 0 } }).usage).toEqual({ cacheReadTokens: 0 });
+		expect(rowOf({ appliedRates: { outputPer1k: 0 } }).appliedRates).toEqual({ outputPer1k: 0 });
+	});
+
+	it("keeps only the rates that are finite numbers >= 0; a rate need not be whole", () => {
+		expect(
+			rowOf({
+				appliedRates: {
+					inputPer1k: 0.3,
+					outputPer1k: -150,
+					cacheReadPer1k: "3",
+					cacheWritePer1k: 37.5,
+				},
+			}).appliedRates,
+		).toEqual({ inputPer1k: 0.3, cacheWritePer1k: 37.5 });
+		expect(
+			rowOf({ appliedRates: { inputPer1k: Number.POSITIVE_INFINITY, outputPer1k: Number.NaN } }),
+		).not.toHaveProperty("appliedRates");
+	});
+
+	it("copies the named keys only", () => {
+		expect(rowOf({ usage: { inputTokens: 5, reasoningTokens: 9 } }).usage).toEqual({
+			inputTokens: 5,
+		});
+		expect(rowOf({ appliedRates: { inputPer1k: 30, inputTokens: 9 } }).appliedRates).toEqual({
+			inputPer1k: 30,
+		});
+		// A count under a rate's name, or a rate under a count's, is neither.
+		expect(rowOf({ usage: RATES })).not.toHaveProperty("usage");
+		expect(rowOf({ appliedRates: USAGE })).not.toHaveProperty("appliedRates");
+	});
+
+	it("a block that is not an object, or keeps no key, gives no key", () => {
+		expect(rowOf({ usage: "oops", appliedRates: null })).not.toHaveProperty("usage");
+		expect(rowOf({ usage: "oops", appliedRates: null })).not.toHaveProperty("appliedRates");
+		expect(rowOf({ usage: {}, appliedRates: [] })).not.toHaveProperty("usage");
+		expect(rowOf({ usage: {}, appliedRates: [] })).not.toHaveProperty("appliedRates");
+		expect(rowOf({ usage: { inputTokens: -5 } })).not.toHaveProperty("usage");
+		expect(rowOf({ usage: 7 })).not.toHaveProperty("usage");
+	});
+
+	it("a usable 1-hour cache write is kept as recorded: its tokens and its rate, and no other key", () => {
+		expect(rowOf({ cacheWrite1h: { tokens: 500, ratePer1k: 60 } }).cacheWrite1h).toEqual({
+			tokens: 500,
+			ratePer1k: 60,
+		});
+		expect(
+			rowOf({ cacheWrite1h: { tokens: 500, ratePer1k: 62.5, extra: 1 } }).cacheWrite1h,
+		).toEqual({
+			tokens: 500,
+			ratePer1k: 62.5,
+		});
+		expect(rowOf({ cacheWrite1h: { tokens: 0, ratePer1k: 0 } }).cacheWrite1h).toEqual({
+			tokens: 0,
+			ratePer1k: 0,
+		});
+	});
+
+	it("a 1-hour cache write the record carries stays on the row, with only its usable numbers", () => {
+		// The row keeps the fact that the record carried one: without it the whole write would look like a 5-minute one.
+		const kept = (cacheWrite1h: unknown) => rowOf({ cacheWrite1h }).cacheWrite1h;
+		expect(kept({ tokens: 500 })).toEqual({ tokens: 500 });
+		expect(kept({ ratePer1k: 60 })).toEqual({ ratePer1k: 60 });
+		expect(kept({ tokens: 1.5, ratePer1k: 60 })).toEqual({ ratePer1k: 60 });
+		expect(kept({ tokens: -1, ratePer1k: 60 })).toEqual({ ratePer1k: 60 });
+		expect(kept({ tokens: Number.NaN, ratePer1k: 60 })).toEqual({ ratePer1k: 60 });
+		expect(kept({ tokens: 500, ratePer1k: -60 })).toEqual({ tokens: 500 });
+		expect(kept({ tokens: 500, ratePer1k: "60" })).toEqual({ tokens: 500 });
+		expect(kept({ tokens: "500", ratePer1k: Number.POSITIVE_INFINITY })).toEqual({});
+		// Present, with nothing usable in it: still on the row, and empty. Nothing is filled in.
+		for (const present of [{}, [], 7, 0, "1h", false, null]) {
+			expect(kept(present)).toEqual({});
+			expect(Object.keys(kept(present) ?? { none: 1 })).toEqual([]);
+		}
+	});
+
+	it("a record with no 1-hour cache write gives a row with no such key", () => {
+		expect(rowOf({ cacheWrite1h: undefined })).not.toHaveProperty("cacheWrite1h");
+		expect(rowOf({ usage: { cacheWriteTokens: 2000 } })).not.toHaveProperty("cacheWrite1h");
+	});
+
+	it("the pricing table version is kept only as a string that names one", () => {
+		expect(rowOf({ pricingTableVersion: 20261102 })).not.toHaveProperty("pricingTableVersion");
+		expect(rowOf({ pricingTableVersion: "" })).not.toHaveProperty("pricingTableVersion");
+	});
+
+	it("adds to the row and changes nothing else on it", () => {
+		const data = { model: "claude-sonnet-4-6", cost: 115, settled: true, transferId: "tx_1" };
+		const plain = rowOf(data);
+		const withInputs = rowOf({
+			...data,
+			usage: USAGE,
+			appliedRates: RATES,
+			cacheWrite1h: { tokens: 50, ratePer1k: 60 },
+			pricingTableVersion: "2026-11-02",
+		});
+		const {
+			usage: _u,
+			appliedRates: _r,
+			cacheWrite1h: _h,
+			pricingTableVersion: _v,
+			...rest
+		} = withInputs;
+		expect(rest).toEqual(plain);
+		expect(withInputs.costUt).toBe(115);
+	});
+});

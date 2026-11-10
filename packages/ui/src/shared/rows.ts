@@ -12,6 +12,22 @@ import type { TransferStatus } from "usertrust-verify";
 
 export type RowIntegrity = "verified" | "after-break";
 
+/** A record's token counts, one per pricing tier, under core's names. */
+export interface TierCounts {
+	inputTokens: number;
+	outputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+}
+
+/** The rate applied to each tier, in usertokens per 1,000 tokens, under core's names. */
+export interface TierRates {
+	inputPer1k: number;
+	outputPer1k: number;
+	cacheReadPer1k: number;
+	cacheWritePer1k: number;
+}
+
 export interface LedgerRow {
 	seq: number | null;
 	/**
@@ -49,6 +65,23 @@ export interface LedgerRow {
 	 * back to the kind's class.
 	 */
 	status?: RowStatus;
+	/**
+	 * What the charge was priced from, as the record carries it: each key is present only when the record holds a
+	 * usable number for it. A count the record does not carry is ABSENT, never 0; a recorded 0 is kept.
+	 */
+	usage?: Partial<TierCounts>;
+	/** The rate applied to each tier, on the same rule as `usage`. */
+	appliedRates?: Partial<TierRates>;
+	/**
+	 * The share of `usage.cacheWriteTokens` written with a 1-hour lifetime, and the rate it was priced at. The rest
+	 * of the write count is priced at `appliedRates.cacheWritePer1k`. Present whenever the record carries one, and
+	 * absent only when it carries none. Each field is present only when the record holds a usable number for it, so
+	 * a share recorded without a usable count or rate is on the row with that field missing (at worst as `{}`):
+	 * the write then cannot be priced, and is never taken for a plain 5-minute write.
+	 */
+	cacheWrite1h?: { tokens?: number; ratePer1k?: number };
+	/** The version of the pricing table the applied rates came from. */
+	pricingTableVersion?: string;
 	hash: string;
 	previousHash: string;
 	integrity: RowIntegrity;
@@ -120,6 +153,47 @@ function num(v: unknown): number | undefined {
 }
 function bool(v: unknown): boolean | undefined {
 	return typeof v === "boolean" ? v : undefined;
+}
+
+/**
+ * A recorded amount: a finite number >= 0, and a whole one where it counts tokens. Anything else is not an amount,
+ * and its reader leaves the field out: nothing is ever filled in as 0.
+ */
+export function amountOf(value: unknown, whole: boolean): number | undefined {
+	return typeof value === "number" &&
+		Number.isFinite(value) &&
+		value >= 0 &&
+		(!whole || Number.isInteger(value))
+		? value
+		: undefined;
+}
+
+const COUNT_KEYS = [
+	"inputTokens",
+	"outputTokens",
+	"cacheReadTokens",
+	"cacheWriteTokens",
+] as const satisfies readonly (keyof TierCounts)[];
+const RATE_KEYS = [
+	"inputPer1k",
+	"outputPer1k",
+	"cacheReadPer1k",
+	"cacheWritePer1k",
+] as const satisfies readonly (keyof TierRates)[];
+
+/** The named keys of a recorded block that hold an amount, or nothing when the block holds none. */
+function amounts<K extends string>(
+	block: unknown,
+	keys: readonly K[],
+	whole: boolean,
+): Partial<Record<K, number>> | undefined {
+	if (typeof block !== "object" || block === null) return undefined;
+	const kept: Partial<Record<K, number>> = {};
+	for (const key of keys) {
+		const amount = amountOf((block as Record<string, unknown>)[key], whole);
+		if (amount !== undefined) kept[key] = amount;
+	}
+	return Object.keys(kept).length > 0 ? kept : undefined;
 }
 
 /**
@@ -200,6 +274,24 @@ export function toLedgerRows(
 		const typeSource = closed(e.data.typeSource, TYPE_SOURCES);
 		if (typeSource !== undefined) row.typeSource = typeSource;
 		row.status = statusFor(e.kind, e.data, verdictOf?.(e));
+		const usage = amounts(e.data.usage, COUNT_KEYS, true);
+		if (usage !== undefined) row.usage = usage;
+		const appliedRates = amounts(e.data.appliedRates, RATE_KEYS, false);
+		if (appliedRates !== undefined) row.appliedRates = appliedRates;
+		// Kept whenever the record carries one, usable or not: dropping an unusable one would leave a row that looks
+		// like a plain 5-minute write, and a charge that looks complete at the wrong rate. A recorded null is carried
+		// too: only a record with no such field has no 1-hour write.
+		const write1h = e.data.cacheWrite1h;
+		if (write1h !== undefined) {
+			row.cacheWrite1h = {
+				...amounts(write1h, ["tokens"], true),
+				...amounts(write1h, ["ratePer1k"], false),
+			};
+		}
+		const pricingTableVersion = str(e.data.pricingTableVersion);
+		if (pricingTableVersion !== undefined && pricingTableVersion !== "") {
+			row.pricingTableVersion = pricingTableVersion;
+		}
 		return row;
 	});
 }
