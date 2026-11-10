@@ -46,8 +46,13 @@ export function without(f: FilterState, chip: Chip): FilterState {
 	return { ...f, [chip.field]: f[chip.field].filter((v) => v !== chip.value) };
 }
 
+/** Whether the value is its facet's one value: an "Only" button's pressed state, and when `toggleOnly` clears. */
+export function isOnly(f: FilterState, field: ChipField, value: string): boolean {
+	const cur = f[field];
+	return cur.length === 1 && cur[0] === value;
+}
+
 /** The filters with one value alone in its facet; when it already is the facet's one value, the facet clears. */
 export function toggleOnly(f: FilterState, field: ChipField, value: string): FilterState {
-	const cur = f[field];
-	return { ...f, [field]: cur.length === 1 && cur[0] === value ? [] : [value] };
+	return { ...f, [field]: isOnly(f, field, value) ? [] : [value] };
 }

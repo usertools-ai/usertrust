@@ -7,7 +7,7 @@
  */
 
 import { useMemo } from "react";
-import { toggleOnly } from "../../../shared/filter-chips.js";
+import { isOnly, toggleOnly } from "../../../shared/filter-chips.js";
 import type { FilterState } from "../../../shared/filters.js";
 import { type BudgetView, budgetShare, unusualNote } from "../../../shared/peek.js";
 import type { LedgerRow } from "../../../shared/rows.js";
@@ -49,8 +49,8 @@ export function PeekExtra(props: {
 
 /**
  * The record's actions: put it on the Spend chart as the pin, or keep only its lane or its model in the filters (a
- * second press, when that value is already the facet's only one, clears the facet). A lane or model with no name
- * gets no button.
+ * second press, when that value is already the facet's only one, clears the facet). An Only button is pressed while
+ * its value is the facet's only one. A lane or model with no name gets no button.
  */
 export function PeekActions(props: {
 	row: LedgerRow;
@@ -69,6 +69,7 @@ export function PeekActions(props: {
 				<button
 					type="button"
 					className="ut-t3"
+					aria-pressed={isOnly(filters, "actors", actor)}
 					onClick={() => onFilters(toggleOnly(filters, "actors", actor))}
 				>
 					{`Only ${actor}`}
@@ -78,6 +79,7 @@ export function PeekActions(props: {
 				<button
 					type="button"
 					className="ut-t3"
+					aria-pressed={isOnly(filters, "models", model)}
 					onClick={() => onFilters(toggleOnly(filters, "models", model))}
 				>
 					{`Only ${model}`}

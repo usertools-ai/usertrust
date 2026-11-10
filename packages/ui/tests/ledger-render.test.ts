@@ -643,10 +643,35 @@ describe("the record's actions", () => {
 		expect(markup(row())).toBe(
 			'<div class="ut-lg-actions">' +
 				'<button type="button" class="ut-t3">Show on chart</button>' +
-				'<button type="button" class="ut-t3">Only a</button>' +
-				'<button type="button" class="ut-t3">Only m</button>' +
+				'<button type="button" class="ut-t3" aria-pressed="false">Only a</button>' +
+				'<button type="button" class="ut-t3" aria-pressed="false">Only m</button>' +
 				"</div>",
 		);
+	});
+
+	it("an Only button is pressed when its value is the facet's only one; Show on chart is not a toggle", () => {
+		const pressed = (filters: FilterState): string[] => {
+			const html = renderToStaticMarkup(createElement(PeekActions, props(row(), filters).props));
+			return [...html.matchAll(/<button([^>]*)>([^<]*)</g)].map(
+				([, attrs, text]) => `${text}=${/aria-pressed="(\w+)"/.exec(attrs ?? "")?.[1] ?? "none"}`,
+			);
+		};
+		expect(pressed({ ...EMPTY_FILTERS, actors: ["a"] })).toEqual([
+			"Show on chart=none",
+			"Only a=true",
+			"Only m=false",
+		]);
+		expect(pressed({ ...EMPTY_FILTERS, models: ["m"] })).toEqual([
+			"Show on chart=none",
+			"Only a=false",
+			"Only m=true",
+		]);
+		expect(pressed({ ...EMPTY_FILTERS, actors: ["a", "b"], models: ["m", "x"] })).toEqual([
+			"Show on chart=none",
+			"Only a=false",
+			"Only m=false",
+		]);
+		expect(pressed(EMPTY_FILTERS)).toEqual(["Show on chart=none", "Only a=false", "Only m=false"]);
 	});
 
 	it("a record with no model, or an empty one, has no second Only button", () => {

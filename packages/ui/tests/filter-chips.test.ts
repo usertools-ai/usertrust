@@ -15,6 +15,7 @@ import {
 	CHIP_FACETS,
 	type Chip,
 	chipsOf,
+	isOnly,
 	toggleOnly,
 	without,
 } from "../src/shared/filter-chips.js";
@@ -77,6 +78,14 @@ describe("the chip rules", () => {
 			["jobTypes", "Role (declared)"],
 			["typeSources", "Type declared by"],
 		]);
+	});
+
+	it("isOnly: true only when the value is its facet's one value, which is when toggleOnly clears", () => {
+		expect(isOnly(f({ actors: ["a"] }), "actors", "a")).toBe(true);
+		expect(isOnly(f({ actors: ["a", "b"] }), "actors", "a")).toBe(false);
+		expect(isOnly(f({ actors: ["b"] }), "actors", "a")).toBe(false);
+		expect(isOnly(EMPTY_FILTERS, "actors", "a")).toBe(false);
+		expect(isOnly(f({ models: ["a"] }), "actors", "a")).toBe(false);
 	});
 
 	it("toggleOnly: an empty facet gets the value; the facet's one value clears it", () => {
