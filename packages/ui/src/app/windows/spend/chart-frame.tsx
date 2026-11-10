@@ -48,6 +48,9 @@ export interface ChartFrameProps {
 const DOT_R = 4.5;
 const MARK_R = 6.5;
 const BREAK_R = 4.5;
+/** What "chain breaks here" needs to the right of its ring; a break closer to the edge puts it on the left. */
+const BREAK_LABEL_W = 104;
+const BREAK_LABEL_MIN_Y = 12;
 
 /** A stop's opacity, scaled by the highlight; the largest product is 0.1625, so the cap never bites today. */
 function stopOpacity(a: number, k: number): number {
@@ -69,7 +72,13 @@ export const ChartFrame = memo(function ChartFrame(p: ChartFrameProps): React.JS
 	const fadeTop = areaFadeTop(ctx.drawn, ctx.y, ctx.baseY);
 	const strength = hover ? AREA_HIGHLIGHT : 1;
 	const clip = firstAreaClip(layers, ctx);
-	const ticks = p.ticks ?? niceTicks(geo.top).map((t) => ({ drawn: t, label: t }));
+	// The plain grid is cut in the unit it is labelled in (one bucket's spend), so its steps read round: $1, $2, $5.
+	const ticks =
+		p.ticks ??
+		niceTicks(geo.top / ctx.perHour).map((t) => ({
+			drawn: t * ctx.perHour,
+			label: t * ctx.perHour,
+		}));
 	return (
 		<svg
 			className="ut-sp-svg"
@@ -203,9 +212,15 @@ export const ChartFrame = memo(function ChartFrame(p: ChartFrameProps): React.JS
 			{brk !== null && (
 				<g className="ut-sp-break">
 					<circle cx={brk.x} cy={brk.y} r={BREAK_R} />
-					<text x={brk.x + 8} y={brk.y - 6}>
-						chain breaks here
-					</text>
+					{brk.x + 8 + BREAK_LABEL_W <= ctx.w ? (
+						<text x={brk.x + 8} y={Math.max(BREAK_LABEL_MIN_Y, brk.y - 6)}>
+							chain breaks here
+						</text>
+					) : (
+						<text x={brk.x - 8} y={Math.max(BREAK_LABEL_MIN_Y, brk.y - 6)} textAnchor="end">
+							chain breaks here
+						</text>
+					)}
 				</g>
 			)}
 			{mark !== null && (

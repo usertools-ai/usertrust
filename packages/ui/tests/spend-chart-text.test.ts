@@ -163,6 +163,27 @@ describe("valueText and whenLine with a pin that has no record", () => {
 	});
 });
 
+describe("words with a time that is not one, and a record past the stale head", () => {
+	it("never throws on a NaN time, with or without the no-record flag", () => {
+		const nan = { t: Number.NaN, pos: 4, pinned: false };
+		expect(whenLine({ shown: nan, pinnedNoRecord: false, lastT: T })).toBe(
+			"unknown time · record 5",
+		);
+		expect(whenLine({ shown: null, pinnedNoRecord: false, lastT: Number.NaN })).toBe(
+			"Live · last spend unknown time",
+		);
+		expect(
+			valueText({ empty: false, shown: nan, pinnedNoRecord: false, head: 11, cumUt: 100 }),
+		).toContain("spent by unknown time");
+	});
+	it("never says a record is past the vault's size", () => {
+		const shown = { t: T, pos: 11, pinned: false };
+		expect(
+			valueText({ empty: false, shown, pinnedNoRecord: false, head: 9, cumUt: 100 }),
+		).toContain("Record 12 of 12");
+	});
+});
+
 describe("newText and plotLabel", () => {
 	it("counts records added since the pin, and nothing when none were", () => {
 		expect(newText(0)).toBe("");

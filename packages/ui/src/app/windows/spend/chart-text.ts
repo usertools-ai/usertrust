@@ -13,7 +13,11 @@ import { bucketPhrase, type LineBucket, perShort, toBucket } from "../../../shar
 /** The separator between the parts of a line. */
 export const SEP = " · ";
 
-const iso = (ms: number): string => new Date(ms).toISOString();
+/** A time as the page writes it; a time that is not one (NaN, out of range) reads as such, never throws. */
+const stamp = (ms: number): string => {
+	const d = new Date(ms);
+	return Number.isNaN(d.getTime()) ? "unknown time" : formatUtc(d.toISOString());
+};
 
 /** A record's number as the Ledger shows it: its vault position plus one, grouped the same on every machine. */
 export function recordNumber(pos: number): string {
@@ -60,10 +64,10 @@ export function whenLine(p: {
 	if (p.pinnedNoRecord) return `Pinned${SEP}no spend recorded by then`;
 	if (p.shown !== null) {
 		const lead = p.shown.pinned ? `Pinned${SEP}` : "";
-		return `${lead}${formatUtc(iso(p.shown.t))}${SEP}record ${recordNumber(p.shown.pos)}`;
+		return `${lead}${stamp(p.shown.t)}${SEP}record ${recordNumber(p.shown.pos)}`;
 	}
 	return p.lastT !== null
-		? `Live${SEP}last spend ${formatUtc(iso(p.lastT))}`
+		? `Live${SEP}last spend ${stamp(p.lastT)}`
 		: `Live${SEP}no spend recorded yet`;
 }
 
@@ -87,9 +91,9 @@ export function valueText(p: {
 	// A pin with no spend record at or before it has no time to read, whatever `shown` holds.
 	if (p.pinnedNoRecord) return `Pinned${SEP}${fig} spent`;
 	if (p.shown !== null) {
-		const of = Math.max(1, p.head + 1).toLocaleString("en-US");
+		const of = Math.max(1, p.head + 1, p.shown.pos + 1).toLocaleString("en-US");
 		const pin = p.shown.pinned ? `${SEP}pinned` : "";
-		return `Record ${recordNumber(p.shown.pos)} of ${of}${SEP}${fig} spent by ${formatUtc(iso(p.shown.t))}${pin}`;
+		return `Record ${recordNumber(p.shown.pos)} of ${of}${SEP}${fig} spent by ${stamp(p.shown.t)}${pin}`;
 	}
 	if (p.empty) return "No spend recorded";
 	return `Live${SEP}${fig} spent`;

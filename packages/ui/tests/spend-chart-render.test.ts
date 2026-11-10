@@ -6,6 +6,7 @@
  * headline) are added below in their own groups.
  */
 
+import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -258,15 +259,18 @@ describe("chart frame: the grid", () => {
 		expect(html).not.toContain(`>${formatUsdAxis(80)}<`);
 	});
 
-	it("falls back to the plain ticks when none are supplied", () => {
+	it("falls back to plain ticks cut in the labelled unit: one bucket's spend, at 1/2/5 steps", () => {
+		expect(day.ctx.perHour).toBeGreaterThan(1);
 		for (const f of [fx, day]) {
-			const plain = niceTicks(f.geo.top);
+			const plain = niceTicks(f.geo.top / f.ctx.perHour);
 			expect(plain.length).toBeGreaterThan(0);
 			const html = frame(f, { ticks: null });
 			const lines = tags(html, "line", "ut-sp-grid");
 			expect(lines.length).toBe(plain.length);
-			expect(lines.map((l) => Number(attr(l, "y1")))).toEqual(plain.map((t) => f.geo.yOfDrawn(t)));
-			for (const t of plain) expect(html).toContain(`>${formatUsdAxis(t / f.ctx.perHour)}<`);
+			expect(lines.map((l) => Number(attr(l, "y1")))).toEqual(
+				plain.map((t) => f.geo.yOfDrawn(t * f.ctx.perHour)),
+			);
+			for (const t of plain) expect(html).toContain(`>${formatUsdAxis(t)}<`);
 		}
 	});
 
@@ -428,6 +432,29 @@ describe("chart frame: the chain break", () => {
 		const ids = [...both.matchAll(/<clipPath id="([^"]+)"/g)].map((m) => m[1]);
 		expect(ids.length).toBe(2);
 		expect(new Set(ids).size).toBe(2);
+	});
+
+	it("puts the label on the left of the ring when there is no room on the right, and keeps it in the box", () => {
+		const right = /<text x="([^"]+)" y="([^"]+)"[^>]*>chain breaks here/.exec(frame(fx, { brk }));
+		expect(right?.[1]).toBe("308");
+		expect(right?.[2]).toBe("84");
+		const edge = frame(fx, { brk: { x: fx.w - 40, y: 3 } });
+		const left = /<text x="([^"]+)" y="([^"]+)" text-anchor="end">chain breaks here/.exec(edge);
+		expect(left?.[1]).toBe(String(fx.w - 48));
+		expect(left?.[2]).toBe("12");
+		// Right of the ring while 104px fit after the 8px gap, left from one pixel closer; and the top clamp holds on both sides.
+		const side = (x: number, y: number): string =>
+			/<text x="[^"]+" y="[^"]+"( text-anchor="end")?>chain breaks here/.exec(
+				frame(fx, { brk: { x, y } }),
+			)?.[1] === undefined
+				? "right"
+				: "left";
+		expect(side(fx.w - 112, 90)).toBe("right");
+		expect(side(fx.w - 111, 90)).toBe("left");
+		const top = /<text x="[^"]+" y="([^"]+)"[^>]*>chain breaks here/.exec(
+			frame(fx, { brk: { x: 300, y: 3 } }),
+		);
+		expect(top?.[1]).toBe("12");
 	});
 
 	it("rings the break and says so, after the over layers and before the open record's ring", () => {
@@ -610,5 +637,27 @@ describe("chart frame: where each mark sits and how it is drawn", () => {
 		expect(stops.length).toBe(AREA_STOPS.length);
 		for (const st of stops) expect(st).toBe("stop-color:var(--sp-ink)");
 		expect(html).toMatch(/<filter[^>]*x="-5%"[^>]*y="-50%"[^>]*width="110%"[^>]*height="200%"/);
+	});
+});
+
+describe("chart frame: the sheet", () => {
+	const sheet = readFileSync(
+		new URL("../src/app/windows/spend/spend.css", import.meta.url),
+		"utf8",
+	);
+	const fx = chartFixture();
+
+	it("names every class the frame's marks use that it does not paint inline", () => {
+		const html = frame(fx, {
+			brk: { x: 300, y: 90 },
+			mark: { x: 10, y: 10 },
+			pin: { x: 40, y: 50 },
+			ghost: "M0 100L700 50",
+			note: "n",
+		});
+		for (const cls of ["gap", "dashed", "break", "ghost", "fcap", "mark", "pin"]) {
+			expect(html).toContain(`ut-sp-${cls}`);
+			expect(sheet).toMatch(new RegExp(`\\.ut-sp-${cls}(?![\\w-])`));
+		}
 	});
 });
