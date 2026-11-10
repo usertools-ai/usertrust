@@ -329,7 +329,7 @@
 	   seven stay down to 600px, which a 1000px screen's list is above. */
 	@container (max-width: 600px) {
 		.ut-row.ut-lg-row {
-			grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 116px minmax(96px, 0.9fr);
+			grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 116px minmax(104px, max-content);
 		}
 
 		.ut-lg-row .ut-lg-k,
@@ -354,7 +354,7 @@
 
 	@container (max-width: 520px) {
 		.ut-row.ut-lg-row {
-			grid-template-columns: 102px minmax(0, 1fr) 80px 70px;
+			grid-template-columns: 102px minmax(0, 1fr) 80px minmax(76px, max-content);
 			gap: 6px;
 			left: 2px;
 			right: 2px;

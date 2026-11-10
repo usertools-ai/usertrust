@@ -851,7 +851,9 @@ describe("the dense list", () => {
 			/<span class="ut-lg-m" title="([^"]*)"/.exec(one(r))?.[1] ?? "";
 		expect(title(row({ model: "claude-sonnet-4-6" }))).toBe("claude-sonnet-4-6, Anthropic");
 		expect(title(row({ model: "some-other-model" }))).toBe("some-other-model");
-		expect(title(bare)).toBe("no model");
+		expect(title(bare)).toBe("llm_call, no model");
+		// The kind may be cut short where it stands in the model's cell: the title has all of it.
+		expect(title({ ...bare, kind: "hold_released" })).toBe("hold_released, no model");
 		// With no model the cell shows the long dash, not an empty cell (and its kind, where the sheet says so).
 		expect(one(bare)).toContain(`<span class="ut-lg-name">${DASH}</span>`);
 		expect(one(row({ model: "gpt-5" }))).toContain('<span class="ut-lg-name">gpt-5</span>');
@@ -1366,14 +1368,21 @@ describe("the Ledger window's sheet", () => {
 		]);
 		const five = narrow(600);
 		expect(ruleIn(five, ".ut-row.ut-lg-row")).toContain(
-			"grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 116px minmax(96px, 0.9fr);",
+			"grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 116px minmax(104px, max-content);",
 		);
+		// The cost cell holds "est." and a figure in the thousands (102px), and grows for a longer one: the model and
+		// the lane give the room.
+		expect(102).toBeLessThanOrEqual(104);
 		expect(ruleIn(five, ".ut-lg-row .ut-lg-k,\n\t\t.ut-lg-row .ut-lg-u")).toContain(
 			"display: none;",
 		);
 		const four = narrow(520);
 		const dense = ruleIn(four, ".ut-row.ut-lg-row");
-		expect(dense).toContain("grid-template-columns: 102px minmax(0, 1fr) 80px 70px;");
+		// The cost cell holds "est." and a figure under ten dollars (73px) in one column down the list; a longer figure
+		// widens its own row's cell, and the model gives the room.
+		expect(dense).toContain(
+			"grid-template-columns: 102px minmax(0, 1fr) 80px minmax(76px, max-content);",
+		);
 		// The capsule is tighter there, so a ten-letter status ("unresolved") fits its 80px whole.
 		const tight = ruleIn(four, ".ut-lg-s .ut-badge");
 		expect(tight).toContain("gap: 4px;");
@@ -1386,8 +1395,8 @@ describe("the Ledger window's sheet", () => {
 		expect(dense).toContain("left: 2px;");
 		expect(dense).toContain("right: 2px;");
 		// The narrowest row's fixed columns, gaps and padding leave the model room at 340px: nothing scrolls sideways.
-		const fixed = 102 + 80 + 70 + 3 * 6 + 2 * 6 + 2 * 2;
-		expect(340 - fixed).toBeGreaterThanOrEqual(52);
+		const fixed = 102 + 80 + 76 + 3 * 6 + 2 * 6 + 2 * 2;
+		expect(340 - fixed).toBeGreaterThanOrEqual(48);
 		// A row keeps its height at every width.
 		expect(`${five}${four}`).not.toMatch(/[^-]height:|white-space/);
 		// Where a row scrolled to stops under the phone's sort bar is the list's to measure: no figure for it here.

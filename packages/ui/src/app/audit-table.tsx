@@ -88,7 +88,7 @@ function DenseRowBody(props: { row: LedgerRow }): React.JSX.Element {
 				className="ut-lg-m"
 				title={
 					row.model === undefined
-						? "no model"
+						? `${row.kind}, no model`
 						: provider === "Other"
 							? row.model
 							: `${row.model}, ${provider}`
