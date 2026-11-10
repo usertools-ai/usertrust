@@ -36,6 +36,27 @@ export const CSV_HEADERS = [
 	"job",
 	"job_type_declared_not_checked",
 	"type_declared_by",
+	// A charge's inputs, as the record carries them: the four token counts, the rate applied to each (usertokens per
+	// 1,000 tokens) and the pricing table the rates came from.
+	"input_tokens",
+	"output_tokens",
+	"cache_read_tokens",
+	"cache_write_tokens",
+	"input_rate_ut_per_1k",
+	"output_rate_ut_per_1k",
+	"cache_read_rate_ut_per_1k",
+	"cache_write_rate_ut_per_1k",
+	"pricing_table_version",
+	// The share of cache_write_tokens written with a 1-hour lifetime, and its own rate. The rest of the write count
+	// was priced at cache_write_rate_ut_per_1k.
+	"cache_write_1h_tokens",
+	"cache_write_1h_rate_ut_per_1k",
+	// Whether the record carried a 1-hour share at all: `yes`, or empty when it carried none. A share whose count or
+	// rate cannot be used leaves that cell empty above, and without this column it would read as no share, with the
+	// whole write priced at cache_write_rate_ut_per_1k.
+	"cache_write_1h_recorded",
+	// THE RULE OF THIS FORMAT: a new column goes here, on the end. No column above ever moves, is renamed or changes
+	// what it holds, so a reader of an older export keeps working. `tests/csv.test.ts` pins the whole header as text.
 ] as const;
 
 /** Leading =,+,-,@ make a cell executable in Excel/Sheets — defang with a quote. */
@@ -51,7 +72,10 @@ function cell(value: string | undefined): string {
 	return /[",\r\n]/.test(safe) || safe !== value ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 
-/** Numerics are emitted bare so spreadsheets treat them as numbers. */
+/**
+ * Numerics are emitted bare so spreadsheets treat them as numbers, in the shortest form that reads back as the same
+ * number: 12.5 is `12.5`, 0.1 is `0.1`, and a value under one millionth is exponent notation (1e-7 is `1e-7`).
+ */
 function num(value: number | undefined): string {
 	return value === undefined ? "" : String(value);
 }
@@ -80,6 +104,21 @@ export function toCsv(rows: LedgerRow[]): string {
 				cell(r.job),
 				cell(r.jobType),
 				cell(r.typeSource),
+				// What the record carries, and nothing worked out from it: no product, no sum. A count or rate the
+				// record does not carry is an empty cell, never 0; a recorded 0 prints 0.
+				num(r.usage?.inputTokens),
+				num(r.usage?.outputTokens),
+				num(r.usage?.cacheReadTokens),
+				num(r.usage?.cacheWriteTokens),
+				num(r.appliedRates?.inputPer1k),
+				num(r.appliedRates?.outputPer1k),
+				num(r.appliedRates?.cacheReadPer1k),
+				num(r.appliedRates?.cacheWritePer1k),
+				cell(r.pricingTableVersion),
+				num(r.cacheWrite1h?.tokens),
+				num(r.cacheWrite1h?.ratePer1k),
+				// `yes` or empty, never `no`: absent stays empty, like every cell here.
+				r.cacheWrite1h === undefined ? "" : "yes",
 			].join(","),
 		);
 	}
