@@ -104,6 +104,9 @@ describe("the chip rules", () => {
 		expect(after.models).toEqual(["a"]);
 		expect(before.actors).toEqual(["a", "b"]);
 		expect(without(before, chip("actors", "z"))).toEqual(before);
+		// Every facet reads its own values, not the lanes'.
+		const status = without(f({ actors: ["x"], statuses: ["s", "t"] }), chip("statuses", "s"));
+		expect(status).toEqual(f({ actors: ["x"], statuses: ["t"] }));
 	});
 
 	it("chipsOf: values the order does not know come first, then the order's, newest last", () => {
