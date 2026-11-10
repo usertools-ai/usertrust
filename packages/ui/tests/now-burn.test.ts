@@ -97,6 +97,9 @@ describe("monthBurn", () => {
 		const noSpend = llm(END - 6 * DAY, 0, { kind: "tool_use" });
 		const noTime = llm(END - 6 * DAY, 0, { ts: "not a time" });
 		expect(monthBurn([noSpend, noTime, later, first], END, null).paceUtPerDay).toBe(400);
+		// The same with real spend on the unreadable record, and that record last: the age is still three days.
+		const lost = llm(END - 6 * DAY, 50, { ts: "not a time" });
+		expect(monthBurn([later, first, lost], END, null).paceUtPerDay).toBe(400);
 		// A first record older than the week leaves the week whole.
 		expect(monthBurn([llm(END - 30 * DAY, 1), later, first], END, null).paceUtPerDay).toBe(
 			1200 / 7,
@@ -222,6 +225,8 @@ describe("projectionOf", () => {
 		expect(projectionOf(summary(), [llm(END - DAY + 1, 2400)], END)).toBeNull();
 		expect(projectionOf(summary(), [llm(END - HOUR, 2400)], END)).toBeNull();
 		expect(projectionOf(summary(), [llm(END - DAY, 2400)], END)).not.toBeNull();
+		// No spend is said before too little history: a first spend record that cost nothing gives the idle line.
+		expect(projectionOf(summary(), [llm(END - HOUR, 0)], END)?.text).toBe(NOW_COPY.projectionIdle);
 		// A budget already used is a fact, not a projection: it is said at any age.
 		const used = projectionOf(summary({ remainingUt: 0 }), [llm(END - HOUR, 2400)], END);
 		expect(used).toStrictEqual({

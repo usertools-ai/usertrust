@@ -49,22 +49,15 @@ export interface UsualBand {
  *
  * `skip`: buckets marked `true` are left out of every history (the unusual ones), so a spike does not widen the range
  * the buckets after it are judged against.
- *
- * `lookback`: how many buckets before a bucket make its history, BAND_WINDOW unless the caller reads against a
- * longer or shorter past. Under BAND_MIN_HISTORY there is no range anywhere.
  */
-export function usualBand(
-	values: ArrayLike<number>,
-	skip?: ArrayLike<boolean>,
-	lookback: number = BAND_WINDOW,
-): UsualBand {
+export function usualBand(values: ArrayLike<number>, skip?: ArrayLike<boolean>): UsualBand {
 	const n = values.length;
 	const mid = new Float64Array(n).fill(Number.NaN);
 	const lo = new Float64Array(n).fill(Number.NaN);
 	const hi = new Float64Array(n).fill(Number.NaN);
 	const from = Math.min(n, BAND_MIN_HISTORY);
 	for (let k = from; k < n; k++) {
-		const j0 = Math.max(0, k - lookback);
+		const j0 = Math.max(0, k - BAND_WINDOW);
 		let sum = 0;
 		let min = Number.POSITIVE_INFINITY;
 		let max = Number.NEGATIVE_INFINITY;

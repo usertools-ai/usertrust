@@ -15,7 +15,7 @@ import { isHeaderSpend } from "./aggregate.js";
 import type { SummaryPayload } from "./api.js";
 import { budgetAsOf, budgetDisplay } from "./budget-display.js";
 import { formatUsdTotal, formatUtc } from "./format.js";
-import { NOW_COPY } from "./now-copy.js";
+import { NOW_COPY, weekPaceWords, youngPaceWords } from "./now-copy.js";
 import { HOUR_MS } from "./now-rate.js";
 import type { LedgerRow } from "./rows.js";
 import { bucketTotals } from "./spend-series.js";
@@ -109,10 +109,7 @@ export function projectionOf(
 	const young = ageDays < 7;
 	// The pace is named by the day: by the hour a small one would print as nothing.
 	const perDay = `${formatUsdTotal(paceUtPerDay)}/day`;
-	const age = ageDays < 1 ? "under a day ago" : `${ageDays.toFixed(1)} days ago`;
-	const assumes = young
-		? `the average of ${perDay} since the first spend record, ${age},`
-		: `the past 7 days' average of ${perDay}`;
+	const assumes = young ? youngPaceWords(perDay, ageDays) : weekPaceWords(perDay);
 	// A controller's record is named by its age: its provenance sentence says more than an old record can.
 	const title = `A projection, not a forecast: it assumes ${assumes} holds. Budget: ${budgetAsOf(summary, endMs).text}`;
 	if (left <= 0) return { text: NOW_COPY.projectionUsed, title };
@@ -126,7 +123,7 @@ export function projectionOf(
 	// A month and a day name one date only within a year; further out the year is printed.
 	const date = daysLeft < 365 ? formatUtc(iso).slice(0, 5) : iso.slice(0, iso.indexOf("T"));
 	return {
-		text: `Projection: reaches ${formatUsdTotal(summary.budget as number)} on ${date} at ${young ? "the pace so far" : "the past week's pace"}`,
+		text: `Projection: reaches ${formatUsdTotal(summary.budget as number)} on ${date} at ${young ? NOW_COPY.projectionPaceYoung : NOW_COPY.projectionPaceWeek}`,
 		title,
 	};
 }

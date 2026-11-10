@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * The spend rate now: the last hour's spend against the usual range of the week before it. Pure.
+ * The spend rate now: the last hour's spend against the usual range of the 24 hours before it. Pure.
  *
  * The range is `usualBand`, the one every chart draws, so the words here and a chart's shading cannot disagree. The
  * hours before the first spend record are not history: they are left out of the range (`skipBeforeFirstSpend`), so a
@@ -17,7 +17,7 @@ import type { LedgerRow } from "./rows.js";
 import { bucketTotals } from "./spend-series.js";
 
 export const HOUR_MS = 3_600_000;
-/** How many hours the rate is read against: one week. */
+/** How many hours are returned: one week. The last is read against the 24 before it, as on every chart. */
 export const RATE_HOURS = 168;
 
 export interface RateNowView {
@@ -36,8 +36,7 @@ export function rateNow(rows: readonly LedgerRow[], endMs: number): RateNowView 
 	const startMs = endMs - RATE_HOURS * HOUR_MS;
 	const hours = bucketTotals(rows, { startMs, endMs }, HOUR_MS);
 	const skip = skipBeforeFirstSpend(rows, startMs, HOUR_MS, RATE_HOURS);
-	// The whole week is the history: the last hour is read against the 167 hours before it, not the day before.
-	const { mid, lo, hi } = usualBand(hours, skip, RATE_HOURS);
+	const { mid, lo, hi } = usualBand(hours, skip);
 	const last = RATE_HOURS - 1;
 	const ratePerHourUt = hours[last] as number;
 	const top = hi[last] as number;
