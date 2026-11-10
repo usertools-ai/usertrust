@@ -201,7 +201,7 @@ describe("share values, legend, percentages and centre", () => {
 		expect(legendOf(valuesOf(4), 2).other?.count).toBe(2);
 	});
 
-	it("reads one breakdown idle, and one bucket at a moment, in the breakdown's key order", () => {
+	it("lists the keys that spent in the range, in spend order, idle and at a bucket alike", () => {
 		const rows = [
 			row("a", 0, 50),
 			row("a", 2, 1),
@@ -211,16 +211,19 @@ describe("share values, legend, percentages and centre", () => {
 			row("c", 9, 2),
 			row("d", 3, 9),
 			row("a", 2, 100, "info"),
+			row("z", 2, 0),
 		];
 		const bd = breakdown(rows, WIN, "lane");
-		expect(bd.keys).toEqual(["a", "b", "d", "c"]);
+		// "z" made a call that cost nothing: the breakdown counts it, the window does not list it.
+		expect(bd.keys).toEqual(["a", "b", "d", "c", "z"]);
 		const idle = shareValues(bd, null, null);
-		expect(idle.keys).toEqual(bd.keys);
+		expect(idle.keys).toEqual(["a", "b", "d", "c"]);
 		expect(idle.values).toEqual([51, 37, 9, 6]);
 		expect(idle.total).toBe(bd.totalUt);
 		const buckets = categoryRows(rows, WIN, "lane", HOUR);
 		const at2 = shareValues(bd, buckets, 2);
-		expect(at2.keys).toEqual(bd.keys);
+		// The range fixes the list: "d" spent nothing in bucket 2 and still reads 0 there.
+		expect(at2.keys).toEqual(idle.keys);
 		expect(at2.values).toEqual([1, 7, 0, 4]);
 		expect(at2.total).toBe(12);
 		expect(shareValues(bd, buckets, null)).toEqual(idle);
@@ -255,11 +258,23 @@ describe("share values, legend, percentages and centre", () => {
 		expect(formatShare(0.4256, 1)).toBe("42.6%");
 	});
 
+	it("never prints a share that is not all of it as 100%", () => {
+		expect(formatShare(0.9996, 0)).toBe(">99%");
+		expect(formatShare(0.9996, 1)).toBe(">99.9%");
+		expect(formatShare(0.996, 0)).toBe(">99%");
+		expect(formatShare(0.99951, 1)).toBe(">99.9%");
+		expect(formatShare(0.994999, 0)).toBe("99%");
+		expect(formatShare(0.994999, 1)).toBe("99.5%");
+		expect(formatShare(0.9994, 1)).toBe("99.9%");
+		expect(formatShare(1, 0)).toBe("100%");
+		expect(formatShare(1, 1)).toBe("100.0%");
+	});
+
 	it("shows no spend as $0.00 and an empty legend, with no NaN", () => {
 		const empty = shareValues(breakdown([], WIN, "lane"), null, null);
 		expect(empty).toEqual({ keys: [], values: [], total: 0 });
 		expect(legendOf(empty)).toEqual({ rows: [], other: null });
-		// A category whose calls cost nothing: it is listed, at a share of 0, never NaN.
+		// A bucket with no spend at all: the range's keys stay listed, at a share of 0, never NaN.
 		expect(legendOf({ keys: ["a"], values: [0], total: 0 }).rows).toEqual([
 			{ key: "a", spendUt: 0, share: 0 },
 		]);

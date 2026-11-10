@@ -196,7 +196,7 @@ export function blendArcs(
 /** What the legend says when nothing in the range is spend. */
 export const SHARE_EMPTY = "No spend in this range";
 
-/** The values the window shows, one per key, in the breakdown's order; `total` is their sum. */
+/** The values the window shows, one per key that spent in the range, in spend order; `total` is their sum. */
 export interface ShareValues {
 	keys: string[];
 	values: number[];
@@ -205,14 +205,15 @@ export interface ShareValues {
 
 /**
  * The breakdown's spend per key over its window, or, at a moment, bucket `k` of `buckets` (`categoryRows` over the
- * same rows and window). The keys and their order are always the breakdown's, so a moment never reorders the ring.
+ * same rows and window). The keys are the breakdown's that spent more than zero in the range, in its order, at a
+ * moment too: a moment never reorders the ring, and a key that spent nothing in that bucket reads 0.
  */
 export function shareValues(
 	bd: Breakdown,
 	buckets: ReadonlyMap<string, Float64Array> | null,
 	k: number | null,
 ): ShareValues {
-	const keys = [...bd.keys];
+	const keys = bd.keys.filter((key) => (bd.byKey.get(key)?.spendUt ?? 0) > 0);
 	const values = keys.map((key) =>
 		buckets === null || k === null
 			? (bd.byKey.get(key)?.spendUt ?? 0)
@@ -278,17 +279,20 @@ export function legendOf(
 }
 
 /**
- * A share as a percent, whole or to one decimal. A nonzero share never prints as zero: it reads "<1%" ("<0.1%").
+ * A share as a percent, whole or to one decimal. A nonzero share never prints as zero: it reads "<1%" ("<0.1%"); and
+ * a share short of all of it never prints as all of it: it reads ">99%" (">99.9%").
  */
 export function formatShare(share: number, decimals: 0 | 1): string {
 	if (share === 0) return decimals === 0 ? "0%" : "0.0%";
 	const pct = share * 100;
 	if (decimals === 0) {
 		const whole = Math.round(pct);
-		return whole === 0 ? "<1%" : `${whole}%`;
+		if (whole === 0) return "<1%";
+		return share < 1 && whole >= 100 ? ">99%" : `${whole}%`;
 	}
 	const tenth = pct.toFixed(1);
-	return Number(tenth) === 0 ? "<0.1%" : `${tenth}%`;
+	if (Number(tenth) === 0) return "<0.1%";
+	return share < 1 && Number(tenth) >= 100 ? ">99.9%" : `${tenth}%`;
 }
 
 /** A legend row's tooltip: its dollars and share, when they were read, and what a click does. */
