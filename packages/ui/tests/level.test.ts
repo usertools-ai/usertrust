@@ -137,7 +137,7 @@ describe("level", () => {
 		expect(scopeOf("provider", "lane", rows, WIN)).toBe("claude-x");
 		const { model: _drop, ...noModel } = row();
 		expect(scopeOf("provider", "lane", [noModel], WIN)).toBe("unknown");
-		expect(scopeOf("provider", "lane", [], WIN)).toBe("unknown");
+		expect(scopeOf("provider", "lane", [], WIN)).toBeNull();
 		expect(scopeOf("lane", "lane", rows, WIN)).toBeNull();
 		expect(scopeOf("provider", "provider", rows, WIN)).toBeNull();
 		expect(scopeOf("provider", "model", [], WIN)).toBeNull();
