@@ -14,24 +14,41 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Dimension } from "../src/shared/breakdown.js";
 import { rankColors } from "../src/shared/colors.js";
 import {
+	atWhen,
 	FADE,
 	FADE_HOT,
+	formatShare,
 	GROW,
 	HALF_GAP,
 	INNER,
+	legendOf,
+	legendTitle,
 	OUTLINE_INSET,
 	RIM_W,
 	RIM_W_HOT,
 	rimPath,
 	ringPath,
 	ringShape,
+	SHARE_EMPTY,
+	type ShareValues,
 	VB,
 } from "../src/shared/donut.js";
 import { EMPTY_FILTERS } from "../src/shared/filters.js";
+import { formatUsdTotal } from "../src/shared/format.js";
 import { categoryBus } from "../src/shared/hover-bus.js";
 import { appExport } from "./helpers/day-one.js";
 import { withDesk } from "./helpers/desk.js";
-import { attr, innerOf, shareData, spend, tagsOf } from "./helpers/share.js";
+import {
+	attr,
+	CHART,
+	HOUR,
+	innerOf,
+	legendFigures,
+	shareData,
+	spend,
+	tagsOf,
+	text,
+} from "./helpers/share.js";
 
 const SHARE = join(import.meta.dirname, "..", "src", "app", "windows", "share");
 const source = (file: string): string => readFileSync(join(SHARE, file), "utf-8");
@@ -45,12 +62,24 @@ interface DonutProps {
 	ariaLabel: string;
 }
 
+interface LegendProps {
+	values: ShareValues;
+	level: Dimension;
+	decimals: 0 | 1;
+	whenLabel: string;
+	startMs: number | null;
+}
+
 let ShareDonut: React.ComponentType<DonutProps>;
 let amountSize: (chars: number) => number;
+let ShareLegend: React.ComponentType<LegendProps>;
+let DimSwitch: React.ComponentType;
 
 beforeAll(async () => {
 	ShareDonut = await appExport("windows/share/donut", "ShareDonut");
 	amountSize = await appExport("windows/share/donut", "amountSize");
+	ShareLegend = await appExport("windows/share/legend", "ShareLegend");
+	DimSwitch = await appExport("windows/share/dim-switch", "DimSwitch");
 });
 
 afterEach(() => {
@@ -370,5 +399,304 @@ describe("the ring", () => {
 		expect(source("donut.tsx")).not.toMatch(
 			/performance\.|document\.|window\.|matchMedia|requestAnimationFrame/,
 		);
+	});
+});
+
+/** `n` categories `k0`..., the first the highest. */
+function valuesOf(n: number): ShareValues {
+	const keys = Array.from({ length: n }, (_, i) => `k${i}`);
+	const values = keys.map((_, i) => (n - i) * 1_000 + 3);
+	return { keys, values, total: values.reduce((a, v) => a + v, 0) };
+}
+
+const two = (a: number, b: number, names: [string, string] = ["a", "b"]): ShareValues => ({
+	keys: names,
+	values: [a, b],
+	total: a + b,
+});
+
+function legend(values: ShareValues, over: Partial<LegendProps> = {}): React.ReactElement {
+	return createElement(ShareLegend, {
+		values,
+		level: "lane",
+		decimals: 0,
+		whenLabel: atWhen(null),
+		startMs: null,
+		...over,
+	});
+}
+
+/** The printed percentages, in row order. */
+function percents(html: string): string[] {
+	return [...html.matchAll(/<span class="p">(.*?)<\/span>/g)].map((m) => text(m[1] ?? ""));
+}
+
+describe("the legend", () => {
+	it("lists the top five and folds the rest into one Other line only when two or more are left", async () => {
+		const eight = await withDesk(legend(valuesOf(8)));
+		expect(tagsOf(eight, "ut-sh-row")).toHaveLength(5);
+		expect(tagsOf(eight, "ut-sh-row").every((t) => t.startsWith("<button"))).toBe(true);
+		const other = tagsOf(eight, "ut-sh-other");
+		expect(other).toHaveLength(1);
+		expect(other[0]).toMatch(/^<li/);
+		expect(attr(other[0] ?? "", "data-fold")).toBe("true");
+		const figures = legendFigures(eight);
+		expect(figures.map(([key]) => key)).toEqual(["k0", "k1", "k2", "k3", "k4", "Other"]);
+		expect(figures[5]?.[1]).toBe(3_003 + 2_003 + 1_003);
+		// The folded line is not a control: nothing in it can be clicked.
+		const folded = eight.slice(eight.indexOf('class="ut-sh-other"'));
+		expect(folded).not.toContain("<button");
+		expect(text(folded)).toContain("Other");
+
+		const seven = await withDesk(legend(valuesOf(7)));
+		expect(tagsOf(seven, "ut-sh-row")).toHaveLength(5);
+		expect(tagsOf(seven, "ut-sh-other")).toHaveLength(1);
+		const six = await withDesk(legend(valuesOf(6)));
+		expect(tagsOf(six, "ut-sh-row")).toHaveLength(6);
+		expect(tagsOf(six, "ut-sh-other")).toHaveLength(0);
+	});
+
+	it("titles the Other line with its count, its dollars and its share to one decimal, even in whole percents", async () => {
+		const v = valuesOf(8);
+		const html = await withDesk(legend(v, { decimals: 0, whenLabel: "this range" }));
+		const other = legendOf(v).other;
+		expect(other).not.toBeNull();
+		if (other === null) return;
+		const title = attr(tagsOf(html, "ut-sh-other")[0] ?? "", "title");
+		expect(title).toBe(
+			`${other.count} more: ${formatUsdTotal(other.spendUt)}, ${formatShare(other.share, 1)} this range`,
+		);
+		expect(formatShare(other.share, 1)).not.toBe(formatShare(other.share, 0));
+	});
+
+	it("reads a bucket start that is not a finite time as the range, without throwing", async () => {
+		const html = await withDesk(legend(valuesOf(3), { startMs: Number.NaN }));
+		expect(attr(tagsOf(html, "ut-sh-legend")[0] ?? "", "data-when")).toBe("range");
+	});
+
+	it("prints the Other line's dollars and percent, whole when small and one decimal when filled", async () => {
+		const v = valuesOf(8);
+		const other = legendOf(v).other;
+		expect(other).not.toBeNull();
+		if (other === null) return;
+		for (const decimals of [0, 1] as const) {
+			const html = await withDesk(legend(v, { decimals }));
+			expect(innerOf(html, /<span class="v"[^>]*data-fold="true"[^>]*>/)).toBe(
+				formatUsdTotal(other.spendUt),
+			);
+			expect(percents(html).at(-1)).toBe(formatShare(other.share, decimals));
+			expect(percents(html).at(-1)).not.toBe(
+				formatShare(legendOf(v).rows[0]?.share ?? 0, decimals),
+			);
+		}
+		expect(formatShare(other.share, 0)).not.toBe(formatShare(other.share, 1));
+		expect(formatUsdTotal(other.spendUt)).not.toBe(formatUsdTotal(0));
+	});
+
+	it("paints each row's swatch from the level's colour map, a different colour for each", async () => {
+		const swatches = (html: string, keys: string[]): string[] =>
+			keys.map(
+				(k) =>
+					new RegExp(`data-key="${k}"[^>]*><i style="background:([^"]*)"`).exec(html)?.[1] ?? "",
+			);
+		const lanes = await withDesk(legend(two(500, 300)), { data: shareData(ROWS) });
+		const laneColors = rankColors(ROWS, "lane");
+		expect(swatches(lanes, ["a", "b"])).toEqual([laneColors.of("a"), laneColors.of("b")]);
+		expect(laneColors.of("a")).not.toBe(laneColors.of("b"));
+		// The level picks the map: the same key is coloured by the model ranking, not the lane one.
+		const modelKey = "claude-sonnet-5";
+		const models = await withDesk(
+			legend(two(500, 300, [modelKey, "other-model"]), { level: "model" }),
+			{
+				data: shareData(ROWS),
+			},
+		);
+		const modelColors = rankColors(ROWS, "model");
+		expect(swatches(models, [modelKey])).toEqual([modelColors.of(modelKey)]);
+		expect(modelColors.of(modelKey)).not.toBe(laneColors.of(modelKey));
+	});
+
+	it("says a hover is on only for this level and a key the legend holds, and presses only the selected row", async () => {
+		const hot = async (hover: { dim: Dimension; key: string }): Promise<string | null> => {
+			categoryBus.set({ ...hover, from: "spend" });
+			const html = await withDesk(legend(valuesOf(3)));
+			return attr(tagsOf(html, "ut-sh-legend")[0] ?? "", "data-hot");
+		};
+		expect(await hot({ dim: "model", key: "k0" })).toBe("false");
+		expect(await hot({ dim: "lane", key: "not-in-the-legend" })).toBe("false");
+		expect(await hot({ dim: "model", key: "not-in-the-legend" })).toBe("false");
+		expect(await hot({ dim: "lane", key: "k0" })).toBe("true");
+		// A hovered row is lit but not pressed: only a selection presses.
+		categoryBus.set({ dim: "lane", key: "k2", from: "spend" });
+		const html = await withDesk(legend(valuesOf(3)));
+		expect(tagsOf(html, "ut-sh-row").map((r) => attr(r, "aria-pressed"))).toEqual([
+			"false",
+			"false",
+			"false",
+		]);
+	});
+
+	it("shows the no-spend line only when there are no rows", async () => {
+		const html = await withDesk(legend(valuesOf(3)));
+		expect(html).not.toContain("ut-sh-none");
+		expect(html).not.toContain(SHARE_EMPTY);
+	});
+
+	it("says which percent setting it is drawn with, for the sheet's wider column", async () => {
+		const whole = await withDesk(legend(valuesOf(3), { decimals: 0 }));
+		expect(attr(tagsOf(whole, "ut-sh-legend")[0] ?? "", "data-decimals")).toBe("0");
+		const tenth = await withDesk(legend(valuesOf(3), { decimals: 1 }));
+		expect(attr(tagsOf(tenth, "ut-sh-legend")[0] ?? "", "data-decimals")).toBe("1");
+	});
+
+	it("adds up exactly: every row and Other sum to the total", async () => {
+		for (const n of [1, 6, 7, 8, 12]) {
+			const v = valuesOf(n);
+			const html = await withDesk(legend(v));
+			expect(legendFigures(html).reduce((a, [, ut]) => a + ut, 0)).toBe(v.total);
+		}
+	});
+
+	it("prints each figure as dollars, on the element that carries its exact value", async () => {
+		const html = await withDesk(legend(two(15_000, 5_000)));
+		const fig = /<span class="v"[^>]*data-key="a"[^>]*>/.exec(html)?.[0] ?? "";
+		expect(attr(fig, "data-fig")).toBe("share.legend");
+		expect(attr(fig, "data-ut")).toBe("15000");
+		expect(innerOf(html, /<span class="v"[^>]*data-key="a"[^>]*>/)).toBe("$1.50");
+	});
+
+	it("prints whole percentages small and one decimal filled, and never 0% for a category that spent", async () => {
+		expect(percents(await withDesk(legend(two(577, 423))))).toEqual(["58%", "42%"]);
+		expect(percents(await withDesk(legend(two(577, 423), { decimals: 1 })))).toEqual([
+			"57.7%",
+			"42.3%",
+		]);
+		expect(percents(await withDesk(legend(two(9_980, 20))))).toEqual([">99%", "<1%"]);
+		expect(percents(await withDesk(legend(two(99_996, 4), { decimals: 1 })))).toEqual([
+			">99.9%",
+			"<0.1%",
+		]);
+		// At a moment a key with nothing in the bucket keeps its row and reads zero.
+		const zero = await withDesk(legend(two(500, 0)));
+		expect(percents(zero)).toEqual(["100%", "0%"]);
+		expect(innerOf(zero, /<span class="v"[^>]*data-key="b"[^>]*>/)).toBe("$0.00");
+	});
+
+	it("marks the selected row pressed and dims the others; with no selection every row is at rest", async () => {
+		const rest = await withDesk(legend(valuesOf(3)));
+		const rows = tagsOf(rest, "ut-sh-row");
+		expect(rows.map((r) => attr(r, "data-lit"))).toEqual(["rest", "rest", "rest"]);
+		expect(rows.map((r) => attr(r, "aria-pressed"))).toEqual(["false", "false", "false"]);
+		expect(attr(tagsOf(rest, "ut-sh-legend")[0] ?? "", "data-hot")).toBe("false");
+
+		const picked = await withDesk(legend(valuesOf(3)), {
+			view: { filters: { ...EMPTY_FILTERS, actors: ["k1"] } },
+		});
+		const lit = tagsOf(picked, "ut-sh-row");
+		expect(lit.map((r) => attr(r, "data-key"))).toEqual(["k0", "k1", "k2"]);
+		expect(lit.map((r) => attr(r, "data-lit"))).toEqual(["dim", "selected", "dim"]);
+		expect(lit.map((r) => attr(r, "aria-pressed"))).toEqual(["false", "true", "false"]);
+		// The level decides which filter field is the selection: a lane filter lights nothing at the model level.
+		const models = await withDesk(legend(valuesOf(3), { level: "model" }), {
+			view: { filters: { ...EMPTY_FILTERS, actors: ["k1"] } },
+		});
+		expect(tagsOf(models, "ut-sh-row").every((r) => attr(r, "data-lit") === "rest")).toBe(true);
+	});
+
+	it("lights the hovered row and says a hover is on", async () => {
+		categoryBus.set({ dim: "lane", key: "k2", from: "spend" });
+		const html = await withDesk(legend(valuesOf(3)));
+		expect(tagsOf(html, "ut-sh-row").map((r) => attr(r, "data-lit"))).toEqual([
+			"rest",
+			"rest",
+			"hover",
+		]);
+		expect(attr(tagsOf(html, "ut-sh-legend")[0] ?? "", "data-hot")).toBe("true");
+	});
+
+	it("keeps a long name on one line, whole in its title, and titles the row with its figures and when", async () => {
+		const long = `claude-${"x".repeat(53)}`;
+		expect(long).toHaveLength(60);
+		const v = two(577, 423, [long, "b"]);
+		const idle = await withDesk(legend(v, { level: "model" }));
+		const row = tagsOf(idle, "ut-sh-row")[0] ?? "";
+		expect(attr(row, "title")).toBe(legendTitle(long, 577, 0.577, "this range"));
+		expect(attr(row, "title")).toContain("57.7% this range. Click to filter the desk to it.");
+		const first = idle.slice(idle.indexOf("<button"), idle.indexOf("</button>"));
+		expect(first.match(/<span class="n"/g)).toHaveLength(1);
+		expect(attr(/<span class="n"[^>]*>/.exec(first)?.[0] ?? "", "title")).toBe(long);
+		expect(attr(tagsOf(idle, "ut-sh-legend")[0] ?? "", "data-when")).toBe("range");
+
+		const startMs = CHART.startMs + 2 * HOUR;
+		const pinned = await withDesk(
+			legend(v, { level: "model", startMs, whenLabel: atWhen(startMs) }),
+		);
+		expect(attr(tagsOf(pinned, "ut-sh-row")[0] ?? "", "title")).toBe(
+			legendTitle(long, 577, 0.577, atWhen(startMs)),
+		);
+		expect(attr(tagsOf(pinned, "ut-sh-row")[0] ?? "", "title")).toMatch(
+			/ at \d{4}-\d\d-\d\d \d\d:\d\dZ\. /,
+		);
+		expect(attr(tagsOf(pinned, "ut-sh-legend")[0] ?? "", "data-when")).toBe(
+			new Date(startMs).toISOString(),
+		);
+	});
+
+	it("says there is no spend, from the one constant, with no NaN", async () => {
+		const html = await withDesk(legend({ keys: [], values: [], total: 0 }));
+		const none = tagsOf(html, "ut-sh-none");
+		expect(none).toHaveLength(1);
+		expect(innerOf(html, /<li class="ut-sh-none"[^>]*>/)).toBe(SHARE_EMPTY);
+		expect(tagsOf(html, "ut-sh-row")).toHaveLength(0);
+		expect(html).not.toMatch(/NaN/);
+		// The range's keys with nothing in this bucket: zeros, never NaN.
+		const quiet = await withDesk(legend({ keys: ["a", "b"], values: [0, 0], total: 0 }));
+		expect(percents(quiet)).toEqual(["0%", "0%"]);
+		expect(quiet).not.toMatch(/NaN/);
+	});
+
+	it("tells a real category named Other from the folded line", async () => {
+		const v = valuesOf(8);
+		v.keys[1] = "Other";
+		const html = await withDesk(legend(v, { level: "provider" }));
+		const real = tagsOf(html, "ut-sh-row").find((r) => attr(r, "data-key") === "Other") ?? "";
+		expect(real).toMatch(/^<button/);
+		expect(attr(real, "data-fold")).toBeNull();
+		const figs = [...html.matchAll(/<span class="v"[^>]*data-key="Other"[^>]*>/g)].map((m) => m[0]);
+		expect(figs.map((f) => attr(f, "data-fold"))).toEqual([null, "true"]);
+	});
+
+	it("has no modifier-key path: a click is one plain toggle", () => {
+		expect(source("legend.tsx")).not.toMatch(/shiftKey|metaKey|ctrlKey|altKey/);
+		expect(source("legend.tsx")).toMatch(/toggleCategory\(filters, level, row\.key, false\)/);
+	});
+});
+
+describe("the dimension switch", () => {
+	const buttons = (html: string): Array<[string, string | null]> =>
+		[...html.matchAll(/<button[^>]*>(.*?)<\/button>/g)].map((m) => [
+			text(m[1] ?? ""),
+			attr(m[0].slice(0, m[0].indexOf(">") + 1), "aria-pressed"),
+		]);
+
+	it("offers the five dimensions in order, Lane pressed by default", async () => {
+		const html = await withDesk(createElement(DimSwitch));
+		const group = tagsOf(html, "ut-seg")[0] ?? "";
+		expect(attr(group, "role")).toBe("group");
+		expect(attr(group, "aria-label")).toBe("Share by");
+		expect(buttons(html)).toEqual([
+			["Lane", "true"],
+			["Role (declared)", "false"],
+			["Model", "false"],
+			["Kind", "false"],
+			["Provider", "false"],
+		]);
+	});
+
+	it("presses the chosen dimension and no other", async () => {
+		const html = await withDesk(createElement(DimSwitch), { view: { dim: "provider" } });
+		expect(buttons(html).filter(([, pressed]) => pressed === "true")).toEqual([
+			["Provider", "true"],
+		]);
 	});
 });

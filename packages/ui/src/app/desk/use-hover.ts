@@ -41,8 +41,20 @@ export function useHoverMoment(self: string): { ms: number; span: [number, numbe
 	);
 }
 
+/** The category most recently handed to `setHoverCategory`, which the bus shows only when the frame flushes. */
+let latestCategory: HoverCategory | null = null;
+
 export function setHoverCategory(c: HoverCategory | null): void {
+	latestCategory = c;
 	publishCategory(c);
+}
+
+/**
+ * The hover that is, or is about to be, on the bus: the last one set, including one still waiting for its frame. A
+ * writer that must know whether a hover is its own reads this, not `categoryBus.get()`, which lags by a frame.
+ */
+export function latestHoverCategory(): HoverCategory | null {
+	return latestCategory;
 }
 
 export function useHoverCategory(): { dim: Dimension; key: string } | null {
