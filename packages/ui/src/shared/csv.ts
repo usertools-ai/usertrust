@@ -9,6 +9,11 @@
  * sum them without coercion; every free-text cell is formula-neutralized
  * (CSV injection) because `actor`/`model` originate in caller-supplied event
  * data. CRLF line endings — Excel's expectation.
+ *
+ * A text cell is defanged when its first character that is not whitespace is
+ * =, +, - or @, or when its first character is a tab or a carriage return.
+ * Only such cells differ from an export that defanged a leading =, +, - or @
+ * alone: every other cell is written byte for byte as before.
  */
 
 import type { AtPayload } from "./api.js";
@@ -59,9 +64,13 @@ export const CSV_HEADERS = [
 	// what it holds, so a reader of an older export keeps working. `tests/csv.test.ts` pins the whole header as text.
 ] as const;
 
-/** Leading =,+,-,@ make a cell executable in Excel/Sheets — defang with a quote. */
+/**
+ * A cell Excel/Sheets may run: =,+,-,@ first, or first after leading whitespace (JavaScript's `\s`, the broad set,
+ * line feeds and no-break spaces included), or a tab or carriage return first, whatever follows. Defang with a quote.
+ * A leading line feed before ordinary text is left as it is: it is quoted for the line break already.
+ */
 function neutralize(value: string): string {
-	return /^[=+\-@]/.test(value) ? `'${value}` : value;
+	return /^(?:[\t\r]|\s*[=+\-@])/.test(value) ? `'${value}` : value;
 }
 
 function cell(value: string | undefined): string {

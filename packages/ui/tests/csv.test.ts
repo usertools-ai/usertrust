@@ -464,3 +464,123 @@ describe("the charge columns", () => {
 		expect(line.split(",").slice(18)).not.toContain("75");
 	});
 });
+
+describe("the formula guard, from the record", () => {
+	const TS = "2026-07-27T13:45:02.000Z";
+	type Text = { actor?: string; model?: string; job?: string; pricingTableVersion?: string };
+
+	/** The export's one data row for a record that carries these text fields, read by the real reader. */
+	function exported(text: Text): string {
+		const data: Record<string, unknown> = { model: text.model ?? "m" };
+		if (text.job !== undefined) data.job = text.job;
+		if (text.pricingTableVersion !== undefined) data.pricingTableVersion = text.pricingTableVersion;
+		const event: PersistedAuditEvent = {
+			id: "id-1",
+			timestamp: TS,
+			previousHash: "0".repeat(64),
+			hash: "a".repeat(64),
+			kind: "llm_call",
+			actor: text.actor ?? "local",
+			data,
+			sequence: 1,
+		};
+		const rows = toLedgerRows([event], { valid: true, breakIndex: null }, undefined, 0);
+		// Everything after the header and its CRLF: a cell may hold a line break of its own.
+		return toCsv(rows).slice(CSV_HEADERS.join(",").length + 2);
+	}
+
+	/** The row the export should write: these cells as written in the file, every other cell as the record gives it. */
+	function line(cells: Partial<Record<(typeof CSV_HEADERS)[number], string>>): string {
+		const base: Partial<Record<(typeof CSV_HEADERS)[number], string>> = {
+			seq: "1",
+			timestamp: TS,
+			kind: "llm_call",
+			actor: "local",
+			model: "m",
+			provider: "unknown",
+			status: "unknown",
+			integrity: "chained",
+			event_id: "id-1",
+			hash: "a".repeat(64),
+			previous_hash: "0".repeat(64),
+		};
+		return CSV_HEADERS.map((name) => ({ ...base, ...cells })[name] ?? "").join(",");
+	}
+
+	// Ordinary text, and how the export has always written it. None of these may change by a single byte.
+	const ORDINARY: [string, string][] = [
+		["local", "local"],
+		["2026-11-02", "2026-11-02"],
+		// Leading spaces before ordinary text, and cells of spaces only.
+		["  hello", "  hello"],
+		[" ", " "],
+		["   ", "   "],
+		[" hello", " hello"],
+		// A formula character after the first ordinary character.
+		["a=b", "a=b"],
+		["1+1", "1+1"],
+		["x-y", "x-y"],
+		["e@mail", "e@mail"],
+		["hello =cmd()", "hello =cmd()"],
+		// A tab or carriage return that is not the first character.
+		["hello\tworld", "hello\tworld"],
+		[" \thello", " \thello"],
+		["a\rb", '"a\rb"'],
+		[" \rhello", '" \rhello"'],
+		// A line feed, first or later, before ordinary text: quoted for the line break, as it always was.
+		["\nhello", '"\nhello"'],
+		["line\nbreak", '"line\nbreak"'],
+		['ops,"night"', '"ops,""night"""'],
+	];
+
+	it("ordinary text prints exactly as it always has, in every text column the record fills", () => {
+		for (const [value, written] of ORDINARY) {
+			expect(exported({ actor: value, model: value, job: value, pricingTableVersion: value })).toBe(
+				line({ actor: written, model: written, job: written, pricing_table_version: written }),
+			);
+		}
+	});
+
+	// Text a spreadsheet would run: a formula character first, or first after whitespace, or a tab or carriage return
+	// first, whatever follows.
+	const FORMULAS = ["=cmd()", "+1", "-1", "@SUM(A1)"];
+	const BEFORE = ["", " ", "   ", "\t", "\r", "\n", " \t ", "\r\n", " "];
+	const HOSTILE = [
+		...FORMULAS.flatMap((formula) => BEFORE.map((before) => `${before}${formula}`)),
+		...["\t", "\r"].flatMap((first) => [
+			`${first}hello`,
+			`${first} hello`,
+			`${first}${first}hello`,
+			`${first}`,
+			`${first}=1+1`,
+		]),
+	];
+	const COLUMNS = [
+		["actor", "actor"],
+		["model", "model"],
+		["job", "job"],
+		["pricingTableVersion", "pricing_table_version"],
+	] as const;
+
+	it("each such cell is written with a leading apostrophe, quoted, in every text column the record fills", () => {
+		for (const [field, column] of COLUMNS) {
+			for (const value of HOSTILE) {
+				expect(exported({ [field]: value })).toBe(line({ [column]: `"'${value}"` }));
+			}
+		}
+	});
+
+	it("a formula character after leading whitespace is defanged like one at the start", () => {
+		expect(exported({ actor: "  =cmd()" })).toBe(line({ actor: `"'  =cmd()"` }));
+		expect(exported({ model: "\t=1+1" })).toBe(line({ model: `"'\t=1+1"` }));
+		expect(exported({ job: " @SUM(A1)" })).toBe(line({ job: `"' @SUM(A1)"` }));
+		expect(exported({ pricingTableVersion: " -1" })).toBe(
+			line({ pricing_table_version: `"' -1"` }),
+		);
+	});
+
+	it("a cell that starts with a tab or a carriage return is defanged, whatever follows", () => {
+		expect(exported({ actor: "\thello" })).toBe(line({ actor: `"'\thello"` }));
+		expect(exported({ job: "\rhello" })).toBe(line({ job: `"'\rhello"` }));
+	});
+});
