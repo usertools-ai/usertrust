@@ -4,12 +4,6 @@
 /* The Share window's rules (prefix ut-sh-). Scoped overrides of the older classes use [data-win="share"]. */
 
 @layer components {
-	/* Day one: the three lists stack in one column, so they fit a window a third of the desk wide. The window part of
-	   this PR stack removes this rule when it replaces the lists. */
-	[data-win="share"] .ut-split {
-		grid-template-columns: minmax(0, 1fr);
-	}
-
 	/* The switch, then the ring beside its legend; the legend drops under the ring when the window is narrow. */
 	.ut-sh {
 		flex: 1 1 auto;
