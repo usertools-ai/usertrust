@@ -7,7 +7,7 @@
  * figure in the ring's centre. The buttons are the keyboard route to the filter a slice's click sets.
  */
 
-import { useCallback, useEffect, useRef } from "react";
+import { useEffect, useMemo } from "react";
 import type { Dimension } from "../../../shared/breakdown.js";
 import { toggleCategory } from "../../../shared/desk-filters.js";
 import {
@@ -18,14 +18,14 @@ import {
 	type ShareValues,
 } from "../../../shared/donut.js";
 import { formatUsdTotal } from "../../../shared/format.js";
-import { categoryBus } from "../../../shared/hover-bus.js";
 import {
 	setHoverCategory,
 	useDeskData,
 	useFilters,
 	useHoverCategory,
 } from "../../desk/desk-state.js";
-import { isOurs, LEGEND_FROM, rowToShow } from "./legend-hover.js";
+import { latestHoverCategory } from "../../desk/use-hover.js";
+import { createHoverOwner } from "./legend-hover.js";
 import { useLitOf } from "./use-lit-at.js";
 
 /** The folded line's name. It is not a category: its figure carries `data-fold`. */
@@ -51,60 +51,16 @@ export function ShareLegend(props: {
 	const hot = hover !== null && hover.dim === level && values.keys.includes(hover.key);
 	const when =
 		startMs === null || !Number.isFinite(startMs) ? "range" : new Date(startMs).toISOString();
-	// The hover this legend published, and which of its rows the pointer and the keyboard focus are on. The legend
-	// clears only a hover it published itself, so a hover another window or the ring set is never wiped by a blur or
-	// a pointer-leave here; and when one of the two leaves while the other is still on a row, that row is shown.
-	const published = useRef<string | null>(null);
-	const pointerRow = useRef<string | null>(null);
-	const focusRow = useRef<string | null>(null);
-	const publish = useCallback(
-		(key: string | null): void => {
-			if (key !== null) {
-				published.current = key;
-				setHoverCategory({ dim: level, key, from: LEGEND_FROM });
-				return;
-			}
-			const ours = isOurs(categoryBus.get(), level, published.current);
-			published.current = null;
-			if (ours) setHoverCategory(null);
-		},
+	// The legend's own hover (see `legend-hover.ts`): it clears only a hover it set itself.
+	const owner = useMemo(
+		() => createHoverOwner({ set: setHoverCategory, latest: latestHoverCategory }, level),
 		[level],
 	);
-	const settle = useCallback(
-		(): void => publish(rowToShow(pointerRow.current, focusRow.current)),
-		[publish],
-	);
-	const enter = (key: string) => () => {
-		pointerRow.current = key;
-		settle();
-	};
-	const leave = (): void => {
-		pointerRow.current = null;
-		settle();
-	};
-	const focus = (key: string) => () => {
-		focusRow.current = key;
-		settle();
-	};
-	const blur = (): void => {
-		focusRow.current = null;
-		settle();
-	};
+	const enter = (key: string) => () => owner.enter(key);
+	const focus = (key: string) => () => owner.focus(key);
 	const shown = rows.map((row) => row.key).join("\n");
-	useEffect(() => {
-		const gone = (k: string | null): boolean => k !== null && !shown.split("\n").includes(k);
-		if (gone(pointerRow.current)) pointerRow.current = null;
-		if (gone(focusRow.current)) focusRow.current = null;
-		if (published.current !== null && gone(published.current)) settle();
-	}, [shown, settle]);
-	useEffect(
-		() => () => {
-			pointerRow.current = null;
-			focusRow.current = null;
-			publish(null);
-		},
-		[publish],
-	);
+	useEffect(() => owner.rows(shown.split("\n")), [owner, shown]);
+	useEffect(() => () => owner.dispose(), [owner]);
 	return (
 		<ul className="ut-sh-legend" data-when={when} data-hot={hot} data-decimals={decimals}>
 			{rows.length === 0 && <li className="ut-sh-none">{SHARE_EMPTY}</li>}
@@ -120,9 +76,9 @@ export function ShareLegend(props: {
 							aria-pressed={lit === "selected"}
 							title={legendTitle(row.key, row.spendUt, row.share, whenLabel)}
 							onPointerEnter={enter(row.key)}
-							onPointerLeave={leave}
+							onPointerLeave={owner.leave}
 							onFocus={focus(row.key)}
-							onBlur={blur}
+							onBlur={owner.blur}
 							onClick={() => setFilters(toggleCategory(filters, level, row.key, false))}
 						>
 							<i style={{ background: colors.of(row.key) }} />
