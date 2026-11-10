@@ -633,6 +633,18 @@ describe("the Now window on a cut vault", () => {
 		expect(text(wordsOf(uncut))).toBe(NOW_COPY.rateUnusual);
 		const cutShort = await renderNow({ rows: short, summary: cut });
 		expect(text(wordsOf(cutShort))).toBe(NOW_COPY.rateUnknown);
+		// The line begins at the first whole hour listed, and says so; the uncut vault's line does not.
+		expect(cutShort).toContain(`${NOW_COPY.rateFromFirstWhole}`);
+		expect(uncut).not.toContain(NOW_COPY.rateFromFirstWhole);
+		expect(cutShort).toContain('data-fig="now.rate"');
+		// The cut falls inside the last hour: its spend is partial, so there is no figure.
+		const lateRow = spend("x", 167, 5_000, { ts: iso(END - 30 * 60_000) });
+		const inLast = await renderNow({ rows: [lateRow], summary: cut });
+		expect(inLast).not.toContain('data-fig="now.rate"');
+		expect(text(wordsOf(inLast))).toBe(NOW_COPY.rateUnknown);
+		expect(inLast).not.toContain("<circle");
+		// The same rows on a vault that is not cut are its own last hour's.
+		expect(await renderNow({ rows: [lateRow] })).toContain('data-fig="now.rate"');
 		// Held back over the 25 hours the range reads: the range is as on any vault.
 		const reaching = [...STEADY, spend("x", 167, 90_000)];
 		for (const over of [{}, { summary: cut }]) {

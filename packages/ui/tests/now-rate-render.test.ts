@@ -34,6 +34,7 @@ function view(
 		tail?: number[];
 		known?: boolean;
 		unusual?: boolean;
+		firstHour?: number;
 		banded?: number;
 		lo?: number;
 		hi?: number;
@@ -54,6 +55,7 @@ function view(
 		ratePerHourUt: hours[RATE_HOURS - 1] as number,
 		known,
 		unusual: over.unusual ?? false,
+		firstHour: over.firstHour ?? 0,
 		band: { mid: edge(0), lo: edge(over.lo ?? 0), hi: edge(over.hi ?? 0) },
 	};
 }
@@ -129,6 +131,91 @@ describe("Rate now", () => {
 		expect(of(false)).toContain('aria-busy="true"');
 		expect(of(true)).not.toContain("aria-busy");
 		expect(of(true)).toContain("<b>Rate now</b>");
+	});
+
+	describe("on a cut vault", () => {
+		const hoursOf = (html: string): number => (html.match(/ut-nw-line/g) ?? []).length;
+		const lineStart = (html: string): string =>
+			/class="ut-nw-line" d="M([\d.]+)/.exec(html)?.[1] ?? "";
+		const linePoints = (html: string): number =>
+			(/class="ut-nw-line" d="([^"]*)"/.exec(html)?.[1] ?? "").split(/[MCL]/).length - 1;
+
+		it("whole from the first hour of the line, it is drawn as ever, with its figure", () => {
+			const html = draw(view({ tail: [1_000, 2_000, 3_000], firstHour: RATE_HOURS - 24 }));
+			expect(html).toContain('aria-label="The past 24 hours, hour by hour');
+			expect(html).not.toContain(NOW_COPY.rateFromFirstWhole);
+			expect(html).toContain('data-fig="now.rate"');
+			expect(dots(html)).toBe(1);
+		});
+
+		it("draws the line only from the first whole hour listed, and says so in its name", () => {
+			const whole = draw(view({ tail: [1_000, 2_000, 3_000], firstHour: RATE_HOURS - 3 }));
+			const full = draw(view({ tail: [1_000, 2_000, 3_000] }));
+			expect(whole).toContain(`${LABEL}${NOW_COPY.rateFromFirstWhole}`);
+			expect(whole).toContain('data-fig="now.rate"');
+			expect(dots(whole)).toBe(1);
+			// Three whole hours: one line of three points, which begins at the third slot from the end, where the
+			// full line's twenty-four points begin at the first.
+			expect(hoursOf(whole)).toBe(1);
+			expect(linePoints(whole)).toBe(3);
+			expect(linePoints(full)).toBe(24);
+			expect(lineStart(whole)).toBe("86");
+			expect(lineStart(full)).toBe("2");
+			// Its last point is the same dot as ever.
+			expect(dot(whole)).toEqual(dot(full));
+		});
+
+		it("two whole hours are a line of two points and a dot", () => {
+			const two = draw(view({ tail: [1_000, 3_000], firstHour: RATE_HOURS - 2 }));
+			expect(hoursOf(two)).toBe(1);
+			expect(linePoints(two)).toBe(2);
+			expect(dots(two)).toBe(1);
+			expect(lineStart(two)).toBe("90");
+			expect(two).toContain(NOW_COPY.rateFromFirstWhole);
+		});
+
+		it("shades the usual range only over hours whose own 24 are whole", () => {
+			// The range is defined from 14 hours before the line; the cut leaves the 24 whole only for the last four.
+			const cutView = view({ banded: 38, firstHour: RATE_HOURS - 28, hi: 2_000, lo: 500 });
+			const uncutView = view({ banded: 38, hi: 2_000, lo: 500 });
+			const start = (html: string): string =>
+				/class="ut-nw-band" d="M([\d.]+)/.exec(html)?.[1] ?? "";
+			expect(start(draw(uncutView))).toBe("2.0");
+			expect(start(draw(cutView))).toBe("82.0");
+			// No hour of the band is whole: no band, and the name does not say there is one.
+			const none = draw(view({ banded: 38, firstHour: RATE_HOURS - 10, hi: 2_000, lo: 500 }));
+			expect(none).not.toContain("ut-nw-band");
+			expect(none).not.toContain("over the usual range");
+		});
+
+		it("with one whole hour it draws the dot and no line, and with none it draws neither and states no figure", () => {
+			const one = draw(view({ tail: [1_000], firstHour: RATE_HOURS - 1 }));
+			expect(hoursOf(one)).toBe(0);
+			expect(dots(one)).toBe(1);
+			expect(one).toContain('data-fig="now.rate"');
+			expect(one).toContain(NOW_COPY.rateFromFirstWhole);
+			const none = draw(view({ tail: [1_000], firstHour: RATE_HOURS, known: false }));
+			expect(hoursOf(none)).toBe(0);
+			expect(dots(none)).toBe(0);
+			expect(none).not.toContain("data-fig");
+			expect(text(none)).toContain("—");
+			expect(none).toContain(`title="${NOW_COPY.rateNotWhole}"`);
+			expect(text(none)).toContain(NOW_COPY.rateUnknown);
+			expect(text(none)).not.toContain("$");
+			// Nothing is drawn, so the name does not say where a line begins.
+			expect(none).not.toContain(NOW_COPY.rateFromFirstWhole);
+		});
+
+		it("the line's range is its whole hours', not the partial ones'", () => {
+			const spike = new Float64Array(RATE_HOURS);
+			spike[RATE_HOURS - 20] = 9_000;
+			const hours = Float64Array.from(spike);
+			hours[RATE_HOURS - 1] = 500;
+			const base = view({ firstHour: RATE_HOURS - 3 });
+			const html = draw({ ...base, hours, ratePerHourUt: 500 });
+			// The spike is before the first whole hour: it does not set the line's top, so the dot sits near the top.
+			expect(dot(html)?.at[1]).toBeLessThan(10);
+		});
 	});
 
 	it("is a fact of the grid, marked unusual or not", () => {

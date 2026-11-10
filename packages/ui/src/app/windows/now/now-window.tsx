@@ -19,7 +19,7 @@ import { applyFilters, isFiltering } from "../../../shared/filters.js";
 import { projectionOf } from "../../../shared/now-burn.js";
 import { NOW_COPY } from "../../../shared/now-copy.js";
 import { lastRecord, spendUpTo } from "../../../shared/now-lists.js";
-import { RANGE_REACH_MS, rateNow, reachesBack } from "../../../shared/now-rate.js";
+import { oldestHeldMs, rateNow } from "../../../shared/now-rate.js";
 import { useDeskData, useRange } from "../../desk/desk-state.js";
 import { useCategoryTint } from "../../desk/use-tint.js";
 import { Window } from "../../desk/window.js";
@@ -53,17 +53,11 @@ function NowSmall(): React.JSX.Element {
 	const last = useMemo(() => lastRecord(chartRows), [chartRows]);
 	// A whole-vault budget against a whole-vault pace: every row, whatever is filtered. Live only: a projection is
 	// of the vault now, not of a past position.
-	// On a cut vault the rows are only the newest: the pace is stated only when they reach back over the week, and the
-	// usual range only when they reach back over the hours it reads. The reach is of every row held, not of a filter's.
+	// On a cut vault the rows are only the newest: where the oldest of every row held falls (not a filter's) is where
+	// the rate's hours are whole from, and the pace is stated only when the rows reach back over the week.
 	const cut = summary?.truncated === true;
-	const rangeReached = useMemo(
-		() => !cut || reachesBack(rows, endMs, RANGE_REACH_MS),
-		[cut, rows, endMs],
-	);
-	const rate = useMemo(
-		() => rateNow(chartRows, endMs, rangeReached),
-		[chartRows, endMs, rangeReached],
-	);
+	const heldFromMs = useMemo(() => (cut ? oldestHeldMs(rows) : null), [cut, rows]);
+	const rate = useMemo(() => rateNow(chartRows, endMs, heldFromMs), [chartRows, endMs, heldFromMs]);
 	const projection = useMemo(
 		() => (at === null ? projectionOf(summary, rows, endMs, filtering, cut) : null),
 		[at, summary, rows, endMs, filtering, cut],

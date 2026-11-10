@@ -10,7 +10,7 @@ import {
 } from "../src/shared/now-copy.js";
 import {
 	HOUR_MS,
-	RANGE_REACH_MS,
+	oldestHeldMs,
 	RATE_HOURS,
 	rateNow,
 	rateWords,
@@ -187,51 +187,69 @@ describe("rateNow", () => {
 	});
 });
 
-describe("reachesBack", () => {
-	it("holds from a record exactly the span before the end, and not from one a millisecond after", () => {
-		expect(RANGE_REACH_MS).toBe(25 * HOUR_MS);
-		expect(reachesBack([llm(END - RANGE_REACH_MS, 1)], END, RANGE_REACH_MS)).toBe(true);
-		expect(reachesBack([llm(END - RANGE_REACH_MS + 1, 1)], END, RANGE_REACH_MS)).toBe(false);
-		expect(reachesBack([llm(END - HOUR_MS, 1), llm(END - 3 * HOUR_MS, 1)], END, 2 * HOUR_MS)).toBe(
-			true,
+describe("oldestHeldMs and reachesBack", () => {
+	it("reads the oldest record of any kind, wherever it sits in the list", () => {
+		const old = llm(END - 9 * HOUR_MS, 0, { kind: "tool_use" });
+		expect(oldestHeldMs([llm(END - HOUR_MS, 1), old, llm(END - 3 * HOUR_MS, 1)])).toBe(
+			END - 9 * HOUR_MS,
 		);
 	});
 
-	it("reads the oldest record of any kind, and is false with none or none readable", () => {
-		expect(
-			reachesBack(
-				[llm(END - HOUR_MS, 1), llm(END - 9 * HOUR_MS, 0, { kind: "tool_use" })],
-				END,
-				5 * HOUR_MS,
-			),
-		).toBe(true);
-		expect(reachesBack([], END, HOUR_MS)).toBe(false);
-		expect(reachesBack([llm(END - 9 * HOUR_MS, 1, { ts: "not a time" })], END, HOUR_MS)).toBe(
-			false,
+	it("is infinite with no record, or none whose time can be read, and passes over an unreadable one", () => {
+		expect(oldestHeldMs([])).toBe(Number.POSITIVE_INFINITY);
+		expect(oldestHeldMs([llm(END, 1, { ts: "not a time" })])).toBe(Number.POSITIVE_INFINITY);
+		expect(oldestHeldMs([llm(END, 1, { ts: "not a time" }), llm(END - HOUR_MS, 1)])).toBe(
+			END - HOUR_MS,
 		);
+	});
+
+	it("reaches back from a record exactly the span before the end, and not from one a millisecond after", () => {
+		expect(reachesBack([llm(END - 5 * HOUR_MS, 1)], END, 5 * HOUR_MS)).toBe(true);
+		expect(reachesBack([llm(END - 5 * HOUR_MS + 1, 1)], END, 5 * HOUR_MS)).toBe(false);
+		expect(reachesBack([], END, HOUR_MS)).toBe(false);
 	});
 });
 
 describe("rateNow on a cut vault", () => {
+	const START = END - RATE_HOURS * HOUR_MS;
 	// 40 steady hours, then the last hour 50 times larger: far above the usual range, where one is known.
 	const rows = withLastHour(steady(40, 1000), 50_000);
+	const held = (hoursBack: number): number => END - hoursBack * HOUR_MS;
 
-	it("gives no usual range when the rows do not reach back over the hours it reads, whatever they hold", () => {
-		const v = rateNow(rows, END, false);
-		expect(v.known).toBe(false);
-		expect(v.unusual).toBe(false);
-		expect(rateWords(v)).toBe(NOW_COPY.rateUnknown);
-		for (const a of [v.band.mid, v.band.lo, v.band.hi]) expect(a.every(Number.isNaN)).toBe(true);
-		// The hours themselves are the rows' own.
-		expect(v.ratePerHourUt).toBe(50_000);
-		expect(v.hours).toEqual(rateNow(rows, END).hours);
-	});
-
-	it("reads the range as before when they do, or when nothing says they are cut", () => {
+	it("is as before when nothing says it is cut", () => {
 		const v = rateNow(rows, END);
+		expect(v.firstHour).toBe(0);
 		expect(v.known).toBe(true);
 		expect(v.unusual).toBe(true);
-		expect(rateNow(rows, END, true)).toEqual(v);
+		expect(rateNow(rows, END, null)).toEqual(v);
+		// Rows that begin before the week are whole from its first hour.
+		expect(rateNow(rows, END, START).firstHour).toBe(0);
+		expect(rateNow(rows, END, START - 5 * HOUR_MS).firstHour).toBe(0);
+	});
+
+	it("is whole from the first hour that begins at or after the oldest row held", () => {
+		expect(rateNow(rows, END, START + 1).firstHour).toBe(1);
+		expect(rateNow(rows, END, START + HOUR_MS).firstHour).toBe(1);
+		expect(rateNow(rows, END, START + HOUR_MS + 1).firstHour).toBe(2);
+		expect(rateNow(rows, END, held(1)).firstHour).toBe(RATE_HOURS - 1);
+		expect(rateNow(rows, END, held(1) + 1).firstHour).toBe(RATE_HOURS);
+		expect(rateNow(rows, END, Number.POSITIVE_INFINITY).firstHour).toBe(RATE_HOURS);
+	});
+
+	it("gives a usual range only when the hours it reads are whole: 25 hours back is enough, a millisecond less is not", () => {
+		const reached = rateNow(rows, END, held(25));
+		expect(reached.known).toBe(true);
+		expect(reached.unusual).toBe(true);
+		const short = rateNow(rows, END, held(25) + 1);
+		expect(short.known).toBe(false);
+		expect(short.unusual).toBe(false);
+		expect(rateWords(short)).toBe(NOW_COPY.rateUnknown);
+		for (const a of [short.band.mid, short.band.lo, short.band.hi]) {
+			expect(a.every(Number.isNaN)).toBe(true);
+		}
+		// The hours themselves are the rows' own.
+		expect(short.hours).toEqual(rateNow(rows, END).hours);
+		expect(short.ratePerHourUt).toBe(50_000);
 	});
 });
 
@@ -259,6 +277,8 @@ describe("NOW_COPY", () => {
 			rateUnusual: "unusual spend rate",
 			rateNormal: "normal rate",
 			rateTip: "The last hour's spend against the usual range of the 24 hours before",
+			rateNotWhole: "The list begins inside the last hour, so its spend is not known",
+			rateFromFirstWhole: ", beginning at the first whole hour listed",
 			rateBandNote: "The shaded band is the usual range for those hours.",
 			projectionLead: "Projection:",
 			projectionLeadFiltered: "Projection, whole vault:",

@@ -18,6 +18,8 @@ export const NOW_COPY = {
 	rateUnusual: "unusual spend rate",
 	rateNormal: "normal rate",
 	rateTip: "The last hour's spend against the usual range of the 24 hours before",
+	rateNotWhole: "The list begins inside the last hour, so its spend is not known",
+	rateFromFirstWhole: ", beginning at the first whole hour listed",
 	rateBandNote: "The shaded band is the usual range for those hours.",
 	projectionLead: "Projection:",
 	projectionLeadFiltered: "Projection, whole vault:",

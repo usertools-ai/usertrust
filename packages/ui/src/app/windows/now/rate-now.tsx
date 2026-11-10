@@ -21,7 +21,7 @@ import type { CSSProperties } from "react";
 import { monotone } from "../../../shared/curve.js";
 import { formatUsd, formatUsdTotal } from "../../../shared/format.js";
 import { NOW_COPY } from "../../../shared/now-copy.js";
-import { type RateNowView, rateWords } from "../../../shared/now-rate.js";
+import { type RateNowView, rateWords, USUAL_HOURS } from "../../../shared/now-rate.js";
 
 /** The hours the small line covers. */
 const SPARK_HOURS = 24;
@@ -55,20 +55,31 @@ export function RateNow(props: {
 	const { hours, band } = view;
 	const from = hours.length - SPARK_HOURS;
 	const last = hours.length - 1;
+	// On a cut vault the hours before the cut are not known and the hour it falls in is partial: nothing is drawn
+	// or stated from them, and the figure is stated only when the last hour is whole.
+	const drawFrom = Math.max(from, view.firstHour);
+	const whole = view.firstHour <= last;
+	const partial = whole && drawFrom > from;
 	const shade = view.known && !props.filled;
 	// The shaded hours: back from the last one for as long as the range is defined.
 	let first = last;
-	while (first > from && Number.isFinite(band.hi[first - 1]) && Number.isFinite(band.lo[first - 1]))
+	// A band hour reads the 24 before it: on a cut vault it is shaded only when those are whole too.
+	const bandFrom = Math.max(from, view.firstHour + USUAL_HOURS);
+	while (
+		first > bandFrom &&
+		Number.isFinite(band.hi[first - 1]) &&
+		Number.isFinite(band.lo[first - 1])
+	)
 		first--;
 	// From zero to the 24 hours' peak (at least 1 UT, so a flat zero is a flat line), and the range's top when shaded.
 	let max = 1;
-	for (let k = from; k <= last; k++) max = Math.max(max, hours[k] as number);
+	for (let k = drawFrom; k <= last; k++) max = Math.max(max, hours[k] as number);
 	if (shade) for (let k = first; k <= last; k++) max = Math.max(max, band.hi[k] as number);
 	const x = (k: number): number => PAD + ((k - from) / (SPARK_HOURS - 1)) * (W - 2 * PAD);
 	const y = (v: number): number => H - PAD - (v / max) * (H - 2 * PAD);
 	const xs: number[] = [];
 	const ys: number[] = [];
-	for (let k = from; k <= last; k++) {
+	for (let k = drawFrom; k <= last; k++) {
 		xs.push(x(k));
 		ys.push(y(hours[k] as number));
 	}
@@ -80,37 +91,47 @@ export function RateNow(props: {
 	}
 	const stroke = view.unusual ? "var(--dk-gold)" : (props.color ?? "var(--dk-text)");
 	const banded = shade && first < last;
-	const figure = formatUsdTotal(view.ratePerHourUt);
+	const figure = whole ? formatUsdTotal(view.ratePerHourUt) : "";
 	return (
 		<div className="ut-fact ut-nw-rate" data-unusual={view.unusual}>
 			<b>{heading}</b>
-			<span className="v" data-fig="now.rate" title={`${formatUsd(view.ratePerHourUt)}/h`}>
-				{/* The figure and its "/h", counted as characters of the figure's own size: a little more room than they take. */}
-				<span className="ut-fit" style={{ "--n": figure.length + 2 } as CSSProperties}>
-					{figure}
-					<small>/h</small>
+			{whole ? (
+				<span className="v" data-fig="now.rate" title={`${formatUsd(view.ratePerHourUt)}/h`}>
+					{/* The figure and its "/h", counted as characters of the figure's own size: a little more room than they take. */}
+					<span className="ut-fit" style={{ "--n": figure.length + 2 } as CSSProperties}>
+						{figure}
+						<small>/h</small>
+					</span>
 				</span>
-			</span>
+			) : (
+				<span className="v na" title={NOW_COPY.rateNotWhole}>
+					—
+				</span>
+			)}
 			<span className="ut-nw-words" title={NOW_COPY.rateTip}>
 				{rateWords(view)}
 			</span>
 			<svg
 				className="ut-nw-spark"
 				role="img"
-				aria-label={`The past 24 hours, hour by hour${banded ? ", over the usual range" : ""}`}
+				aria-label={`The past 24 hours, hour by hour${partial ? NOW_COPY.rateFromFirstWhole : ""}${banded ? ", over the usual range" : ""}`}
 				width={W}
 				height={H}
 				viewBox={`0 0 ${W} ${H}`}
 			>
 				{banded && <path className="ut-nw-band" d={`${top}${bottom}Z`} />}
-				<path className="ut-nw-line" d={monotone(xs, ys).path()} style={{ stroke }} />
-				<circle
-					className="ut-nw-dot"
-					cx={x(last)}
-					cy={y(hours[last] as number)}
-					r={2.5}
-					style={{ fill: stroke }}
-				/>
+				{xs.length > 1 && (
+					<path className="ut-nw-line" d={monotone(xs, ys).path()} style={{ stroke }} />
+				)}
+				{whole && (
+					<circle
+						className="ut-nw-dot"
+						cx={x(last)}
+						cy={y(hours[last] as number)}
+						r={2.5}
+						style={{ fill: stroke }}
+					/>
+				)}
 			</svg>
 		</div>
 	);
