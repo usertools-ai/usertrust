@@ -168,7 +168,7 @@
 	}
 
 	.ut-row.ut-lg-row {
-		grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 64px 60px 92px minmax(96px, 0.9fr);
+		grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 64px 60px 116px minmax(96px, 0.9fr);
 		gap: 10px;
 		box-sizing: border-box;
 		height: 30px;
@@ -224,7 +224,8 @@
 		color: var(--dk-label);
 	}
 
-	/* The status: the badge may be cut short in a narrow cell, the mark after a break in the chain never is. */
+	/* The status: a capsule, in a column wide enough for the longest status word. Beside the mark after a break in
+	   the chain it may be cut short; the mark never is. */
 	.ut-lg-row .ut-lg-s {
 		display: flex;
 		align-items: center;
@@ -235,8 +236,21 @@
 		min-width: 0;
 		flex: 0 1 auto;
 		overflow: hidden;
-		font-size: 10px;
-		letter-spacing: 0.8px;
+		height: 16px;
+		padding: 0 4px;
+		border-radius: 8px;
+		background: color-mix(in srgb, var(--accent) 16%, transparent);
+		color: var(--accent);
+		font: 600 10px/16px var(--fig);
+	}
+
+	/* A status that is a warning keeps its own colour on the capsule. */
+	.ut-lg-s .ut-badge[data-tone="alert"] {
+		color: var(--alert);
+	}
+
+	.ut-lg-s .ut-badge[data-tone="stakes"] {
+		color: var(--stakes);
 	}
 
 	.ut-lg-s .bad {
@@ -288,10 +302,11 @@
 		background: color-mix(in srgb, var(--dk-text) 6%, transparent);
 	}
 
-	/* A narrower list drops columns and never squeezes them: first the kind and the usage, then the actor. */
-	@container (max-width: 680px) {
+	/* A narrower list drops columns and never squeezes them: first the kind and the usage, then the actor. All
+	   seven stay down to 600px, which a 1000px screen's list is above. */
+	@container (max-width: 600px) {
 		.ut-row.ut-lg-row {
-			grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 92px minmax(96px, 0.9fr);
+			grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 116px minmax(96px, 0.9fr);
 		}
 
 		.ut-lg-row .ut-lg-k,
@@ -302,9 +317,14 @@
 
 	@container (max-width: 520px) {
 		.ut-row.ut-lg-row {
-			grid-template-columns: 102px minmax(0, 1fr) 76px 70px;
+			grid-template-columns: 102px minmax(0, 1fr) 80px 70px;
 			gap: 6px;
 			padding: 0 6px;
+		}
+
+		.ut-lg-s .ut-badge {
+			gap: 4px;
+			letter-spacing: 0;
 		}
 
 		.ut-lg-row .ut-lg-a {
@@ -320,10 +340,11 @@
 		}
 	}
 
-	/* A phone: the sort bar sticks to the top of the page over the rows, so a row scrolled to stops below it. */
+	/* A phone: the sort bar sticks to the top of the page over the rows, so a row scrolled to stops below it, by
+	   the bar's height as the list measures it. */
 	@media (max-width: 760px) {
 		.ut-lg-row {
-			scroll-margin-top: 52px;
+			scroll-margin-top: var(--ut-lg-cap, 0px);
 		}
 	}
 }

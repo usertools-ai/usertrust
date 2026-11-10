@@ -14,7 +14,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, describe, expect, it } from "vitest";
 import { EMPTY_FILTERS, type FilterState } from "../src/shared/filters.js";
 import { budgetOf } from "../src/shared/peek.js";
-import type { LedgerRow } from "../src/shared/rows.js";
+import type { LedgerRow, RowStatus } from "../src/shared/rows.js";
+import { statusWord } from "../src/shared/status-word.js";
 
 // The components are .tsx files, which the tests' typecheck (no jsx) cannot import statically: load them by a
 // computed path, typed here by what the tests use.
@@ -763,7 +764,11 @@ describe("the dense list", () => {
 			"ut-lg-c",
 		]);
 		expect(html).toContain(`<span class="ut-lg-t" title="${r.ts}">10-12 17:59:02Z</span>`);
-		expect(html).toContain('<span class="ut-lg-k">llm_call</span>');
+		// The kind's cell is narrow: a long kind is cut, and its title says it whole.
+		expect(html).toContain('<span class="ut-lg-k" title="llm_call">llm_call</span>');
+		expect(one(row({ kind: "settlement_unrecoverable" }))).toContain(
+			'<span class="ut-lg-k" title="settlement_unrecoverable">settlement_unrecoverable</span>',
+		);
 		expect(html).toMatch(/<span class="ut-lg-a" title="actor agent:1234567890">agent . 12345678</);
 		// The two-line body is gone from the list.
 		expect(html).not.toContain("ut-meta");
@@ -897,6 +902,19 @@ describe("the dense list", () => {
 		const top = between("const drawnKey = useRef(key);", "}, [key]);");
 		expect(top).toContain("if (drawnKey.current === key) return;");
 		expect(top).toContain("parentRef.current.scrollTop = 0;");
+		// On a phone the page is the scroller and the sort bar sticks over the list: the page is moved so the
+		// list's top sits just under the bar, wherever the bar's bottom is measured to be.
+		expect(top).toContain("const under = capRef.current?.getBoundingClientRect().bottom ?? 0;");
+		expect(top).toContain("const at = parentRef.current.getBoundingClientRect().top;");
+		expect(top).toContain("if (at < under) window.scrollBy(0, at - under);");
+		expect(src).toContain('<div className="ut-cap" ref={capRef}>');
+		// A row scrolled to stops under the bar by the same measure, set on the list before the scroll.
+		const scroll = between("if (scrollTo === null) return;", "}, [scrollTo]);");
+		expect(scroll).toContain(
+			// biome-ignore lint/suspicious/noTemplateCurlyInString: a line of the source, quoted as it is written
+			'setProperty("--ut-lg-cap", `${capRef.current?.offsetHeight ?? 0}px`)',
+		);
+		expect(scroll.indexOf("setProperty(")).toBeLessThan(scroll.indexOf("scrollIntoView("));
 	});
 
 	it("an open or pinned record is revealed once, when it is first in the list, not again after a new sort", () => {
@@ -1161,7 +1179,7 @@ describe("the Ledger window's sheet", () => {
 	it("a dense row is 30px on one line of seven columns, and keeps its place before it is drawn", () => {
 		const dense = rule(".ut-row.ut-lg-row");
 		expect(dense).toContain(
-			"grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 64px 60px 92px minmax(96px, 0.9fr);",
+			"grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 64px 60px 116px minmax(96px, 0.9fr);",
 		);
 		expect(dense).toContain("height: 30px;");
 		expect(dense).toContain("box-sizing: border-box;");
@@ -1211,7 +1229,27 @@ describe("the Ledger window's sheet", () => {
 		const badge = rule(".ut-lg-s .ut-badge");
 		expect(badge).toContain("min-width: 0;");
 		expect(badge).toContain("flex: 0 1 auto;");
-		expect(badge).toContain("font-size: 10px;");
+		// A capsule in the figure face, 16px tall, gold on a gold wash; a status that is a warning keeps its own colour.
+		for (const decl of ["height: 16px;", "padding: 0 4px;", "border-radius: 8px;"]) {
+			expect(badge).toContain(decl);
+		}
+		expect(badge).toContain("background: color-mix(in srgb, var(--accent) 16%, transparent);");
+		expect(badge).toContain("color: var(--accent);");
+		expect(badge).toContain("font: 600 10px/16px var(--fig);");
+		expect(rule('.ut-lg-s .ut-badge[data-tone="alert"]')).toContain("color: var(--alert);");
+		expect(rule('.ut-lg-s .ut-badge[data-tone="stakes"]')).toContain("color: var(--stakes);");
+		expect(css.indexOf('.ut-lg-s .ut-badge[data-tone="alert"] {')).toBeGreaterThan(
+			css.indexOf(".ut-lg-s .ut-badge {"),
+		);
+		// The status column holds the longest status word whole: its letters (6px each at 10px in the figure face,
+		// spaced 1.2px), the dot and its gap (6px each) and the capsule's padding (4px a side).
+		const statuses =
+			"settled released failed denied ambiguous ungoverned unrecoverable info unknown";
+		const longest = Math.max(...statuses.split(" ").map((s) => statusWord(s as RowStatus).length));
+		expect(longest).toBe("unrecoverable".length);
+		const column = Number(/64px 60px (\d+)px minmax\(96px/.exec(rule(".ut-row.ut-lg-row"))?.[1]);
+		expect(column).toBeGreaterThanOrEqual(longest * (6 + 1.2) + 6 + 6 + 2 * 4);
+		expect(column).toBeLessThan(120);
 		const bad = rule(".ut-lg-s .bad");
 		expect(bad).toContain("flex: none;");
 		expect(bad).toContain("color: var(--stakes);");
@@ -1241,29 +1279,43 @@ describe("the Ledger window's sheet", () => {
 	});
 
 	it("a narrower list drops columns, never squeezes them: the kind and the usage, then the actor", () => {
-		const five = narrow(680);
+		// All seven columns stay down to a 600px list: a 1000px screen gives the list 640px.
+		expect(narrow(680)).toBe("");
+		expect(css.match(/@container \(max-width: \d+px\)/g)).toEqual([
+			"@container (max-width: 600px)",
+			"@container (max-width: 520px)",
+		]);
+		const five = narrow(600);
 		expect(ruleIn(five, ".ut-row.ut-lg-row")).toContain(
-			"grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 92px minmax(96px, 0.9fr);",
+			"grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 116px minmax(96px, 0.9fr);",
 		);
 		expect(ruleIn(five, ".ut-lg-row .ut-lg-k,\n\t\t.ut-lg-row .ut-lg-u")).toContain(
 			"display: none;",
 		);
 		const four = narrow(520);
 		const dense = ruleIn(four, ".ut-row.ut-lg-row");
-		expect(dense).toContain("grid-template-columns: 102px minmax(0, 1fr) 76px 70px;");
+		expect(dense).toContain("grid-template-columns: 102px minmax(0, 1fr) 80px 70px;");
+		// The capsule is tighter there, so a ten-letter status ("unresolved") fits its 80px whole.
+		const tight = ruleIn(four, ".ut-lg-s .ut-badge");
+		expect(tight).toContain("gap: 4px;");
+		expect(tight).toContain("letter-spacing: 0;");
+		expect(10 * 6 + 6 + 4 + 2 * 4).toBeLessThanOrEqual(80);
 		expect(dense).toContain("gap: 6px;");
 		expect(dense).toContain("padding: 0 6px;");
 		expect(ruleIn(four, ".ut-lg-row .ut-lg-a")).toContain("display: none;");
 		expect(ruleIn(four, ".ut-lg-row .ut-lg-t")).toContain("font-size: 11px;");
 		expect(ruleIn(four, ".ut-lg-rows")).toContain("padding-inline: 2px;");
 		// The narrowest row's fixed columns, gaps and padding leave the model room at 340px: nothing scrolls sideways.
-		const fixed = 102 + 76 + 70 + 3 * 6 + 2 * 6 + 2 * 2;
-		expect(340 - fixed).toBeGreaterThanOrEqual(56);
+		const fixed = 102 + 80 + 70 + 3 * 6 + 2 * 6 + 2 * 2;
+		expect(340 - fixed).toBeGreaterThanOrEqual(52);
 		// A row keeps its height at every width.
 		expect(`${five}${four}`).not.toMatch(/[^-]height:|white-space/);
-		// On a phone the sort bar sticks over the rows: a row scrolled to by the keys stops below it.
-		const phone = css.slice(css.lastIndexOf("@media (max-width: 760px)"));
-		expect(phone).toMatch(/\.ut-lg-row\s*\{\s*scroll-margin-top: 52px;/);
+		// On a phone the sort bar sticks over the rows: a row scrolled to by the keys stops below it, by the bar's
+		// measured height (the list sets it), never a figure written here.
+		expect(css).toMatch(
+			/@media \(max-width: 760px\) \{\s*\.ut-lg-row \{\s*scroll-margin-top: var\(--ut-lg-cap, 0px\);/,
+		);
+		expect(css).not.toMatch(/scroll-margin-top: \d/);
 	});
 
 	it("the record's actions sit in one wrapping row", () => {

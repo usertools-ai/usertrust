@@ -112,7 +112,9 @@ function DenseRowBody(props: { row: LedgerRow; maxCost: number | undefined }): R
 			<span className="ut-lg-a" title={`actor ${row.actor}`}>
 				{compactActor(row.actor)}
 			</span>
-			<span className="ut-lg-k">{row.kind}</span>
+			<span className="ut-lg-k" title={row.kind}>
+				{row.kind}
+			</span>
 			<span
 				className="ut-lg-u"
 				title={
@@ -402,6 +404,9 @@ export const AuditTable = memo(function AuditTable(props: {
 	const sorted = useMemo(() => sortRows(props.rows, sortKey, desc), [props.rows, sortKey, desc]);
 	const count = sorted.length;
 	const parentRef = useRef<HTMLDivElement>(null);
+	// The sort bar. On a phone it sticks to the top of the page over the rows, so its height is measured wherever
+	// a row or the list's top is brought under it.
+	const capRef = useRef<HTMLDivElement>(null);
 
 	// Each bar is drawn against the costliest record of the whole list, drawn or not, so a bar never changes length
 	// as more rows are drawn.
@@ -451,7 +456,14 @@ export const AuditTable = memo(function AuditTable(props: {
 	useEffect(() => {
 		if (drawnKey.current === key) return;
 		drawnKey.current = key;
-		if (parentRef.current !== null) parentRef.current.scrollTop = 0;
+		if (parentRef.current === null) return;
+		parentRef.current.scrollTop = 0;
+		// On a phone the page is the scroller: when the list's top is above the sort bar's bottom edge (the bar is
+		// stuck over the rows), the page moves so the top sits just under it. Elsewhere the bar ends where the list
+		// starts, and nothing moves.
+		const under = capRef.current?.getBoundingClientRect().bottom ?? 0;
+		const at = parentRef.current.getBoundingClientRect().top;
+		if (at < under) window.scrollBy(0, at - under);
 	}, [key]);
 
 	// One more set of rows when the mark after the last row comes near the screen. The observer is made again after
@@ -505,6 +517,8 @@ export const AuditTable = memo(function AuditTable(props: {
 	};
 	useEffect(() => {
 		if (scrollTo === null) return;
+		// The sheet stops a row under the stuck sort bar by this height (on a phone only).
+		parentRef.current?.style.setProperty("--ut-lg-cap", `${capRef.current?.offsetHeight ?? 0}px`);
 		document.getElementById(rowDomId(scrollTo.hash))?.scrollIntoView({ block: scrollTo.block });
 	}, [scrollTo]);
 
@@ -640,7 +654,7 @@ export const AuditTable = memo(function AuditTable(props: {
 
 	return (
 		<>
-			<div className="ut-cap">
+			<div className="ut-cap" ref={capRef}>
 				<span className="lead">Sort</span>
 				{SORTS.map((s) => (
 					<button
