@@ -3,15 +3,16 @@
 
 /**
  * What the record panel shows about one charge: each tier's tokens, rate and product, the sum beside the charged
- * cost, and the lines the Ledger window adds under the status. Rendered to static markup, so what is asserted is
- * what a reader sees.
+ * cost, and the lines and actions the Ledger window adds under the status. Rendered to static markup, so what is
+ * asserted is what a reader sees.
  */
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createElement, type ReactNode } from "react";
+import { createElement, isValidElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, describe, expect, it } from "vitest";
+import { EMPTY_FILTERS, type FilterState } from "../src/shared/filters.js";
 import { budgetOf } from "../src/shared/peek.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 
@@ -39,9 +40,16 @@ interface PanelProps {
 let ChargeTable: Component<{ row: LedgerRow }>;
 let PeekExtra: Component<{ row: LedgerRow; rows: readonly LedgerRow[]; budget: Budget }>;
 let RowPanel: Component<PanelProps>;
+let PeekActions: Component<{
+	row: LedgerRow;
+	filters: FilterState;
+	onPin(pos: number): void;
+	onFilters(f: FilterState): void;
+}>;
 beforeAll(async () => {
 	ChargeTable = await load("windows/ledger/charge-table", "ChargeTable");
 	PeekExtra = await load("windows/ledger/peek-extra", "PeekExtra");
+	PeekActions = await load("windows/ledger/peek-extra", "PeekActions");
 	RowPanel = await load("row-panel", "RowPanel");
 });
 
@@ -585,6 +593,111 @@ describe("the record panel", () => {
 	});
 });
 
+describe("the record's actions", () => {
+	interface Pressed {
+		pins: number[];
+		filters: FilterState[];
+	}
+	interface Button {
+		text: string;
+		onClick(): void;
+	}
+	const textOf = (node: ReactNode): string =>
+		Array.isArray(node)
+			? node.map(textOf).join("")
+			: typeof node === "string" || typeof node === "number"
+				? String(node)
+				: "";
+	/** The buttons of a returned element, in order, with their text and click handler. */
+	const buttonsOf = (node: ReactNode): Button[] => {
+		if (Array.isArray(node)) return node.flatMap(buttonsOf);
+		if (!isValidElement(node)) return [];
+		const p = node.props as { children?: ReactNode; onClick?: () => void };
+		if (node.type === "button")
+			return [{ text: textOf(p.children), onClick: p.onClick ?? (() => {}) }];
+		return buttonsOf(p.children);
+	};
+	const props = (r: LedgerRow, filters: FilterState = EMPTY_FILTERS) => {
+		const pressed: Pressed = { pins: [], filters: [] };
+		return {
+			pressed,
+			props: {
+				row: r,
+				filters,
+				onPin: (pos: number) => pressed.pins.push(pos),
+				onFilters: (f: FilterState) => pressed.filters.push(f),
+			},
+		};
+	};
+	const markup = (r: LedgerRow): string =>
+		renderToStaticMarkup(createElement(PeekActions, props(r).props));
+	const press = (r: LedgerRow, text: string, filters: FilterState = EMPTY_FILTERS): Pressed => {
+		const { pressed, props: p } = props(r, filters);
+		const button = buttonsOf(PeekActions(p)).find((b) => b.text === text);
+		expect(button, text).toBeDefined();
+		button?.onClick();
+		return pressed;
+	};
+
+	it("a row of tier-3 buttons: show on the chart, only this lane, only this model", () => {
+		expect(markup(row())).toBe(
+			'<div class="ut-lg-actions">' +
+				'<button type="button" class="ut-t3">Show on chart</button>' +
+				'<button type="button" class="ut-t3">Only a</button>' +
+				'<button type="button" class="ut-t3">Only m</button>' +
+				"</div>",
+		);
+	});
+
+	it("a record with no model, or an empty one, has no second Only button", () => {
+		const { model: _model, ...bare } = row();
+		for (const r of [bare, row({ model: "" }), row({ model: "  " })]) {
+			const html = markup(r);
+			expect(html).toContain(">Show on chart<");
+			expect(html).toContain(">Only a<");
+			expect(html.match(/>Only/g)).toHaveLength(1);
+		}
+	});
+
+	it("never a button with an empty name: an empty lane has no Only button", () => {
+		const html = markup(row({ actor: "" }));
+		expect(html).toContain(">Show on chart<");
+		expect(html).not.toMatch(/>Only a</);
+		expect(html.match(/>Only/g)).toHaveLength(1);
+		expect(html).toContain(">Only m<");
+		for (const blank of ["", " "]) {
+			const names = buttonsOf(PeekActions(props(row({ actor: blank, model: blank })).props)).map(
+				(b) => b.text,
+			);
+			expect(names, JSON.stringify(blank)).toEqual(["Show on chart"]);
+		}
+	});
+
+	it("Show on chart pins the record's position, and sets no filter", () => {
+		const pressed = press(row({ pos: 42 }), "Show on chart");
+		expect(pressed.pins).toEqual([42]);
+		expect(pressed.filters).toEqual([]);
+	});
+
+	it("Only <lane> keeps that lane alone, and a second press clears it", () => {
+		const others = { ...EMPTY_FILTERS, actors: ["b"], models: ["x"] };
+		const once = press(row(), "Only a", others);
+		expect(once.pins).toEqual([]);
+		expect(once.filters).toEqual([{ ...others, actors: ["a"] }]);
+		const again = press(row(), "Only a", { ...EMPTY_FILTERS, actors: ["a"] });
+		expect(again.filters).toEqual([EMPTY_FILTERS]);
+	});
+
+	it("Only <model> keeps that model alone, and leaves the lanes", () => {
+		const others = { ...EMPTY_FILTERS, actors: ["b"], models: ["x", "y"] };
+		const once = press(row(), "Only m", others);
+		expect(once.pins).toEqual([]);
+		expect(once.filters).toEqual([{ ...others, models: ["m"] }]);
+		const again = press(row(), "Only m", { ...EMPTY_FILTERS, models: ["m"] });
+		expect(again.filters).toEqual([EMPTY_FILTERS]);
+	});
+});
+
 describe("the Ledger window's sheet", () => {
 	const css = appFile("windows/ledger/ledger.css").replace(/\/\*[\s\S]*?\*\//g, "");
 	/** The declarations of the first rule with this selector. */
@@ -605,12 +718,20 @@ describe("the Ledger window's sheet", () => {
 	});
 
 	it("every new class has a rule, the figures are right-aligned and tabular, and no colour is written out", () => {
-		const names = "lg-charge lg-sums lg-part lg-src lg-extra lg-unusual lg-share lg-peek chainnote";
+		const names =
+			"lg-charge lg-sums lg-part lg-src lg-extra lg-unusual lg-share lg-peek chainnote lg-actions";
 		for (const name of names.split(" ")) {
 			expect(css, name).toMatch(new RegExp(`\\.ut-${name}[^{}]*\\{`));
 		}
 		expect(rule(".ut-lg-sums td")).toContain("text-align: right");
 		expect(rule(".ut-lg-sums td")).toContain("font-variant-numeric: tabular-nums");
 		expect(css).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(/);
+	});
+
+	it("the record's actions sit in one wrapping row", () => {
+		const actions = rule(".ut-lg-actions");
+		expect(actions).toContain("display: flex");
+		expect(actions).toContain("flex-wrap: wrap");
+		expect(actions).toMatch(/gap: \d+px/);
 	});
 });

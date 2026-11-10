@@ -146,6 +146,14 @@
 		border-top: 1px solid var(--dk-grid);
 	}
 
+	/* The record's actions: one row of small buttons under the lines above, wrapping when the panel is narrow. */
+	.ut-lg-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+		margin: 6px 0 10px;
+	}
+
 	@media (prefers-reduced-motion: reduce) {
 		.ut-glass.ut-lg-peek {
 			animation: none;
