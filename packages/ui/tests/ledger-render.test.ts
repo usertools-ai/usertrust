@@ -915,6 +915,7 @@ describe("the dense list", () => {
 		// On a phone the page is the scroller: the rows follow the window, below the sort bar as it is measured.
 		expect(src).toContain("enabled: !phone,");
 		expect(src).toContain("enabled: phone,");
+		expect(src).toContain("const virtualizer = phone ? inPage : inList;");
 		expect(src).toContain("scrollPaddingStart: capH,");
 		expect(src).toContain("setCapH(capRef.current?.offsetHeight ?? 0);");
 	});

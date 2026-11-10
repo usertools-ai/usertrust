@@ -11,6 +11,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LedgerRow } from "../src/shared/rows.js";
+import { appSource } from "./helpers/app-source.js";
 import { appExport, type Component, dayOneRows, loadedData, noIds } from "./helpers/day-one.js";
 import { withDesk } from "./helpers/desk.js";
 
@@ -86,6 +87,10 @@ describe("the Ledger on day one", () => {
 		// Live, nothing is marked.
 		const live = await withDesk(createElement(LedgerWindow), { data: loadedData() });
 		expect(live).not.toMatch(/data-pinned|data-hour/);
+		// The hour another window points at reaches the list too; the Ledger's own pointer is not echoed back to it.
+		const src = appSource();
+		expect(src).toContain('const pointed = useHoverMoment("ledger");');
+		expect(src).toContain("hourSpan={pointed?.span ?? null}");
 	});
 
 	it("filled with a record open, docks the panel beside the list", async () => {
