@@ -534,6 +534,11 @@ describe("the record panel", () => {
 		const arrows = src.slice(src.indexOf('"ArrowUp"'), src.indexOf('e.key === "Escape"'));
 		expect(arrows).toContain(`closest('[data-win="ledger"]')`);
 		expect(arrows).toContain("input, textarea, select, [role='listbox'], [role='menu']");
+		// A chord (Cmd+Up, Alt+Down, Shift+Down) is the browser's or the system's: it is left alone, before anything
+		// is prevented.
+		const chord = "if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;";
+		expect(arrows).toContain(chord);
+		expect(arrows.indexOf(chord)).toBeLessThan(arrows.indexOf("e.preventDefault()"));
 		expect(arrows).toContain("e.preventDefault()");
 		expect(arrows).toContain("e.stopPropagation()");
 		expect(arrows).toMatch(/onStep\(e\.key === "ArrowUp" \? -1 : 1\)/);

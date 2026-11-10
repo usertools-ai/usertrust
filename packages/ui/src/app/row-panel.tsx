@@ -208,6 +208,8 @@ export function RowPanel(props: {
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent): void => {
 			if ((e.key === "ArrowUp" || e.key === "ArrowDown") && onStep !== undefined) {
+				// Leave the browser's and the system's chords alone (Cmd+Up, Alt+Down), and a selection's Shift+arrow.
+				if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
 				// Only from inside the Ledger window: an arrow anywhere else keeps its own meaning. The list, a field and a
 				// menu keep theirs too (the list's arrows move its active row and open nothing).
 				const target = e.target instanceof Element ? e.target : null;
