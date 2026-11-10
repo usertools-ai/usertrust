@@ -51,6 +51,10 @@ export const CSV_HEADERS = [
 	// was priced at cache_write_rate_ut_per_1k.
 	"cache_write_1h_tokens",
 	"cache_write_1h_rate_ut_per_1k",
+	// Whether the record carried a 1-hour share at all: `yes`, or empty when it carried none. A share whose count or
+	// rate cannot be used leaves that cell empty above, and without this column it would read as no share, with the
+	// whole write priced at cache_write_rate_ut_per_1k.
+	"cache_write_1h_recorded",
 	// THE RULE OF THIS FORMAT: a new column goes here, on the end. No column above ever moves, is renamed or changes
 	// what it holds, so a reader of an older export keeps working. `tests/csv.test.ts` pins the whole header as text.
 ] as const;
@@ -113,6 +117,8 @@ export function toCsv(rows: LedgerRow[]): string {
 				cell(r.pricingTableVersion),
 				num(r.cacheWrite1h?.tokens),
 				num(r.cacheWrite1h?.ratePer1k),
+				// `yes` or empty, never `no`: absent stays empty, like every cell here.
+				r.cacheWrite1h === undefined ? "" : "yes",
 			].join(","),
 		);
 	}
