@@ -1216,7 +1216,7 @@ describe("spend chart: the slider and the layers' notes", () => {
 	});
 	it("names the bucket in its label at each range", () => {
 		expect(attr(plotTag(chart()), "aria-label")).toBe(
-			"Spend per hour over time: hover to preview, click to pin a record, click again for now",
+			"Spend per hour over time: hover to read a record, click to pin it, click again for now",
 		);
 		expect(attr(plotTag(chart({ bucket: LINE_BUCKETS["1d"] })), "aria-label")).toContain(
 			"Spend per 5 min over time",

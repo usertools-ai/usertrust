@@ -128,5 +128,5 @@ export function newText(fresh: number): string {
 
 /** The plot's name for assistive tech, in the line's own bucket. */
 export function plotLabel(per: string): string {
-	return `Spend per ${per} over time: hover to preview, click to pin a record, click again for now`;
+	return `Spend per ${per} over time: hover to read a record, click to pin it, click again for now`;
 }

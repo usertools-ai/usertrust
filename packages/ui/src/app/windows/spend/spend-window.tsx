@@ -16,7 +16,7 @@ import { LINE_BUCKETS } from "../../../shared/spend-model.js";
 import { useDeskData, useOpenRecord, usePosition, useRange } from "../../desk/desk-state.js";
 import { useCategoryTint } from "../../desk/use-tint.js";
 import { useWindow, Window } from "../../desk/window.js";
-import { useChartData } from "./chart-data.js";
+import { resolvedPin, useChartData } from "./chart-data.js";
 import { RangeChips } from "./range-chips.js";
 import { SpendChart } from "./spend-chart.js";
 
@@ -30,7 +30,7 @@ const SpendBody = memo(function SpendBody(): React.JSX.Element {
 	const { rows, list, summary, at, head } = useDeskData();
 	const { chartRows, allRows, chartWindow, filterNote } = useChartData();
 	const { range, setRange } = useRange();
-	const { at: pinnedPos, setAt: onPin } = usePosition();
+	const { at: addressPos, setAt: onPin } = usePosition();
 	const { open } = useOpenRecord();
 	const ink = useCategoryTint();
 	const { settling } = useWindow();
@@ -50,6 +50,11 @@ const SpendBody = memo(function SpendBody(): React.JSX.Element {
 	}
 
 	const filtered = chartRows.length !== rows.length;
+	// The pin the chart draws is the answered position, which an address past the vault's end is clamped to.
+	const pinnedPos = resolvedPin(addressPos, at);
+	// Unfiltered, the pinned headline is the snapshot's own total: the rows held may begin after the pin (a cut vault).
+	const pinTotalUt =
+		!filtered && pinnedPos !== null && at !== null && at.pos === pinnedPos ? at.spentUt : null;
 	return (
 		<SpendChart
 			rows={chartRows}
@@ -58,12 +63,14 @@ const SpendBody = memo(function SpendBody(): React.JSX.Element {
 			filtered={filtered}
 			truncated={summary?.truncated ?? false}
 			pinnedPos={pinnedPos}
+			pinTotalUt={pinTotalUt}
 			at={at}
 			head={head}
 			ink={ink}
 			allRows={allRows}
 			filterNote={filterNote}
 			markMs={open === null ? null : momentOf(open.ts)}
+			markPos={open === null ? null : open.pos}
 			breakPos={summary?.chain.breakIndex ?? null}
 			settling={settling}
 			range={range}

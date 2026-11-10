@@ -154,7 +154,8 @@ export function useOpenRecord(): {
 
 /**
  * The position in the vault's history: the address's `#at`, and the Spend chart's pin. `shown` is the header's answer.
- * `preview` moves only the header (a hover on the chart), never the address.
+ * `preview` moves only the header, never the address. No window calls it now (the Spend chart's hover no longer
+ * moves the header); it stays, with the header's own follower below, until a later desk part removes them.
  */
 export function usePosition(): {
 	at: number | null;
@@ -235,8 +236,9 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 	// the screen stays live and the status under the header says so: a past view is only ever drawn from its own answer.
 	const { view: atView } = useAt(at, summary, live, rows, resyncs, rowsVault, navigation);
 	const shownAt = atView.at;
-	// A hover on the Spend chart previews the HEADER only (A6): its own follower asks for the previewed position, and
-	// the list, the rows and every window keep reading `atView`, the committed position. A navigation drops a preview.
+	// A preview moves the HEADER only (A6): its own follower asks for the previewed position, and the list, the rows
+	// and every window keep reading `atView`, the committed position. A navigation drops a preview. Nothing asks for
+	// one now.
 	const [previewPos, setPreviewPos] = useState<number | null>(null);
 	const preview = setPreviewPos;
 	const { view: previewView } = useAt(

@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { createElement } from "react";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { DeskData, DeskView } from "../src/app/desk/desk-types.js";
-import type { SummaryPayload } from "../src/shared/api.js";
+import type { AtPayload, SummaryPayload } from "../src/shared/api.js";
 import { breakdown, type SpendWindow as RangeWindow } from "../src/shared/breakdown.js";
 import { PROVIDER_COLOR, rankColors } from "../src/shared/colors.js";
 import { deskWindow } from "../src/shared/desk-filters.js";
@@ -47,6 +47,7 @@ let filterNoteOf: (order: readonly string[]) => string;
 let chartWindowOf: (range: RangeId, nowMs: number, firstMs: number | null) => RangeWindow;
 let firstRecordMs: (rows: readonly LedgerRow[]) => number | null;
 let minuteOf: (nowMs: number) => number;
+let resolvedPin: (addressPos: number | null, at: AtPayload | null) => number | null;
 
 beforeAll(async () => {
 	SpendWindow = await appExport("windows/spend/spend-window", "SpendWindow");
@@ -55,6 +56,7 @@ beforeAll(async () => {
 	chartWindowOf = await appExport("windows/spend/chart-data", "chartWindowOf");
 	minuteOf = await appExport("windows/spend/chart-data", "minuteOf");
 	firstRecordMs = await appExport("windows/spend/chart-data", "firstRecordMs");
+	resolvedPin = await appExport("windows/spend/chart-data", "resolvedPin");
 });
 
 /** The desk's clock in these cases: 2026-11-08 12:00:20 UTC, twenty seconds into a minute. */
@@ -214,7 +216,13 @@ describe("the chart data's pure parts", () => {
 		expect(filterNoteOf(["kinds:llm_call", "search:a:b", "models:m:1"])).toBe(
 			"Filtered: llm_call · search · m:1 · faint line: all spend",
 		);
-		expect(filterNoteOf(["from:2026-11-01"])).toBe("Filtered: 2026-11-01 · faint line: all spend");
+		// The four bounds are named by their field, as the filter bar names them.
+		expect(filterNoteOf(["from:2026-11-01"])).toBe(
+			"Filtered: from 2026-11-01 UTC · faint line: all spend",
+		);
+		expect(filterNoteOf(["to:2026-11-05", "costMin:500", "costMax:900"])).toBe(
+			"Filtered: to 2026-11-05 UTC · cost ≥ 500 UT · cost ≤ 900 UT · faint line: all spend",
+		);
 		expect(filterNoteOf([])).toBe("Filtered: search · faint line: all spend");
 	});
 
@@ -250,11 +258,25 @@ describe("the chart data's pure parts", () => {
 		expect(firstRecordMs([spendRow(0, { ts: "x" })])).toBeNull();
 	});
 
-	it("takes the earliest position, not the earliest time", () => {
+	it("takes the least time, so a row written out of order with an earlier time stays inside the window", async () => {
 		const t = (h: number): string => new Date(NOW - h * HOUR).toISOString();
-		// Position 1 is the first record held, though position 3 carries the earlier time.
-		const rows = [spendRow(3, { ts: t(20) }), spendRow(1, { ts: t(10) })];
-		expect(firstRecordMs(rows)).toBe(NOW - 10 * HOUR);
+		// Position 1 is the later record by position but carries the earlier time.
+		const rows = [spendRow(0, { ts: t(10) }), spendRow(1, { ts: t(20) })];
+		expect(firstRecordMs(rows)).toBe(NOW - 20 * HOUR);
+		const d = await chartData({ rows });
+		expect(d.chartWindow.startMs).toBeLessThanOrEqual(NOW - 20 * HOUR);
+	});
+
+	it("resolves the pin: an address past the vault's end is the head the server answered", () => {
+		const at = (pos: number, head: number): AtPayload => ({ pos, head }) as AtPayload;
+		expect(resolvedPin(null, at(12, 12))).toBeNull();
+		expect(resolvedPin(20, at(12, 12))).toBe(12);
+		expect(resolvedPin(13, at(12, 12))).toBe(12);
+		expect(resolvedPin(12, at(12, 12))).toBe(12);
+		expect(resolvedPin(4, at(4, 12))).toBe(4);
+		// Another position's answer still on screen changes nothing.
+		expect(resolvedPin(4, at(3, 12))).toBe(4);
+		expect(resolvedPin(4, null)).toBe(4);
 	});
 
 	it("reads the same window through the hook at two moments of one minute", async () => {
@@ -277,7 +299,7 @@ interface WinCase {
 	phase?: LoadPhase;
 	range?: RangeId;
 	/** What the past view answered for the pin: its head is the vault's head when the position was chosen. */
-	at?: { head: number } | null;
+	at?: { head: number; pos?: number; spentUt?: number } | null;
 }
 
 /** The Spend window inside the desk, as static markup. */
@@ -427,6 +449,18 @@ describe("Spend: the marks", () => {
 		expect(await spend()).not.toContain("ut-sp-mark");
 	});
 
+	it("rings a record written out of order where the line puts it: at the running latest time", async () => {
+		// Position 7 carries a time before position 5's; the line and the cursor read it at position 5's time.
+		const rows = thirteen().map((r) =>
+			r.pos === 7 ? { ...r, ts: new Date(NOW - 72 * HOUR + 2 * HOUR).toISOString() } : r,
+		);
+		const cx = (html: string): number =>
+			Number(/<circle class="ut-sp-mark" cx="([^"]+)"/.exec(html)?.[1]);
+		const out = cx(await spend({ rows, openHash: "h7" }));
+		expect(out).toBeGreaterThan(0);
+		expect(out).toBeCloseTo(cx(await spend({ rows, openHash: "h5" })), 3);
+	});
+
 	it("marks where the chain breaks, from the summary's break index", async () => {
 		const broken = dayOneSummary({
 			chain: { events: 13, valid: false, empty: false, breakIndex: 5, errors: [] },
@@ -478,6 +512,43 @@ describe("Spend: what the words say about the records held", () => {
 		const html = await spend({ pin: 4 });
 		expect(plotTag(html)).toContain('aria-valuemax="13"');
 		expect(plotTag(html)).toContain("Record 5 of 13");
+	});
+});
+
+describe("Spend: a pin that the address names past, or before, what the page holds", () => {
+	it("draws a pin past the vault's end at the head the server answered, not at later records", async () => {
+		const rows = thirteen();
+		// The vault had ten records (head 9) when the link was followed; three have arrived since.
+		const html = await spend({
+			rows,
+			pin: 20,
+			filters: alpha,
+			at: { head: 9, pos: 9, spentUt: 55_000 },
+		});
+		const lane = rows.filter((r) => r.actor === "alpha");
+		expect(headline(html)).toBe(formatUsdTotal(cumTo(lane, 9)));
+		expect(cumTo(lane, 9)).not.toBe(cumTo(lane, 12));
+	});
+
+	it("reads an unfiltered pin's total from the snapshot, which counts what the rows held begin after", async () => {
+		const rows = thirteen();
+		const html = await spend({ rows, pin: 4, at: { head: 12, pos: 4, spentUt: 10_000 } });
+		expect(headline(html)).toBe(formatUsdTotal(10_000));
+		expect(cumTo(rows, 4)).toBe(15_000);
+	});
+
+	it("keeps the rows' total under a filter, and while the answer is for another position", async () => {
+		const rows = thirteen();
+		const lane = rows.filter((r) => r.actor === "alpha");
+		const filtered = await spend({
+			rows,
+			pin: 4,
+			filters: alpha,
+			at: { head: 12, pos: 4, spentUt: 10_000 },
+		});
+		expect(headline(filtered)).toBe(formatUsdTotal(cumTo(lane, 4)));
+		const other = await spend({ rows, pin: 4, at: { head: 12, pos: 3, spentUt: 10_000 } });
+		expect(headline(other)).toBe(formatUsdTotal(15_000));
 	});
 });
 
@@ -547,6 +618,12 @@ describe("Spend: the stylesheet", () => {
 		(m) => ({ sel: (m[1] ?? "").trim(), body: m[2] ?? "" }),
 	);
 	const ruleOf = (sel: string): string => rules.find((r) => r.sel === sel)?.body ?? "";
+
+	it("keeps room under the plot for the cursor's time stamp, which hangs 17px below it", () => {
+		const pad = /padding:\s*\d+px\s+\d+px\s+(\d+)px/.exec(ruleOf(".ut-sp-chart"));
+		expect(Number(pad?.[1])).toBeGreaterThanOrEqual(17);
+		expect(ruleOf(".ut-sp-time")).toContain("top: 100%");
+	});
 
 	it("is read with the page's stylesheets", () => {
 		expect(css).toContain(own);

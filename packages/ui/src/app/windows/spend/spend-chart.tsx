@@ -108,6 +108,8 @@ export interface SpendChartProps {
 	truncated: boolean;
 	/** The pinned position, or null for live. */
 	pinnedPos: number | null;
+	/** The vault's own total at the pinned position (the snapshot's), when the rows are unfiltered and it has answered. */
+	pinTotalUt?: number | null;
 	/** The answer for the pinned position, for the count of records added since it was chosen. */
 	at: AtPayload | null;
 	/** The vault's last position; -1 before a summary. */
@@ -120,6 +122,8 @@ export interface SpendChartProps {
 	filterNote: string | null;
 	/** The moment of the record open in the Ledger's panel, ms, for its ring. */
 	markMs: number | null;
+	/** The open record's position: a spend record is ringed where the line and the cursor put it. */
+	markPos?: number | null;
 	/** The vault position of the first record that breaks the chain, for the dashed line and its ring. */
 	breakPos: number | null;
 	/** The window is animating its size: keep the last settled width. */
@@ -600,7 +604,7 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 		headI === null
 			? restSpend(records)
 			: live === null && pinnedPos !== null
-				? totalAtPos(records, pinnedPos)
+				? (p.pinTotalUt ?? totalAtPos(records, pinnedPos))
 				: headI >= 0
 					? (records.cum[headI] as number)
 					: records.before;
@@ -662,7 +666,12 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 		() => (pinInRange ? onLine(series, geo, msToX(records.t[pinIdx] as number, win, geo.w)) : null),
 		[pinInRange, pinIdx, records, win, geo, series],
 	);
-	const { markMs, breakPos } = p;
+	const { breakPos } = p;
+	// A spend record is ringed at the time the line and the cursor give it (the running latest time), which an
+	// out-of-order record's own time is not; any other record is placed by its own time.
+	const markI = p.markPos == null ? -1 : indexAtPos(records, p.markPos);
+	const markMs =
+		markI >= 0 && records.pos[markI] === p.markPos ? (records.t[markI] as number) : p.markMs;
 	const ringMark = useMemo(
 		() =>
 			markMs !== null && geo.w > 0 && markMs >= win.startMs && markMs <= win.endMs

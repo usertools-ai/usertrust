@@ -58,14 +58,15 @@
 		border: 0;
 	}
 
-	/* The chart fills the window's body: the headline row, then the plot taking what is left, then the axis. */
+	/* The chart fills the window's body: the headline row, then the plot taking what is left. The bottom padding holds
+	   the cursor's time stamp, which hangs below the plot (17px), so the body never clips it or scrolls. */
 	.ut-sp-chart {
 		display: flex;
 		flex-direction: column;
 		flex: 1 1 0;
 		min-height: 0;
 		gap: 8px;
-		padding: 10px 14px 6px;
+		padding: 10px 14px 20px;
 		background: var(--dk-pane);
 		color: var(--dk-text);
 	}

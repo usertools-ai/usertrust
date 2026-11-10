@@ -11,6 +11,7 @@
 
 import { useMemo } from "react";
 import { isHeaderSpend } from "../../../shared/aggregate.js";
+import type { AtPayload } from "../../../shared/api.js";
 import type { SpendWindow } from "../../../shared/breakdown.js";
 import { chartWindow as windowFor } from "../../../shared/chart-window.js";
 import { applyFilters } from "../../../shared/filters.js";
@@ -38,20 +39,29 @@ export function minuteOf(nowMs: number): number {
 }
 
 /**
- * The time of the first held spend record: the earliest position among the rows whose time reads, or null when there
- * is none. The chart's window opens no earlier than it, so no flat run-up is drawn.
+ * The least time among the held spend rows whose time reads, or null when there is none. The chart's window opens no
+ * earlier than it, so no flat run-up is drawn, and a row written out of order with an earlier time still falls inside
+ * the window (its spend stays in the line and the range's total).
  */
 export function firstRecordMs(rows: readonly LedgerRow[]): number | null {
-	let best: LedgerRow | null = null;
-	let bestMs = 0;
+	let best: number | null = null;
 	for (const row of rows) {
 		if (!isHeaderSpend(row.kind, row.costUt)) continue;
 		const t = Date.parse(row.ts);
-		if (Number.isNaN(t) || (best !== null && row.pos >= best.pos)) continue;
-		best = row;
-		bestMs = t;
+		if (Number.isNaN(t) || (best !== null && t >= best)) continue;
+		best = t;
 	}
-	return best === null ? null : bestMs;
+	return best;
+}
+
+/**
+ * The position the chart draws as pinned. The address's position can be past the vault's end (a link written when the
+ * vault was longer, or a typed one): the server answers with the head and says so, and that is the position the pin
+ * stands for, so records that arrive later are not counted into it. Until an answer says so, the address's own.
+ */
+export function resolvedPin(addressPos: number | null, at: AtPayload | null): number | null {
+	if (addressPos === null) return null;
+	return at !== null && addressPos > at.head ? at.pos : addressPos;
 }
 
 /** The chart's window: the range ending at the end of the current minute, never at a pinned position. */
@@ -62,12 +72,21 @@ export function chartWindowOf(range: RangeId, nowMs: number, firstMs: number | n
 /**
  * The caption under a filter. Each filter token (`"<field>:<value>"`, in the order the filters were added, the newest
  * last) is named by its value, the text after the first colon. A text search is named `search`: the words typed are
- * not a name for what the line shows.
+ * not a name for what the line shows. The four bounds are not values of a list and are named by their field, as the
+ * filter bar names them: `from 2026-11-01 UTC`, `to 2026-11-05 UTC`, `cost ≥ 500 UT`, `cost ≤ 900 UT`.
  */
 export function filterNoteOf(order: readonly string[]): string {
-	const values = order.map((t) =>
-		t.startsWith("search:") ? "search" : t.slice(t.indexOf(":") + 1),
-	);
+	const values = order.map((t) => {
+		const i = t.indexOf(":");
+		if (i < 0) return t;
+		const field = t.slice(0, i);
+		const value = t.slice(i + 1);
+		if (field === "search") return "search";
+		if (field === "from" || field === "to") return `${field} ${value} UTC`;
+		if (field === "costMin") return `cost ≥ ${value} UT`;
+		if (field === "costMax") return `cost ≤ ${value} UT`;
+		return value;
+	});
 	return `Filtered: ${values.length > 0 ? values.join(SEP) : "search"}${SEP}faint line: all spend`;
 }
 

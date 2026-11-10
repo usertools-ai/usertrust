@@ -121,6 +121,26 @@ describe("the open record's ring: where it may be drawn", () => {
 	});
 });
 
+describe("the open record's ring for a record written out of order", () => {
+	it("sits where the line and the cursor put a spend record: at the running latest time", () => {
+		const late = T0 + 30 * HOUR;
+		const own = T0 + 20 * HOUR;
+		const out = [
+			spendRow(0, { ts: new Date(T0 + 10 * HOUR).toISOString(), costUt: 1000 }),
+			spendRow(1, { ts: new Date(late).toISOString(), costUt: 1000 }),
+			spendRow(2, { ts: new Date(own).toISOString(), costUt: 1000 }),
+		];
+		const cx = (html: string): number =>
+			Number(/<circle class="ut-sp-mark" cx="([^"]+)"/.exec(html)?.[1]);
+		expect(cx(chart({ rows: out, markMs: own, markPos: 2 }))).toBeCloseTo(
+			msToX(late, WEEK_WIN, W),
+			3,
+		);
+		// With no position the record's own time places it.
+		expect(cx(chart({ rows: out, markMs: own }))).toBeCloseTo(msToX(own, WEEK_WIN, W), 3);
+	});
+});
+
 describe("the peak label", () => {
 	/** The label's anchor, its transform's pieces and its text, or null when there is none. */
 	function label(html: string): {
