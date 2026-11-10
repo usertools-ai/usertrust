@@ -16,6 +16,7 @@
  */
 
 import type { SpendWindow } from "./breakdown.js";
+import { LINE_BUCKETS as BUCKET_MS } from "./chart-window.js";
 import { inWindow, type SpendRecords, spendRecords } from "./cumulative.js";
 import { type LedgerRow, statusOf } from "./rows.js";
 import { smoothRadius, smoothRate } from "./smooth-rate.js";
@@ -32,16 +33,17 @@ export interface LineBucket {
 }
 
 /**
- * The bucket each range draws with. Above a month it is 6 h, not a day: a day's bucket averages an hour-long burst
- * of spend down until it no longer stands out from the rest of the line.
+ * The bucket each range draws with: the sizes are `chart-window.ts`'s, the words for them are here. Above a month it
+ * is 6 h, not a day: a day's bucket averages an hour-long burst of spend down until it no longer stands out from the
+ * rest of the line.
  */
 export const LINE_BUCKETS: Record<RangeId, LineBucket> = {
-	"1d": { ms: 5 * MINUTE, per: "5 min" },
-	"1w": { ms: HOUR, per: "hour" },
-	"1m": { ms: 4 * HOUR, per: "4 h" },
-	"3m": { ms: 6 * HOUR, per: "6 h" },
-	ytd: { ms: 6 * HOUR, per: "6 h" },
-	"1y": { ms: 6 * HOUR, per: "6 h" },
+	"1d": { ms: BUCKET_MS["1d"], per: "5 min" },
+	"1w": { ms: BUCKET_MS["1w"], per: "hour" },
+	"1m": { ms: BUCKET_MS["1m"], per: "4 h" },
+	"3m": { ms: BUCKET_MS["3m"], per: "6 h" },
+	ytd: { ms: BUCKET_MS.ytd, per: "6 h" },
+	"1y": { ms: BUCKET_MS["1y"], per: "6 h" },
 };
 
 /** A per-hour rate as the spend of one whole bucket, the unit every figure on the line is shown in. */
