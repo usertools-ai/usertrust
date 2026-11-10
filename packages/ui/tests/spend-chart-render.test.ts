@@ -2,17 +2,31 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * The Spend chart's marks as static markup. The frame cases are here; the chart's own cases (cursor, keys, pin,
- * headline) are added below in their own groups.
+ * The Spend chart's marks as static markup. The frame cases are here; the chart's own cases (headline, filters,
+ * slots) are added below in their own groups.
  */
 
 import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, describe, expect, it } from "vitest";
-import { LAYERS, type LayerZ, type SpendLayer } from "../src/app/windows/spend/layers.js";
-import { formatUsdAxis } from "../src/shared/format.js";
-import { LINE_BUCKETS } from "../src/shared/spend-model.js";
+import {
+	type ChartCtx,
+	LAYERS,
+	type LayerZ,
+	type SpendLayer,
+} from "../src/app/windows/spend/layers.js";
+import type { AtPayload } from "../src/shared/api.js";
+import type { SpendWindow } from "../src/shared/breakdown.js";
+import { formatUsd, formatUsdAxis, formatUsdTotal, formatUtc } from "../src/shared/format.js";
+import type { LedgerRow } from "../src/shared/rows.js";
+import {
+	buildSpendModel,
+	LINE_BUCKETS,
+	type LineBucket,
+	perShort,
+	toBucket,
+} from "../src/shared/spend-model.js";
 import {
 	AREA_HIGHLIGHT,
 	AREA_STOPS,
@@ -24,7 +38,37 @@ import {
 	niceTicks,
 } from "../src/shared/spend-scale.js";
 import { appExport, type Component } from "./helpers/day-one.js";
-import { type ChartFixture, chartFixture, HOUR, T0 } from "./helpers/spend-fixture.js";
+import {
+	type ChartFixture,
+	chartFixture,
+	HOUR,
+	spendRow,
+	T0,
+	WEEK_WIN,
+} from "./helpers/spend-fixture.js";
+
+interface ChartProps {
+	rows: readonly LedgerRow[];
+	win: SpendWindow;
+	totalUt: number | null;
+	filtered: boolean;
+	truncated: boolean;
+	pinnedPos: number | null;
+	at: AtPayload | null;
+	head: number;
+	ink: string | null;
+	allRows: readonly LedgerRow[] | null;
+	filterNote: string | null;
+	markMs: number | null;
+	breakPos: number | null;
+	settling: boolean;
+	layers?: readonly SpendLayer[];
+	bucket: LineBucket;
+	filterKey: string;
+	controls?: React.ReactNode;
+	onPin(pos: number | null): void;
+	onPreview(pos: number | null): void;
+}
 
 interface FrameProps {
 	ctx: ChartFixture["ctx"];
@@ -43,9 +87,11 @@ interface FrameProps {
 }
 
 let ChartFrame: Component<FrameProps>;
+let SpendChart: Component<ChartProps>;
 
 beforeAll(async () => {
 	ChartFrame = await appExport("windows/spend/chart-frame", "ChartFrame");
+	SpendChart = await appExport("windows/spend/spend-chart", "SpendChart");
 });
 
 function frame(fx: ChartFixture, over: Partial<FrameProps> = {}): string {
@@ -678,5 +724,380 @@ describe("chart frame: the sheet", () => {
 		// The gap under the dashes is wider than the dashes, or it would not hide the solid line.
 		const w = (r: string): number => Number(/stroke-width: ([\d.]+)/.exec(r)?.[1]);
 		expect(w(gap)).toBeGreaterThan(w(dashed));
+	});
+});
+
+// ---- The chart: headline, crosshair slots and layers, as static markup with props only ----
+
+/** Twelve spend records 6 h apart over three days, costing 1,000 to 13,000 UT by position, and one info row at 6. */
+function chartRows(): LedgerRow[] {
+	return Array.from({ length: 13 }, (_, pos) =>
+		spendRow(pos, {
+			ts: new Date(T0 + pos * 6 * HOUR).toISOString(),
+			costUt: (pos + 1) * 1000,
+			...(pos === 6 ? { kind: "policy_decision" } : {}),
+		}),
+	);
+}
+/** The spend records' costs by position: the info row spends nothing. */
+const COST = (pos: number): number => (pos === 6 ? 0 : (pos + 1) * 1000);
+const SUM = Array.from({ length: 13 }, (_, p) => COST(p)).reduce((a, b) => a + b, 0);
+
+function chart(over: Partial<ChartProps> = {}): string {
+	return renderToStaticMarkup(
+		createElement(SpendChart, {
+			rows: chartRows(),
+			win: WEEK_WIN,
+			totalUt: null,
+			filtered: false,
+			truncated: false,
+			pinnedPos: null,
+			at: null,
+			head: 12,
+			ink: null,
+			allRows: null,
+			filterNote: null,
+			markMs: null,
+			breakPos: null,
+			settling: false,
+			bucket: LINE_BUCKETS["1w"],
+			filterKey: "{}",
+			onPin: () => undefined,
+			onPreview: () => undefined,
+			...over,
+		}),
+	);
+}
+
+/** The headline's settled figure: the visually hidden span inside the `spend.headline` block. */
+function headline(html: string): string | undefined {
+	return /data-fig="spend\.headline"><span[^>]*>[^<]*<\/span><span class="sr-only">([^<]*)<\/span>/.exec(
+		html,
+	)?.[1];
+}
+const textOf = (html: string, cls: string): string | undefined =>
+	new RegExp(`<span class="${cls}"[^>]*>(.*?)</span>(?=<span class="ut-sp-|</div>)`).exec(
+		html,
+	)?.[1];
+const plotTag = (html: string): string => /<div[^>]*class="ut-sp-plot"[^>]*>/.exec(html)?.[0] ?? "";
+const stripTags = (s: string | undefined): string => (s ?? "").replace(/<[^>]*>/g, "");
+
+describe("spend chart: the headline is an exact sum", () => {
+	it("reads every spend record's cost, and the info row none", () => {
+		expect(headline(chart())).toBe(formatUsdTotal(SUM));
+		expect(SUM).toBe(84_000);
+	});
+	it("reads the anchor when the server holds older records", () => {
+		expect(headline(chart({ totalUt: 1_000_000, truncated: true }))).toBe(
+			formatUsdTotal(1_000_000),
+		);
+	});
+	it("puts the exact 4-decimal amount in the figure's title", () => {
+		const rest = chart({ totalUt: 1_234_500 });
+		expect(rest).toContain(`<span class="ut-sp-fig" title="${formatUsd(1_234_500)}">`);
+		expect(formatUsd(1_234_500)).not.toBe(formatUsdTotal(1_234_500));
+	});
+	it("reads live at rest, with the last spend's time", () => {
+		const html = chart();
+		expect(html).toContain('<span class="ut-sp-lbl">Spend</span>');
+		expect(stripTags(textOf(html, "ut-sp-when"))).toBe(`Live · last spend ${"11-04 00:00:00Z"}`);
+	});
+	it("with only undated spend rows, or only older spend, never says no spend beside a headline that reads some", () => {
+		const a = chart({ rows: [spendRow(0, { ts: "not a date", costUt: 5000 })] });
+		expect(headline(a)).toBe(formatUsdTotal(5000));
+		expect(stripTags(textOf(a, "ut-sp-when"))).toBe("Live · last spend time unknown");
+		const b = chart({ rows: [], totalUt: 7000, truncated: true });
+		expect(headline(b)).toBe(formatUsdTotal(7000));
+		expect(stripTags(textOf(b, "ut-sp-when"))).toBe("Live · last spend time unknown");
+		expect(stripTags(textOf(chart({ rows: [] }), "ut-sp-when"))).toBe(
+			"Live · no spend recorded yet",
+		);
+	});
+	it("counts an undated zero-cost spend row as spend: its time is unknown, it is not no spend", () => {
+		const html = chart({ rows: [spendRow(0, { ts: "not a date", costUt: 0 })] });
+		expect(stripTags(textOf(html, "ut-sp-when"))).toBe("Live · last spend time unknown");
+	});
+	it("does not name the previous dated row when the newest spend row is undated", () => {
+		const rows = [
+			spendRow(0, { ts: new Date(T0).toISOString(), costUt: 1000 }),
+			spendRow(1, { ts: "not a date", costUt: 2000 }),
+		];
+		expect(stripTags(textOf(chart({ rows }), "ut-sp-when"))).toBe("Live · last spend time unknown");
+	});
+	it("names the bucket in the sub-line at each range", () => {
+		expect(stripTags(textOf(chart(), "ut-sp-sub"))).toMatch(
+			/^\+\$8\.40 in this range · peak \$\S+\/h$/,
+		);
+		const day = chart({ bucket: LINE_BUCKETS["1d"] });
+		expect(stripTags(textOf(day, "ut-sp-sub"))).toMatch(/peak \$\S+\/5 min$/);
+	});
+});
+
+describe("spend chart: a filtered view never claims the vault", () => {
+	it("says in this view, and since the oldest record held when the vault is truncated", () => {
+		const html = chart({ filtered: true, truncated: true });
+		expect(html).toContain('<span class="ut-sp-lbl">Spend in this view</span>');
+		expect(stripTags(textOf(html, "ut-sp-sub"))).toContain("since the oldest record held");
+	});
+	it("never says in this view unfiltered", () => {
+		expect(chart({ truncated: true })).not.toContain("in this view");
+	});
+});
+
+describe("spend chart: the tint", () => {
+	it("puts the category colour on the plot as the ink and its glow", () => {
+		const style = attr(plotTag(chart({ ink: "#BE804D" })), "style") ?? "";
+		expect(style).toContain("--sp-ink:#BE804D");
+		expect(style).toContain("--sp-glow:#BE804D");
+		expect(attr(plotTag(chart()), "style")).toBeUndefined();
+	});
+});
+
+describe("spend chart: under a filter", () => {
+	const all = chartRows().map((r) => (r.pos === 12 ? { ...r, costUt: 9_000_000 } : r));
+	const filteredRows = chartRows().slice(0, 6);
+	const labels = (html: string): string[] =>
+		[...html.matchAll(/<text class="ut-sp-tick"[^>]*>([^<]*)<\/text>/g)].map((m) => m[1] as string);
+	const ticksFor = (rows: LedgerRow[]): string[] => {
+		const m = buildSpendModel(rows, WEEK_WIN, LINE_BUCKETS["1w"], null);
+		return niceTicks(Math.max(m.drawnPeak * HEADROOM, MIN_TOP)).map((t) => formatUsdAxis(t));
+	};
+	it("draws all spend faint, with its caption, on the unfiltered scale", () => {
+		const html = chart({
+			rows: filteredRows,
+			filtered: true,
+			allRows: all,
+			filterNote: "Filtered: xAI · faint line: all spend",
+		});
+		expect(html).toContain('class="ut-sp-ghost"');
+		expect(html).toContain("Filtered: xAI · faint line: all spend");
+		expect(labels(html)).toEqual(ticksFor(all));
+		expect(ticksFor(all)).not.toEqual(ticksFor(filteredRows));
+	});
+	it("draws no faint line and no caption unfiltered, on the line's own scale", () => {
+		const html = chart({ rows: filteredRows });
+		expect(html).not.toContain("ut-sp-ghost");
+		expect(html).not.toContain("ut-sp-fcap");
+		expect(labels(html)).toEqual(ticksFor(filteredRows));
+	});
+});
+
+describe("spend chart: figures and words read exactly", () => {
+	it("reads the anchor when there are no rows", () => {
+		expect(headline(chart({ rows: [], totalUt: 1_000_000 }))).toBe(formatUsdTotal(1_000_000));
+		expect(headline(chart({ rows: [] }))).toBe(formatUsdTotal(0));
+	});
+	it("says the peak of the exact rates, per the bucket's unit", () => {
+		const m = buildSpendModel(chartRows(), WEEK_WIN, LINE_BUCKETS["1w"], null);
+		const peak = formatUsdTotal(toBucket(m.peakRate, LINE_BUCKETS["1w"]));
+		expect(peak).not.toBe(formatUsdTotal(toBucket(m.drawnPeak, LINE_BUCKETS["1w"])));
+		expect(stripTags(textOf(chart(), "ut-sp-sub"))).toBe(
+			`+${formatUsdTotal(m.rangeUt)} in this range · peak ${peak}${perShort("hour")}`,
+		);
+	});
+	it("says since the oldest record held only when filtered and truncated both", () => {
+		const sub = (o: Partial<ChartProps>): string => stripTags(textOf(chart(o), "ut-sp-sub"));
+		expect(sub({ filtered: true })).not.toContain("since the oldest record held");
+		expect(sub({ truncated: true })).not.toContain("since the oldest record held");
+		expect(sub({ filtered: true, truncated: true })).toContain("since the oldest record held");
+	});
+	it("says no spend was recorded with no rows", () => {
+		expect(stripTags(textOf(chart({ rows: [] }), "ut-sp-sub"))).toBe(
+			"No spend recorded in this range",
+		);
+		expect(stripTags(textOf(chart(), "ut-sp-sub"))).not.toContain("No spend recorded");
+	});
+	it("hides the visible figure and the axis from assistive tech, and says it is not pinned", () => {
+		const html = chart();
+		expect(html).toMatch(/<span class="ut-tick" aria-hidden="true"/);
+		expect(html).toMatch(/<div class="ut-sp-axis" aria-hidden="true"/);
+		expect(plotTag(html)).toContain('data-pinned="false"');
+	});
+});
+
+describe("spend chart: the layers' hand in the chart", () => {
+	const under: SpendLayer = {
+		id: "bands",
+		z: "under",
+		Layer: () => createElement("i", { "data-test": "under" }),
+	};
+	it("draws an under layer once, inside the svg", () => {
+		const html = chart({ layers: [under] });
+		expect(html.split('data-test="under"').length - 1).toBe(1);
+	});
+	it("takes the grid's ticks from the layer that gives a scale", () => {
+		const scaled: SpendLayer = {
+			id: "knee",
+			z: "under",
+			Layer: () => null,
+			scale: () => ({ knee: Number.POSITIVE_INFINITY, ticks: [{ drawn: 1, label: 7 }] }),
+		};
+		const labels = [
+			...chart({ layers: [scaled] }).matchAll(/<text class="ut-sp-tick"[^>]*>([^<]*)<\/text>/g),
+		].map((m) => m[1]);
+		expect(labels).toEqual([formatUsdAxis(7)]);
+	});
+	it("draws the faint line from all spend's rows, not the filtered ones", () => {
+		const all = chartRows();
+		const some = all.slice(0, 6);
+		const html = chart({ rows: some, filtered: true, allRows: all, filterNote: "n" });
+		const ghost = /<path class="ut-sp-ghost" d="([^"]*)"/.exec(html)?.[1];
+		const main = (h: string): string | undefined =>
+			/<path class="ut-sp-line"[^>]* d="([^"]*)"/.exec(h)?.[1] ??
+			/<path[^>]* d="([^"]*)"[^>]*class="ut-sp-line"/.exec(h)?.[1];
+		expect(ghost).toBeDefined();
+		expect(ghost).toBe(main(chart({ rows: all })));
+		expect(ghost).not.toBe(main(chart({ rows: some })));
+	});
+});
+
+describe("spend chart: the record a bucket lands on", () => {
+	const at = (ms: number): { ts: string } => ({ ts: new Date(ms).toISOString() });
+	/** Render with a layer that moves to bucket `k` as the arrow keys would; the position the header was sent to. */
+	function landed(
+		rows: LedgerRow[],
+		k: number,
+		win: SpendWindow = WEEK_WIN,
+	): number | null | undefined {
+		let sent: number | null | undefined;
+		const probe: SpendLayer = {
+			id: "loupe",
+			z: "overlay",
+			Layer: (p: { ctx: ChartCtx }) => {
+				p.ctx.moveTo(k);
+				return null;
+			},
+		};
+		chart({ rows, win, layers: [probe], onPreview: (pos) => (sent = pos) });
+		return sent;
+	}
+	it("takes the last record of a bucket that holds two", () => {
+		const rows = [
+			spendRow(0, at(T0 + 5 * HOUR + 10 * 60_000)),
+			spendRow(1, at(T0 + 5 * HOUR + 40 * 60_000)),
+			spendRow(2, at(T0 + 9 * HOUR)),
+		];
+		expect(landed(rows, 5)).toBe(1);
+	});
+	it("takes the record nearest the centre of an empty bucket", () => {
+		const rows = [spendRow(0, at(T0 + 2.5 * HOUR)), spendRow(1, at(T0 + 10 * HOUR))];
+		expect(landed(rows, 3)).toBe(0);
+		expect(landed(rows, 8)).toBe(1);
+	});
+	it("counts from the window's first record when older records precede it", () => {
+		const rows = [
+			spendRow(0, at(T0 - 5 * HOUR)),
+			spendRow(1, at(T0 + 2 * HOUR)),
+			spendRow(2, at(T0 + 10 * HOUR)),
+		];
+		expect(landed(rows, 4)).toBe(1);
+	});
+	it("never lands on a record past the window's end in its last, shorter bucket", () => {
+		const win = { startMs: T0, endMs: T0 + 7 * 24 * HOUR + 30 * 60_000 };
+		const rows = [
+			spendRow(0, at(T0 + 7 * 24 * HOUR + 5 * 60_000)),
+			spendRow(1, at(T0 + 7 * 24 * HOUR + 10 * 60_000)),
+			spendRow(2, at(T0 + 7 * 24 * HOUR + 50 * 60_000)),
+		];
+		expect(landed(rows, 168, win)).toBe(1);
+	});
+	it("lands nowhere with no rows", () => {
+		expect(landed([], 3)).toBeUndefined();
+	});
+});
+
+describe("spend chart: nothing a row says is dropped", () => {
+	const dated = (pos: number, cost: number, ms: number): LedgerRow =>
+		spendRow(pos, { costUt: cost, ts: new Date(ms).toISOString() });
+	it("rests on every spend row, including one whose time does not read", () => {
+		const rows = [dated(0, 100_000, T0 + HOUR), spendRow(1, { costUt: 200_000, ts: "not a time" })];
+		expect(headline(chart({ rows }))).toBe(formatUsdTotal(300_000));
+		expect(headline(chart({ rows: [spendRow(0, { costUt: 200_000, ts: "x" })] }))).toBe(
+			formatUsdTotal(200_000),
+		);
+	});
+	it("says no spend only when the range holds none, not when the span is empty", () => {
+		// The first row is written after the window and the second inside it: the second's record takes the running
+		// maximum time, so it is outside the span, but its cost is in the range.
+		const rows = [dated(0, 100_000, WEEK_WIN.endMs + 2 * HOUR), dated(1, 50_000, T0 + HOUR)];
+		const m = buildSpendModel(rows, WEEK_WIN, LINE_BUCKETS["1w"], null);
+		expect(m.span.i1).toBeLessThan(m.span.i0);
+		expect(m.rangeUt).toBe(50_000);
+		const sub = stripTags(textOf(chart({ rows }), "ut-sp-sub"));
+		expect(sub).not.toContain("No spend recorded");
+		expect(sub.startsWith(`+${formatUsdTotal(50_000)} in this range`)).toBe(true);
+	});
+	it("writes the axis for a window that does not read, instead of throwing", () => {
+		const html = chart({ win: { startMs: Number.NaN, endMs: Number.NaN } });
+		expect(html).toContain("<span>unknown time</span><span>unknown time</span>");
+	});
+});
+
+describe("spend chart: the plot at rest", () => {
+	it("marks the when-line as live, not past, with no cursor", () => {
+		expect(chart()).toContain('class="ut-sp-when" data-past="false"');
+	});
+	it("draws no pin, ring or break mark in this part", () => {
+		const html = chart({ pinnedPos: 3, markMs: T0, breakPos: 2 });
+		for (const cls of ["ut-sp-pin", "ut-sp-mark", "ut-sp-break"]) expect(html).not.toContain(cls);
+	});
+	it("labels the axis with the window's start, then its end", () => {
+		const axis = /<div class="ut-sp-axis"[^>]*><span>([^<]*)<\/span><span>([^<]*)<\/span>/.exec(
+			chart(),
+		);
+		expect(axis?.[1]).toBe(formatUtc(new Date(WEEK_WIN.startMs).toISOString()));
+		expect(axis?.[2]).toBe(formatUtc(new Date(WEEK_WIN.endMs).toISOString()));
+		expect(axis?.[1]).not.toBe(axis?.[2]);
+	});
+	it("shows the faint line's caption only with the faint line", () => {
+		const html = chart({ filterNote: "a note" });
+		expect(html).not.toContain("a note");
+		expect(html).not.toContain("ut-sp-fcap");
+	});
+});
+
+describe("spend chart: the layers' slots", () => {
+	const ov: SpendLayer = {
+		id: "loupe",
+		z: "overlay",
+		Layer: () => createElement("i", { "data-test": "ov" }),
+		Overlay: () => createElement("i", { "data-test": "ov-html" }),
+	};
+	const under: SpendLayer = {
+		id: "bands",
+		z: "under",
+		Layer: () => createElement("i", { "data-test": "under" }),
+		Note: () => createElement("b", { "data-test": "note" }),
+	};
+	let html = "";
+	let plot = "";
+	beforeAll(() => {
+		html = chart({ layers: [under, ov] });
+		plot = html.slice(html.indexOf('class="ut-sp-plot"'), html.indexOf('class="ut-sp-axis"'));
+	});
+	it("puts an overlay layer and then its Overlay in the plot, after the svg", () => {
+		const svgEnd = plot.indexOf("</svg>");
+		expect(svgEnd).toBeGreaterThan(-1);
+		expect(plot.indexOf('data-test="ov"')).toBeGreaterThan(svgEnd);
+		expect(plot.indexOf('data-test="ov-html"')).toBeGreaterThan(plot.indexOf('data-test="ov"'));
+	});
+	it("keeps an under layer inside the svg", () => {
+		expect(plot.indexOf('data-test="under"')).toBeGreaterThan(-1);
+		expect(plot.indexOf('data-test="under"')).toBeLessThan(plot.indexOf("</svg>"));
+	});
+});
+
+describe("spend chart: the area at rest", () => {
+	it("keeps the area at rest strength with no cursor", () => {
+		const first = /<stop[^>]*>/.exec(chart())?.[0] ?? "";
+		expect(attr(first, "stop-opacity")).toBe("0.13");
+	});
+});
+
+describe("spend chart: the words it never uses", () => {
+	it("renders without a browser and never says verified, runaway, loop or anomaly", () => {
+		for (const html of [chart(), chart({ rows: [] })]) {
+			expect(html.toLowerCase()).not.toMatch(/verified|runaway|loop|anomal/);
+		}
 	});
 });

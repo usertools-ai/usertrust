@@ -330,3 +330,91 @@ describe("breakRecord", () => {
 		expect(breakRecord(spendRecords([], null), 0, all)).toBe(-1);
 	});
 });
+
+describe("spendRecords: the total", () => {
+	const at = (min: number): string => new Date(T0 + min * MIN).toISOString();
+	it("counts a spend row whose time does not read, which has no record of its own", () => {
+		const r = spendRecords(
+			rowsOf([
+				{ kind: "llm_call", cost: 100, ts: at(1) },
+				{ kind: "llm_call", cost: 200, ts: "not a date" },
+			]),
+			null,
+		);
+		expect(r.n).toBe(1);
+		expect(r.cum[0]).toBe(100);
+		expect(r.total).toBe(300);
+	});
+	it("is the anchor when the anchor covers the rows held", () => {
+		const rows = rowsOf([
+			{ kind: "llm_call", cost: 100, ts: at(1) },
+			{ kind: "llm_call", cost: 200, ts: "x" },
+		]);
+		expect(spendRecords(rows, 1000).total).toBe(1000);
+		expect(spendRecords(rows, 1000).before).toBe(700);
+	});
+	it("is the rows' own spend when the anchor is below it, or is not a number", () => {
+		const rows = rowsOf([
+			{ kind: "llm_call", cost: 100, ts: at(1) },
+			{ kind: "llm_call", cost: 200, ts: at(2) },
+		]);
+		const low = spendRecords(rows, 100);
+		expect(low.before).toBe(0);
+		expect(low.total).toBe(300);
+		expect(spendRecords(rows, Number.NaN).total).toBe(300);
+		expect(spendRecords(rows, Number.POSITIVE_INFINITY).total).toBe(300);
+	});
+	it("is the anchor, or zero, with no rows, and the whole fixture's spend with none", () => {
+		expect(spendRecords([], null).total).toBe(0);
+		expect(spendRecords([], 5000).total).toBe(5000);
+		expect(spendRecords(rowsOf(SPECS), null).total).toBe(SPEND_SUM);
+	});
+});
+
+describe("spendRecords: rows held and the newest row's time", () => {
+	const at = (min: number): string => new Date(T0 + min * MIN).toISOString();
+	it("counts every spend row held, dated or not", () => {
+		const r = spendRecords(
+			rowsOf([
+				{ kind: "llm_call", cost: 100, ts: at(1) },
+				{ kind: "llm_call", cost: 200, ts: "x" },
+			]),
+			null,
+		);
+		expect([r.rows, r.n]).toEqual([2, 1]);
+		expect(spendRecords([], 5000).rows).toBe(0);
+	});
+	it("says the newest row is undated only when that row's time does not read", () => {
+		const dated = spendRecords(rowsOf([{ kind: "llm_call", cost: 100, ts: at(1) }]), null);
+		expect(dated.lastUndated).toBe(false);
+		const last = spendRecords(
+			rowsOf([
+				{ kind: "llm_call", cost: 100, ts: at(1) },
+				{ kind: "llm_call", cost: 200, ts: "x" },
+			]),
+			null,
+		);
+		expect(last.lastUndated).toBe(true);
+		const first = spendRecords(
+			rowsOf([
+				{ kind: "llm_call", cost: 100, ts: "x" },
+				{ kind: "llm_call", cost: 200, ts: at(1) },
+			]),
+			null,
+		);
+		expect(first.lastUndated).toBe(false);
+		expect(spendRecords([], null).lastUndated).toBe(false);
+	});
+	it("reads the newest row by position, not the last one held, when rows arrive out of order", () => {
+		const [r0, r1] = rowsOf([
+			{ kind: "llm_call", cost: 100, ts: at(1) },
+			{ kind: "llm_call", cost: 200, ts: "x" },
+		]) as [LedgerRow, LedgerRow];
+		expect(spendRecords([r1, r0], null).lastUndated).toBe(true);
+		const [d0, d1] = rowsOf([
+			{ kind: "llm_call", cost: 100, ts: "x" },
+			{ kind: "llm_call", cost: 200, ts: at(1) },
+		]) as [LedgerRow, LedgerRow];
+		expect(spendRecords([d1, d0], null).lastUndated).toBe(false);
+	});
+});

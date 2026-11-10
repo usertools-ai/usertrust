@@ -8,7 +8,10 @@ import {
 	bucketOf,
 	drawnCursor,
 	escapeTarget,
+	frameKey,
 	keyAction,
+	movedTime,
+	reconcileCursor,
 	stepBucket,
 	toggleTarget,
 } from "../src/app/windows/spend/chart-keys.js";
@@ -79,24 +82,34 @@ describe("subLine", () => {
 describe("whenLine", () => {
 	it("names the pinned record by its time and vault number", () => {
 		expect(
-			whenLine({ shown: { t: T, pos: 17_951, pinned: true }, pinnedNoRecord: false, lastT: T }),
+			whenLine({
+				shown: { t: T, pos: 17_951, pinned: true },
+				pinnedNoRecord: false,
+				lastT: T,
+				spent: true,
+			}),
 		).toBe("Pinned · 11-07 18:00:05Z · record 17,952");
 	});
 	it("names a hovered record without the pin's word", () => {
 		expect(
-			whenLine({ shown: { t: T, pos: 4, pinned: false }, pinnedNoRecord: false, lastT: T }),
+			whenLine({
+				shown: { t: T, pos: 4, pinned: false },
+				pinnedNoRecord: false,
+				lastT: T,
+				spent: true,
+			}),
 		).toBe("11-07 18:00:05Z · record 5");
 	});
 	it("is live at rest", () => {
-		expect(whenLine({ shown: null, pinnedNoRecord: false, lastT: T })).toBe(
+		expect(whenLine({ shown: null, pinnedNoRecord: false, lastT: T, spent: true })).toBe(
 			"Live · last spend 11-07 18:00:05Z",
 		);
-		expect(whenLine({ shown: null, pinnedNoRecord: false, lastT: null })).toBe(
+		expect(whenLine({ shown: null, pinnedNoRecord: false, lastT: null, spent: false })).toBe(
 			"Live · no spend recorded yet",
 		);
 	});
 	it("says so for a pin with no spend at or before it", () => {
-		expect(whenLine({ shown: null, pinnedNoRecord: true, lastT: T })).toBe(
+		expect(whenLine({ shown: null, pinnedNoRecord: true, lastT: T, spent: true })).toBe(
 			"Pinned · no spend recorded by then",
 		);
 	});
@@ -146,7 +159,7 @@ describe("valueText and whenLine with a pin that has no record", () => {
 	it("never reads the time of a pin with no spend record at or before it", () => {
 		const v = { empty: false, shown: nan, pinnedNoRecord: true, head: 11, cumUt: 0 };
 		expect(valueText(v)).toBe("Pinned · $0.00 spent");
-		expect(whenLine({ shown: nan, pinnedNoRecord: true, lastT: T })).toBe(
+		expect(whenLine({ shown: nan, pinnedNoRecord: true, lastT: T, spent: true })).toBe(
 			"Pinned · no spend recorded by then",
 		);
 	});
@@ -166,10 +179,10 @@ describe("valueText and whenLine with a pin that has no record", () => {
 describe("words with a time that is not one, and a record past the stale head", () => {
 	it("never throws on a NaN time, with or without the no-record flag", () => {
 		const nan = { t: Number.NaN, pos: 4, pinned: false };
-		expect(whenLine({ shown: nan, pinnedNoRecord: false, lastT: T })).toBe(
+		expect(whenLine({ shown: nan, pinnedNoRecord: false, lastT: T, spent: true })).toBe(
 			"unknown time · record 5",
 		);
-		expect(whenLine({ shown: null, pinnedNoRecord: false, lastT: Number.NaN })).toBe(
+		expect(whenLine({ shown: null, pinnedNoRecord: false, lastT: Number.NaN, spent: true })).toBe(
 			"Live · last spend unknown time",
 		);
 		expect(
@@ -297,5 +310,103 @@ describe("toggleTarget and escapeTarget", () => {
 		expect(escapeTarget(false, "key")).toBe("clear");
 		expect(escapeTarget(false, "pointer")).toBe("none");
 		expect(escapeTarget(false, null)).toBe("none");
+	});
+});
+
+describe("frameKey", () => {
+	it("changes with the filters and with the move to or from no rows, and with nothing else", () => {
+		expect(frameKey('{"actors":["a"]}', false)).not.toBe(frameKey('{"actors":["b"]}', false));
+		expect(frameKey("{}", false)).not.toBe(frameKey("{}", true));
+		expect(frameKey("{}", false)).toBe(frameKey("{}", false));
+	});
+});
+
+describe("reconcileCursor", () => {
+	const rows = [0, 1, 2, 3, 4].map((i) => ({ t: T + i * 600_000, pos: 10 + i }));
+	const records = {
+		n: rows.length,
+		pos: Int32Array.from(rows.map((r) => r.pos)),
+		t: Float64Array.from(rows.map((r) => r.t)),
+		cum: Float64Array.from([1, 2, 3, 4, 5]),
+		hash: rows.map((r) => `h${r.pos}`),
+		before: 0,
+		total: 5,
+		rows: 5,
+		lastUndated: false,
+	};
+	const bucketAt = (start: number) => (t: number) => Math.floor((t - start) / 3_600_000);
+	const live = (i: number, k: number): CursorValue => ({ k, via: "pointer", i });
+	const next = (span = { i0: 0, i1: 4 }, start = T) => ({
+		records,
+		span,
+		bucketOf: bucketAt(start),
+	});
+	it("keeps the record by position and puts it in its bucket on the new line", () => {
+		// The record at position 12 was index 1 in the old model and is index 2 here.
+		expect(reconcileCursor(live(1, 0), 12, next())).toEqual({ k: 0, via: "pointer", i: 2 });
+	});
+	it("reads the bucket against the new window, one bucket on", () => {
+		// Position 14 is 40 minutes in: bucket 0 of a window starting at T, bucket 1 when it starts an hour earlier.
+		expect(reconcileCursor(live(4, 0), 14, next({ i0: 0, i1: 4 }, T))?.k).toBe(0);
+		expect(reconcileCursor(live(4, 0), 14, next({ i0: 0, i1: 4 }, T - 3_600_000))?.k).toBe(1);
+		expect(reconcileCursor(live(4, 0), 14, next({ i0: 0, i1: 4 }, T - 7_200_000))?.k).toBe(2);
+	});
+	it("keeps a record sitting exactly at the span's first index", () => {
+		expect(reconcileCursor(live(3, 0), 10, next({ i0: 0, i1: 4 }))).toEqual({
+			k: 0,
+			via: "pointer",
+			i: 0,
+		});
+		expect(reconcileCursor(live(3, 0), 12, next({ i0: 2, i1: 4 }))?.i).toBe(2);
+		expect(reconcileCursor(live(3, 0), 14, next({ i0: 4, i1: 4 }))?.i).toBe(4);
+	});
+	it("reads the bucket of the record itself, not of its neighbour", () => {
+		// Records are ten minutes apart; with 15-minute buckets record 2 (20 min) is in bucket 1, record 1 in bucket 0.
+		const quarter = { ...next(), bucketOf: (t: number) => Math.floor((t - T) / 900_000) };
+		expect(reconcileCursor(live(0, 0), 12, quarter)?.k).toBe(1);
+		expect(reconcileCursor(live(0, 0), 11, quarter)?.k).toBe(0);
+		expect(reconcileCursor(live(0, 0), 14, quarter)?.k).toBe(2);
+	});
+	it("keeps the way the cursor was set", () => {
+		expect(reconcileCursor({ k: 0, via: "key", i: 1 }, 11, next())?.via).toBe("key");
+	});
+	it("drops the cursor when its record is gone or outside the span", () => {
+		expect(reconcileCursor(live(1, 0), 99, next())).toBeNull();
+		expect(reconcileCursor(live(1, 0), 12, next({ i0: 3, i1: 4 }))).toBeNull();
+		expect(reconcileCursor(live(1, 0), 12, next({ i0: 0, i1: 1 }))).toBeNull();
+		expect(reconcileCursor(live(1, 0), 5, next())).toBeNull();
+		expect(reconcileCursor(live(1, 0), undefined, next())).toBeNull();
+	});
+	it("has nothing to keep when the cursor is not a live one", () => {
+		expect(reconcileCursor(null, 12, next())).toBeNull();
+		expect(reconcileCursor({ k: 0, via: "pin", i: 1 }, 12, next())).toBeNull();
+	});
+});
+
+describe("whenLine at rest with spend the time cannot name", () => {
+	it("says the time is unknown when spend exists but no dated row names it", () => {
+		expect(whenLine({ shown: null, pinnedNoRecord: false, lastT: null, spent: true })).toBe(
+			"Live · last spend time unknown",
+		);
+	});
+	it("says no spend only when there is none, and names a dated last spend otherwise", () => {
+		expect(whenLine({ shown: null, pinnedNoRecord: false, lastT: null, spent: false })).toBe(
+			"Live · no spend recorded yet",
+		);
+		expect(whenLine({ shown: null, pinnedNoRecord: false, lastT: T, spent: true })).toBe(
+			"Live · last spend 11-07 18:00:05Z",
+		);
+	});
+});
+
+describe("movedTime", () => {
+	it("is the new time when a kept record's time changed, null when it did not", () => {
+		expect(movedTime(100, 200)).toBe(200);
+		expect(movedTime(100, 100)).toBeNull();
+		expect(movedTime(undefined, 200)).toBe(200);
+	});
+	it("is null with no readable new time", () => {
+		expect(movedTime(100, undefined)).toBeNull();
+		expect(movedTime(100, Number.NaN)).toBeNull();
 	});
 });

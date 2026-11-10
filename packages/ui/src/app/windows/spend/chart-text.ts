@@ -14,7 +14,7 @@ import { bucketPhrase, type LineBucket, perShort, toBucket } from "../../../shar
 export const SEP = " · ";
 
 /** A time as the page writes it; a time that is not one (NaN, out of range) reads as such, never throws. */
-const stamp = (ms: number): string => {
+export const stamp = (ms: number): string => {
 	const d = new Date(ms);
 	return Number.isNaN(d.getTime()) ? "unknown time" : formatUtc(d.toISOString());
 };
@@ -60,15 +60,16 @@ export function whenLine(p: {
 	shown: { t: number; pos: number; pinned: boolean } | null;
 	pinnedNoRecord: boolean;
 	lastT: number | null;
+	/** Whether any spend exists at all, dated or not: `lastT` null with spend says the time is unknown. */
+	spent: boolean;
 }): string {
 	if (p.pinnedNoRecord) return `Pinned${SEP}no spend recorded by then`;
 	if (p.shown !== null) {
 		const lead = p.shown.pinned ? `Pinned${SEP}` : "";
 		return `${lead}${stamp(p.shown.t)}${SEP}record ${recordNumber(p.shown.pos)}`;
 	}
-	return p.lastT !== null
-		? `Live${SEP}last spend ${stamp(p.lastT)}`
-		: `Live${SEP}no spend recorded yet`;
+	if (p.lastT !== null) return `Live${SEP}last spend ${stamp(p.lastT)}`;
+	return p.spent ? `Live${SEP}last spend time unknown` : `Live${SEP}no spend recorded yet`;
 }
 
 /** Whether a shown record is at or after the chain's break, so the when-line says the links are broken from there. */
