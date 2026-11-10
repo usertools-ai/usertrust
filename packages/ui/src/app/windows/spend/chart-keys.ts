@@ -106,3 +106,11 @@ export function escapeTarget(
 	if (pinned) return "live";
 	return via === "key" ? "clear" : "none";
 }
+
+/**
+ * The key the marks' wrapper is remounted by, so the one fade runs: every filter change, and the move between no rows
+ * and some. Never the window, which the clock moves, so a live append never fades.
+ */
+export function frameKey(filterKey: string, empty: boolean): string {
+	return `${filterKey}|${empty}`;
+}

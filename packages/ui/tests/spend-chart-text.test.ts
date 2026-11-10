@@ -8,6 +8,7 @@ import {
 	bucketOf,
 	drawnCursor,
 	escapeTarget,
+	frameKey,
 	keyAction,
 	stepBucket,
 	toggleTarget,
@@ -297,5 +298,13 @@ describe("toggleTarget and escapeTarget", () => {
 		expect(escapeTarget(false, "key")).toBe("clear");
 		expect(escapeTarget(false, "pointer")).toBe("none");
 		expect(escapeTarget(false, null)).toBe("none");
+	});
+});
+
+describe("frameKey", () => {
+	it("changes with the filters and with the move to or from no rows, and with nothing else", () => {
+		expect(frameKey('{"actors":["a"]}', false)).not.toBe(frameKey('{"actors":["b"]}', false));
+		expect(frameKey("{}", false)).not.toBe(frameKey("{}", true));
+		expect(frameKey("{}", false)).toBe(frameKey("{}", false));
 	});
 });
