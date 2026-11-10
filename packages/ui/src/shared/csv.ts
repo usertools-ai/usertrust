@@ -9,6 +9,15 @@
  * sum them without coercion; every free-text cell is formula-neutralized
  * (CSV injection) because `actor`/`model` originate in caller-supplied event
  * data. CRLF line endings — Excel's expectation.
+ *
+ * A text cell is defanged when its first character that is not whitespace is
+ * =, +, - or @, or when its first character is a tab or a carriage return.
+ * As a precaution, and not because any spreadsheet was measured doing it, the
+ * same holds when that character is another form of one of the four (its
+ * Unicode compatibility form is =, +, - or @, as for the fullwidth and small
+ * forms) or the minus sign. Only such cells differ from an export that
+ * defanged a leading =, +, - or @ alone: every other cell is written byte for
+ * byte as before.
  */
 
 import type { AtPayload } from "./api.js";
@@ -59,9 +68,31 @@ export const CSV_HEADERS = [
 	// what it holds, so a reader of an older export keeps working. `tests/csv.test.ts` pins the whole header as text.
 ] as const;
 
-/** Leading =,+,-,@ make a cell executable in Excel/Sheets — defang with a quote. */
+/** The minus sign, U+2212, named by its code point so that it is not mistaken for a hyphen here. */
+const MINUS_SIGN = String.fromCodePoint(0x2212);
+const FORMULA_CHARACTERS: ReadonlySet<string> = new Set(["=", "+", "-", "@", MINUS_SIGN]);
+
+/**
+ * Whether the first character that is not whitespace (JavaScript's `\s`, the broad set, line feeds and no-break
+ * spaces included) is a formula character: =, +, - or @, which Excel/Sheets may run.
+ *
+ * As a precaution, and not as a fact about any spreadsheet, another form of one counts too: a character whose
+ * compatibility form (Unicode NFKC) is =, +, - or @ or the minus sign. That covers the fullwidth and small forms of
+ * the four, their superscript and subscript forms, and the minus sign itself. No spreadsheet was measured reading
+ * such a cell as a formula; such a cell is not ordinary data either.
+ */
+function formulaFirst(value: string): boolean {
+	const first = /^\s*(\S)/u.exec(value)?.[1];
+	return first !== undefined && FORMULA_CHARACTERS.has(first.normalize("NFKC"));
+}
+
+/**
+ * Defang, with a quote, a cell a spreadsheet may run: a formula character first or first after leading whitespace,
+ * or a tab or carriage return first, whatever follows. A leading line feed before ordinary text is left as it is:
+ * it is quoted for the line break already.
+ */
 function neutralize(value: string): string {
-	return /^[=+\-@]/.test(value) ? `'${value}` : value;
+	return /^[\t\r]/.test(value) || formulaFirst(value) ? `'${value}` : value;
 }
 
 function cell(value: string | undefined): string {
