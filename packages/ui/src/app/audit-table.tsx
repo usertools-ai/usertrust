@@ -376,7 +376,7 @@ export const AuditTable = memo(function AuditTable(props: {
 	hourSpan?: readonly [number, number] | null;
 	/** The position of the record a chart has pinned: it is marked with the records of its hour, and scrolled to the middle once. */
 	pinnedPos?: number | null;
-	/** What the rows are a list of (the filters, as one string). A new key starts again at the top. */
+	/** What the rows are a list of (the filters, as one string). A new key starts again at the top; with none passed, a new set of filters does not. */
 	resetKey?: string;
 	/** The time (ms) of the record under the pointer, or null when the pointer is on none. Called only on a change. */
 	onHover?(ms: number | null): void;
@@ -453,8 +453,8 @@ export const AuditTable = memo(function AuditTable(props: {
 		[props.hourSpan, pinnedMs],
 	);
 
-	// A new sort or a new set of filters is a new list, from its top. Not on the first draw, and not when a record
-	// arrives (the key is the same).
+	// A new sort is a new list, from its top; so is a new set of filters, when the caller passes a new resetKey for it
+	// (the list cannot tell otherwise). Not on the first draw, and not when a record arrives (the key is the same).
 	const key = `${props.resetKey ?? ""}|${sortKey}|${desc ? "desc" : "asc"}`;
 	const drawnKey = useRef(key);
 	useEffect(() => {

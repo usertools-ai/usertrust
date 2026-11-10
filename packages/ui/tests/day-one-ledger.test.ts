@@ -84,6 +84,23 @@ describe("the Ledger on day one", () => {
 		// The three records are a day apart: no other is pinned, and none shares the hour.
 		expect(html.match(/data-pinned/g)).toHaveLength(1);
 		expect(html.match(/data-hour/g)).toHaveLength(1);
+		// An address past the vault's end is answered with the head: the head's record is the one marked, as it is the
+		// one the chart pins. No record stands at the address's own position.
+		const head = dayOneRows()[2] as LedgerRow;
+		const past = await withDesk(createElement(LedgerWindow), {
+			data: { ...loadedData(), resolvedPos: head.pos },
+			view: { at: 99 },
+		});
+		const headTag = new RegExp(`<div[^>]*id="ut-row-${head.hash}"[^>]*>`).exec(past)?.[0] ?? "";
+		expect(headTag).toContain('data-pinned="true"');
+		expect(headTag).toContain('data-hour="true"');
+		expect(past.match(/data-pinned/g)).toHaveLength(1);
+		expect(past.match(/data-hour/g)).toHaveLength(1);
+		// An answer held from before, with nothing pinned now, marks nothing.
+		const stale = await withDesk(createElement(LedgerWindow), {
+			data: { ...loadedData(), resolvedPos: head.pos },
+		});
+		expect(stale).not.toMatch(/data-pinned|data-hour/);
 		// Live, nothing is marked.
 		const live = await withDesk(createElement(LedgerWindow), { data: loadedData() });
 		expect(live).not.toMatch(/data-pinned|data-hour/);

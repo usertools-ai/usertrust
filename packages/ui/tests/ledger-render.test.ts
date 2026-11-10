@@ -1288,16 +1288,44 @@ describe("the Ledger window's sheet", () => {
 			expect(m[1]).not.toMatch(/[~+]/);
 			expect((m[1] as string).trim().split(/\s+/)).toHaveLength(1);
 		}
+		// The bar is the row's own; the tint is painted by a layer under the row's cells, not as the row's
+		// background: a record that has just arrived is lit by an animation of its background, which would
+		// hold the tint off for good.
 		const hour = rule('.ut-row.ut-lg-row[data-hour="true"]');
-		expect(hour).toContain("background: color-mix(in srgb, var(--dk-gold) 5%, transparent);");
 		expect(hour).toContain("box-shadow: inset 2px 0 0 var(--dk-gold);");
+		expect(hour).not.toContain("background");
 		const pinned = rule('.ut-row.ut-lg-row[data-pinned="true"]');
-		expect(pinned).toContain("background: color-mix(in srgb, var(--dk-gold) 10%, transparent);");
 		expect(pinned).toContain("box-shadow: inset 3px 0 0 var(--dk-gold);");
-		// A record that is both pinned and in the hour reads as pinned; a hovered one lights over either.
+		expect(pinned).not.toContain("background");
+		const layer = rule(
+			'.ut-row.ut-lg-row[data-hour="true"]::before,\n\t.ut-row.ut-lg-row[data-pinned="true"]::before',
+		);
+		for (const decl of [
+			'content: "";',
+			"position: absolute;",
+			"inset: 0;",
+			"z-index: -1;",
+			"pointer-events: none;",
+		]) {
+			expect(layer, decl).toContain(decl);
+		}
+		// Under the cells and over the row's own background: the row is its own stacking context.
+		expect(rule(".ut-row.ut-lg-row")).toContain("isolation: isolate;");
+		// Each tint is a rule of its own, after the rule the two share (which ends in the pinned record's selector).
+		const hourTint = '\n\n\t.ut-row.ut-lg-row[data-hour="true"]::before';
+		const pinnedTint = '\n\n\t.ut-row.ut-lg-row[data-pinned="true"]::before';
+		expect(rule(hourTint)).toContain(
+			"background: color-mix(in srgb, var(--dk-gold) 5%, transparent);",
+		);
+		expect(rule(pinnedTint)).toContain(
+			"background: color-mix(in srgb, var(--dk-gold) 10%, transparent);",
+		);
+		// A record that is both pinned and in the hour reads as pinned; a hovered one lights too.
 		expect(css.indexOf('[data-pinned="true"] {')).toBeGreaterThan(
 			css.indexOf('[data-hour="true"] {'),
 		);
+		expect(css.indexOf(`${hourTint} {`)).toBeGreaterThan(0);
+		expect(css.indexOf(`${pinnedTint} {`)).toBeGreaterThan(css.indexOf(`${hourTint} {`));
 		expect(css.indexOf(":not(.sel):hover {")).toBeGreaterThan(
 			css.indexOf('[data-pinned="true"] {'),
 		);

@@ -175,6 +175,7 @@
 		top: 0;
 		left: 8px;
 		right: 8px;
+		isolation: isolate;
 		box-sizing: border-box;
 		height: 30px;
 		padding: 0 12px;
@@ -274,14 +275,32 @@
 
 	/* The records of the hour a chart points at, then the one record it has pinned, then the row under the pointer:
 	   in this order, so a pinned record in the hour reads as pinned. Only the row itself lights, never one beside it. */
+	/* The bar is the row's own. The tint is a layer under the row's cells, not the row's background: a record that has
+	   just arrived is lit by an animation of its background, and an animated value outranks every rule. */
 	.ut-row.ut-lg-row[data-hour="true"] {
-		background: color-mix(in srgb, var(--dk-gold) 5%, transparent);
 		box-shadow: inset 2px 0 0 var(--dk-gold);
 	}
 
 	.ut-row.ut-lg-row[data-pinned="true"] {
-		background: color-mix(in srgb, var(--dk-gold) 10%, transparent);
 		box-shadow: inset 3px 0 0 var(--dk-gold);
+	}
+
+	.ut-row.ut-lg-row[data-hour="true"]::before,
+	.ut-row.ut-lg-row[data-pinned="true"]::before {
+		content: "";
+		position: absolute;
+		inset: 0;
+		z-index: -1;
+		border-radius: inherit;
+		pointer-events: none;
+	}
+
+	.ut-row.ut-lg-row[data-hour="true"]::before {
+		background: color-mix(in srgb, var(--dk-gold) 5%, transparent);
+	}
+
+	.ut-row.ut-lg-row[data-pinned="true"]::before {
+		background: color-mix(in srgb, var(--dk-gold) 10%, transparent);
 	}
 
 	.ut-row.ut-lg-row:not(.sel):hover {
