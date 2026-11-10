@@ -542,6 +542,13 @@ describe("the legend", () => {
 		expect(html).not.toContain(SHARE_EMPTY);
 	});
 
+	it("says which percent setting it is drawn with, for the sheet's wider column", async () => {
+		const whole = await withDesk(legend(valuesOf(3), { decimals: 0 }));
+		expect(attr(tagsOf(whole, "ut-sh-legend")[0] ?? "", "data-decimals")).toBe("0");
+		const tenth = await withDesk(legend(valuesOf(3), { decimals: 1 }));
+		expect(attr(tagsOf(tenth, "ut-sh-legend")[0] ?? "", "data-decimals")).toBe("1");
+	});
+
 	it("adds up exactly: every row and Other sum to the total", async () => {
 		for (const n of [1, 6, 7, 8, 12]) {
 			const v = valuesOf(n);

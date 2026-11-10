@@ -48,6 +48,22 @@ describe("the Share window's sheet", () => {
 		expect(rule('.ut-sh-row[data-lit="dim"]')).toMatch(/opacity:\s*0\.45;/);
 	});
 
+	it("keeps a switch button's hit area inside it, so a wrapped row cannot take the row above's clicks", () => {
+		const hit = rule('[data-win="share"] .ut-seg button::after');
+		expect(hit).toMatch(/inset:\s*0 -1px;/);
+		// The shared extension it overrides reaches 4px (10px on a phone) above and below.
+		expect(allCss()).toMatch(/\.ut-seg button::after\s*\{\s*inset:\s*-4px -1px/);
+	});
+
+	it("gives the percent column room for one decimal, and 40px otherwise", () => {
+		expect(rule(".ut-sh-row, .ut-sh-other")).toMatch(
+			/grid-template-columns:\s*10px minmax\(0, 1fr\) auto var\(--ut-sh-pct, 40px\);/,
+		);
+		const px = Number(/--ut-sh-pct:\s*(\d+)px/.exec(rule('.ut-sh-legend[data-decimals="1"]'))?.[1]);
+		// ">99.9%" is about 48px at 12.5px in tabular figures.
+		expect(px).toBeGreaterThanOrEqual(50);
+	});
+
 	it("keeps a long name on one line", () => {
 		const n = rule(".ut-sh-row .n, .ut-sh-other .n");
 		expect(n).toMatch(/white-space:\s*nowrap/);

@@ -84,6 +84,12 @@
 		font: 500 12px/28px var(--sans);
 	}
 
+	/* The rows wrap with a 2px gap, so the hit area stays inside each button: the shared 4px (10px on a phone) of
+	   extension above and below would let a lower row take clicks on the row above. */
+	[data-win="share"] .ut-seg button::after {
+		inset: 0 -1px;
+	}
+
 	[data-win="share"] .ut-seg button:hover {
 		color: var(--dk-text);
 	}
@@ -180,13 +186,18 @@
 	.ut-sh-row,
 	.ut-sh-other {
 		display: grid;
-		grid-template-columns: 10px minmax(0, 1fr) auto 40px;
+		grid-template-columns: 10px minmax(0, 1fr) auto var(--ut-sh-pct, 40px);
 		gap: 6px;
 		align-items: center;
 		height: 28px;
 		padding: 0 8px;
 		font: 500 12.5px var(--sans);
 		font-variant-numeric: tabular-nums;
+	}
+
+	/* One decimal ("100.0%", ">99.9%") needs a wider column than a whole percent. */
+	.ut-sh-legend[data-decimals="1"] {
+		--ut-sh-pct: 52px;
 	}
 
 	.ut-sh-row {
