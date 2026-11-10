@@ -11,6 +11,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LedgerRow } from "../src/shared/rows.js";
+import { appSource } from "./helpers/app-source.js";
 import { appExport, type Component, dayOneRows, loadedData, noIds } from "./helpers/day-one.js";
 import { withDesk } from "./helpers/desk.js";
 
@@ -69,6 +70,44 @@ describe("the Ledger on day one", () => {
 		expect(table.length).toBeGreaterThan(0);
 		expect(noIds(html)).toContain(noIds(table));
 		expect(html).toContain('aria-label="Ledger"');
+	});
+
+	it("with a position pinned, the list marks that record and its hour as the window first draws", async () => {
+		const pin = dayOneRows()[1] as LedgerRow;
+		const html = await withDesk(createElement(LedgerWindow), {
+			data: loadedData(),
+			view: { at: pin.pos },
+		});
+		const tag = new RegExp(`<div[^>]*id="ut-row-${pin.hash}"[^>]*>`).exec(html)?.[0] ?? "";
+		expect(tag).toContain('data-pinned="true"');
+		expect(tag).toContain('data-hour="true"');
+		// The three records are a day apart: no other is pinned, and none shares the hour.
+		expect(html.match(/data-pinned/g)).toHaveLength(1);
+		expect(html.match(/data-hour/g)).toHaveLength(1);
+		// An address past the vault's end is answered with the head: the head's record is the one marked, as it is the
+		// one the chart pins. No record stands at the address's own position.
+		const head = dayOneRows()[2] as LedgerRow;
+		const past = await withDesk(createElement(LedgerWindow), {
+			data: { ...loadedData(), resolvedPos: head.pos },
+			view: { at: 99 },
+		});
+		const headTag = new RegExp(`<div[^>]*id="ut-row-${head.hash}"[^>]*>`).exec(past)?.[0] ?? "";
+		expect(headTag).toContain('data-pinned="true"');
+		expect(headTag).toContain('data-hour="true"');
+		expect(past.match(/data-pinned/g)).toHaveLength(1);
+		expect(past.match(/data-hour/g)).toHaveLength(1);
+		// An answer held from before, with nothing pinned now, marks nothing.
+		const stale = await withDesk(createElement(LedgerWindow), {
+			data: { ...loadedData(), resolvedPos: head.pos },
+		});
+		expect(stale).not.toMatch(/data-pinned|data-hour/);
+		// Live, nothing is marked.
+		const live = await withDesk(createElement(LedgerWindow), { data: loadedData() });
+		expect(live).not.toMatch(/data-pinned|data-hour/);
+		// The hour another window points at reaches the list too; the Ledger's own pointer is not echoed back to it.
+		const src = appSource();
+		expect(src).toContain('const pointed = useHoverMoment("ledger");');
+		expect(src).toContain("hourSpan={pointed?.span ?? null}");
 	});
 
 	it("filled with a record open, docks the panel beside the list", async () => {

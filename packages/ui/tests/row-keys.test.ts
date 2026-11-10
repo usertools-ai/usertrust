@@ -101,7 +101,11 @@ describe("the audit list is one tab stop", () => {
 		expect(html).toContain('role="listbox"');
 		expect(html).toContain('aria-label="Audit records"');
 		expect(tabStops(html)).toEqual(["0"]);
-		expect(html).not.toContain('class="ut-row');
+		// The rows near the screen are drawn, not all sixty, each as an option of the one listbox.
+		const drawn = html.match(/role="option"/g)?.length ?? 0;
+		expect(drawn).toBeGreaterThan(0);
+		expect(drawn).toBeLessThan(60);
+		expect(html.match(/class="ut-row/g)).toHaveLength(drawn);
 	});
 
 	it("an empty list (skeleton, no-rows message) offers no listbox and no tab stop", async () => {
@@ -196,16 +200,19 @@ describe("the inspector takes focus from the list", () => {
 		expect(popoverOwnsEscape(page())).toBe(false);
 	});
 
-	it("the active row is scrolled back into the rendered window when keyboard focus returns, and when it moves while focused", async () => {
+	it("the active row is scrolled back among the rows drawn when keyboard focus returns, and when it moves while focused", async () => {
 		const src = await source("audit-table.tsx");
-		// the listbox takes onFocus; keyboard focus (focus-visible) scrolls the active row in, a mouse focus does not
+		// the listbox takes onFocus; keyboard focus (focus-visible) brings the active row in, a mouse focus does not
 		const onFocus = src.slice(src.indexOf("const onFocus"), src.indexOf("const moveTo"));
-		expect(onFocus).toContain(':focus-visible")) virtualizer.scrollToIndex(activeIndex)');
+		expect(onFocus).toContain(':focus-visible")) showRow(activeIndex, "auto")');
 		expect(src).toMatch(/onKeyDown,\s*onFocus,/);
-		// while focused, a sort, filter or insert that moves the active row scrolls it in
+		// while focused, a sort, filter or insert that moves the active row brings it in
 		expect(src).toMatch(
-			/if \(activeRow !== undefined && listFocused\(\)\) virtualizer\.scrollToIndex\(activeIndex\);\s*\}, \[activeIndex, sorted\]\);/,
+			/if \(activeRow !== undefined && listFocused\(\)\) showRow\(activeIndex, "auto"\);\s*\}, \[activeIndex, sorted\]\);/,
 		);
+		// bringing a row in scrolls the list to it, and the rows there are drawn
+		const showRow = src.slice(src.indexOf("const showRow"), src.indexOf("const listFocused"));
+		expect(showRow).toContain("virtualizer.scrollToIndex(index, { align })");
 		// the active row is resolved by hash (see resolveActiveIndex in row-nav.test.ts)
 		expect(src).toContain("resolveActiveIndex(sorted, activeHash, props.selected)");
 	});
@@ -218,19 +225,20 @@ describe("the inspector takes focus from the list", () => {
 		expect(app).toContain("onFocusHandled={() => setKbOpen(undefined)}");
 	});
 
-	it("PageUp and PageDown move by the measured rows in view, not a fixed row height", async () => {
+	it("PageUp and PageDown move by the rows that fit in view, every row being one height", async () => {
 		const src = await source("audit-table.tsx");
-		expect(src).toContain(
-			"pageSizeFromItems(virtualizer.getVirtualItems(), el.scrollTop, el.clientHeight)",
+		// On a phone the page is the scroller (the list flows in it), so a screenful is the window's, below the sort bar
+		// that sticks over the rows (its height as measured, capH); a row the keys bring in is placed below the bar.
+		const keys = src.slice(
+			src.indexOf("const onKeyDown"),
+			src.indexOf("// Focus returns to the list"),
 		);
-		// On a phone the page is the scroller (the list flows in it), so a screenful is the window's, not the list's.
-		// ...below the sort bar, which sticks to the top of the window over the rows (its height, capH): a row the keyboard
-		// brings into view is placed below the bar, and a screenful counts only the rows below it.
-		expect(src).toMatch(
-			/phone\s*\?\s*pageSizeFromItems\(\s*virtualizer\.getVirtualItems\(\),\s*window\.scrollY \+ capH,\s*window\.innerHeight - capH,?\s*\)/,
+		expect(keys).toMatch(
+			/pageSizeForRows\(\s*phone \? window\.innerHeight - capH : \(el\?\.clientHeight \?\? 0\),?\s*\)/,
 		);
+		expect(keys).toContain("nextRowIndex(activeIndex, e.key, count, page)");
 		expect(src).toMatch(/useWindowVirtualizer<Element>\(\{[^}]*scrollPaddingStart: capH/);
-		expect(src).toContain('<div className="ut-cap" ref={capRef}>');
+		expect(src).not.toContain("pageSizeFromItems");
 		expect(src).not.toContain("ROW_HEIGHT");
 	});
 

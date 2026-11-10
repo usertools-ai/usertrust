@@ -9,6 +9,7 @@
 import { costView } from "./display.js";
 import { formatUtc } from "./format.js";
 import { type LedgerRow, statusOf } from "./rows.js";
+import { statusWord } from "./status-word.js";
 
 /**
  * How many rows a PageUp or PageDown moves: the rows that fit wholly in the list's viewport, measured (each item's
@@ -91,7 +92,8 @@ export function rowAccessibleName(row: LedgerRow): string {
 			? "no cost recorded"
 			: `${cost.ut}, ${cost.usd}${cost.estimated ? ", estimated" : ""}`,
 		formatUtc(row.ts),
-		statusOf(row),
+		// The word the badge shows, so the name and the row say the same thing.
+		statusWord(statusOf(row)),
 	];
 	if (row.integrity !== "verified") parts.push("after break");
 	return parts.join(", ");

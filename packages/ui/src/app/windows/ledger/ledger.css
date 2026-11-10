@@ -159,4 +159,219 @@
 			animation: none;
 		}
 	}
+
+	/* The list: one record a line, in columns. Every row is 30px whatever it holds. The rows stand in one block as
+	   tall as all of them; only those near the screen are drawn, each placed in the block and moved down to its
+	   own place by the list. The selectors carry the row's older class too, so they win over its older two-line
+	   rules wherever the list is drawn. */
+	.ut-lg-rows {
+		position: relative;
+	}
+
+	.ut-row.ut-lg-row {
+		grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 64px 60px 116px minmax(96px, 0.9fr);
+		gap: 10px;
+		position: absolute;
+		top: 0;
+		left: 8px;
+		right: 8px;
+		isolation: isolate;
+		box-sizing: border-box;
+		height: 30px;
+		padding: 0 12px;
+		border-radius: 0;
+		color: var(--dk-legend);
+		font: 400 12px/1 var(--sans);
+	}
+
+	/* A hairline under each row. Not on the open record, whose border is its own. */
+	.ut-row.ut-lg-row:not(.sel) {
+		border-bottom-color: color-mix(in srgb, var(--dk-text) 5%, transparent);
+	}
+
+	.ut-lg-row > span {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.ut-lg-row .ut-lg-t,
+	.ut-lg-row .ut-lg-k {
+		color: var(--dk-label);
+		font-family: var(--fig);
+		font-variant-numeric: tabular-nums;
+	}
+
+	/* The model: a short dash in its provider's colour (each row sets it), then the name, cut with an ellipsis. */
+	.ut-lg-row .ut-lg-m {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		color: var(--dk-text);
+	}
+
+	.ut-lg-dash {
+		flex: none;
+		width: 10px;
+		height: 2px;
+		border-radius: 1px;
+	}
+
+	.ut-lg-name {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	/* The kind of a record with no model, in the model's cell. Hidden while the kind has its own cell. */
+	.ut-lg-m .ut-lg-kin {
+		display: none;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		color: var(--dk-label);
+		font-family: var(--fig);
+	}
+
+	.ut-lg-row .ut-lg-u {
+		color: var(--dk-label);
+	}
+
+	/* The status: a capsule, in a column wide enough for the longest status word. Beside the mark after a break in
+	   the chain it may be cut short; the mark never is. */
+	.ut-lg-row .ut-lg-s {
+		display: flex;
+		align-items: center;
+		gap: 5px;
+	}
+
+	.ut-lg-s .ut-badge {
+		min-width: 0;
+		flex: 0 1 auto;
+		overflow: hidden;
+		height: 16px;
+		padding: 0 4px;
+		border-radius: 8px;
+		background: color-mix(in srgb, var(--accent) 16%, transparent);
+		color: var(--accent);
+		font: 600 10px/16px var(--fig);
+	}
+
+	/* A status that is a warning keeps its own colour on the capsule. */
+	.ut-lg-s .ut-badge[data-tone="alert"] {
+		color: var(--alert);
+	}
+
+	.ut-lg-s .ut-badge[data-tone="stakes"] {
+		color: var(--stakes);
+	}
+
+	.ut-lg-s .bad {
+		flex: none;
+		color: var(--stakes);
+	}
+
+	/* The cost, right-aligned. */
+	.ut-lg-row .ut-lg-c {
+		text-align: right;
+	}
+
+	.ut-lg-c .ut-amt {
+		color: var(--dk-text);
+		font: 600 12px var(--fig);
+		font-variant-numeric: tabular-nums;
+	}
+
+	/* A cost that rests on estimated usage says so before the figure. Hidden while the usage cell says it. */
+	.ut-lg-row .ut-lg-est {
+		display: none;
+		margin-right: 4px;
+		color: var(--info);
+		font: 600 10px/1 var(--sans);
+	}
+
+	/* The records of the hour a chart points at, then the one record it has pinned, then the row under the pointer:
+	   in this order, so a pinned record in the hour reads as pinned. Only the row itself lights, never one beside it. */
+	/* The bar is the row's own. The tint is a layer under the row's cells, not the row's background: a record that has
+	   just arrived is lit by an animation of its background, and an animated value outranks every rule. */
+	.ut-row.ut-lg-row[data-hour="true"] {
+		box-shadow: inset 2px 0 0 var(--dk-gold);
+	}
+
+	.ut-row.ut-lg-row[data-pinned="true"] {
+		box-shadow: inset 3px 0 0 var(--dk-gold);
+	}
+
+	.ut-row.ut-lg-row[data-hour="true"]::before,
+	.ut-row.ut-lg-row[data-pinned="true"]::before {
+		content: "";
+		position: absolute;
+		inset: 0;
+		z-index: -1;
+		border-radius: inherit;
+		pointer-events: none;
+	}
+
+	.ut-row.ut-lg-row[data-hour="true"]::before {
+		background: color-mix(in srgb, var(--dk-gold) 5%, transparent);
+	}
+
+	.ut-row.ut-lg-row[data-pinned="true"]::before {
+		background: color-mix(in srgb, var(--dk-gold) 10%, transparent);
+	}
+
+	.ut-row.ut-lg-row:not(.sel):hover {
+		background: color-mix(in srgb, var(--dk-text) 6%, transparent);
+	}
+
+	/* A narrower list drops columns and never squeezes them: first the kind and the usage, then the actor. All
+	   seven stay down to 600px, which a 1000px screen's list is above. */
+	@container (max-width: 600px) {
+		.ut-row.ut-lg-row {
+			grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 116px minmax(104px, max-content);
+		}
+
+		.ut-lg-row .ut-lg-k,
+		.ut-lg-row .ut-lg-u {
+			display: none;
+		}
+
+		/* What those two cells alone said moves to cells that stay: the estimate beside the cost, and the kind of a
+		   record with no model in place of the model's dash. */
+		.ut-lg-row .ut-lg-est {
+			display: inline;
+		}
+
+		.ut-lg-m .ut-lg-kin {
+			display: block;
+		}
+
+		.ut-lg-m .ut-lg-kin + .ut-lg-name {
+			display: none;
+		}
+	}
+
+	@container (max-width: 520px) {
+		.ut-row.ut-lg-row {
+			grid-template-columns: 102px minmax(0, 1fr) 80px minmax(76px, max-content);
+			gap: 6px;
+			left: 2px;
+			right: 2px;
+			padding: 0 6px;
+		}
+
+		.ut-lg-s .ut-badge {
+			gap: 4px;
+			letter-spacing: 0;
+		}
+
+		.ut-lg-row .ut-lg-a {
+			display: none;
+		}
+
+		.ut-lg-row .ut-lg-t {
+			font-size: 11px;
+		}
+	}
 }

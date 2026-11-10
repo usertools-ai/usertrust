@@ -11,15 +11,26 @@ import { memo, useCallback, useRef, useState } from "react";
 import { DOCK_QUERY } from "../../../shared/desk-layout.js";
 import type { LedgerRow } from "../../../shared/rows.js";
 import { AuditTable } from "../../audit-table.js";
-import { useDeskData, useFilters, useOpenRecord } from "../../desk/desk-state.js";
+import {
+	useDeskData,
+	useFilters,
+	useHoverMoment,
+	useOpenRecord,
+	usePosition,
+} from "../../desk/desk-state.js";
 import { useMedia } from "../../desk/use-box-size.js";
 import { Window } from "../../desk/window.js";
 import { InspectorHint, RowPanel } from "../../row-panel.js";
+import { resolvedPin } from "../spend/chart-data.js";
 
 export const LedgerWindow = memo(function LedgerWindow(): React.JSX.Element {
-	const { list, liveIds, held, pastNote } = useDeskData();
+	const { list, liveIds, held, pastNote, resolvedPos } = useDeskData();
 	const { clear } = useFilters();
 	const { openHash, setOpenHash, open } = useOpenRecord();
+	// The list marks the pinned record, and the hour another window points at. The pinned record is the one the vault
+	// answered with (the head, for an address past its end), as on the chart.
+	const { at } = usePosition();
+	const pointed = useHoverMoment("ledger");
 	// Wide by default (the server's answer): the docked panel only exists on a desktop window, and a browser reads the
 	// real width at once.
 	const wide = useMedia(DOCK_QUERY, true);
@@ -66,6 +77,8 @@ export const LedgerWindow = memo(function LedgerWindow(): React.JSX.Element {
 									liveIds={liveIds}
 									selected={openHash}
 									restoreFocus={restoreFocus}
+									pinnedPos={resolvedPin(at, resolvedPos)}
+									hourSpan={pointed?.span ?? null}
 									onOpen={openRow}
 									onClearFilters={clear}
 								/>
