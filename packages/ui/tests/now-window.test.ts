@@ -7,7 +7,7 @@
  * read now, from every row the page holds, whatever is pinned.
  */
 
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { chartWindow } from "../src/shared/chart-window.js";
@@ -102,10 +102,11 @@ describe("the Now window, live", () => {
 			"<b>Budget",
 			"<b>Rate now</b>",
 			'</svg></div><p class="ut-nw-proj"',
-			'</p><button type="button" class="ut-more"',
-			'id="ut-fact-chain"',
-			"<b>Integrity</b>",
-			'id="ut-fact-anchor"',
+			// The third row, by the markup's own order: Integrity under the rate, Details under the projection.
+			'</p><div class="ut-fact"><b>Integrity</b>',
+			'</div><button type="button" class="ut-more"',
+			'</button><div class="ut-fact detail" id="ut-fact-chain"',
+			'</div><div class="ut-fact detail" id="ut-fact-anchor"',
 			'</section><p class="ut-nw-last"',
 		];
 		const found = marks.map((m) => html.indexOf(m));
@@ -142,6 +143,25 @@ describe("the Now window, live", () => {
 		expect(rateFigure(await renderNow({ rows, nowMs: NOW_MS + 45_000 }))).toBe(
 			formatUsdTotal(3_000),
 		);
+	});
+
+	it("the last full read is given in UTC, as every time on the page is", async () => {
+		const summary = dayOneSummary({ verifiedAt: "2026-11-10T14:42:27.000Z" });
+		const integrity = fact(await renderNow({ rows: ROWS, summary }), "Integrity");
+		expect(text(integrity)).toContain("links checked as of 11-10 14:42:27Z");
+		expect(integrity).not.toMatch(/11\/10\/2026|\b[AP]M\b/);
+	});
+
+	it("nothing the window draws is formatted by the reader's locale", () => {
+		const SRC = join(import.meta.dirname, "..", "src", "app");
+		const files = [
+			...readdirSync(join(SRC, "windows", "now"))
+				.filter((f) => /\.tsx?$/.test(f))
+				.map((f) => join(SRC, "windows", "now", f)),
+			join(SRC, "summary-strip.tsx"),
+		];
+		expect(files.length).toBeGreaterThan(4);
+		for (const f of files) expect(readFileSync(f, "utf-8")).not.toMatch(/toLocale/);
 	});
 
 	it("the projection is the pure one, over the unfiltered rows, with its tooltip", async () => {
@@ -223,7 +243,7 @@ describe("the Now window before its records have loaded", () => {
 		for (const phase of ["loading", "failed"] as const) {
 			const html = await renderNow({ rows: ROWS, phase });
 			expect(html).toContain('aria-label="vault summary"');
-			expect(html).toContain(`${HELD_RATE}${HELD_PROJ}<button type="button" class="ut-more"`);
+			expect(html).toContain(`${HELD_RATE}${HELD_PROJ}<div class="ut-fact"><b>Integrity</b>`);
 			expect(html).toContain(`</section>${HELD_LAST}</div>`);
 			expect(html).not.toContain('data-fig="now.rate"');
 			expect(html).not.toContain("<svg role");
@@ -276,6 +296,26 @@ describe("the Now window at a past position", () => {
 		expect(rateFigure(html)).toBe(rateFigure(live));
 		expect(lastLine(html)).toBe(lastLine(live));
 		expect(lastLine(html)).toContain(`title="record ${Y_NEW.pos + 1} `);
+	});
+});
+
+describe("the Now window's budget at a past position", () => {
+	const provenance = "from usertrust.config.json; not confirmed as enforced";
+	const note = "budget history starts with the first budget record; this is today's budget";
+
+	it("says where today's budget came from in the sentence the live fact uses", async () => {
+		const at = atOf(Y_MID, 12_000, {
+			budget: { ut: 1_000_000, source: "config", writtenAt: null, provenance, note },
+		});
+		const past = text(fact(await renderNow({ rows: ROWS, at }), "Budget"));
+		expect(past).toContain(`${provenance}. ${note}`);
+		expect(past).not.toContain("config · unconfirmed.");
+		const summary = dayOneSummary({
+			budgetSource: "config",
+			budgetWrittenAt: null,
+			budgetProvenance: provenance,
+		});
+		expect(text(fact(await renderNow({ rows: ROWS, summary }), "Budget"))).toContain(provenance);
 	});
 });
 
@@ -420,6 +460,8 @@ describe("the Now window's sheet", () => {
 		expect(rule('[data-win="now"] .ut-facts')).toMatch(
 			/grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\);/,
 		);
+		// Rows 12px apart, columns 16px.
+		expect(rule('[data-win="now"] .ut-facts')).toMatch(/gap:\s*12px 16px;/);
 		expect(rule('[data-win="now"] .ut-nw-rate')).toMatch(
 			/grid-template-columns:\s*minmax\(0, 1fr\) auto;/,
 		);
@@ -429,9 +471,49 @@ describe("the Now window's sheet", () => {
 		expect(rule('.ut-nw-rate[data-unusual="true"] .ut-nw-words')).toMatch(
 			/color:\s*var\(--dk-gold\);/,
 		);
-		expect(rule(".ut-nw-dot")).toMatch(/fill:\s*var\(--dk-gold\);/);
+		// The dot's colour is set where it is drawn, as the line's is.
+		expect(SHEET).not.toMatch(/\.ut-nw-dot/);
 		expect(rule(".ut-nw-proj")).toMatch(/font-variant-numeric:\s*tabular-nums;/);
 		expect(rule(".ut-nw-last")).toMatch(/text-overflow:\s*ellipsis;/);
+	});
+
+	it("sets the facts' lines closer than the page-wide strip did, so the Budget fact is at most 170px tall", () => {
+		const px = (decls: string, prop: string): number =>
+			Number(new RegExp(`(?:^|[;\\s])${prop}:\\s*([0-9.]+)px;`).exec(decls)?.[1] ?? Number.NaN);
+		const gap = px(rule('[data-win="now"] .ut-facts .ut-fact'), "row-gap");
+		const label = px(rule('[data-win="now"] .ut-facts .ut-fact > b'), "min-height");
+		const value = rule(
+			'[data-win="now"] .ut-facts .ut-fact .v, [data-win="now"] .ut-facts .ut-fact .v.na',
+		);
+		const sub = rule('[data-win="now"] .ut-facts .ut-fact.budget > .ut-sub');
+		expect([gap, label, px(value, "height"), px(value, "line-height")]).toEqual([4, 13, 18, 18]);
+		// The Budget fact's usertoken line and its scope line are one line each.
+		expect([px(sub, "height"), px(sub, "line-height")]).toEqual([14, 14]);
+		expect(sub).toMatch(/-webkit-line-clamp:\s*1;/);
+		expect(sub).toMatch(/(?:^|[;\s])line-clamp:\s*1;/);
+		// The lines the older sheet still sizes: the meter, the amounts and the two-line note.
+		const older = allCss();
+		const meter = Number(/\.ut-meter\s*\{\s*height:\s*([0-9.]+)px;/.exec(older)?.[1]);
+		const amounts = Number(/\.ut-facts \.ut-amts\s*\{\s*height:\s*([0-9.]+)px;/.exec(older)?.[1]);
+		const why = Number(/\.ut-facts \.ut-why\s*\{\s*height:\s*([0-9.]+)px;/.exec(older)?.[1]);
+		expect([meter, amounts, why]).toEqual([3, 32, 34]);
+		// Label, figure, meter, amounts, usertokens, scope, note: seven lines and the six gaps between them. Each line's
+		// top, from the fact's: the figure 17, the meter 39, the amounts 46, the usertokens 82, the scope 100, the note
+		// 118.
+		const heights = [
+			label,
+			px(value, "height"),
+			meter,
+			amounts,
+			px(sub, "height"),
+			px(sub, "height"),
+			why,
+		];
+		const tops = heights.map((_, i) => heights.slice(0, i).reduce((a, b) => a + b + gap, 0));
+		expect(tops).toEqual([0, 17, 39, 46, 82, 100, 118]);
+		const cell = (tops.at(-1) ?? Number.NaN) + why;
+		expect(cell).toBe(152);
+		expect(cell).toBeLessThanOrEqual(170);
 	});
 
 	it("gives each held box the size of what it will hold, and keeps it unseen", () => {

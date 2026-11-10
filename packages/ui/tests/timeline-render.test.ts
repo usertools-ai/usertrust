@@ -437,20 +437,25 @@ describe("past budget provenance", () => {
 		expect(html).not.toContain("enforced");
 	});
 
-	it("the config's budget: the config source word, never enforced", () => {
+	it("the config's budget: the sentence the live fact shows, then the note, and never called enforced", () => {
+		const provenance = "from usertrust.config.json; not confirmed as enforced";
 		const html = text(
-			strip(
-				at({
-					budget: pastBudget({
-						source: "config",
-						writtenAt: null,
-						provenance: "from usertrust.config.json; not confirmed as enforced",
-					}),
-				}),
-			),
+			strip(at({ budget: pastBudget({ source: "config", writtenAt: null, provenance }) })),
 		);
-		expect(html).toContain(budgetSourceWord("config", null, NOW).word);
-		expect(html).not.toContain("enforced");
+		expect(html).toContain(`${provenance}. ${NOTE}`);
+		// Not the bare source word in the sentence's place.
+		expect(html).not.toContain(`${budgetSourceWord("config", null, NOW).word}. `);
+		// The only "enforced" is the sentence's own "not confirmed as enforced".
+		expect(html.split("not confirmed as enforced").join("")).not.toContain("enforced");
+	});
+
+	it("the line's title is the line: the sentence is not said twice", () => {
+		const provenance = "from usertrust.config.json; not confirmed as enforced";
+		const html = strip(
+			at({ budget: pastBudget({ source: "config", writtenAt: null, provenance }) }),
+		);
+		const title = /<span class="ut-why" title="([^"]*)"/.exec(html)?.[1] ?? "";
+		expect(title.replace(/&#x27;/g, "'")).toBe(`${provenance}. ${NOTE}`);
 	});
 
 	it("a source that is not a controller's record: the provenance sentence is in the line's title", () => {

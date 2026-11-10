@@ -35,11 +35,36 @@
 		}
 	}
 
-	/* The facts in two columns, so they fit a window a third of the desk wide. The older sheet's narrower layouts are
-	   kept at the same widths. */
+	/* The facts in two columns, so they fit a window a third of the desk wide: Spend and Budget, the rate and its
+	   projection, Integrity and Details. The older sheet's narrower layouts are kept at the same widths. */
 	[data-win="now"] .ut-facts {
 		grid-template-columns: repeat(2, minmax(0, 1fr));
-		gap: 16px 20px;
+		gap: 12px 16px;
+	}
+
+	/* The facts' lines sit closer here than in the page-wide strip they came from, so the window holds all three
+	   rows: 4px between a fact's lines, a 13px heading and an 18px figure. */
+	[data-win="now"] .ut-facts .ut-fact {
+		row-gap: 4px;
+	}
+
+	[data-win="now"] .ut-facts .ut-fact > b {
+		min-height: 13px;
+	}
+
+	[data-win="now"] .ut-facts .ut-fact .v,
+	[data-win="now"] .ut-facts .ut-fact .v.na {
+		height: 18px;
+		line-height: 18px;
+	}
+
+	/* The Budget fact's usertoken line and its scope line are one line each. A figure too long for its column keeps
+	   its whole text in its title and opens in full, as any cut line of a fact does. */
+	[data-win="now"] .ut-facts .ut-fact.budget > .ut-sub {
+		height: 14px;
+		line-height: 14px;
+		-webkit-line-clamp: 1;
+		line-clamp: 1;
 	}
 
 	/* Chain and Anchor file sit behind Details at every width, so the window fits its facts. Nothing here moves a
@@ -108,7 +133,8 @@
 		color: var(--dk-gold);
 	}
 
-	/* The line's colour is set where it is drawn: the default ink, one category's colour, or gold. */
+	/* The colour of the line and of the dot on its last hour is set where they are drawn: the default ink, one
+	   category's colour, or gold. */
 	.ut-nw-line {
 		fill: none;
 		stroke-width: 1.4;
@@ -119,10 +145,6 @@
 	.ut-nw-band {
 		fill: var(--dk-legend);
 		fill-opacity: 0.14;
-	}
-
-	.ut-nw-dot {
-		fill: var(--dk-gold);
 	}
 
 	/* The projection: beside the rate, under the budget it is about. Its place is kept, a line tall at the least, when

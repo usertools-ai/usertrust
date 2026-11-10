@@ -5,9 +5,9 @@
  * Rate now: the last hour's spend, what it reads as against the usual range, and the past 24 hours as a small line.
  * Props only. It reads now wherever it is drawn (at a past position too), so its heading never changes.
  *
- * The line is the default ink, or the one filtered category's colour; an unusual rate is gold, with a dot on the last
- * hour. The small form shades the usual range behind the line; the filled form's tile is the plain line (the week's
- * chart beside it shades the range).
+ * The line is the default ink, or the one filtered category's colour; an unusual rate is gold. The last hour always
+ * has a dot, in the line's colour. The small form shades the usual range behind the line, and the line's name says
+ * so only when it does; the filled form's tile is the plain line (the week's chart beside it shades the range).
  *
  * With no view (the records have not loaded) it states no figure: the fact keeps its heading, and its words and its
  * line are held empty and unseen in the boxes they will take, so nothing moves when they arrive.
@@ -69,6 +69,7 @@ export function RateNow(props: {
 		bottom = `L${x(k).toFixed(1)} ${y(band.lo[k] as number).toFixed(1)}${bottom}`;
 	}
 	const stroke = view.unusual ? "var(--dk-gold)" : (props.color ?? "var(--dk-text)");
+	const banded = shade && first < last;
 	return (
 		<div className="ut-fact ut-nw-rate" data-unusual={view.unusual}>
 			<b>Rate now</b>
@@ -82,16 +83,20 @@ export function RateNow(props: {
 			<svg
 				className="ut-nw-spark"
 				role="img"
-				aria-label="The past 24 hours, hour by hour"
+				aria-label={`The past 24 hours, hour by hour${banded ? ", over the usual range" : ""}`}
 				width={W}
 				height={H}
 				viewBox={`0 0 ${W} ${H}`}
 			>
-				{shade && first < last && <path className="ut-nw-band" d={`${top}${bottom}Z`} />}
+				{banded && <path className="ut-nw-band" d={`${top}${bottom}Z`} />}
 				<path className="ut-nw-line" d={monotone(xs, ys).path()} style={{ stroke }} />
-				{view.unusual && (
-					<circle className="ut-nw-dot" cx={x(last)} cy={y(view.ratePerHourUt)} r={2.5} />
-				)}
+				<circle
+					className="ut-nw-dot"
+					cx={x(last)}
+					cy={y(hours[last] as number)}
+					r={2.5}
+					style={{ fill: stroke }}
+				/>
 			</svg>
 		</div>
 	);

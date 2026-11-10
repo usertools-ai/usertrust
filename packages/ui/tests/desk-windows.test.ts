@@ -118,8 +118,8 @@ describe("Now", () => {
 		const projection = /<p class="ut-nw-proj"[^>]*>[^<]*<\/p>/.exec(html)?.[0] ?? "";
 		expect(rate).toContain("<b>Rate now</b>");
 		expect(projection).toContain("Projection:");
-		// What Now adds sits between the Budget fact and the Details button; without it, the grid is the strip's.
-		expect(html).toContain(`${rate}${projection}<button type="button" class="ut-more"`);
+		// What Now adds sits between the Budget fact and the Integrity fact; without it, the grid is the strip's.
+		expect(html).toContain(`${rate}${projection}<div class="ut-fact"><b>Integrity</b>`);
 		expect(html).not.toContain(facts);
 		expect(html.replace(`${rate}${projection}`, "")).toContain(facts);
 	});

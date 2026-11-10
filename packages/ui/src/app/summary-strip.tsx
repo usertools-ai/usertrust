@@ -33,6 +33,7 @@ import {
 	formatUsd,
 	formatUsdTotal,
 	formatUt,
+	formatUtc,
 	formatUtcMinute,
 	middleTruncate,
 	UT_KEY,
@@ -533,9 +534,12 @@ function FactLine(props: {
 export function PastBudgetFact(props: { at: AtPayload }): React.JSX.Element {
 	const { budget } = props.at;
 	const now = useNow();
+	const controller = isControllerRecord(budget.source);
 	const word = budgetSourceWord(budget.source, budget.writtenAt, now).word;
-	const from =
-		isControllerRecord(budget.source) && budget.writtenAt !== null
+	// Any other source says where the figure came from in the sentence the live fact shows.
+	const from = !controller
+		? budget.provenance.replace(/^unknown: /, "")
+		: budget.writtenAt !== null
 			? `${word}, as of ${formatUtcMinute(budget.writtenAt)}`
 			: word;
 	const line = budget.ut !== null ? `${from}. ${budget.note}` : budget.note;
@@ -575,11 +579,12 @@ export function PastBudgetFact(props: { at: AtPayload }): React.JSX.Element {
 			)}
 			{/* Two lines (clamped): where the figure came from, then the whole note. The whole line is in its title, and a
 			    cut line opens in full. The provenance sentence calls a controller's budget "enforced", so as live, a
-			    controller's record never shows it: its words are the source word and the time. */}
+			    controller's record never shows it: its words are the source word and the time. A budget with no figure
+			    has its reason in the line above, and in this line's title. */}
 			<FactLine
 				className="ut-why"
 				text={line}
-				title={isControllerRecord(budget.source) ? line : `${budget.provenance}. ${line}`}
+				title={controller || budget.ut !== null ? line : `${budget.provenance}. ${line}`}
 			/>
 		</div>
 	);
@@ -645,6 +650,8 @@ export function IntegrityFact(props: {
 	const { s } = props;
 	if (props.at !== null) return <PastIntegrityFact at={props.at} anchorFile={s.anchorFile} />;
 	const status = chainStatus(s.chain);
+	// In UTC, as every time on the page is: never the reader's own clock or date order.
+	const checked = verifiedAsOf(s.verifiedAt, (d) => formatUtc(d.toISOString()));
 	return (
 		<div className="ut-fact">
 			<b>Integrity</b>
@@ -679,8 +686,8 @@ export function IntegrityFact(props: {
 			)}
 			<FactLine
 				className="ut-why"
-				text={verifiedAsOf(s.verifiedAt)}
-				title={`${verifiedAsOf(s.verifiedAt)}. The dashboard is a monitor: usertrust verify is the authoritative check of a vault`}
+				text={checked}
+				title={`${checked}. The dashboard is a monitor: usertrust verify is the authoritative check of a vault`}
 			/>
 		</div>
 	);
@@ -782,8 +789,8 @@ export function BudgetFact(props: { s: SummaryPayload }): React.JSX.Element {
 }
 
 /**
- * The facts row before the first summary: each fact with the lines it will have once loaded, held empty and unseen
- * (and the phone's Details toggle held too), so the first load moves nothing. Only a "…" shows.
+ * The facts before the first summary, in the order they are drawn once loaded: each fact with the lines it will have,
+ * held empty and unseen (and the Details toggle held too), so the first load moves nothing. Only a "…" shows.
  */
 function LoadingFacts(props: { budgetNote?: ReactNode }): React.JSX.Element {
 	return (
@@ -806,13 +813,6 @@ function LoadingFacts(props: { budgetNote?: ReactNode }): React.JSX.Element {
 				<Reserve line="why" />
 			</div>
 			{props.budgetNote}
-			<span className="ut-more" aria-hidden="true" data-reserve="true">
-				Details
-			</span>
-			<div className="ut-fact detail">
-				<b>Chain</b>
-				<span className="v na">…</span>
-			</div>
 			<div className="ut-fact">
 				<b>Integrity</b>
 				<span className="ut-pill">
@@ -820,6 +820,13 @@ function LoadingFacts(props: { budgetNote?: ReactNode }): React.JSX.Element {
 				</span>
 				<Reserve line="sub" />
 				<Reserve line="why" />
+			</div>
+			<span className="ut-more" aria-hidden="true" data-reserve="true">
+				Details
+			</span>
+			<div className="ut-fact detail">
+				<b>Chain</b>
+				<span className="v na">…</span>
 			</div>
 			<div className="ut-fact detail">
 				<b>Anchor file</b>
@@ -839,6 +846,9 @@ function LoadingFacts(props: { budgetNote?: ReactNode }): React.JSX.Element {
  */
 export type SummaryStripPart = "bar" | "head" | "facts" | "all";
 
+/** A count with its thousands grouped the one way the page writes them, whatever the reader's locale. */
+const COUNT = new Intl.NumberFormat("en-US");
+
 export function SummaryStrip(props: {
 	summary: SummaryPayload | null;
 	live: LiveState;
@@ -846,7 +856,7 @@ export function SummaryStrip(props: {
 	at?: AtPayload | null;
 	/** One part, or all of them (the default). The desk puts them in different places. */
 	part?: SummaryStripPart;
-	/** Drawn in the facts grid after the Budget fact, before the Details button. */
+	/** Drawn in the facts grid after the Budget fact, before the Integrity fact. */
 	budgetNote?: ReactNode;
 	/** A Spend figure of another scope (the filtered records' sum) and the label that says so; Budget never swaps. */
 	spentOverride?: { ut: number; label: string };
@@ -857,7 +867,8 @@ export function SummaryStrip(props: {
 	const showFacts = part === "facts" || part === "all";
 	const s = props.summary;
 	const at = props.at ?? null;
-	// Phone only: the Chain and Anchor facts sit behind a button. Elsewhere every fact shows and the button does not.
+	// The Chain and Anchor facts sit behind a button where the stylesheet shows it. The button follows the facts that
+	// are always shown and comes before the two it opens, so the order on screen is the markup's, which Tab follows.
 	const [detailsOpen, setDetailsOpen] = useState(false);
 	const detailsRef = useRef<HTMLButtonElement>(null);
 	// Escape closes the disclosure from the button or from inside it, unless the anchor explainer is open (it takes the
@@ -940,6 +951,7 @@ export function SummaryStrip(props: {
 					)}
 					{at === null ? <BudgetFact s={s} /> : <PastBudgetFact at={at} />}
 					{props.budgetNote}
+					<IntegrityFact s={s} at={at} />
 					<button
 						ref={detailsRef}
 						type="button"
@@ -956,12 +968,11 @@ export function SummaryStrip(props: {
 					<div className="ut-fact detail" id="ut-fact-chain">
 						<b>Chain</b>
 						<span className="v">
-							<Fit text={`${events.toLocaleString()} ${events === 1 ? "event" : "events"}`}>
-								{events.toLocaleString()} <small>{events === 1 ? "event" : "events"}</small>
+							<Fit text={`${COUNT.format(events)} ${events === 1 ? "event" : "events"}`}>
+								{COUNT.format(events)} <small>{events === 1 ? "event" : "events"}</small>
 							</Fit>
 						</span>
 					</div>
-					<IntegrityFact s={s} at={at} />
 					<AnchorFact anchorFile={s.anchorFile} past={at !== null} />
 				</section>
 			)}

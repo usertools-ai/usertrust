@@ -3,7 +3,7 @@
 
 /**
  * Rate now as it is drawn: the heading that never changes, the figure with its hook, the words, and the 24 hour line
- * with its colour, its shaded usual range (small form only) and its dot (unusual only).
+ * with its colour, its shaded usual range (small form only) and the dot on its last hour.
  */
 
 import { createElement } from "react";
@@ -56,6 +56,16 @@ const draw = (v: RateNowView, color: string | null = null, filled = false): stri
 	renderToStaticMarkup(createElement(RateNow, { view: v, color, filled }));
 
 const text = (html: string): string => html.replace(/<[^>]*>/g, "");
+/** The dot on the last hour: where it is and its colour, or null when there is none. */
+function dot(html: string): { at: [number, number]; fill: string } | null {
+	const m =
+		/<circle class="ut-nw-dot" cx="([^"]*)" cy="([^"]*)" r="2\.5" style="fill:([^"]*)"><\/circle>/.exec(
+			html,
+		);
+	return m === null ? null : { at: [Number(m[1]), Number(m[2])], fill: m[3] ?? "" };
+}
+const dots = (html: string): number => html.split("<circle").length - 1;
+const LABEL = "The past 24 hours, hour by hour";
 
 /** The line's points as the path gives them: the move, then each curve's end. */
 function points(html: string): [number, number][] {
@@ -100,34 +110,67 @@ describe("Rate now", () => {
 		expect(html).toContain(
 			`<span class="ut-nw-words" title="${NOW_COPY.rateTip.replaceAll("'", "&#x27;")}">`,
 		);
-		expect(html).toContain("var(--dk-text)");
+		expect(html).toContain('style="stroke:var(--dk-text)"');
 		expect(html).not.toContain("var(--dk-gold)");
-		expect(html).not.toContain("ut-nw-dot");
+		// The dot is the line's colour: gold is for an unusual rate only.
+		expect(dot(html)?.fill).toBe("var(--dk-text)");
 	});
 
 	it("an unusual rate says so, in gold, with a dot on the last hour", () => {
 		const html = draw(view({ tail: [0, 5_000], unusual: true, hi: 100 }));
 		expect(text(html)).toContain("unusual spend rate");
 		expect(html).toContain('style="stroke:var(--dk-gold)"');
-		const dot = /<circle class="ut-nw-dot" cx="([^"]*)" cy="([^"]*)" r="2.5">/.exec(html);
-		const end = points(html).at(-1);
-		expect(dot).not.toBeNull();
-		expect([Number(dot?.[1]), Number(dot?.[2])]).toEqual(end);
+		expect(dot(html)).toEqual({ at: points(html).at(-1), fill: "var(--dk-gold)" });
 		expect(text(html)).not.toMatch(/runaway|loop|anomaly/i);
 	});
 
-	it("too little history says so, and nothing about the rate: no gold, no dot, no shading", () => {
+	it("the last hour always has its dot, one only, at the line's end, in the line's colour", () => {
+		const states: [RateNowView, string | null, boolean][] = [
+			[view(), null, false],
+			[view({ tail: [300, 0] }), null, false],
+			[view({ tail: [0, 5_000], known: false }), null, false],
+			[view({ tail: [0] }), "#BE804D", false],
+			[view({ tail: [200, 900], hi: 2_000 }), "#BE804D", true],
+		];
+		for (const [v, color, filled] of states) {
+			const html = draw(v, color, filled);
+			expect(dots(html)).toBe(1);
+			expect(dot(html)).toEqual({ at: points(html).at(-1), fill: color ?? "var(--dk-text)" });
+		}
+		// Unusual is gold whatever the tint.
+		expect(dot(draw(view({ unusual: true }), "#BE804D"))?.fill).toBe("var(--dk-gold)");
+		// Drawn after the line, so it sits on top of it.
+		const html = draw(view());
+		expect(html.indexOf("<circle")).toBeGreaterThan(html.indexOf('class="ut-nw-line"'));
+	});
+
+	it("too little history says so, and nothing about the rate: no gold, no shading, no range named", () => {
 		const html = draw(view({ tail: [0, 5_000], known: false }));
 		expect(text(html)).toContain("too little history to call");
 		expect(text(html)).not.toMatch(/unusual|normal/);
-		expect(html).not.toContain("ut-nw-dot");
+		expect(dot(html)?.fill).toBe("var(--dk-text)");
 		expect(html).not.toContain("var(--dk-gold)");
 		expect(html).not.toContain("ut-nw-band");
+		expect(html).toContain(`role="img" aria-label="${LABEL}"`);
+	});
+
+	it("the line's name says it is drawn over the usual range exactly when the range is shaded", () => {
+		const over = `role="img" aria-label="${LABEL}, over the usual range"`;
+		const plain = `role="img" aria-label="${LABEL}"`;
+		const shaded = draw(view({ hi: 500 }));
+		expect(shaded).toContain("ut-nw-band");
+		expect(shaded).toContain(over);
+		// The filled form draws the plain line, and a range of one hour is no band.
+		for (const html of [draw(view({ hi: 500 }), null, true), draw(view({ banded: 1, hi: 500 }))]) {
+			expect(html).not.toContain("ut-nw-band");
+			expect(html).toContain(plain);
+		}
 	});
 
 	it("a category tint recolours the line; unusual stays gold", () => {
 		expect(draw(view(), "#BE804D")).toContain('style="stroke:#BE804D"');
 		expect(draw(view(), "#BE804D")).not.toContain("var(--dk-text)");
+		expect(dot(draw(view(), "#BE804D"))?.fill).toBe("#BE804D");
 		expect(draw(view(), null)).toContain('style="stroke:var(--dk-text)"');
 		const unusual = draw(view({ unusual: true }), "#BE804D");
 		expect(unusual).toContain('style="stroke:var(--dk-gold)"');
@@ -182,7 +225,7 @@ describe("Rate now", () => {
 		expect(pts.at(-1)).toEqual([94, 16]);
 		expect(pts[1]).toEqual([6, 30]);
 		expect(html).toContain('width="96" height="32" viewBox="0 0 96 32"');
-		expect(html).toContain('role="img" aria-label="The past 24 hours, hour by hour"');
+		expect(html).toContain(`role="img" aria-label="${LABEL}"`);
 	});
 
 	it("the shaded range's top sets the scale in the small form, and not in the filled one", () => {

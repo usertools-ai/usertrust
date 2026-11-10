@@ -204,11 +204,27 @@ describe("all", () => {
 		);
 	});
 
-	// The markup as it was before the head became a part of its own, kept as a digest: the one line added since (the
-	// Budget fact's scope) is taken out before the comparison, so everything else is held byte for byte.
+	// The markup as it was before the head became a part of its own, kept as a digest. What has changed since is
+	// undone before the comparison, so everything else is held byte for byte: the Budget fact's scope line is taken
+	// out, the Integrity fact is put back between Chain and Anchor file, and a past budget's line is given its old
+	// words.
 	const SCOPE_LINE = `<span class="ut-sub" title="${NOW_COPY.scopeVault}">${NOW_COPY.scopeVault}</span>`;
+	const NOTE = at().budget.note.replaceAll("'", "&#x27;");
+	const FROM = at().budget.provenance;
+	const asBefore = (html: string): string =>
+		noIds(html)
+			.split(SCOPE_LINE)
+			.join("")
+			.replace(
+				/(<div class="ut-fact"><b>Integrity<\/b>.*?<\/div>)(<button type="button" class="ut-more".*?<\/button>)(<div class="ut-fact detail" id="ut-fact-chain">.*?<\/div>)/,
+				"$2$3$1",
+			)
+			.replace(
+				`title="${FROM}. ${NOTE}">${FROM}. ${NOTE}<`,
+				`title="${FROM}. config · unconfirmed. ${NOTE}">config · unconfirmed. ${NOTE}<`,
+			);
 	const digest = (html: string): string =>
-		createHash("sha256").update(noIds(html).split(SCOPE_LINE).join("")).digest("hex");
+		createHash("sha256").update(asBefore(html)).digest("hex");
 	it.each([
 		["live", {}, "1532d41fda26553e42a5f3f3cd0db57ffb9d805da2181f72103248c8c8d5ccfb"],
 		[
@@ -283,18 +299,18 @@ describe("the Spend fact's scope", () => {
 describe("the note after Budget", () => {
 	const note = createElement("i", { "data-note": "here" }, "the note");
 
-	it("is drawn between the Budget fact and the Details button", () => {
+	it("is drawn between the Budget fact and the Integrity fact", () => {
 		for (const a of [null, at()]) {
 			const html = strip({ at: a, part: "facts", budgetNote: note });
 			const budget = html.indexOf("<b>Budget");
 			const noteAt = html.indexOf('<i data-note="here">the note</i>');
-			const details = html.indexOf('class="ut-more"');
+			const integrity = html.indexOf("<b>Integrity</b>");
 			expect(budget).toBeGreaterThan(-1);
 			expect(noteAt).toBeGreaterThan(budget);
-			expect(details).toBeGreaterThan(noteAt);
-			// Directly before the button: nothing else between them.
-			expect(html.slice(noteAt, details)).toBe(
-				'<i data-note="here">the note</i><button type="button" ',
+			expect(integrity).toBeGreaterThan(noteAt);
+			// Directly before the fact: nothing else between them.
+			expect(html.slice(noteAt, integrity)).toBe(
+				'<i data-note="here">the note</i><div class="ut-fact">',
 			);
 		}
 	});
@@ -303,7 +319,9 @@ describe("the note after Budget", () => {
 		const html = strip({ summary: null, part: "facts", budgetNote: note });
 		const noteAt = html.indexOf('<i data-note="here">the note</i>');
 		expect(noteAt).toBeGreaterThan(html.indexOf("<b>Budget"));
-		expect(html.indexOf('class="ut-more"')).toBeGreaterThan(noteAt);
+		expect(html.slice(noteAt, html.indexOf("<b>Integrity</b>"))).toBe(
+			'<i data-note="here">the note</i><div class="ut-fact">',
+		);
 	});
 
 	it("absent, nothing is drawn there", () => {
@@ -346,6 +364,52 @@ describe("the Budget fact's scope", () => {
 	});
 });
 
+describe("the facts' order", () => {
+	/** Where each of the facts and the Details control starts, by its own mark. */
+	const places = (html: string): number[] =>
+		[
+			"<b>Spend</b>",
+			"<b>Budget",
+			"<b>Integrity</b>",
+			'class="ut-more"',
+			"<b>Chain</b>",
+			"<b>Anchor file</b>",
+		].map((m) => html.indexOf(m));
+
+	it("is Spend, Budget, Integrity, then Details and what it opens: Chain and Anchor file", () => {
+		const cases: Partial<StripProps>[] = [{}, { at: at() }, { summary: BROKEN }, { summary: null }];
+		for (const over of cases) {
+			const found = places(strip({ ...over, part: "facts" }));
+			expect(found.every((i) => i >= 0)).toBe(true);
+			expect(found).toEqual([...found].sort((a, b) => a - b));
+		}
+	});
+
+	it("the Details control comes straight after Integrity, and Chain straight after it", () => {
+		const html = strip({ part: "facts" });
+		expect(html).toMatch(
+			/<b>Integrity<\/b>(?:(?!<div class="ut-fact).)*<\/div><button type="button" class="ut-more"/,
+		);
+		expect(html).toContain('</button><div class="ut-fact detail" id="ut-fact-chain">');
+		const loading = strip({ summary: null, part: "facts" });
+		expect(loading).toMatch(
+			/<b>Integrity<\/b>(?:(?!<div class="ut-fact).)*<\/div><span class="ut-more" aria-hidden="true" data-reserve="true">Details<\/span><div class="ut-fact detail"><b>Chain<\/b>/,
+		);
+	});
+});
+
+describe("the Chain fact", () => {
+	it("groups its count the one way the page writes numbers, whatever the reader's locale", () => {
+		const chain = { events: 12_345, valid: true, empty: false, breakIndex: null, errors: [] };
+		const live = strip({ summary: summary({ chain }), part: "facts" });
+		expect(text(fact(live, "Chain"))).toContain("12,345 events");
+		expect(fact(live, "Chain")).toContain('style="--n:13"');
+		// At a past position the count is the records up to it.
+		const past = strip({ at: at({ pos: 1_233 }), part: "facts" });
+		expect(text(fact(past, "Chain"))).toContain("1,234 events");
+	});
+});
+
 describe("the Integrity fact", () => {
 	const draw = (s: SummaryPayload, a: AtPayload | null, anchorLine?: boolean): string =>
 		renderToStaticMarkup(
@@ -362,6 +426,20 @@ describe("the Integrity fact", () => {
 		expect(NOT_ANCHORED_NOTE).toBe("hash links only · not anchored");
 		expect(text(html)).toContain("not yet read in full");
 		expect(html).not.toMatch(/\bverified\b/i);
+	});
+
+	it("gives the time of the last full read in UTC, as the rest of the page does", () => {
+		const html = draw(summary({ verifiedAt: "2026-11-10T14:42:27.000Z" }), null);
+		expect(text(html)).toContain("links checked as of 11-10 14:42:27Z");
+		expect(html).toContain(
+			'title="links checked as of 11-10 14:42:27Z. The dashboard is a monitor',
+		);
+		// Never the reader's own clock or date order.
+		expect(html).not.toMatch(/11\/10\/2026|\b[AP]M\b/);
+		// A time that cannot be read is shown as written.
+		expect(text(draw(summary({ verifiedAt: "not a time" }), null))).toContain(
+			"links checked as of not a time",
+		);
 	});
 
 	it("is the strip's own Integrity fact, live and past", () => {
