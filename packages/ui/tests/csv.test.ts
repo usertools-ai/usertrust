@@ -521,6 +521,32 @@ describe("the formula guard, from the record", () => {
 	// vowel separator, the zero-width space and the word joiner.
 	const NOT_WHITESPACE = chars([0x00, 0x1f, 0x85, 0xad, 0x180e, 0x200b, 0x2060]);
 
+	// Other forms of a formula character, guarded as a precaution: the fullwidth =, +, - and @, the small =, +, - and
+	// @, and the minus sign.
+	const NAMED_LOOKALIKES = chars([
+		0xff1d, 0xff0b, 0xff0d, 0xff20, 0xfe66, 0xfe62, 0xfe63, 0xfe6b, 0x2212,
+	]);
+	const FULLWIDTH_EQUALS = String.fromCodePoint(0xff1d);
+	const MINUS_SIGN = String.fromCodePoint(0x2212);
+	// Every character beyond ASCII whose compatibility form (Unicode NFKC) is =, +, - or @ or the minus sign, found by
+	// walking all of Unicode: the named ones above, and superscript and subscript forms.
+	const LOOKALIKES: string[] = [];
+	for (let point = 0x80; point <= 0x10ffff; point++) {
+		if (point >= 0xd800 && point <= 0xdfff) continue;
+		const char = String.fromCodePoint(point);
+		if (["=", "+", "-", "@", MINUS_SIGN].includes(char.normalize("NFKC"))) LOOKALIKES.push(char);
+	}
+	// Not another form of one: the hyphen, the en dash, almost equal to, two equals signs in one character (its
+	// compatibility form is two characters), the fullwidth percent and the fullwidth number sign.
+	const NOT_LOOKALIKES = chars([0x2010, 0x2013, 0x2248, 0x2a75, 0xff05, 0xff03]);
+
+	it("the other forms found by walking Unicode include every one named, and none of the ones left alone", () => {
+		for (const named of NAMED_LOOKALIKES) expect(LOOKALIKES).toContain(named);
+		for (const other of NOT_LOOKALIKES) expect(LOOKALIKES).not.toContain(other);
+		expect(LOOKALIKES.length).toBeGreaterThanOrEqual(NAMED_LOOKALIKES.length);
+		expect(LOOKALIKES.length).toBeLessThan(40);
+	});
+
 	it("the wide whitespace named here, with the four ASCII ones, is all the whitespace there is", () => {
 		const all = new Set([" ", "\t", "\n", "\r", ...WIDE_WHITESPACE]);
 		expect(all.size).toBe(25);
@@ -580,6 +606,18 @@ describe("the formula guard, from the record", () => {
 		["a\r\n@x", '"a\r\n@x"'],
 		["a\n +1", '"a\n +1"'],
 		["a\n-1", '"a\n-1"'],
+		// A tab at the start of a later line: the tab rule is about the first character of the cell, too.
+		["a\n\thello", '"a\n\thello"'],
+		["a\r\n\thello", '"a\r\n\thello"'],
+		// Another form of a formula character that is not first: later in the text, and at the start of a later line.
+		[`a${FULLWIDTH_EQUALS}1`, `a${FULLWIDTH_EQUALS}1`],
+		[`a\n${FULLWIDTH_EQUALS}1`, `"a\n${FULLWIDTH_EQUALS}1"`],
+		[`a ${MINUS_SIGN}1`, `a ${MINUS_SIGN}1`],
+		// Characters that only look or sound like one: their compatibility form is none of the four.
+		...NOT_LOOKALIKES.flatMap((first): [string, string][] => [
+			[`${first}1`, `${first}1`],
+			[` ${first}1`, ` ${first}1`],
+		]),
 		// A first character that cannot be seen and is not whitespace to JavaScript (a null, a zero-width space, a
 		// word joiner and the like) is not skipped: the cell starts with that character, not with the formula.
 		...NOT_WHITESPACE.map((first): [string, string] => [`${first}=1`, `${first}=1`]),
@@ -607,6 +645,11 @@ describe("the formula guard, from the record", () => {
 			`${first}=1+1`,
 		]),
 	];
+	// The precaution: another form of a formula character first, or first after whitespace.
+	const LOOKALIKE_BEFORE = ["", " ", "   ", "\n", " \t ", String.fromCodePoint(0x3000)];
+	const HOSTILE_LOOKALIKES = [...new Set([...NAMED_LOOKALIKES, ...LOOKALIKES])].flatMap((first) =>
+		LOOKALIKE_BEFORE.flatMap((before) => [`${before}${first}1`, `${before}${first}cmd()`]),
+	);
 	const COLUMNS = [
 		["actor", "actor"],
 		["model", "model"],
@@ -629,6 +672,19 @@ describe("the formula guard, from the record", () => {
 		expect(exported({ pricingTableVersion: " -1" })).toBe(
 			line({ pricing_table_version: `"' -1"` }),
 		);
+	});
+
+	it("as a precaution, another form of a formula character first, or first after whitespace, is defanged too", () => {
+		for (const [field, column] of COLUMNS) {
+			for (const value of HOSTILE_LOOKALIKES) {
+				expect(exported({ [field]: value })).toBe(line({ [column]: `"'${value}"` }));
+			}
+		}
+		// Each named one, on its own line here so that a failure names it.
+		for (const named of NAMED_LOOKALIKES) {
+			expect(exported({ actor: `${named}1` })).toBe(line({ actor: `"'${named}1"` }));
+			expect(exported({ actor: `  ${named}1` })).toBe(line({ actor: `"'  ${named}1"` }));
+		}
 	});
 
 	it("a cell that starts with a tab or a carriage return is defanged, whatever follows", () => {
