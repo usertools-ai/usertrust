@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, describe, expect, it } from "vitest";
+import { stamp } from "../src/app/windows/spend/chart-text.js";
 import {
 	type ChartCtx,
 	LAYERS,
@@ -1033,13 +1034,170 @@ describe("spend chart: nothing a row says is dropped", () => {
 	});
 });
 
+const cumTo = (pos: number): number =>
+	Array.from({ length: pos + 1 }, (_, p) => COST(p)).reduce((a, b) => a + b, 0);
+
+describe("spend chart: pinned", () => {
+	let pinned = "";
+	beforeAll(() => {
+		pinned = chart({ pinnedPos: 4 });
+	});
+	it("reads the pinned record's cumulative and names it", () => {
+		expect(pinned).toContain('<span class="ut-sp-lbl">Spend by then</span>');
+		expect(headline(pinned)).toBe(formatUsdTotal(cumTo(4)));
+		const when = stripTags(textOf(pinned, "ut-sp-when"));
+		expect(when.startsWith("Pinned · ")).toBe(true);
+		expect(when.endsWith(" · record 5")).toBe(true);
+	});
+	it("marks the slider pinned and says so in its value", () => {
+		const tag = plotTag(pinned);
+		expect(attr(tag, "data-pinned")).toBe("true");
+		expect(attr(tag, "aria-valuenow")).toBe("5");
+		expect(attr(tag, "aria-valuetext")?.endsWith(" · pinned")).toBe(true);
+		expect(attr(plotTag(chart()), "data-pinned")).toBe("false");
+	});
+	it("draws the whole line to now: the range's spend is every record's, not cut at the pin", () => {
+		expect(attr(plotTag(pinned), "aria-valuemax")).toBe("13");
+		expect(
+			stripTags(textOf(pinned, "ut-sp-sub")).startsWith(`+${formatUsdTotal(SUM)} in this range`),
+		).toBe(true);
+		expect(pinned).toContain('class="ut-sp-pin"');
+		expect(pinned).not.toContain('class="ut-sp-live"');
+	});
+	it("reads the whole value text for the pinned record: its number, the spend by it and its time", () => {
+		expect(attr(plotTag(pinned), "aria-valuetext")).toBe(
+			`Record 5 of 13 · ${formatUsdTotal(cumTo(4))} spent by ${stamp(T0 + 4 * 6 * HOUR)} · pinned`,
+		);
+	});
+	it("names the pinned bucket's own spend in the sub-line, not the peak", () => {
+		// Records are six hours apart and the line's buckets an hour: the pinned record's bucket holds only its cost.
+		const sub = stripTags(textOf(pinned, "ut-sp-sub"));
+		expect(
+			sub.startsWith(`+${formatUsdTotal(SUM)} in this range · ${formatUsdTotal(COST(4))} `),
+		).toBe(true);
+		expect(sub).not.toContain("peak");
+	});
+	it("reads a pin older than every record held as the spend before them", () => {
+		// Records from position 5 on, and 5000 spent before them: a pin at position 2 has no record at or before it.
+		const held = chartRows().slice(5);
+		const heldSum = held.reduce(
+			(n, r) => n + (r.kind === "policy_decision" ? 0 : (r.costUt ?? 0)),
+			0,
+		);
+		const html = chart({ rows: held, pinnedPos: 2, totalUt: heldSum + 5000, truncated: true });
+		expect(headline(html)).toBe(formatUsdTotal(5000));
+		expect(stripTags(textOf(html, "ut-sp-when"))).toBe("Pinned · no spend recorded by then");
+		expect(attr(plotTag(html), "aria-valuetext")).toBe(`Pinned · ${formatUsdTotal(5000)} spent`);
+	});
+	it("offers Now while pinned, with its title, and not when live", () => {
+		expect(pinned).toContain(
+			'<button type="button" class="ut-sp-now" title="Back to the vault as it is now (Escape)">Now</button>',
+		);
+		expect(chart()).not.toContain("ut-sp-now");
+	});
+	it("counts the records added since the pin on Now", () => {
+		const at = { ...({} as AtPayload), head: 10 };
+		expect(chart({ pinnedPos: 4, at })).toContain('<span class="ut-sp-new"> +2 new</span>');
+	});
+	it("still reads a pin older than the window, with no mark, and keeps Now", () => {
+		const late: SpendWindow = { startMs: T0 + 30 * HOUR, endMs: T0 + 30 * HOUR + 7 * 24 * HOUR };
+		const html = chart({ pinnedPos: 4, win: late });
+		expect(headline(html)).toBe(formatUsdTotal(cumTo(4)));
+		expect(stripTags(textOf(html, "ut-sp-when")).startsWith("Pinned · ")).toBe(true);
+		expect(html).not.toContain('class="ut-sp-pin"');
+		expect(html).toContain('class="ut-sp-now"');
+	});
+	it("puts the controls at the right of the headline row, after Now", () => {
+		const html = chart({ pinnedPos: 4, controls: createElement("i", { "data-test": "chips" }) });
+		const head =
+			/<div class="ut-sp-head">.*?<\/div><div[^>]*class="ut-sp-plot"/.exec(html)?.[0] ?? "";
+		expect(head.indexOf("ut-sp-now")).toBeGreaterThan(head.indexOf('data-fig="spend.headline"'));
+		expect(head.indexOf('data-test="chips"')).toBeGreaterThan(head.indexOf("ut-sp-now"));
+	});
+});
+
+describe("spend chart: the chain break in the when-line", () => {
+	it("says the links are broken for a record at or after the break, and not before it", () => {
+		expect(textOf(chart({ pinnedPos: 5, breakPos: 5 }), "ut-sp-when")).toContain(
+			'<span class="ut-sp-broke"> · links broken from here</span>',
+		);
+		expect(chart({ pinnedPos: 3, breakPos: 5 })).not.toContain("ut-sp-broke");
+		expect(chart({ breakPos: 5 })).not.toContain("ut-sp-broke");
+	});
+	it("rings the break on the line, and draws none for a clean chain", () => {
+		expect(chart({ breakPos: 5 })).toContain("chain breaks here");
+		expect(chart()).not.toContain("chain breaks here");
+	});
+});
+
+describe("spend chart: empty", () => {
+	const onlyInfo = [spendRow(0, { kind: "policy_decision" })];
+	it("says no spend, disables the slider and writes no NaN", () => {
+		const html = chart({ rows: onlyInfo, head: 0 });
+		expect(stripTags(textOf(html, "ut-sp-sub"))).toBe("No spend recorded in this range");
+		const tag = plotTag(html);
+		expect(attr(tag, "aria-disabled")).toBe("true");
+		expect(attr(tag, "aria-valuemax")).toBe("1");
+		expect(attr(tag, "aria-valuetext")).toBe("No spend recorded");
+		expect(html).not.toContain("NaN");
+	});
+	it("keeps the slider's range at least one before a summary", () => {
+		const html = chart({ rows: [], head: -1 });
+		expect(attr(plotTag(html), "aria-valuemax")).toBe("1");
+		expect(html).not.toContain("NaN");
+	});
+	it("is enabled with spend in the window", () => {
+		expect(attr(plotTag(chart()), "aria-disabled")).toBeUndefined();
+	});
+});
+
+describe("spend chart: the slider and the layers' notes", () => {
+	it("follows the pin in the figure's title", () => {
+		expect(chart({ pinnedPos: 4 })).toContain(
+			`<span class="ut-sp-fig" title="${formatUsd(cumTo(4))}">`,
+		);
+	});
+	it("reads live at rest in its value, from one to the vault's last position", () => {
+		const tag = plotTag(chart());
+		expect(attr(tag, "role")).toBe("slider");
+		expect(attr(tag, "tabindex")).toBe("0");
+		expect(attr(tag, "aria-valuemin")).toBe("1");
+		expect(attr(tag, "aria-valuetext")).toBe(`Live · ${formatUsdTotal(SUM)} spent`);
+		expect(attr(tag, "aria-valuenow")).toBe("13");
+	});
+	it("names the bucket in its label at each range", () => {
+		expect(attr(plotTag(chart()), "aria-label")).toBe(
+			"Spend per hour over time: hover to preview, click to pin a record, click again for now",
+		);
+		expect(attr(plotTag(chart({ bucket: LINE_BUCKETS["1d"] })), "aria-label")).toContain(
+			"Spend per 5 min over time",
+		);
+	});
+	it("ends the sub-line with each layer's Note, after its own text", () => {
+		const under: SpendLayer = {
+			id: "bands",
+			z: "under",
+			Layer: () => null,
+			Note: () => createElement("b", { "data-test": "note" }),
+		};
+		expect(textOf(chart({ layers: [under] }), "ut-sp-sub")).toMatch(
+			/^\+\$8\.40 in this range · peak [^<]+<span class="ut-sp-note"><b data-test="note"><\/b><\/span>$/,
+		);
+	});
+	it("writes no note markup when no layer has a Note", () => {
+		expect(chart()).not.toContain("ut-sp-note");
+		expect(LAYERS).toEqual([]);
+		const plain: SpendLayer = { id: "bands", z: "under", Layer: () => null };
+		expect(chart({ layers: [plain] })).not.toContain("ut-sp-note");
+	});
+	it("reads one at rest with the head before every record", () => {
+		expect(attr(plotTag(chart({ head: -1 })), "aria-valuenow")).toBe("1");
+	});
+});
+
 describe("spend chart: the plot at rest", () => {
 	it("marks the when-line as live, not past, with no cursor", () => {
 		expect(chart()).toContain('class="ut-sp-when" data-past="false"');
-	});
-	it("draws no pin, ring or break mark in this part", () => {
-		const html = chart({ pinnedPos: 3, markMs: T0, breakPos: 2 });
-		for (const cls of ["ut-sp-pin", "ut-sp-mark", "ut-sp-break"]) expect(html).not.toContain(cls);
 	});
 	it("labels the axis with the window's start, then its end", () => {
 		const axis = /<div class="ut-sp-axis"[^>]*><span>([^<]*)<\/span><span>([^<]*)<\/span>/.exec(

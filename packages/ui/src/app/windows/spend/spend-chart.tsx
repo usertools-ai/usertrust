@@ -2,16 +2,16 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * The Spend chart: the static marks, a cursor that snaps to the real records under the pointer, and a headline read
- * from exact records.
+ * The Spend chart: the static marks, a cursor that snaps to real records, the keys, the pin and the headline.
  *
- * The cursor is a small store, not React state: the model, the scale, the drawn line and the layers' context are built
- * once per rows, window, bucket, width and layers, and a cursor move re-renders only the headline, the crosshair and
- * whatever reads the store, never the marks. Every figure is read from exact records (`cum`, the model's buckets),
- * never from the drawn curve.
+ * The chart always runs to now; a pin is a marker inside it. The cursor is a small store, not React state: the model,
+ * the scale, the drawn line and the layers' context are built once per rows, window, bucket, width and layers, and a
+ * cursor move re-renders only the headline, the crosshair, the slider's attributes and whatever reads the store, never
+ * the marks. Every figure is read from exact records (`cum`, the model's buckets), never from the drawn curve.
  */
 
 import {
+	type KeyboardEvent,
 	memo,
 	type PointerEvent,
 	type ReactNode,
@@ -23,7 +23,13 @@ import {
 } from "react";
 import type { AtPayload } from "../../../shared/api.js";
 import type { SpendWindow } from "../../../shared/breakdown.js";
-import { inWindow, type SpendRecords } from "../../../shared/cumulative.js";
+import {
+	breakRecord,
+	indexAtPos,
+	inWindow,
+	lastAtOrBefore,
+	type SpendRecords,
+} from "../../../shared/cumulative.js";
 import {
 	type CursorStore,
 	type CursorValue,
@@ -45,21 +51,37 @@ import {
 	bucketCenterMs,
 	type DrawnSeries,
 	drawSeries,
+	type Geometry,
 	geometry,
 } from "../../../shared/spend-scale.js";
-import { setHoverMoment } from "../../desk/desk-state.js";
+import { newSince } from "../../../shared/timeline-view.js";
+import { setHoverMoment, useHoverMoment } from "../../desk/desk-state.js";
 import { useBoxSize } from "../../desk/use-box-size.js";
 import { ChartFrame } from "./chart-frame.js";
 import {
 	bucketOf as bucketAt,
+	drawnCursor,
+	escapeTarget,
 	frameKey,
 	isLiveCursor,
+	keyAction,
+	keyMove,
 	movedTime,
 	reconcileCursor,
 	stepBucket,
+	toggleTarget,
 } from "./chart-keys.js";
-import { headLabel, stamp, subLine, whenLine } from "./chart-text.js";
-import { buildCtx, resolveScale } from "./ctx.js";
+import {
+	brokenFrom,
+	headLabel,
+	newText,
+	plotLabel,
+	stamp,
+	subLine,
+	valueText,
+	whenLine,
+} from "./chart-text.js";
+import { buildCtx, dispatchKey, resolveScale } from "./ctx.js";
 import { type ChartCtx, LAYERS, RING_SELECTOR, type SpendLayer } from "./layers.js";
 
 export interface SpendChartProps {
@@ -95,7 +117,7 @@ export interface SpendChartProps {
 	bucket: LineBucket;
 	/** The filters the rows were drawn with, as one string: a change fades the marks in again. */
 	filterKey: string;
-	/** Drawn at the right of the headline row. */
+	/** Drawn at the right of the headline row, after the Now button. */
 	controls?: ReactNode;
 	onPin(pos: number | null): void;
 	/** Moves the page header to a position while the line is read, without moving the list. */
@@ -110,6 +132,11 @@ type Span = { i0: number; i1: number };
 
 const inSpan = (i: number, s: Span): boolean => i >= 0 && i >= s.i0 && i <= s.i1;
 const finiteOr = (v: number, d: number): number => (Number.isFinite(v) ? v : d);
+
+/** The point on the drawn line at plot x; the base when the line has no point there. */
+function onLine(series: DrawnSeries, geo: Geometry, x: number): { x: number; y: number } {
+	return { x, y: finiteOr(series.curve.at(x), geo.baseY) };
+}
 
 /** Bucket of a time on this model's line. */
 function bucketOf(t: number, win: SpendWindow, m: SpendModel): number {
@@ -143,7 +170,7 @@ function useGlide(x: number | null): number | null {
 
 /**
  * The path a range switch tweens between. For now the new line is drawn at once and nothing is morphing; the tween
- * is filled in here, so the frame reads one answer.
+ * is filled in here, so the frame and the peak label read one answer.
  */
 function useRangeMorph(series: DrawnSeries): { series: DrawnSeries; morphing: boolean } {
 	return { series, morphing: false };
@@ -174,12 +201,16 @@ interface Latest {
 	model: SpendModel;
 	win: SpendWindow;
 	w: number;
+	fallback: CursorValue | null;
+	pinnedPos: number | null;
 	layers: readonly SpendLayer[];
+	ctx: ChartCtx;
+	onPin(pos: number | null): void;
 	onPreview(pos: number | null): void;
 }
 
 export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JSX.Element {
-	const { rows, win, totalUt, filtered, truncated, ink, settling, bucket } = p;
+	const { rows, win, totalUt, filtered, truncated, pinnedPos, ink, settling, bucket } = p;
 	const layers = p.layers ?? LAYERS;
 
 	const storeRef = useRef<CursorStore | null>(null);
@@ -270,14 +301,15 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 			latest.current?.onPreview(pendingPreview.current);
 		});
 	};
-	/** The header back to the vault as it is now, at once: a pending preview must not land after it. */
+	/** The header back to what is pinned (or live), at once: a pending preview must not land after it. */
 	const unpreview = (): void => {
 		if (previewRaf.current !== 0 && typeof cancelAnimationFrame === "function") {
 			cancelAnimationFrame(previewRaf.current);
 		}
 		previewRaf.current = 0;
 		previewing.current = false;
-		latest.current?.onPreview(null);
+		const L = latest.current;
+		L?.onPreview(L.pinnedPos);
 	};
 	const previewRef = useRef({ preview, unpreview });
 	previewRef.current = { preview, unpreview };
@@ -294,10 +326,10 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 			previewRef.current.preview(L.model.records.pos[i] as number);
 		}
 	};
-	/** Drop the live cursor. */
+	/** Drop the live cursor: what is drawn falls back to another window's moment or the pin. */
 	const clearLive = (): void => {
 		if (!isLiveCursor(store.get())) return;
-		store.set(null);
+		store.set(latest.current?.fallback ?? null);
 		publishRef.current(null);
 		previewRef.current.unpreview();
 	};
@@ -323,19 +355,72 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 	);
 
 	const { records, span } = model;
+	const M = span.i1 >= span.i0 ? span.i1 - span.i0 + 1 : 0;
+	const pinned = pinnedPos !== null;
+	const pinIdx = pinnedPos === null ? -1 : indexAtPos(records, pinnedPos);
+	const pinInRange = pinned && inSpan(pinIdx, span);
 
-	latest.current = { model, win, w, layers, onPreview: p.onPreview };
+	// Another window's moment, inside this window: a synced crosshair only.
+	const other = useHoverMoment(SELF);
+	const sync = useMemo((): CursorValue | null => {
+		if (other === null || !(other.ms >= win.startMs && other.ms < win.endMs)) return null;
+		const at = lastAtOrBefore(records, other.ms);
+		const i = inSpan(at, span) ? at : -1;
+		return {
+			k: bucketOf(i >= 0 ? (records.t[i] as number) : other.ms, win, model),
+			via: "sync",
+			i,
+		};
+	}, [other, win, records, span, model]);
+	const pin = useMemo(
+		(): CursorValue | null =>
+			pinInRange
+				? { k: bucketOf(records.t[pinIdx] as number, win, model), via: "pin", i: pinIdx }
+				: null,
+		[pinInRange, pinIdx, records, win, model],
+	);
+	const fallback = drawnCursor(null, sync, pin);
 
-	// What is drawn: a live cursor still inside this model's records.
+	latest.current = {
+		model,
+		win,
+		w,
+		fallback,
+		pinnedPos,
+		layers,
+		ctx,
+		onPin: p.onPin,
+		onPreview: p.onPreview,
+	};
+
+	// What is drawn: a live cursor still inside this model's records, else the fallback.
 	const stored = useSyncExternalStore(store.subscribe, store.get, () => null);
-	const live: CursorValue | null = isLiveCursor(stored) && inSpan(stored.i, span) ? stored : null;
+	const live = isLiveCursor(stored) && inSpan(stored.i, span) ? stored : null;
+
+	// The store holds what is drawn, for the layers: the fallback whenever there is no live cursor.
+	useLayoutEffect(() => {
+		store.set(drawnCursor(store.get(), sync, pin));
+	}, [store, sync, pin]);
+
+	// A range or filter change: no live cursor survives it, and no window keeps following this one.
+	const resetKey = `${bucket.ms}|${p.filterKey}`;
+	const firstReset = useRef(resetKey);
+	useEffect(() => {
+		if (firstReset.current === resetKey) return;
+		firstReset.current = resetKey;
+		if (isLiveCursor(store.get())) store.set(latest.current?.fallback ?? null);
+		publishRef.current(null);
+	}, [resetKey, store]);
 
 	// A new model (a live append, a filter, a later window): keep the live cursor on its record, in that record's bucket
 	// on the new line, or drop it, and the header's preview with it, when the record is gone.
 	const prevModel = useRef(model);
+	const prevWin = useRef(win);
 	useLayoutEffect(() => {
 		const was = prevModel.current;
+		const wasWin = prevWin.current;
 		prevModel.current = model;
+		prevWin.current = win;
 		if (was === model) return;
 		const v = store.get();
 		if (!isLiveCursor(v)) return;
@@ -343,6 +428,12 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 			records: model.records,
 			span: model.span,
 			bucketOf: (t) => bucketOf(t, win, model),
+			key: {
+				prevStartMs: wasWin.startMs + v.k * was.bucketMs,
+				startMs: win.startMs,
+				bucketMs: model.bucketMs,
+				recordIn: (k) => recordInBucket(k, win, model),
+			},
 		});
 		if (next !== null) {
 			store.set(next);
@@ -351,7 +442,7 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 			if (moved !== null) publishRef.current(moved);
 			return;
 		}
-		store.set(null);
+		store.set(latest.current?.fallback ?? null);
 		publishRef.current(null);
 		previewRef.current.unpreview();
 	}, [store, model, win]);
@@ -428,7 +519,7 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 			raf.current = requestAnimationFrame(() => frameRef.current());
 		} else frameRef.current();
 	};
-	/** A pointer is done with the line: drop its cursor. */
+	/** A pointer is done with the line: drop its cursor (a key cursor stays). */
 	const release = (): void => {
 		touchDown.current = false;
 		point.current = null;
@@ -456,39 +547,137 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 		track(e);
 	};
 	const onPointerUp = (e: PointerEvent<HTMLDivElement>): void => {
-		// A mouse's release does nothing.
+		// A mouse's release does nothing: its click lands where it is.
 		if (e.pointerType !== "mouse") release();
 	};
 	const onPointerLeave = (): void => {
 		release();
 	};
 
+	/** A click: back to live when pinned, else pin the record under the pointer. */
+	const press = (e: React.MouseEvent<HTMLDivElement>): void => {
+		const L = latest.current;
+		if (L === null) return;
+		const target = e.target as Element | null;
+		if (target?.closest?.(RING_SELECTOR) != null) return;
+		if (L.pinnedPos !== null) {
+			L.onPin(null);
+			return;
+		}
+		const r = rect.current ?? e.currentTarget.getBoundingClientRect();
+		const i = recordAt(e.clientX - r.left);
+		if (i >= 0) L.onPin(L.model.records.pos[i] as number);
+	};
+
+	const onKey = (e: KeyboardEvent<HTMLDivElement>): void => {
+		const L = latest.current;
+		if (L === null) return;
+		if (dispatchKey(L.layers, { key: e.key }, L.ctx)) {
+			e.preventDefault();
+			return;
+		}
+		const act = keyAction(e);
+		if (act === null) return;
+		const s = L.model.span;
+		const cur = store.get();
+		const liveI = isLiveCursor(cur) && inSpan(cur.i, s) ? cur.i : -1;
+		const pinI = L.pinnedPos === null ? -1 : indexAtPos(L.model.records, L.pinnedPos);
+		if (act.type === "escape") {
+			const to = escapeTarget(L.pinnedPos !== null, cur?.via ?? null);
+			if (to === "none") return;
+			e.preventDefault();
+			if (to === "live") {
+				// Escape belongs to the line here: the desk's own Escape must not also close what is open.
+				e.stopPropagation();
+				clearLive();
+				L.onPin(null);
+				// The header leaves any preview too: it shows the vault as it is now.
+				L.onPreview(null);
+				return;
+			}
+			clearLive();
+			return;
+		}
+		if (act.type === "toggle") {
+			if (s.i1 < s.i0) return;
+			e.preventDefault();
+			const to = toggleTarget(liveI, pinI, L.pinnedPos !== null);
+			if (to === "live") L.onPin(null);
+			else if (to === "pin") L.onPin(L.model.records.pos[liveI] as number);
+			return;
+		}
+		const move = keyMove(act, {
+			liveI,
+			liveK: isLiveCursor(cur) && liveI >= 0 ? cur.k : null,
+			pinI,
+			span: s,
+			buckets: L.model.values.length,
+		});
+		if (move === null) return;
+		e.preventDefault();
+		if (typeof window !== "undefined") dpr.current = window.devicePixelRatio || 1;
+		if (move.to === "record") setLive(move.i, "key");
+		else moveTo(move.k);
+	};
+	const onBlur = (): void => {
+		if (store.get()?.via === "key") clearLive();
+	};
+
 	// ---- What is shown ----
-	const headI = live !== null ? live.i : null;
-	const cum = headI === null ? restSpend(records) : (records.cum[headI] as number);
-	const shown =
+	const headI = live !== null ? live.i : pinned ? pinIdx : null;
+	const cum =
 		headI === null
-			? null
-			: { t: records.t[headI] as number, pos: records.pos[headI] as number, pinned: false };
+			? restSpend(records)
+			: headI >= 0
+				? (records.cum[headI] as number)
+				: records.before;
+	const shown =
+		headI !== null && headI >= 0
+			? {
+					t: records.t[headI] as number,
+					pos: records.pos[headI] as number,
+					pinned: live === null || headI === pinIdx,
+				}
+			: null;
+	const pinnedNoRecord = live === null && pinned && pinIdx < 0;
+	const shownK = live !== null ? live.k : pin !== null ? pin.k : -1;
 	// The words say no spend only when the range holds none: the span can be empty while out-of-order times still
-	// put spend in its buckets.
+	// put spend in its buckets. The slider and the keys read the span itself.
 	const empty = !(model.rangeUt > 0);
+	const noSpan = M === 0;
 	const label = headLabel({ shown: headI !== null, filtered });
 	const sub = subLine({
 		empty,
 		rangeUt: model.rangeUt,
 		peakRate: model.peakRate,
 		bucket,
-		shownUt: live !== null ? (model.values[live.k] ?? null) : null,
+		shownUt: shownK >= 0 ? (model.values[shownK] ?? null) : null,
 		filtered,
 		truncated,
 	});
+	const whenShown = shown === null ? null : { ...shown, pinned: live === null };
 	const when = whenLine({
-		shown,
-		pinnedNoRecord: false,
+		shown: whenShown,
+		pinnedNoRecord,
 		lastT: records.n > 0 && !records.lastUndated ? (records.t[records.n - 1] as number) : null,
 		spent: records.rows > 0 || records.total > 0,
 	});
+	const broke = brokenFrom(shown?.pos ?? null, p.breakPos);
+	const vText = valueText({ empty: noSpan, shown, pinnedNoRecord, head: p.head, cumUt: cum });
+	const fresh = pinned ? newSince(p.at, p.head) : 0;
+
+	// The marks on the line: each read from the model, never from the cursor.
+	const pinMark = useMemo(
+		() => (pinInRange ? onLine(series, geo, msToX(records.t[pinIdx] as number, win, geo.w)) : null),
+		[pinInRange, pinIdx, records, win, geo, series],
+	);
+	const { breakPos } = p;
+	const brkMark = useMemo(() => {
+		const i = breakRecord(records, breakPos, win);
+		return i < 0
+			? null
+			: onLine(series, geo, geo.centerX(bucketOf(records.t[i] as number, win, model)));
+	}, [records, breakPos, win, geo, series, model]);
 
 	const plotStyle = useMemo(
 		() =>
@@ -498,7 +687,11 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 
 	// The crosshair: snapped to a device pixel at the record's x; the dot sits on the drawn line.
 	const liveX = live === null ? null : msToX(records.t[live.i] as number, win, geo.w);
-	const glideX = useGlide(liveX);
+	const syncX =
+		live === null && sync !== null && other !== null
+			? msToX(sync.i >= 0 ? (records.t[sync.i] as number) : other.ms, win, geo.w)
+			: null;
+	const glideX = useGlide(liveX ?? syncX);
 	let cross: ReactNode = null;
 	if (live !== null && liveX !== null && glideX !== null) {
 		const y = finiteOr(series.curve.at(liveX), geo.baseY);
@@ -517,7 +710,17 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 				</div>
 			</>
 		);
+	} else if (glideX !== null) {
+		// Another window's moment: a 1px line only; it moves no headline and no dot.
+		cross = (
+			<div
+				className="ut-sp-xh ut-sp-sync"
+				style={{ transform: `translateX(${snapPx(glideX - 0.5, dpr.current)}px)` }}
+			/>
+		);
 	}
+
+	const notes = layers.filter((l) => l.Note !== undefined);
 
 	return (
 		<div className="ut-sp-chart">
@@ -531,18 +734,49 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 					</span>
 				</div>
 				<div className="ut-sp-subs">
-					<span className="ut-sp-sub">{sub}</span>
+					<span className="ut-sp-sub">
+						{sub}
+						{notes.length > 0 && (
+							<span className="ut-sp-note">
+								{notes.map((l) => (l.Note === undefined ? null : <l.Note key={l.id} ctx={ctx} />))}
+							</span>
+						)}
+					</span>
 					<span className="ut-sp-when" data-past={headI !== null ? "true" : "false"}>
 						{when}
+						{broke && <span className="ut-sp-broke"> · links broken from here</span>}
 					</span>
 				</div>
 				<span className="ut-sp-grow" />
+				{pinned && (
+					<button
+						type="button"
+						className="ut-sp-now"
+						title="Back to the vault as it is now (Escape)"
+						onClick={() => {
+							p.onPin(null);
+							p.onPreview(null);
+							plotRef.current?.focus();
+						}}
+					>
+						Now
+						{fresh > 0 && <span className="ut-sp-new">{newText(fresh)}</span>}
+					</button>
+				)}
 				{p.controls}
 			</div>
 			<div
 				ref={plotRef}
 				className="ut-sp-plot"
-				data-pinned="false"
+				role="slider"
+				tabIndex={0}
+				aria-label={plotLabel(bucket.per)}
+				aria-valuemin={1}
+				aria-valuemax={Math.max(1, p.head + 1)}
+				aria-valuenow={shown !== null ? shown.pos + 1 : Math.max(1, p.head + 1)}
+				aria-valuetext={vText}
+				aria-disabled={noSpan ? true : undefined}
+				data-pinned={pinned ? "true" : "false"}
 				style={plotStyle}
 				onPointerEnter={onPointerEnter}
 				onPointerDown={onPointerDown}
@@ -550,6 +784,9 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 				onPointerUp={onPointerUp}
 				onPointerCancel={release}
 				onPointerLeave={onPointerLeave}
+				onClick={press}
+				onKeyDown={onKey}
+				onBlur={onBlur}
 			>
 				<div className="ut-sp-frame" key={frameKey(p.filterKey, rows.length === 0)}>
 					<ChartFrame
@@ -558,11 +795,11 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 						series={series}
 						ticks={scale.ticks}
 						layers={layers}
-						live
+						live={!pinned}
 						hover={live !== null}
-						pin={null}
+						pin={pinMark}
 						mark={null}
-						brk={null}
+						brk={brkMark}
 						ghost={ghost}
 						note={ghost === null ? null : p.filterNote}
 						idPrefix="sp"
