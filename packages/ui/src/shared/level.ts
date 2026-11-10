@@ -90,7 +90,8 @@ export function effectiveLevel(
 
 /**
  * What a drilled level is scoped to: at models, the provider of the first spend in `win`; at lanes, its model
- * (`"unknown"` when there is none). Null when the level was not followed down.
+ * (`"unknown"` only for a real record that has no model). Null when the level was not followed down or the window
+ * holds no spend.
  */
 export function scopeOf(
 	dim: Dimension,
@@ -101,7 +102,7 @@ export function scopeOf(
 	if (dim !== "provider" || (level !== "model" && level !== "lane")) return null;
 	const first = rows.find((row) => spendInWindow(row, win) !== undefined);
 	if (level === "model") return first === undefined ? null : providerOf(first);
-	return first === undefined ? "unknown" : keyOf("model", first);
+	return first === undefined ? null : keyOf("model", first);
 }
 
 /** The window's subtitle, from `LEVEL_SUBTITLE` and `SUBTITLE_DRILL` only. */
