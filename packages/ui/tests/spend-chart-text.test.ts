@@ -58,6 +58,8 @@ describe("subLine", () => {
 	});
 	it("reads the shown bucket with its phrase", () => {
 		expect(subLine({ ...base, shownUt: 25_000 })).toBe("+$123.45 in this range · $2.50 this hour");
+		// A quiet bucket spends nothing and still reads as that bucket, not as the peak.
+		expect(subLine({ ...base, shownUt: 0 })).toBe("+$123.45 in this range · $0.00 this hour");
 		expect(subLine({ ...base, shownUt: 25_000, bucket: LINE_BUCKETS["3m"] })).toBe(
 			"+$123.45 in this range · $2.50 these 6 h",
 		);
@@ -139,9 +141,32 @@ describe("valueText", () => {
 	});
 });
 
+describe("valueText and whenLine with a pin that has no record", () => {
+	const nan = { t: Number.NaN, pos: 4, pinned: true };
+	it("never reads the time of a pin with no spend record at or before it", () => {
+		const v = { empty: false, shown: nan, pinnedNoRecord: true, head: 11, cumUt: 0 };
+		expect(valueText(v)).toBe("Pinned · $0.00 spent");
+		expect(whenLine({ shown: nan, pinnedNoRecord: true, lastT: T })).toBe(
+			"Pinned · no spend recorded by then",
+		);
+	});
+	it("puts the pin before the empty window", () => {
+		expect(valueText({ empty: true, shown: null, pinnedNoRecord: true, head: 11, cumUt: 0 })).toBe(
+			"Pinned · $0.00 spent",
+		);
+	});
+	it("groups the vault's size in thousands", () => {
+		const shown = { t: T, pos: 4, pinned: false };
+		expect(
+			valueText({ empty: false, shown, pinnedNoRecord: false, head: 1199, cumUt: 100 }),
+		).toContain("of 1,200");
+	});
+});
+
 describe("newText and plotLabel", () => {
 	it("counts records added since the pin, and nothing when none were", () => {
 		expect(newText(0)).toBe("");
+		expect(newText(1)).toBe(" +1 new");
 		expect(newText(3)).toBe(" +3 new");
 		expect(newText(1_200)).toBe(" +1,200 new");
 	});
@@ -158,6 +183,8 @@ describe("newText and plotLabel", () => {
 describe("keyAction", () => {
 	it("maps each key, with Shift's larger steps", () => {
 		expect(keyAction({ ...NO_MODS, key: "ArrowLeft" })).toEqual({ type: "bucket", by: -1 });
+		expect(keyAction({ ...NO_MODS, key: "ArrowRight" })).toEqual({ type: "bucket", by: 1 });
+		expect(keyAction({ ...NO_MODS, key: "ArrowDown" })).toEqual({ type: "record", by: -1 });
 		expect(keyAction({ ...NO_MODS, key: "ArrowRight", shiftKey: true })).toEqual({
 			type: "bucket",
 			by: 10,
@@ -208,6 +235,9 @@ describe("stepBucket and bucketOf", () => {
 		expect(bucketOf(50, 0, 10, 5)).toBe(4);
 		expect(bucketOf(-5, 0, 10, 5)).toBe(0);
 		expect(bucketOf(Number.NaN, 0, 10, 5)).toBe(0);
+		// The window's start is where bucket 0 begins.
+		expect(bucketOf(25, 20, 10, 5)).toBe(0);
+		expect(bucketOf(45, 20, 10, 5)).toBe(2);
 		// A line with no buckets reads bucket 0, not -1.
 		expect(bucketOf(30, 0, 10, 0)).toBe(0);
 	});
@@ -233,6 +263,9 @@ describe("drawnCursor", () => {
 describe("toggleTarget and escapeTarget", () => {
 	it("pins the record under a live cursor, or goes live when it is the pinned one", () => {
 		expect(toggleTarget(3, -1, false)).toBe("pin");
+		// The first record in the window is pinnable, and a record equal to a stale pin index is not the pin.
+		expect(toggleTarget(0, -1, false)).toBe("pin");
+		expect(toggleTarget(5, 5, false)).toBe("pin");
 		expect(toggleTarget(3, 5, true)).toBe("pin");
 		expect(toggleTarget(5, 5, true)).toBe("live");
 		expect(toggleTarget(-1, 5, true)).toBe("none");

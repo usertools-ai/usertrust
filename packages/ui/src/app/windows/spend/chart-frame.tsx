@@ -49,9 +49,9 @@ const DOT_R = 4.5;
 const MARK_R = 6.5;
 const BREAK_R = 4.5;
 
-/** A stop's opacity, scaled by the highlight and kept to a short decimal (0.13 x 1.25 is 0.1625, not 0.16250000000000003). */
+/** A stop's opacity, scaled by the highlight; the largest product is 0.1625, so the cap never bites today. */
 function stopOpacity(a: number, k: number): number {
-	return Number(Math.min(1, a * k).toPrecision(12));
+	return Math.min(1, a * k);
 }
 
 function slot(layers: readonly SpendLayer[], z: LayerZ, ctx: ChartCtx): React.ReactNode {

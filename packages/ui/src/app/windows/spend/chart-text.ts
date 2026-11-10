@@ -84,12 +84,13 @@ export function valueText(p: {
 	cumUt: number;
 }): string {
 	const fig = formatUsdTotal(p.cumUt);
+	// A pin with no spend record at or before it has no time to read, whatever `shown` holds.
+	if (p.pinnedNoRecord) return `Pinned${SEP}${fig} spent`;
 	if (p.shown !== null) {
 		const of = Math.max(1, p.head + 1).toLocaleString("en-US");
 		const pin = p.shown.pinned ? `${SEP}pinned` : "";
 		return `Record ${recordNumber(p.shown.pos)} of ${of}${SEP}${fig} spent by ${formatUtc(iso(p.shown.t))}${pin}`;
 	}
-	if (p.pinnedNoRecord) return `Pinned${SEP}${fig} spent`;
 	if (p.empty) return "No spend recorded";
 	return `Live${SEP}${fig} spent`;
 }

@@ -381,6 +381,7 @@ describe("chart frame: the open record's ring", () => {
 		expect(attr(rings[0] ?? "", "r")).toBe("6.5");
 		expect(attr(rings[0] ?? "", "cx")).toBe("210");
 		expect(attr(rings[0] ?? "", "cy")).toBe("77.5");
+		expect(attr(rings[0] ?? "", "fill")).toBe("none");
 		expect(html.indexOf("ut-sp-mark")).toBeLessThan(html.indexOf('class="ut-sp-pin"'));
 	});
 
@@ -414,6 +415,19 @@ describe("chart frame: the chain break", () => {
 		// After the three strokes, before the over layers.
 		expect(html.indexOf('class="ut-sp-line"')).toBeLessThan(html.indexOf("ut-sp-gap"));
 		expect(html.indexOf("ut-sp-dashed")).toBeLessThan(html.indexOf("knee-over"));
+	});
+
+	it("keeps the dashed copy's clip no wider than the plot, and its id apart from an area clip's", () => {
+		const past = frame(fx, { brk: { x: fx.w + 50, y: 90 } });
+		const rect = /<clipPath id="[^"]+"><rect\b([^>]*)>/.exec(past)?.[0] ?? "";
+		expect(attr(rect, "width")).toBe("0");
+		const both = frame(fx, {
+			brk,
+			layers: [{ ...marker("unusual", "under"), areaClip: () => "M0 0H10V10Z" }],
+		});
+		const ids = [...both.matchAll(/<clipPath id="([^"]+)"/g)].map((m) => m[1]);
+		expect(ids.length).toBe(2);
+		expect(new Set(ids).size).toBe(2);
 	});
 
 	it("rings the break and says so, after the over layers and before the open record's ring", () => {
@@ -452,6 +466,7 @@ describe("chart frame: all spend under a filter", () => {
 		const paths = tags(html, "path", "ut-sp-ghost");
 		expect(paths.length).toBe(1);
 		expect(attr(paths[0] ?? "", "d")).toBe(ghost);
+		expect(attr(paths[0] ?? "", "fill")).toBe("none");
 		expect(html.indexOf("unusual-mid")).toBeLessThan(html.indexOf("ut-sp-ghost"));
 		expect(html.indexOf("ut-sp-ghost")).toBeLessThan(html.indexOf('class="ut-sp-glow"'));
 		const cap = /<text\b[^>]*class="ut-sp-fcap"[^>]*>([^<]*)<\/text>/.exec(html);
