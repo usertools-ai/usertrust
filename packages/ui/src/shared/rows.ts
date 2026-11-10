@@ -279,9 +279,10 @@ export function toLedgerRows(
 		const appliedRates = amounts(e.data.appliedRates, RATE_KEYS, false);
 		if (appliedRates !== undefined) row.appliedRates = appliedRates;
 		// Kept whenever the record carries one, usable or not: dropping an unusable one would leave a row that looks
-		// like a plain 5-minute write, and a charge that looks complete at the wrong rate.
+		// like a plain 5-minute write, and a charge that looks complete at the wrong rate. A recorded null is carried
+		// too: only a record with no such field has no 1-hour write.
 		const write1h = e.data.cacheWrite1h;
-		if (write1h !== undefined && write1h !== null) {
+		if (write1h !== undefined) {
 			row.cacheWrite1h = {
 				...amounts(write1h, ["tokens"], true),
 				...amounts(write1h, ["ratePer1k"], false),

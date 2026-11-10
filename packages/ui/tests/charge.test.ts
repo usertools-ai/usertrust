@@ -243,6 +243,7 @@ describe("chargeOf", () => {
 				["a negative rate", { tokens: 500, ratePer1k: -60 }],
 				["nothing usable", {}],
 				["a value that is not an object", "1h"],
+				["a null", null],
 			])(
 				"a 1-hour share recorded with %s leaves the write unpriced and the charge partial",
 				(_name, cacheWrite1h) => {
@@ -268,16 +269,14 @@ describe("chargeOf", () => {
 			);
 
 			it("a record with no 1-hour share prices the whole write at the one write rate", () => {
-				for (const none of [undefined, null]) {
-					const c = charged(186, none);
-					expect(c.state).toBe("priced");
-					expect(c.lines[3]?.parts).toEqual([
-						{ label: null, count: 2000, ratePer1k: 37.5, utText: "75", usdText: "$0.0075" },
-					]);
-					expect(c.sumText).toBe("186");
-					expect(c.computedUt).toBe(186);
-					expect(c.differenceUt).toBe(0);
-				}
+				const c = charged(186, undefined);
+				expect(c.state).toBe("priced");
+				expect(c.lines[3]?.parts).toEqual([
+					{ label: null, count: 2000, ratePer1k: 37.5, utText: "75", usdText: "$0.0075" },
+				]);
+				expect(c.sumText).toBe("186");
+				expect(c.computedUt).toBe(186);
+				expect(c.differenceUt).toBe(0);
 			});
 
 			it("a usable share is two terms, as before", () => {

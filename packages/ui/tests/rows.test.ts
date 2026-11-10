@@ -531,14 +531,13 @@ describe("a charge's inputs", () => {
 		expect(kept({ tokens: 500, ratePer1k: "60" })).toEqual({ tokens: 500 });
 		expect(kept({ tokens: "500", ratePer1k: Number.POSITIVE_INFINITY })).toEqual({});
 		// Present, with nothing usable in it: still on the row, and empty. Nothing is filled in.
-		for (const present of [{}, [], 7, 0, "1h", false]) {
+		for (const present of [{}, [], 7, 0, "1h", false, null]) {
 			expect(kept(present)).toEqual({});
 			expect(Object.keys(kept(present) ?? { none: 1 })).toEqual([]);
 		}
 	});
 
 	it("a record with no 1-hour cache write gives a row with no such key", () => {
-		expect(rowOf({ cacheWrite1h: null })).not.toHaveProperty("cacheWrite1h");
 		expect(rowOf({ cacheWrite1h: undefined })).not.toHaveProperty("cacheWrite1h");
 		expect(rowOf({ usage: { cacheWriteTokens: 2000 } })).not.toHaveProperty("cacheWrite1h");
 	});
