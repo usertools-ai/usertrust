@@ -136,9 +136,11 @@ describe("the panel's arithmetic", () => {
 	it("a whole sum charged one higher is explained, carries the residue hook and is not a difference", () => {
 		const html = table(RESIDUE);
 		expect(html).toContain(
-			"Sum 3 UT. Recorded 4 UT: the cost was computed in floating point, came out a hair above 3, and costs round up.",
+			"Sum 3 UT. Recorded 4 UT: the cost was computed in floating point, came out a hair above 3, and charges round up.",
 		);
-		expect(html).not.toMatch(/Charged|the charge was|charges round up/);
+		// "charges round up" is the rule for any charge; nothing says this record was charged.
+		expect(html).not.toMatch(/Charged|the charge was/);
+		expect(html).not.toContain("costs round up");
 		expect(html).toContain(fig("panel-sum-exact", "3 UT"));
 		expect(html).toContain(fig("panel-sum", "4 UT"));
 		expect(html).toContain(fig("panel-residue", "1 UT"));
@@ -276,9 +278,10 @@ describe("the panel's arithmetic", () => {
 		// A whole sum recorded one higher: the cost was recorded, so nothing is said to have been charged.
 		const residue = table({ ...RESIDUE, status: "ambiguous", settled: false });
 		expect(residue).toContain(
-			"Sum 3 UT. Recorded 4 UT: the cost was computed in floating point, came out a hair above 3, and costs round up.",
+			"Sum 3 UT. Recorded 4 UT: the cost was computed in floating point, came out a hair above 3, and charges round up.",
 		);
-		expect(residue).not.toMatch(/Charged|the charge was|charges round up/);
+		expect(residue).not.toMatch(/Charged|the charge was/);
+		expect(residue).not.toContain("costs round up");
 	});
 
 	it("no status says Charged: the last row is the recorded cost for a settled call and for every other", () => {

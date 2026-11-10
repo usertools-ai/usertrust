@@ -108,7 +108,7 @@ function sumLine(
 		// About this record only when its cost is that figure. A record that holds another figure gets the general
 		// sentence about its tiers, and the difference is said below.
 		text: held
-			? `Sum ${sum}. Recorded ${computed}: the cost was ${how} costs round up.`
+			? `Sum ${sum}. Recorded ${computed}: the cost was ${how} charges round up.`
 			: `Sum ${sum}. A charge of these tiers comes to ${computed}: it is ${how} charges round up.`,
 		residue: true,
 	};
