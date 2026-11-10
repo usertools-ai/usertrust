@@ -250,6 +250,10 @@ describe("budgetShare", () => {
 		// Either side of the half of the last decimal: 0.000004% would print as zeros, 0.000006% prints as 0.00001%.
 		expect(budgetShare(4, 100_000_000)).toBe("under 0.00001% of the budget");
 		expect(budgetShare(6, 100_000_000)).toBe("0.00001% of the budget");
+		// Close to the half: 0.0000049% and the float just under 0.000005% print as zeros, 0.0000051% does not.
+		expect(budgetShare(49, 1_000_000_000)).toBe("under 0.00001% of the budget");
+		expect(budgetShare(5, 100_000_000)).toBe("under 0.00001% of the budget");
+		expect(budgetShare(51, 1_000_000_000)).toBe("0.00001% of the budget");
 		expect(budgetShare(0, 1_000_000)).toBe("0.00000% of the budget");
 	});
 
@@ -261,6 +265,7 @@ describe("budgetShare", () => {
 		expect(budgetShare(5, 0)).toBeNull();
 		expect(budgetShare(5, -100)).toBeNull();
 		expect(budgetShare(Number.NaN, 100)).toBeNull();
+		expect(budgetShare(Number.POSITIVE_INFINITY, 1_000_000)).toBeNull();
 		expect(budgetShare(5, Number.NaN)).toBeNull();
 	});
 });

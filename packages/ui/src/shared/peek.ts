@@ -87,7 +87,8 @@ export function budgetShare(costUt: number | undefined, budgetUt: number | null)
 	if (!(costUt >= 0)) return null;
 	const p = (costUt / budgetUt) * 100;
 	if (!Number.isFinite(p)) return null;
-	if (p > 0 && p < 0.000005) return "under 0.00001% of the budget";
+	// Asked of the printed text itself, not of a threshold: whatever prints as five zeros is "under".
+	if (p > 0 && Number(p.toFixed(5)) === 0) return "under 0.00001% of the budget";
 	const digits = p >= 1 ? 1 : p >= 0.01 ? 3 : 5;
 	return `${p.toFixed(digits)}% of the budget`;
 }
