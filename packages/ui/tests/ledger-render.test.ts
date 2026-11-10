@@ -390,6 +390,21 @@ describe("the panel's arithmetic", () => {
 		expect(html).not.toContain("1234.5");
 	});
 
+	it("a rate is written out in plain grouped decimals: 1,250 and 0.0000001, never an exponent", () => {
+		const html = table(
+			row({ appliedRates: { ...RATES, inputPer1k: 1250, cacheReadPer1k: 0.0000001 } }),
+		);
+		const input = html.slice(html.indexOf("Input"), html.indexOf("Output"));
+		expect(input).toContain("<td>1,000</td><td>1,250 UT</td>");
+		const cacheRead = html.slice(html.indexOf("Cache read"), html.indexOf("Cache write"));
+		expect(cacheRead).toContain("<td>2,000</td><td>0.0000001 UT</td>");
+		expect(html).not.toMatch(/\de-\d/);
+		// A rate keeps every digit it was recorded with.
+		expect(html).toContain("<td>150 UT</td>");
+		expect(html).toContain("<td>37.5 UT</td>");
+		expect(table(RESIDUE)).toContain("<td>0.3 UT</td>");
+	});
+
 	it("a partial charge names what is missing and does not claim that no counts are recorded", () => {
 		const html = table(
 			row({ usage: { inputTokens: 1000, outputTokens: 500, cacheWriteTokens: 100 } }),

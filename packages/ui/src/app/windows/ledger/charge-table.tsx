@@ -28,7 +28,23 @@ function exactUt(text: string): string {
 type Cells = Pick<ChargeLine, "count" | "ratePer1k">;
 
 const tokens = (n: number | null): string => n?.toLocaleString("en-US") ?? NOT_RECORDED;
-const rate = (n: number | null): string => (n === null ? NOT_RECORDED : `${n} UT`);
+
+/**
+ * A rate as it was recorded, written like the other figures: every digit, the whole part grouped, never an exponent.
+ * The digits are the shortest that read back as the same number, which for a recorded rate are the ones it was
+ * written with, so nothing is rounded away: 1250 is "1,250 UT" and 1e-7 is "0.0000001 UT".
+ */
+function rate(n: number | null): string {
+	if (n === null) return NOT_RECORDED;
+	const [mantissa = "", exponent = "0"] = String(n).split("e");
+	const [whole = "", fraction = ""] = mantissa.split(".");
+	const digits = whole + fraction;
+	// Where the decimal point falls among the digits once the exponent is applied.
+	const point = whole.length + Number(exponent);
+	if (point <= 0) return exactUt(`0.${"0".repeat(-point)}${digits}`);
+	if (point >= digits.length) return exactUt(digits.padEnd(point, "0"));
+	return exactUt(`${digits.slice(0, point)}.${digits.slice(point)}`);
+}
 
 /** A product in usertokens with its dollars under it; a long dash when there is none to print. */
 function Cost(props: { ut: string | null; usd: string | null }): React.JSX.Element {
