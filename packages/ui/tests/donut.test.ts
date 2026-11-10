@@ -10,6 +10,7 @@ import {
 	atTime,
 	atWhen,
 	blendArcs,
+	blendShape,
 	bucketAt,
 	bucketStartMs,
 	centreOf,
@@ -23,22 +24,28 @@ import {
 	LEGEND_ROWS,
 	legendOf,
 	legendTitle,
+	MOMENT_BUCKET_MS,
 	OUTLINE_INSET,
 	type Pt,
 	RIM_W,
 	RIM_W_HOT,
+	type RingShape,
 	rimPath,
 	ringEdges,
 	ringPath,
+	ringShape,
 	SHARE_EMPTY,
 	type ShareValues,
 	SLIVER,
+	shapeKey,
 	shareValues,
 	sliceAngles,
+	startTween,
 	TWEEN_MS,
 	VB,
 } from "../src/shared/donut.js";
 import type { LedgerRow } from "../src/shared/rows.js";
+import { LANE_BUCKET_MS } from "../src/shared/spend-series.js";
 
 const TAU = Math.PI * 2;
 const C = 150;
@@ -614,5 +621,159 @@ describe("donut guards: whole turn, unreal times, NaN", () => {
 		expect(blendArcs(from, to, 2).get("a")).toEqual({ a0: 2, a1: 4 });
 		expect(blendArcs(from, to, -1).get("a")).toEqual({ a0: 0, a1: 1 });
 		expect(blendArcs(from, to, 0.5).get("a")).toEqual({ a0: 1, a1: 2.5 });
+	});
+});
+
+describe("the moment's bucket", () => {
+	it("is the spend line's bucket at every range: 5 min, 1 h, 4 h, then 6 h", () => {
+		const MIN = 60_000;
+		expect(MOMENT_BUCKET_MS).toEqual({
+			"1d": 5 * MIN,
+			"1w": 60 * MIN,
+			"1m": 4 * 60 * MIN,
+			"3m": 6 * 60 * MIN,
+			ytd: 6 * 60 * MIN,
+			"1y": 6 * 60 * MIN,
+		});
+	});
+
+	it("is not the lanes' bucket", () => {
+		expect(MOMENT_BUCKET_MS["1w"]).not.toBe(LANE_BUCKET_MS["1w"]);
+		expect(MOMENT_BUCKET_MS["1d"]).not.toBe(LANE_BUCKET_MS["1d"]);
+	});
+});
+
+describe("the ring's shape and its tween", () => {
+	const shape = (values: number[], grown: string | null): RingShape =>
+		ringShape(["a", "b"], values, (key) => key === grown);
+
+	it("gives every key its arc and grows only the ones in focus", () => {
+		const s = shape([30, 70], "b");
+		const arcs = sliceAngles([30, 70]);
+		expect([...s.arcs.keys()]).toEqual(["a", "b"]);
+		expect(s.arcs.get("a")).toEqual(arcs[0]);
+		expect(s.arcs.get("b")).toEqual(arcs[1]);
+		expect(s.grow.get("a")).toBe(0);
+		expect(s.grow.get("b")).toBe(GROW);
+	});
+
+	it("blends arcs and growth together: the start at 0, the target exactly at 1", () => {
+		const from = shape([30, 70], null);
+		const to = shape([70, 30], "a");
+		expect(blendShape(from, to, 0).arcs.get("a")).toEqual(from.arcs.get("a"));
+		expect(blendShape(from, to, 0).grow.get("a")).toBe(0);
+		expect(blendShape(from, to, 0.5).grow.get("a")).toBe(GROW / 2);
+		expect(blendShape(from, to, 1).arcs.get("b")).toEqual(to.arcs.get("b"));
+		expect(blendShape(from, to, 1).grow.get("a")).toBe(GROW);
+		// A key the ring did not have starts collapsed and not grown.
+		const fresh = blendShape({ arcs: new Map(), grow: new Map() }, to, 0);
+		expect(fresh.arcs.get("a")?.a0).toBe(fresh.arcs.get("a")?.a1);
+		expect(fresh.grow.get("a")).toBe(0);
+	});
+
+	it("names a shape: the same for equal shapes, different when an arc or the growth differs", () => {
+		expect(shapeKey(shape([30, 70], "a"))).toBe(shapeKey(shape([30, 70], "a")));
+		expect(shapeKey(shape([30, 70], "a"))).not.toBe(shapeKey(shape([30, 70], null)));
+		expect(shapeKey(shape([30, 70], "a"))).not.toBe(shapeKey(shape([31, 69], "a")));
+	});
+
+	it("runs from the first frame's time for TWEEN_MS and ends exactly on the target", () => {
+		const from = shape([30, 70], null);
+		const to = shape([70, 30], "a");
+		const at = startTween(from, to);
+		const first = at(5_000);
+		expect(first.done).toBe(false);
+		expect(shapeKey(first.shape)).toBe(shapeKey(from));
+		const mid = at(5_000 + TWEEN_MS / 2);
+		expect(mid.done).toBe(false);
+		const a1 = mid.shape.arcs.get("a")?.a1 as number;
+		expect(a1).toBeGreaterThan(from.arcs.get("a")?.a1 as number);
+		expect(a1).toBeLessThan(to.arcs.get("a")?.a1 as number);
+		// Ease-out: past the half-way point at half the time.
+		expect(mid.shape.grow.get("a") as number).toBeGreaterThan(GROW / 2);
+		const end = at(5_000 + TWEEN_MS);
+		expect(end.done).toBe(true);
+		expect(end.shape).toBe(to);
+		expect(at(5_000 + 10 * TWEEN_MS)).toEqual({ shape: to, done: true });
+	});
+
+	it("retargets from the shape on screen: the new tween's first frame is where the old one was", () => {
+		const from = shape([30, 70], null);
+		const run = startTween(from, shape([70, 30], "a"));
+		run(0);
+		const shown = run(TWEEN_MS / 3).shape;
+		const next = startTween(shown, shape([50, 50], "b"));
+		const first = next(999).shape;
+		expect(shapeKey(first)).toBe(shapeKey(shown));
+		expect(shapeKey(first)).not.toBe(shapeKey(from));
+	});
+
+	it("treats a key with no value as nothing: it keeps its place and spans no angle", () => {
+		const s = ringShape(["a", "b", "c"], [40, 60], () => false);
+		expect([...s.arcs.keys()]).toEqual(["a", "b", "c"]);
+		const c = s.arcs.get("c") as { a0: number; a1: number };
+		expect(c.a1).toBe(c.a0);
+		expect(s.arcs.get("a")).toEqual(sliceAngles([40, 60, 0])[0]);
+		expect(s.arcs.get("b")).toEqual(sliceAngles([40, 60, 0])[1]);
+	});
+
+	it("names a shape to five decimals: a difference below that is the same shape, one above it is not", () => {
+		const at = (a1: number, g: number): RingShape => ({
+			arcs: new Map([["a", { a0: 0, a1 }]]),
+			grow: new Map([["a", g]]),
+		});
+		expect(shapeKey(at(1.000001, 0))).toBe(shapeKey(at(1.000002, 0)));
+		expect(shapeKey(at(1.00001, 0))).not.toBe(shapeKey(at(1.00002, 0)));
+		expect(shapeKey(at(1, 0))).not.toBe(shapeKey(at(1, 7)));
+		const start = (a0: number): RingShape => ({
+			arcs: new Map([["a", { a0, a1: 2 }]]),
+			grow: new Map([["a", 0]]),
+		});
+		expect(shapeKey(start(1.000001))).toBe(shapeKey(start(1.000002)));
+		expect(shapeKey(start(1.00001))).not.toBe(shapeKey(start(1.00002)));
+		// A key with no growth entry reads as not grown.
+		const bare: RingShape = { arcs: new Map([["a", { a0: 0, a1: 1 }]]), grow: new Map() };
+		expect(shapeKey(bare)).toBe(shapeKey(at(1, 0)));
+	});
+
+	it("blends growth down as well as up, and an ease that is not a number lands on the target", () => {
+		const grown = shape([30, 70], "a");
+		const rest = shape([30, 70], null);
+		expect(blendShape(grown, rest, 0.5).grow.get("a")).toBe(GROW / 2);
+		expect(blendShape(grown, rest, 0).grow.get("a")).toBe(GROW);
+		expect(blendShape(rest, grown, Number.NaN).grow.get("a")).toBe(GROW);
+		expect(blendShape(rest, grown, Number.NaN).arcs).toEqual(grown.arcs);
+		// An ease past either end is held to it: growth never overshoots, never goes under rest.
+		expect(blendShape(rest, grown, 2).grow.get("a")).toBe(GROW);
+		expect(blendShape(rest, grown, -1).grow.get("a")).toBe(0);
+		expect(blendShape(grown, rest, 2).grow.get("a")).toBe(0);
+		expect(blendShape(grown, rest, -1).grow.get("a")).toBe(GROW);
+	});
+
+	it("draws the old shape, still running, for a time before the first frame's", () => {
+		const from = shape([30, 70], null);
+		const run = startTween(from, shape([70, 30], "a"));
+		run(100);
+		const early = run(50);
+		expect(early.done).toBe(false);
+		expect(shapeKey(early.shape)).toBe(shapeKey(from));
+	});
+
+	it("takes a duration of one millisecond as a duration, not as none", () => {
+		const from = shape([30, 70], null);
+		const to = shape([70, 30], "a");
+		const run = startTween(from, to, 1);
+		expect(run(10).done).toBe(false);
+		expect(run(10.5).done).toBe(false);
+		expect(run(11).done).toBe(true);
+	});
+
+	it("ends at once on a time that is not a number, or with no duration", () => {
+		const from = shape([30, 70], null);
+		const to = shape([70, 30], "a");
+		const broken = startTween(from, to);
+		broken(0);
+		expect(broken(Number.NaN)).toEqual({ shape: to, done: true });
+		expect(startTween(from, to, 0)(1)).toEqual({ shape: to, done: true });
 	});
 });
