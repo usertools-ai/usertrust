@@ -1423,6 +1423,18 @@ describe("dated-snapshot canonicalization (F2)", () => {
 		}
 		expect(getModelRates("claude-fable-5-2")).not.toBe(PRICING_TABLE["claude-fable-5-1"]);
 		expect(getModelRates("claude-fable-5-2")).not.toBe(PRICING_TABLE["claude-fable-5"]);
+		// The new keys must not capture a dated snapshot of the ORIGINAL rows: `claude-fable-5-20260301`
+		// begins with the letters of `claude-fable-5-2`, and a prefix match would price it at $8 / $40.
+		for (const family of ["claude-fable-5", "claude-mythos-5"]) {
+			const dated = getModelRates(`${family}-20260301`);
+			expect(dated, family).toBe(PRICING_TABLE[family]);
+			expect(dated, family).not.toBe(PRICING_TABLE[`${family}-2`]);
+			expect(dated, family).toMatchObject({
+				inputPer1k: 100,
+				outputPer1k: 500,
+				cacheReadPer1k: 10,
+			});
+		}
 	});
 
 	it("a 7-digit, non-numeric or -fast suffix falls to the flagged fallback", () => {
