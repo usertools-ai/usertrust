@@ -24,7 +24,6 @@ import {
 	LEGEND_ROWS,
 	legendOf,
 	legendTitle,
-	MOMENT_BUCKET_MS,
 	OUTLINE_INSET,
 	type Pt,
 	RIM_W,
@@ -45,7 +44,6 @@ import {
 	VB,
 } from "../src/shared/donut.js";
 import type { LedgerRow } from "../src/shared/rows.js";
-import { LANE_BUCKET_MS } from "../src/shared/spend-series.js";
 
 const TAU = Math.PI * 2;
 const C = 150;
@@ -621,25 +619,6 @@ describe("donut guards: whole turn, unreal times, NaN", () => {
 		expect(blendArcs(from, to, 2).get("a")).toEqual({ a0: 2, a1: 4 });
 		expect(blendArcs(from, to, -1).get("a")).toEqual({ a0: 0, a1: 1 });
 		expect(blendArcs(from, to, 0.5).get("a")).toEqual({ a0: 1, a1: 2.5 });
-	});
-});
-
-describe("the moment's bucket", () => {
-	it("is the spend line's bucket at every range: 5 min, 1 h, 4 h, then 6 h", () => {
-		const MIN = 60_000;
-		expect(MOMENT_BUCKET_MS).toEqual({
-			"1d": 5 * MIN,
-			"1w": 60 * MIN,
-			"1m": 4 * 60 * MIN,
-			"3m": 6 * 60 * MIN,
-			ytd: 6 * 60 * MIN,
-			"1y": 6 * 60 * MIN,
-		});
-	});
-
-	it("is not the lanes' bucket", () => {
-		expect(MOMENT_BUCKET_MS["1w"]).not.toBe(LANE_BUCKET_MS["1w"]);
-		expect(MOMENT_BUCKET_MS["1d"]).not.toBe(LANE_BUCKET_MS["1d"]);
 	});
 });
 

@@ -12,7 +12,6 @@
 
 import type { Breakdown, SpendWindow } from "./breakdown.js";
 import { formatUsdTotal, formatUtcMinute } from "./format.js";
-import type { RangeId } from "./spend-series.js";
 
 /** The drawing box's side. */
 export const VB = 300;
@@ -305,24 +304,6 @@ export function bucketAt(ms: number, win: SpendWindow, bucketMs: number, n: numb
 	if (!(ms >= win.startMs && ms <= win.endMs)) return null;
 	return Math.min(n - 1, Math.floor((ms - win.startMs) / bucketMs));
 }
-
-const MINUTE_MS = 60_000;
-const HOUR_MS = 60 * MINUTE_MS;
-
-/**
- * The bucket a pinned or hovered moment is read in, per range: 5 min, 1 h, 4 h, then 6 h. These are the Spend line's
- * bucket sizes at those ranges (the line's `LINE_BUCKETS` table), so "At <time>" names the same moment on both charts.
- * This is a copy until that table is on master; the part that follows it compares the two in a test. Until then the
- * line's own bucket also depends on its width, and the two may differ at an unusual width.
- */
-export const MOMENT_BUCKET_MS: Readonly<Record<RangeId, number>> = {
-	"1d": 5 * MINUTE_MS,
-	"1w": HOUR_MS,
-	"1m": 4 * HOUR_MS,
-	"3m": 6 * HOUR_MS,
-	ytd: 6 * HOUR_MS,
-	"1y": 6 * HOUR_MS,
-};
 
 /** Bucket `k`'s first instant. */
 export function bucketStartMs(win: SpendWindow, bucketMs: number, k: number): number {
