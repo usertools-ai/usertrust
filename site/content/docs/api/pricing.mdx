@@ -47,6 +47,12 @@ output, cache-read (cache-hit prompt tokens), and cache-write (cache-creation pr
 | `claude-haiku-4-5` | 10 | 50 | 1 | 12.5 | 20 |
 | `claude-3-5-haiku` (retired) | 8 | 40 | 0.8 | 10 | 16 |
 
+usertrust 5.5.0 has no rate row for `claude-fable-5-2` or `claude-mythos-5-2`, so calls to them are
+metered at the fallback rate (250 / 1250 usertokens per 1,000 tokens in / out). Until the next
+release, set `"pricing": "custom"` in `usertrust.config.json` and add each id you call to
+`customRates` with `inputPer1k` 80, `outputPer1k` 400, `cacheReadPer1k` 2, `cacheWritePer1k` 100 and
+`cacheWrite1hPer1k` 160; a dated id needs its own entry, and `usertrust-server` must be restarted.
+
 Rates re-verified against Anthropic's published pricing page
 (`platform.claude.com/docs/en/about-claude/pricing`) on 2026-10-07; the 1-hour write column was re-read
 raw on 2026-10-08, and every row again on 2026-10-11.
