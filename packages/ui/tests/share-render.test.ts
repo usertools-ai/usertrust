@@ -17,9 +17,11 @@ import {
 	atWhen,
 	FADE,
 	FADE_HOT,
+	formatShare,
 	GROW,
 	HALF_GAP,
 	INNER,
+	legendOf,
 	legendTitle,
 	OUTLINE_INSET,
 	RIM_W,
@@ -32,6 +34,7 @@ import {
 	VB,
 } from "../src/shared/donut.js";
 import { EMPTY_FILTERS } from "../src/shared/filters.js";
+import { formatUsdTotal } from "../src/shared/format.js";
 import { categoryBus } from "../src/shared/hover-bus.js";
 import { appExport } from "./helpers/day-one.js";
 import { withDesk } from "./helpers/desk.js";
@@ -451,6 +454,24 @@ describe("the legend", () => {
 		const six = await withDesk(legend(valuesOf(6)));
 		expect(tagsOf(six, "ut-sh-row")).toHaveLength(6);
 		expect(tagsOf(six, "ut-sh-other")).toHaveLength(0);
+	});
+
+	it("titles the Other line with its count, its dollars and its share to one decimal, even in whole percents", async () => {
+		const v = valuesOf(8);
+		const html = await withDesk(legend(v, { decimals: 0, whenLabel: "this range" }));
+		const other = legendOf(v).other;
+		expect(other).not.toBeNull();
+		if (other === null) return;
+		const title = attr(tagsOf(html, "ut-sh-other")[0] ?? "", "title");
+		expect(title).toBe(
+			`${other.count} more: ${formatUsdTotal(other.spendUt)}, ${formatShare(other.share, 1)} this range`,
+		);
+		expect(formatShare(other.share, 1)).not.toBe(formatShare(other.share, 0));
+	});
+
+	it("reads a bucket start that is not a finite time as the range, without throwing", async () => {
+		const html = await withDesk(legend(valuesOf(3), { startMs: Number.NaN }));
+		expect(attr(tagsOf(html, "ut-sh-legend")[0] ?? "", "data-when")).toBe("range");
 	});
 
 	it("adds up exactly: every row and Other sum to the total", async () => {
