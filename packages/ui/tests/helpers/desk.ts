@@ -30,6 +30,7 @@ export function defaultDeskData(over: Partial<DeskData> = {}): DeskData {
 		live: "live",
 		liveIds: new Set(),
 		at: null,
+		headAt: null,
 		head: -1,
 		held: false,
 		holdNote: null,
@@ -60,6 +61,7 @@ export function defaultDeskView(over: Partial<DeskView> = {}): DeskView {
 		openHash: null,
 		setOpenHash: () => undefined,
 		at: null,
+		headAt: null,
 		setAt: () => undefined,
 		preview: () => undefined,
 	};

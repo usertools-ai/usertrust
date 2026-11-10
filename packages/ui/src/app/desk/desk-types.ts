@@ -28,6 +28,8 @@ export interface DeskData {
 	liveIds: Set<string>;
 	/** The position shown in the header (the vault as recorded there), or null for live. */
 	at: AtPayload | null;
+	/** What the header shows: the previewed position, else the committed `at` (A6: a hover moves only the header). */
+	headAt: AtPayload | null;
 	/** The last position of the vault, or -1 before a summary lands. */
 	head: number;
 	/** Whether what the windows draw lags the header (a deferred render still landing, or `pastHeld`). */

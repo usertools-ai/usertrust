@@ -32,6 +32,7 @@ import {
 } from "../../shared/desk-filters.js";
 import { COMPACT_QUERY, isDimmed, type WindowId } from "../../shared/desk-layout.js";
 import { EMPTY_FILTERS, isFiltering } from "../../shared/filters.js";
+import { headerView } from "../../shared/header-view.js";
 import { effectiveLevel } from "../../shared/level.js";
 import {
 	type HoldAnnouncement,
@@ -162,7 +163,7 @@ export function usePosition(): {
 	shown: DeskData["at"];
 } {
 	const { at, setAt, preview } = useDeskView();
-	const { at: shown } = useDeskData();
+	const { headAt: shown } = useDeskData();
 	return useMemo(() => ({ at, setAt, preview, shown }), [at, setAt, preview, shown]);
 }
 
@@ -232,8 +233,24 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 	const { fill, setFill, range, setRange, dim, setDim } = useDeskMemory();
 	// The past position shown (`#at=N`), from /api/at. Until its first answer lands, or when it fails with nothing loaded,
 	// the screen stays live and the status under the header says so: a past view is only ever drawn from its own answer.
-	const { view: atView, preview } = useAt(at, summary, live, rows, resyncs, rowsVault, navigation);
+	const { view: atView } = useAt(at, summary, live, rows, resyncs, rowsVault, navigation);
 	const shownAt = atView.at;
+	// A hover on the Spend chart previews the HEADER only (A6): its own follower asks for the previewed position, and
+	// the list, the rows and every window keep reading `atView`, the committed position. A navigation drops a preview.
+	const [previewPos, setPreviewPos] = useState<number | null>(null);
+	const preview = setPreviewPos;
+	const { view: previewView } = useAt(
+		previewPos,
+		summary,
+		live,
+		rows,
+		resyncs,
+		rowsVault,
+		navigation,
+	);
+	const header = headerView(previewPos, atView, previewView);
+	// biome-ignore lint/correctness/useExhaustiveDependencies: `navigation` is a trigger, not a value the effect reads
+	useEffect(() => setPreviewPos(null), [navigation]);
 	// The past view reads each row's status against the rows the page held when the answer's request was SENT
 	// (`atView.rows`), not the rows held when the answer renders: a live `status` frame for a record after the
 	// position, one the server had not seen when it answered, can arrive in between, and `statusAt` cannot correct it
@@ -329,6 +346,7 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 			live,
 			liveIds,
 			at: shownAt,
+			headAt: header.at,
 			head,
 			held,
 			holdNote,
@@ -349,6 +367,7 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 			live,
 			liveIds,
 			shownAt,
+			header.at,
 			head,
 			held,
 			holdNote,
@@ -392,7 +411,6 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 			setOpenHash,
 			at,
 			setAt,
-			preview,
 		],
 	);
 
@@ -401,9 +419,9 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 		[shownRows, openHash],
 	);
 	const goLive = useCallback(() => {
-		preview(null);
+		setPreviewPos(null);
 		setAt(null);
-	}, [preview, setAt]);
+	}, [setAt]);
 	// The record layer counts only while its panel is on screen. While another window fills the desk the Ledger is
 	// hidden (`isDimmed`): Escape restores the fill first and the record's panel then opens, rather than closing a
 	// record no one can see and leaving the fill.
@@ -436,9 +454,9 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 	const shell = useMemo<ShellBinding>(
 		() => ({
 			status: {
-				error: atView.error,
-				loading: pointLoading(atView),
-				reloaded: atView.reloaded,
+				error: header.error,
+				loading: pointLoading(header),
+				reloaded: header.reloaded,
 				announce: announce.text,
 			},
 			goLive,
@@ -449,7 +467,7 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 			peel,
 			act,
 		}),
-		[atView, announce.text, goLive, drawn.filters, newestOf, count, addressNote, peel, act],
+		[header, announce.text, goLive, drawn.filters, newestOf, count, addressNote, peel, act],
 	);
 
 	return (

@@ -48,7 +48,7 @@ function useFocusAfterFill(fill: WindowId | null): void {
 }
 
 export function DeskShell(): React.JSX.Element {
-	const { list, summary, live, at: shownAt, held, holdNote, pastHeld } = useDeskData();
+	const { list, summary, live, headAt, held, holdNote, pastHeld } = useDeskData();
 	const { filters, setFilters } = useFilters();
 	const { fill } = useFill();
 	const { status, filtering, newestOf, count, addressNote, peel, act } = useShellBinding();
@@ -80,7 +80,7 @@ export function DeskShell(): React.JSX.Element {
 		<div className="ut-dk">
 			<Backdrop />
 			<header className="ut-dk-top ut-glass">
-				<SummaryStrip part="bar" summary={summary} live={live} at={shownAt} />
+				<SummaryStrip part="bar" summary={summary} live={live} at={headAt} />
 				<input
 					type="search"
 					className="ut-search"

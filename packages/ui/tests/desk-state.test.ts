@@ -304,7 +304,7 @@ describe("the desk's hooks", () => {
 			pos: 4,
 			ts: new Date(T0).toISOString(),
 		} as unknown as NonNullable<DeskData["at"]>;
-		const p = await probe(() => state.usePosition(), { view: { at: 4 }, data: { at } });
+		const p = await probe(() => state.usePosition(), { view: { at: 4 }, data: { headAt: at } });
 		expect(p.at).toBe(4);
 		expect(p.shown).toBe(at);
 	});
@@ -431,10 +431,12 @@ describe("the provider keeps what the page had", () => {
 	});
 
 	it("red-first (the header preview was not on the view): the view carries useAt's own preview, and usePosition returns it", () => {
-		expect(src).toContain("const { view: atView, preview } = useAt(");
+		expect(src).toContain("const { view: atView } = useAt(");
+		// A6: the preview is its own state, read by the header only (`headerView`), never the committed view.
+		expect(src).toContain("const preview = setPreviewPos;");
 		const view = /const view = useMemo<DeskView>\(([\s\S]*?)\n\t\);/.exec(src)?.[1] ?? "";
 		expect(view).toMatch(/\bpreview,/);
-		// The same function, not a wrapper that could also move the address.
+		// A function that sets the preview state, not a wrapper that could also move the address.
 		expect(view).not.toMatch(/preview:/);
 		const position = /export function usePosition\(\)[\s\S]*?\n\}\n/.exec(src)?.[0] ?? "";
 		expect(position).toContain("const { at, setAt, preview } = useDeskView();");
