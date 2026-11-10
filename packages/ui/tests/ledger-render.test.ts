@@ -268,8 +268,15 @@ describe("the panel's arithmetic", () => {
 		expect(html).toContain(fig("panel-sum", "115 UT"));
 		expect(html).toContain(fig("panel-cost", "115 UT"));
 		expect(table({ ...open, costUt: 120 })).toContain(
-			"The tiers add up to 115 UT; the record holds 120 UT; the charge is 5 UT higher. Shown as recorded.",
+			"The tiers add up to 115 UT; the record holds 120 UT; the recorded cost is 5 UT higher. Shown as recorded.",
 		);
+		expect(table({ ...open, costUt: 112 })).toContain("the recorded cost is 3 UT lower.");
+		// A whole sum recorded one higher: the cost was recorded, so nothing is said to have been charged.
+		const residue = table({ ...RESIDUE, status: "ambiguous", settled: false });
+		expect(residue).toContain(
+			"Sum 3 UT. Recorded 4 UT: the cost was computed in floating point, came out a hair above 3, and costs round up.",
+		);
+		expect(residue).not.toMatch(/Charged|the charge was|charges round up/);
 		for (const status of ["settled", "failed", "unknown"] as const) {
 			const other = table(row({ status }));
 			expect(other).toContain('<th scope="row" colSpan="3">Charged</th>');

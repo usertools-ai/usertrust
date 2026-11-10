@@ -74,6 +74,7 @@ function sumLine(
 	sumText: string,
 	computedUt: number,
 	charged: boolean,
+	unresolved: boolean,
 ): { text: string | null; residue: boolean } {
 	const sum = exactUt(sumText);
 	const computed = formatUt(computedUt);
@@ -83,11 +84,13 @@ function sumLine(
 		return { text: `Sum ${sum}. A charge is at least ${computed}.`, residue: false };
 	}
 	if (computedUt !== whole + 1) return { text: null, residue: false };
-	const how = `computed in floating point, came out a hair above ${whole.toLocaleString("en-US")}, and charges round up`;
+	// An unresolved call's cost is recorded, not confirmed, so the sentence speaks of a cost and never of a charge.
+	const noun = unresolved && charged ? "cost" : "charge";
+	const how = `computed in floating point, came out a hair above ${whole.toLocaleString("en-US")}, and ${noun}s round up`;
 	return {
 		// "Charged" only when the record's cost is that figure; a record that charged something else says so below.
 		text: charged
-			? `Sum ${sum}. Charged ${computed}: the charge was ${how}.`
+			? `Sum ${sum}. ${unresolved ? "Recorded" : "Charged"} ${computed}: the ${noun} was ${how}.`
 			: `Sum ${sum}. A charge of these tiers comes to ${computed}: it is ${how}.`,
 		residue: true,
 	};
@@ -158,7 +161,7 @@ export function ChargeTable(props: { row: LedgerRow }): React.JSX.Element | null
 	// An unresolved call's cost is recorded, not confirmed: it is not said to have been charged.
 	const unresolved = statusOf(row) === "ambiguous";
 	const priced = sumText !== null && computedUt !== null && differenceUt !== null;
-	const sum = priced ? sumLine(sumText, computedUt, differenceUt === 0) : null;
+	const sum = priced ? sumLine(sumText, computedUt, differenceUt === 0, unresolved) : null;
 	const lacking = charge.state === "partial" ? missing(charge, row) : [];
 	return (
 		<div className="ut-lg-charge">
@@ -217,7 +220,7 @@ export function ChargeTable(props: { row: LedgerRow }): React.JSX.Element | null
 					{sum.text}
 					{sum.text !== null && differenceUt !== 0 && " "}
 					{differenceUt !== 0 &&
-						`The tiers add up to ${formatUt(computedUt)}; the record ${unresolved ? "holds" : "charged"} ${formatUt(costUt)}; the charge is ${formatUt(Math.abs(differenceUt))} ${differenceUt > 0 ? "higher" : "lower"}. Shown as recorded.`}
+						`The tiers add up to ${formatUt(computedUt)}; the record ${unresolved ? "holds" : "charged"} ${formatUt(costUt)}; the ${unresolved ? "recorded cost" : "charge"} is ${formatUt(Math.abs(differenceUt))} ${differenceUt > 0 ? "higher" : "lower"}. Shown as recorded.`}
 				</p>
 			)}
 			<p className="ut-lg-src">Pricing table version: {charge.version ?? NOT_RECORDED}</p>
