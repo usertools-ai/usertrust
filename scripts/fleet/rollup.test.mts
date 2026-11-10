@@ -340,7 +340,13 @@ test("list-price math matches hand-computed fixture values", () => {
 	assert.deepStrictEqual(listRatesForModel("claude-opus-5-5"), { input: 4, output: 20 });
 	assert.deepStrictEqual(listRatesForModel("claude-sonnet-5-5-20261001"), { input: 2, output: 10 });
 	assert.deepStrictEqual(listRatesForModel("claude-fable-5-1"), { input: 10, output: 50 });
+	assert.deepStrictEqual(listRatesForModel("claude-fable-5-2"), { input: 8, output: 40 });
+	assert.deepStrictEqual(listRatesForModel("claude-mythos-5-2-20261105"), { input: 8, output: 40 });
 	assert.deepStrictEqual(listRatesForModel("claude-mythos-5"), { input: 10, output: 50 });
+	// A dated snapshot of the original rows is not captured by the 5.2 keys it begins like.
+	assert.deepStrictEqual(listRatesForModel("claude-fable-5-20260301"), { input: 10, output: 50 });
+	assert.deepStrictEqual(listRatesForModel("claude-mythos-5-20260301"), { input: 10, output: 50 });
+	assert.equal(cacheReadMultFor("claude-fable-5-20260301"), CACHE_READ_MULT);
 	// Deprecated but callable (Project Glasswing): $25 / $125 per MTok.
 	assert.deepStrictEqual(listRatesForModel("claude-mythos-preview"), { input: 25, output: 125 });
 	// Priced per request by prompt length: exactly 100,000 is the lower tier.
@@ -401,6 +407,8 @@ test("list-price cache reads use the PER-MODEL multiplier (0.05x / 0.025x), not 
 	assert.equal(cacheReadMultFor("claude-opus-5-5-20261001"), 0.05);
 	assert.equal(cacheReadMultFor("claude-fable-5-1"), 0.025);
 	assert.equal(cacheReadMultFor("claude-mythos-5-1"), 0.025);
+	assert.equal(cacheReadMultFor("claude-fable-5-2"), 0.025);
+	assert.equal(cacheReadMultFor("claude-mythos-5-2"), 0.025);
 	assert.equal(cacheReadMultFor("claude-opus-5"), CACHE_READ_MULT);
 	assert.equal(cacheReadMultFor("claude-fable-5"), CACHE_READ_MULT);
 });

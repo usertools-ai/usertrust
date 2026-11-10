@@ -11,8 +11,8 @@ A budget of `100_000` UT equals $10.00. A budget of `1_000_000` UT equals $100.0
 
 ## Pricing Table
 
-The SDK includes a 56-model pricing table in `ledger/pricing.ts`, current as of
-`PRICING_TABLE_VERSION = "2026-11-02"` (see [PRICING_TABLE_VERSION](#pricing_table_version)).
+The SDK includes a 58-model pricing table in `ledger/pricing.ts`, current as of
+`PRICING_TABLE_VERSION = "2026-11-10"` (see [PRICING_TABLE_VERSION](#pricing_table_version)).
 Rates are in usertokens per 1,000 LLM tokens, across **four tiers**: input (fresh prompt tokens),
 output, cache-read (cache-hit prompt tokens), and cache-write (cache-creation prompt tokens). A
 `—` means the provider publishes no rate for that tier — it is **not** free; see
@@ -22,8 +22,10 @@ output, cache-read (cache-hit prompt tokens), and cache-write (cache-creation pr
 
 | Model | Input | Output | Cache Read | Cache Write (5m) | Cache Write (1h) |
 |-------|------:|-------:|-----------:|------------:|------------:|
+| `claude-fable-5-2` | 80 | 400 | 2 | 100 | 160 |
 | `claude-fable-5-1` | 100 | 500 | 2.5 | 125 | 200 |
 | `claude-fable-5` | 100 | 500 | 10 | 125 | 200 |
+| `claude-mythos-5-2` (limited availability) | 80 | 400 | 2 | 100 | 160 |
 | `claude-mythos-5-1` (limited availability) | 100 | 500 | 2.5 | 125 | 200 |
 | `claude-mythos-5` (limited availability) | 100 | 500 | 10 | 125 | 200 |
 | `claude-opus-5-5` | 40 | 200 | 2 | 50 | 80 |
@@ -45,13 +47,20 @@ output, cache-read (cache-hit prompt tokens), and cache-write (cache-creation pr
 | `claude-haiku-4-5` | 10 | 50 | 1 | 12.5 | 20 |
 | `claude-3-5-haiku` (retired) | 8 | 40 | 0.8 | 10 | 16 |
 
+usertrust 5.5.0 has no rate row for `claude-fable-5-2` or `claude-mythos-5-2`, so calls to them are
+metered at the fallback rate (250 / 1250 usertokens per 1,000 tokens in / out). Until the next
+release, set `"pricing": "custom"` in `usertrust.config.json` and add each id you call to
+`customRates` with `inputPer1k` 80, `outputPer1k` 400, `cacheReadPer1k` 2, `cacheWritePer1k` 100 and
+`cacheWrite1hPer1k` 160; a dated id needs its own entry, and `usertrust-server` must be restarted.
+
 Rates re-verified against Anthropic's published pricing page
 (`platform.claude.com/docs/en/about-claude/pricing`) on 2026-10-07; the 1-hour write column was re-read
 raw on 2026-10-08, and every row again on 2026-10-11.
 
 Anthropic publishes cache-read at 0.1x base input and 5-minute cache-write at 1.25x, with three
 published exceptions on cache reads: **0.05x** on `claude-opus-5-5` and `claude-sonnet-5-5`, and
-**0.025x** on `claude-fable-5-1` and `claude-mythos-5-1`. `claude-sonnet-5` is $2 / $10 per MTok:
+**0.025x** on `claude-fable-5-2`, `claude-mythos-5-2`, `claude-fable-5-1` and `claude-mythos-5-1`.
+`claude-sonnet-5` is $2 / $10 per MTok:
 the introductory price became the standard price and the announced increase to $3 / $15 did not
 happen. The **1-hour** cache write (2x base input, the last column) is its own tier:
 `cacheWriteTokens` stays the TOTAL written and a call that reports a 1-hour share
@@ -302,6 +311,7 @@ getModelRates("claude-fable-5-20260301")  // dated snapshot → claude-fable-5 �
 getModelRates("gpt-4o-2024-08-06")        // dated snapshot → gpt-4o → { 25, 100 }
 getModelRates("gpt-4o-2024-05-13")        // exact row, priced above its alias → { 50, 150 }
 getModelRates("claude-fable-5-1")         // its own row → { 100, 500, cache read 2.5 }
+getModelRates("claude-fable-5-2")         // its own row → { 80, 400, cache read 2 }
 getModelRates("claude-opus-5-fast")       // unknown → fallback → { 250, 1250 }
 ```
 
@@ -417,7 +427,7 @@ interface LongPromptTier {
 ### PRICING_TABLE_VERSION
 
 ```typescript
-const PRICING_TABLE_VERSION: string  // e.g. "2026-11-02"
+const PRICING_TABLE_VERSION: string  // e.g. "2026-11-10"
 ```
 
 Date-stamped version of the built-in `PRICING_TABLE`, bumped whenever any entry's rates change.

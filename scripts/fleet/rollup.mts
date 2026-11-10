@@ -71,6 +71,9 @@ export const CACHE_READ_MULT = 0.1;
  * that line's own prompt length, exactly as the kernel's `longPrompt` does.
  */
 export const LIST_USD_PER_MTOK: Record<string, { input: number; output: number }> = {
+	// $8 / $40, read from the page on 2026-11-10.
+	"claude-fable-5-2": { input: 8, output: 40 },
+	"claude-mythos-5-2": { input: 8, output: 40 },
 	"claude-fable-5-1": { input: 10, output: 50 },
 	"claude-fable-5": { input: 10, output: 50 },
 	"claude-mythos-5-1": { input: 10, output: 50 },
@@ -122,7 +125,8 @@ function listKeyFor(model: string): string | undefined {
 /**
  * Published cache-read multipliers that differ from the 0.1x default
  * (platform.claude.com/docs/en/about-claude/pricing, footnotes 1 and 2, retrieved
- * 2026-10-07): 0.05x on Opus 5.5 / Sonnet 5.5, 0.025x on Fable 5.1 / Mythos 5.1.
+ * 2026-10-07; the 5.2 rows 2026-11-10): 0.05x on Opus 5.5 / Sonnet 5.5, 0.025x on Fable and
+ * Mythos 5.1 / 5.2.
  * A flat 0.1x overstates those models' cache reads 2x / 4x in the list-price block.
  */
 const CACHE_READ_MULT_BY_MODEL: Record<string, number> = {
@@ -130,6 +134,8 @@ const CACHE_READ_MULT_BY_MODEL: Record<string, number> = {
 	"claude-sonnet-5-5": 0.05,
 	"claude-fable-5-1": 0.025,
 	"claude-mythos-5-1": 0.025,
+	"claude-fable-5-2": 0.025,
+	"claude-mythos-5-2": 0.025,
 };
 
 /** Cache-read multiplier of a model's list price: its published override, else {@link CACHE_READ_MULT}. */

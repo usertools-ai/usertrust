@@ -94,7 +94,8 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 	// model-pricing table (platform.claude.com/docs/en/about-claude/pricing),
 	// $/MTok x 10 = usertokens per 1k. Published multipliers: 5-minute cache write
 	// 1.25x base input; cache read 0.1x base input EXCEPT 0.05x on Opus 5.5 and
-	// Sonnet 5.5 and 0.025x on Fable 5.1 and Mythos 5.1 (page footnotes 1 and 2).
+	// Sonnet 5.5 and 0.025x on Fable 5.2, Mythos 5.2, Fable 5.1 and Mythos 5.1 (page footnotes
+	// 1 and 2).
 	// (The 1-hour write is 2x; collapsing per-TTL pricing to the 5m rate is a
 	// documented approximation — operators with 1h-heavy workloads override via
 	// customRates.)
@@ -214,6 +215,15 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		cacheWritePer1k: 125,
 		cacheWrite1hPer1k: 200,
 	},
+	// $8 in / $40 out / $0.20 hit (0.025x) / $10 5m write / $16 1h write, read from the page
+	// on 2026-11-10. Until then the id had no row and was priced at the fallback rate.
+	"claude-fable-5-2": {
+		inputPer1k: 80,
+		outputPer1k: 400,
+		cacheReadPer1k: 2,
+		cacheWritePer1k: 100,
+		cacheWrite1hPer1k: 160,
+	},
 	// Deprecated 2026-06-09 (retirement date "to be announced") but still callable by
 	// Project Glasswing participants, so it needs its own row or it falls to the
 	// fallback. $25 in / $125 out per MTok: https://www.anthropic.com/project/glasswing
@@ -230,7 +240,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		cacheWritePer1k: 312.5,
 		cacheWrite1hPer1k: 500,
 	},
-	// Limited availability; same rates as Fable 5 / Fable 5.1.
+	// Limited availability; same rates as Fable 5 / Fable 5.1 / Fable 5.2.
 	"claude-mythos-5": {
 		inputPer1k: 100,
 		outputPer1k: 500,
@@ -244,6 +254,13 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		cacheReadPer1k: 2.5,
 		cacheWritePer1k: 125,
 		cacheWrite1hPer1k: 200,
+	},
+	"claude-mythos-5-2": {
+		inputPer1k: 80,
+		outputPer1k: 400,
+		cacheReadPer1k: 2,
+		cacheWritePer1k: 100,
+		cacheWrite1hPer1k: 160,
 	},
 	// $5 in / $25 out / $0.50 hit / $6.25 5m write. These are the STANDARD-speed
 	// rates; fast mode ($10 in / $50 out) is a request `speed` tier this per-model
@@ -538,7 +555,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
  * Bump on every entry change; recorded on receipts so a metered cost can be
  * reproduced against the exact table that priced it.
  */
-export const PRICING_TABLE_VERSION = "2026-11-02";
+export const PRICING_TABLE_VERSION = "2026-11-10";
 
 /**
  * Reduce a model id to its base table key. Strips EXACTLY ONE trailing date
