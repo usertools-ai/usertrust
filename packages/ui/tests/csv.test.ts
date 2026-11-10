@@ -507,6 +507,18 @@ describe("the formula guard, from the record", () => {
 		return CSV_HEADERS.map((name) => ({ ...base, ...cells })[name] ?? "").join(",");
 	}
 
+	// Characters named by code point, so that none of them sits in this file where it cannot be seen.
+	const chars = (points: number[]) => points.map((point) => String.fromCodePoint(point));
+	// Whitespace to JavaScript beyond the space, tab and line breaks: vertical tab, form feed, the no-break space, the
+	// ogham space mark, en quad, em space, hair space, line and paragraph separators, the narrow no-break space, the
+	// medium mathematical space, the ideographic space and the byte order mark.
+	const WIDE_WHITESPACE = chars([
+		0x0b, 0x0c, 0xa0, 0x1680, 0x2000, 0x2003, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000,
+		0xfeff,
+	]);
+	// Not whitespace to JavaScript: a null, the next-line control, the zero-width space and the word joiner.
+	const NOT_WHITESPACE = chars([0x00, 0x85, 0x200b, 0x2060]);
+
 	// Ordinary text, and how the export has always written it. None of these may change by a single byte.
 	const ORDINARY: [string, string][] = [
 		["local", "local"],
@@ -515,7 +527,7 @@ describe("the formula guard, from the record", () => {
 		["  hello", "  hello"],
 		[" ", " "],
 		["   ", "   "],
-		[" hello", " hello"],
+		["\u00a0hello", "\u00a0hello"],
 		// A formula character after the first ordinary character.
 		["a=b", "a=b"],
 		["1+1", "1+1"],
@@ -531,6 +543,26 @@ describe("the formula guard, from the record", () => {
 		["\nhello", '"\nhello"'],
 		["line\nbreak", '"line\nbreak"'],
 		['ops,"night"', '"ops,""night"""'],
+		// Other punctuation first, and first after a space: only =, +, - and @ are formula characters.
+		["%x", "%x"],
+		["|x", "|x"],
+		["'=1", "'=1"],
+		['"=1', '"""=1"'],
+		[",=1", '",=1"'],
+		["*1", "*1"],
+		["/1", "/1"],
+		["(1)", "(1)"],
+		[" %x", " %x"],
+		[" |x", " |x"],
+		[" '=1", " '=1"],
+		[' "=1', '" ""=1"'],
+		[" ,=1", '" ,=1"'],
+		[" *1", " *1"],
+		[" /1", " /1"],
+		[" (1)", " (1)"],
+		// A first character that cannot be seen and is not whitespace to JavaScript (a null, a next-line control, a
+		// zero-width space, a word joiner) is not skipped: the cell starts with that character, not with the formula.
+		...NOT_WHITESPACE.map((first): [string, string] => [`${first}=1`, `${first}=1`]),
 	];
 
 	it("ordinary text prints exactly as it always has, in every text column the record fills", () => {
@@ -544,7 +576,7 @@ describe("the formula guard, from the record", () => {
 	// Text a spreadsheet would run: a formula character first, or first after whitespace, or a tab or carriage return
 	// first, whatever follows.
 	const FORMULAS = ["=cmd()", "+1", "-1", "@SUM(A1)"];
-	const BEFORE = ["", " ", "   ", "\t", "\r", "\n", " \t ", "\r\n", " "];
+	const BEFORE = ["", " ", "   ", "\t", "\r", "\n", " \t ", "\r\n", ...WIDE_WHITESPACE];
 	const HOSTILE = [
 		...FORMULAS.flatMap((formula) => BEFORE.map((before) => `${before}${formula}`)),
 		...["\t", "\r"].flatMap((first) => [
