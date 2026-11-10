@@ -39,6 +39,11 @@ export interface HoverIo {
 	latest(): HoverCategory | null;
 }
 
+/** One string that is the same for two lists only when the lists are the same; a name may hold any character. */
+export function listedKey(keys: readonly string[]): string {
+	return JSON.stringify(keys);
+}
+
 export interface HoverOwner {
 	enter(key: string): void;
 	leave(): void;

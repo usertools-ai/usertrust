@@ -10,6 +10,7 @@ import {
 	type HoverIo,
 	isOurs,
 	LEGEND_FROM,
+	listedKey,
 	rowToShow,
 } from "../src/app/windows/share/legend-hover.js";
 import type { HoverCategory } from "../src/shared/hover-bus.js";
@@ -143,6 +144,18 @@ describe("the legend's hover owner", () => {
 		owner.enter("a");
 		owner.rows(["a", "b"]);
 		expect(t.sent).toEqual([mine("a")]);
+	});
+
+	it("holds a row whose name has a line feed as one row, and tells it from two rows", () => {
+		const t = deferredIo();
+		const owner = createHoverOwner(t.io, "lane");
+		owner.enter("a\nb");
+		owner.rows(["a\nb", "c"]);
+		expect(t.sent).toEqual([mine("a\nb")]);
+		owner.rows(["a", "b", "c"]);
+		expect(t.sent.at(-1)).toBeNull();
+		expect(listedKey(["a\nb"])).not.toBe(listedKey(["a", "b"]));
+		expect(listedKey(["a", "b"])).toBe(listedKey(["a", "b"]));
 	});
 
 	it("clears its own hover when disposed, and only then", () => {
