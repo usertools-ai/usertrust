@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * How one charge adds up, as a table: each tier's tokens, the rate applied and their product, then the sum, the
+ * How one call's cost adds up, as a table: each tier's tokens, the rate applied and their product, then the sum, the
  * whole usertokens it rounds up to and the cost the record carries. The figures are `chargeOf`'s; nothing is summed
  * here. A count or rate the record does not carry reads "not recorded", never 0, and a charge with one missing
  * prints no sum.
@@ -11,7 +11,7 @@
 import { type Charge, type ChargeLine, chargeOf } from "../../../shared/charge.js";
 import { usageView } from "../../../shared/display.js";
 import { formatUt } from "../../../shared/format.js";
-import { amountOf, type LedgerRow, statusOf } from "../../../shared/rows.js";
+import { amountOf, type LedgerRow } from "../../../shared/rows.js";
 
 const NOT_RECORDED = "not recorded";
 /** The one kind of record that is a call, and so the only one with tokens to add up. */
@@ -66,15 +66,18 @@ function missing(charge: Charge, row: LedgerRow): string[] {
 
 /**
  * The sentence for the sum, only where the rows under the tiers need words: a fractional sum rounded up and a whole
- * sum charged as it is are told by the rows alone (`text` is null). A whole sum that computes one higher is the
+ * sum recorded as it is are told by the rows alone (`text` is null). A whole sum that computes one higher is the
  * floating-point case: the terms are exactly a whole number in decimals and land a hair above it when summed as the
  * charge sums them, and a charge rounds up. `residue` is true only then.
+ *
+ * Nothing here says the record was charged an amount. The record carries the cost that was metered, and what the
+ * ledger posted for a settled call can be less (a settlement is capped at its hold): so the record's own figure is
+ * a recorded cost for every call. `held` is whether that figure is the one the tiers come to.
  */
 function sumLine(
 	sumText: string,
 	computedUt: number,
-	charged: boolean,
-	unresolved: boolean,
+	held: boolean,
 ): { text: string | null; residue: boolean } {
 	const sum = exactUt(sumText);
 	const computed = formatUt(computedUt);
@@ -84,14 +87,13 @@ function sumLine(
 		return { text: `Sum ${sum}. A charge is at least ${computed}.`, residue: false };
 	}
 	if (computedUt !== whole + 1) return { text: null, residue: false };
-	// A call that is not settled has a recorded cost, so the sentence speaks of a cost and never of a charge.
-	const noun = unresolved && charged ? "cost" : "charge";
-	const how = `computed in floating point, came out a hair above ${whole.toLocaleString("en-US")}, and ${noun}s round up`;
+	const how = `computed in floating point, came out a hair above ${whole.toLocaleString("en-US")}, and`;
 	return {
-		// "Charged" only when the record's cost is that figure; a record that charged something else says so below.
-		text: charged
-			? `Sum ${sum}. ${unresolved ? "Recorded" : "Charged"} ${computed}: the ${noun} was ${how}.`
-			: `Sum ${sum}. A charge of these tiers comes to ${computed}: it is ${how}.`,
+		// About this record only when its cost is that figure. A record that holds another figure gets the general
+		// sentence about its tiers, and the difference is said below.
+		text: held
+			? `Sum ${sum}. Recorded ${computed}: the cost was ${how} costs round up.`
+			: `Sum ${sum}. A charge of these tiers comes to ${computed}: it is ${how} charges round up.`,
 		residue: true,
 	};
 }
@@ -158,16 +160,13 @@ export function ChargeTable(props: { row: LedgerRow }): React.JSX.Element | null
 	const charge = chargeOf(row);
 	const { costUt, sumText, computedUt, differenceUt } = charge;
 	if (charge.state === "none" || costUt === null) return null;
-	// "Charged" is said only of a settled call. With any other status, or none, the cost is recorded and not
-	// confirmed, and nothing is said to have been charged.
-	const unresolved = statusOf(row) !== "settled";
 	const priced = sumText !== null && computedUt !== null && differenceUt !== null;
-	const sum = priced ? sumLine(sumText, computedUt, differenceUt === 0, unresolved) : null;
+	const sum = priced ? sumLine(sumText, computedUt, differenceUt === 0) : null;
 	const lacking = charge.state === "partial" ? missing(charge, row) : [];
 	return (
 		<div className="ut-lg-charge">
 			<table className="ut-lg-sums">
-				<caption>How this charge adds up</caption>
+				<caption>How this cost adds up</caption>
 				<thead>
 					<tr>
 						<th scope="col">Tier</th>
@@ -199,15 +198,11 @@ export function ChargeTable(props: { row: LedgerRow }): React.JSX.Element | null
 							/>
 						</>
 					)}
-					<Foot
-						label={unresolved ? "Recorded cost" : "Charged"}
-						fig="ledger.panel-cost"
-						value={formatUt(costUt)}
-					/>
+					<Foot label="Recorded cost" fig="ledger.panel-cost" value={formatUt(costUt)} />
 				</tfoot>
 			</table>
 			{charge.state === "no-counts" && (
-				<p>No token counts are recorded for this charge, so it cannot be added up from tokens.</p>
+				<p>No token counts are recorded for this cost, so it cannot be added up from tokens.</p>
 			)}
 			{charge.state === "partial" && (
 				<p>
@@ -221,7 +216,7 @@ export function ChargeTable(props: { row: LedgerRow }): React.JSX.Element | null
 					{sum.text}
 					{sum.text !== null && differenceUt !== 0 && " "}
 					{differenceUt !== 0 &&
-						`The tiers add up to ${formatUt(computedUt)}; the record ${unresolved ? "holds" : "charged"} ${formatUt(costUt)}; the ${unresolved ? "recorded cost" : "charge"} is ${formatUt(Math.abs(differenceUt))} ${differenceUt > 0 ? "higher" : "lower"}. Shown as recorded.`}
+						`The tiers add up to ${formatUt(computedUt)}; the record holds ${formatUt(costUt)}; the recorded cost is ${formatUt(Math.abs(differenceUt))} ${differenceUt > 0 ? "higher" : "lower"}. Shown as recorded.`}
 				</p>
 			)}
 			<p className="ut-lg-src">Pricing table version: {charge.version ?? NOT_RECORDED}</p>

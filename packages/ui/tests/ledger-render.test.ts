@@ -95,7 +95,7 @@ const fig = (name: string, value: string): string => `data-fig="ledger.${name}">
 describe("the panel's arithmetic", () => {
 	it("a priced charge: every tier's tokens, rate and product, the sum, the charged cost and its sources", () => {
 		const html = table(row());
-		expect(html).toContain("<caption>How this charge adds up</caption>");
+		expect(html).toContain("<caption>How this cost adds up</caption>");
 		for (const head of ["Tier", "Tokens", "Rate per 1k", "Cost"]) expect(html).toContain(head);
 		for (const tier of ["Input", "Output", "Cache read", "Cache write"])
 			expect(html).toContain(tier);
@@ -136,8 +136,9 @@ describe("the panel's arithmetic", () => {
 	it("a whole sum charged one higher is explained, carries the residue hook and is not a difference", () => {
 		const html = table(RESIDUE);
 		expect(html).toContain(
-			"Sum 3 UT. Charged 4 UT: the charge was computed in floating point, came out a hair above 3, and charges round up.",
+			"Sum 3 UT. Recorded 4 UT: the cost was computed in floating point, came out a hair above 3, and costs round up.",
 		);
+		expect(html).not.toMatch(/Charged|the charge was|charges round up/);
 		expect(html).toContain(fig("panel-sum-exact", "3 UT"));
 		expect(html).toContain(fig("panel-sum", "4 UT"));
 		expect(html).toContain(fig("panel-residue", "1 UT"));
@@ -154,18 +155,19 @@ describe("the panel's arithmetic", () => {
 	it("a difference is shown, in both directions, as recorded", () => {
 		const more = table(row({ costUt: 120 }));
 		expect(more).toContain(
-			"The tiers add up to 115 UT; the record charged 120 UT; the charge is 5 UT higher. Shown as recorded.",
+			"The tiers add up to 115 UT; the record holds 120 UT; the recorded cost is 5 UT higher. Shown as recorded.",
 		);
 		expect(more).toContain(fig("panel-cost", "120 UT"));
 		expect(more).toContain('<p class="ut-lg-sumnote">The tiers add up to 115 UT;');
-		expect(table(row({ costUt: 112 }))).toContain("the charge is 3 UT lower");
+		expect(table(row({ costUt: 112 }))).toContain("the recorded cost is 3 UT lower.");
+		expect(more).not.toMatch(/the record charged|the charge is/);
 	});
 
 	it("no token counts: says so, claims no sum, still shows the charged cost", () => {
 		const { usage: _usage, ...bare } = row();
 		const html = table(bare);
 		expect(html).toContain(
-			"No token counts are recorded for this charge, so it cannot be added up from tokens.",
+			"No token counts are recorded for this cost, so it cannot be added up from tokens.",
 		);
 		expect(html).not.toContain("ledger.panel-sum");
 		expect(html).not.toContain("Sum ");
@@ -256,7 +258,7 @@ describe("the panel's arithmetic", () => {
 	it("only a call has a table: a record of another kind has none, whatever cost and model it carries", () => {
 		expect(table(row({ kind: "settlement_ambiguous", status: "ambiguous", costUt: 40 }))).toBe("");
 		expect(table(row({ kind: "policy_denied", status: "denied" }))).toBe("");
-		expect(table(row())).toContain("How this charge adds up");
+		expect(table(row())).toContain("How this cost adds up");
 	});
 
 	it("an unresolved call's cost is a recorded cost, not a charge, in the rows and in the sentences", () => {
@@ -279,42 +281,40 @@ describe("the panel's arithmetic", () => {
 		expect(residue).not.toMatch(/Charged|the charge was|charges round up/);
 	});
 
-	it("only a settled call says Charged: any other status, or none, is a recorded cost", () => {
-		const settled = table(row({ status: "settled" }));
-		expect(settled).toContain('<th scope="row" colSpan="3">Charged</th>');
-		expect(settled).not.toContain("Recorded cost");
-		// "unknown" is a call with no verdict on its transfer, the same as a row that carries no status at all.
+	it("no status says Charged: the last row is the recorded cost for a settled call and for every other", () => {
+		// A settled call's settlement can be less than its metered cost, and the record carries only the metered
+		// cost: so it is a recorded cost whatever the status. A row that carries no status at all reads the same.
 		const { status: _status, ...bare } = row({ settled: false });
 		const rows = [
 			bare,
-			...(["unknown", "unrecoverable", "failed"] as const).map((s) => row({ status: s })),
+			...(["settled", "ambiguous", "unknown", "unrecoverable", "failed"] as const).map((s) =>
+				row({ status: s }),
+			),
 		];
 		for (const r of rows) {
 			const html = table(r);
 			expect(html).toContain('<th scope="row" colSpan="3">Recorded cost</th>');
-			expect(html).not.toContain(">Charged<");
+			expect(html).not.toMatch(/Charged|\bcharged\b/);
 			expect(html).toContain(fig("panel-cost", "115 UT"));
 		}
-		expect(table(row({ status: "unknown", costUt: 120 }))).toContain(
-			"the record holds 120 UT; the recorded cost is 5 UT higher.",
-		);
-		expect(table({ ...RESIDUE, status: "unknown" })).toContain(
-			"Sum 3 UT. Recorded 4 UT: the cost was",
-		);
+		for (const status of ["settled", "unknown"] as const) {
+			expect(table(row({ status, costUt: 120 }))).toContain(
+				"the record holds 120 UT; the recorded cost is 5 UT higher.",
+			);
+			expect(table({ ...RESIDUE, status })).toContain("Sum 3 UT. Recorded 4 UT: the cost was");
+		}
 	});
 
 	it("a whole sum that computes one higher, on a record that holds another figure: both sentences in full", () => {
 		const tiers =
 			"Sum 3 UT. A charge of these tiers comes to 4 UT: it is computed in floating point, came out a hair above 3, and charges round up.";
-		// Settled: the tiers' own charge is described, then the difference from what was charged.
-		expect(table({ ...RESIDUE, costUt: 7 })).toContain(
-			`<p class="ut-lg-sumnote">${tiers} The tiers add up to 4 UT; the record charged 7 UT; the charge is 3 UT higher. Shown as recorded.</p>`,
-		);
-		// Not settled: the first sentence is about the tiers, not this record, so it keeps "charge"; the second
-		// speaks of the recorded cost.
-		expect(table({ ...RESIDUE, costUt: 7, status: "unknown" })).toContain(
-			`<p class="ut-lg-sumnote">${tiers} The tiers add up to 4 UT; the record holds 7 UT; the recorded cost is 3 UT higher. Shown as recorded.</p>`,
-		);
+		// The first sentence is about the tiers, not this record, so it keeps "charge"; the second speaks of the
+		// recorded cost. The same for a settled call and for one that is not.
+		for (const status of ["settled", "unknown"] as const) {
+			expect(table({ ...RESIDUE, costUt: 7, status })).toContain(
+				`<p class="ut-lg-sumnote">${tiers} The tiers add up to 4 UT; the record holds 7 UT; the recorded cost is 3 UT higher. Shown as recorded.</p>`,
+			);
+		}
 	});
 
 	it("a missing rate reads 'not recorded' in its own cell, never 0", () => {
@@ -470,8 +470,8 @@ describe("the record panel", () => {
 	it("shows the arithmetic in every variant, after the Usage line", () => {
 		for (const over of [{}, { docked: false }, { inWindow: true }]) {
 			const html = panel(row(), over);
-			expect(html).toContain("How this charge adds up");
-			expect(html.indexOf("How this charge adds up")).toBeGreaterThan(html.indexOf("Usage"));
+			expect(html).toContain("How this cost adds up");
+			expect(html.indexOf("How this cost adds up")).toBeGreaterThan(html.indexOf("Usage"));
 		}
 	});
 
