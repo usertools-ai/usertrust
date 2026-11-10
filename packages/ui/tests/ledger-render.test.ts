@@ -685,8 +685,8 @@ describe("the dense list", () => {
 	it("draws only the rows near the screen, each at its place among all the records", () => {
 		const html = list(many(400));
 		const drawn = count(html, 'role="option"');
-		expect(drawn).toBeGreaterThan(0);
-		expect(drawn).toBeLessThanOrEqual(60);
+		// Until the list is measured it draws for a screen of twenty rows, and six more past its edge.
+		expect(drawn).toBe(20 + 6);
 		expect(count(html, 'aria-setsize="400"')).toBe(drawn);
 		expect(html).toContain('aria-posinset="1"');
 		expect(html).not.toContain(`aria-posinset="${drawn + 1}"`);
@@ -704,6 +704,28 @@ describe("the dense list", () => {
 		expect(count(vast, 'role="option"')).toBe(drawn);
 		expect(count(vast, 'aria-setsize="100000"')).toBe(drawn);
 		expect(vast).toContain('<div class="ut-lg-rows" style="height:3000000px">');
+	});
+
+	it("filters that leave nothing say how many records they hide", () => {
+		const none = list([], { total: 7 });
+		expect(none).not.toContain('role="option"');
+		expect(none).toContain("<b>Nothing matches these filters</b>7 records are hidden");
+		expect(list([], { total: 1 })).toContain(
+			"<b>Nothing matches these filters</b>1 record is hidden",
+		);
+		expect(list([], { total: 1_234 })).toContain("1,234 records are hidden");
+		// The count is of the records hidden. The message is drawn only when no record is left, so this is read
+		// in the source: the two cannot differ on screen.
+		expect(src).toContain("hidden={props.total - count}");
+	});
+
+	it("a record that has just arrived carries the mark that lights it, and no other row does", () => {
+		const r = row();
+		expect(one(r, { fresh: true })).toMatch(/^<div[^>]*class="ut-row ut-lg-row fresh"/);
+		expect(one(r, { fresh: true, selected: true, active: true })).toMatch(
+			/^<div[^>]*class="ut-row ut-lg-row sel act fresh"/,
+		);
+		expect(one(r)).not.toContain("fresh");
 	});
 
 	it("a short list draws every record", () => {
@@ -823,6 +845,13 @@ describe("the dense list", () => {
 		expect(dash(row({ model: "some-other-model" }))).toBe("background:#8A877F");
 		const { model: _model, ...bare } = row();
 		expect(dash(bare)).toBe("background:#8A877F");
+		// The cell's title: the model with its provider, the model alone for a provider it cannot name, and
+		// "no model" for a record that has none.
+		const title = (r: LedgerRow): string =>
+			/<span class="ut-lg-m" title="([^"]*)"/.exec(one(r))?.[1] ?? "";
+		expect(title(row({ model: "claude-sonnet-4-6" }))).toBe("claude-sonnet-4-6, Anthropic");
+		expect(title(row({ model: "some-other-model" }))).toBe("some-other-model");
+		expect(title(bare)).toBe("no model");
 		// With no model the cell shows the long dash, not the kind and not an empty cell.
 		expect(one(bare)).toContain(`<span class="ut-lg-name">${DASH}</span>`);
 		expect(one(row({ model: "gpt-5" }))).toContain('<span class="ut-lg-name">gpt-5</span>');
@@ -992,6 +1021,7 @@ describe("the dense list", () => {
 		expect(rowSrc).not.toMatch(/onPointer|onClick|onMouse|hover/i);
 		const click = between("const onClick = (", "const hovered = useRef");
 		expect(click).toContain(`closest('[role="option"]')?.id`);
+		expect(click).toContain("setActiveHash(target.hash);");
 		expect(click).toContain("props.onOpen(target, false);");
 	});
 });
