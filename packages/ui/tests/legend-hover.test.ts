@@ -218,6 +218,18 @@ describe("the legend's hover owner", () => {
 		expect(t.sent.at(-1)).toEqual({ dim: "lane", key: "s", from: "share" });
 	});
 
+	it("brings back a ring hover at the owner's own level when it was replaced by the legend's own row and let go", () => {
+		const t = deferredIo();
+		const owner = createHoverOwner(t.io, "model");
+		const ring: HoverCategory = { dim: "model", key: "r", from: "share" };
+		t.other(ring);
+		owner.focus("a");
+		owner.enter("b");
+		owner.leave();
+		owner.blur();
+		expect(t.sent.at(-1)).toEqual(ring);
+	});
+
 	it("does not hand back a hover the legend itself left on the bus", () => {
 		const t = deferredIo();
 		const owner = createHoverOwner(t.io, "lane");

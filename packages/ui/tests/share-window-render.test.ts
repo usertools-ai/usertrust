@@ -462,6 +462,8 @@ describe("the window while the point's records are on their way", () => {
 			pastNote: "Loading that day",
 		} as typeof d;
 		const html = await win({ data: waiting });
+		expect(tagsOf(html, "ut-sh")).toHaveLength(1);
+		expect(attr(tagsOf(html, "ut-sh")[0] ?? "", "data-filled")).toBe("false");
 		expect(tagsOf(html, "ut-seg")).toHaveLength(1);
 		expect(innerOf(html, /<div class="ut-empty"[^>]*><b>/)).toBe("Loading that day");
 		expect(tagsOf(html, "ut-sh-ring")).toHaveLength(0);
@@ -469,7 +471,7 @@ describe("the window while the point's records are on their way", () => {
 		expect(tagsOf(html, "ut-sh-slice")).toHaveLength(0);
 	});
 
-	it("keeps the lane level when picking a lane would widen the rows to more than one model", async () => {
+	it("stays at models when picking a lane would widen the lane level to more than one model", async () => {
 		// Lane a has one model; lane b has two. With a picked, the lane level would lift the pick and show b's other
 		// model too, so the window stays at models, scoped to the one provider.
 		const rows = [

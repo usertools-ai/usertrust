@@ -42,7 +42,6 @@ import {
 	roleSources,
 	scopeOf,
 } from "../../../shared/level.js";
-import { pastHeldNote } from "../../../shared/list-view.js";
 import type { LedgerRow, RowStatus } from "../../../shared/rows.js";
 import { bucketCount } from "../../../shared/spend-series.js";
 import { statusWord } from "../../../shared/status-word.js";
@@ -93,15 +92,14 @@ function useShareData(): ShareData {
 		if (dim === "provider") {
 			const rowsNoModel = applyFilters(rows, withoutDimension(filters, "model"));
 			level = effectiveLevel(dim, rowsNoModel, chartWindow).dim;
-			let scoped = rowsNoModel;
 			// Lanes lift the lane filter, which widens the rows: the lane level stands only if the widened rows still
 			// hold the one provider and the one model. Otherwise it stays at models, with the lane filter in force.
 			if (level === "lane") {
 				const widened = applyFilters(rows, withoutDimension(filters, "lane"));
-				if (effectiveLevel(dim, widened, chartWindow).dim === "lane") scoped = widened;
-				else level = "model";
+				if (effectiveLevel(dim, widened, chartWindow).dim !== "lane") level = "model";
 			}
-			if (level !== "provider") scope = scopeOf(dim, level, scoped, chartWindow);
+			// Where the lane level stands the narrow and the widened rows hold the same one provider and one model.
+			if (level !== "provider") scope = scopeOf(dim, level, rowsNoModel, chartWindow);
 		}
 		const rowsExcl = applyFilters(rows, withoutDimension(filters, level));
 		return {
@@ -208,7 +206,7 @@ function ShareBody({ data, filled }: { data: ShareData; filled: boolean }): Reac
 					<DimSwitch />
 				</div>
 				<div className="ut-empty">
-					<b>{pastNote ?? pastHeldNote(false)}</b>
+					<b>{pastNote}</b>
 				</div>
 			</div>
 		);
