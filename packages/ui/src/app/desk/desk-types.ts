@@ -28,6 +28,8 @@ export interface DeskData {
 	liveIds: Set<string>;
 	/** The position shown in the header (the vault as recorded there), or null for live. */
 	at: AtPayload | null;
+	/** What the header shows: the previewed position, else the committed `at` (A6: a hover moves only the header). */
+	headAt: AtPayload | null;
 	/** The last position of the vault, or -1 before a summary lands. */
 	head: number;
 	/** Whether what the windows draw lags the header (a deferred render still landing, or `pastHeld`). */
@@ -47,8 +49,15 @@ export interface DeskData {
 	level: Dimension;
 	/** The breakdown for `level`, computed on first read. */
 	breakdown: () => Breakdown;
-	/** The colours for `level`, fixed for the session. */
+	/** The colours for `level`, fixed for the session: the same map `colorsFor(level)` gives. */
 	colors: () => ColorMap;
+	/**
+	 * The colours of any dimension, fixed for the session, built on first read. A tint can come from a dimension that
+	 * is not the current level (a provider filter while the split is by lane), so it needs that dimension's map.
+	 */
+	colorsFor(dim: Dimension): ColorMap;
+	/** The active filters as `"<field>:<value>"` tokens in the order they were added, the newest last (the chips' order). */
+	filterOrder: readonly string[];
 }
 
 /** What the reader chose: filters, range, dimension, fill, the open record and the position. */
@@ -65,6 +74,11 @@ export interface DeskView {
 	setOpenHash(h: string | null): void;
 	at: number | null;
 	setAt(p: number | null): void;
+	/**
+	 * Show the header at a position without touching the address (a hover on the chart), or null to return it to the
+	 * address's position. The list does not move, and Back has nothing to undo.
+	 */
+	preview(p: number | null): void;
 }
 
 /** What only the shell reads: the status under the header, the count, the address note and the Esc layers. */

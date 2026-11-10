@@ -23,6 +23,7 @@ import {
 import { createCutter, pastRows } from "../../shared/asof.js";
 import { AT_TIMEOUT_MS, pointLoading } from "../../shared/at-follow.js";
 import type { Dimension } from "../../shared/breakdown.js";
+import type { ColorMap } from "../../shared/colors.js";
 import {
 	deskWindow,
 	orderFilters,
@@ -31,6 +32,7 @@ import {
 } from "../../shared/desk-filters.js";
 import { COMPACT_QUERY, isDimmed, type WindowId } from "../../shared/desk-layout.js";
 import { EMPTY_FILTERS, isFiltering } from "../../shared/filters.js";
+import { headerView } from "../../shared/header-view.js";
 import { effectiveLevel } from "../../shared/level.js";
 import {
 	type HoldAnnouncement,
@@ -54,6 +56,7 @@ import { loadTotals } from "./load-totals.js";
 import { useMedia } from "./use-box-size.js";
 import { computeBreakdown, memoOnce } from "./use-breakdown.js";
 import { ColorBook, type TotalsOutcome } from "./use-colors.js";
+import { useDeskMemory } from "./use-desk-memory.js";
 import { useHoverCategory } from "./use-hover.js";
 
 export type { DeskData, DeskView, ShellBinding } from "./desk-types.js";
@@ -149,15 +152,19 @@ export function useOpenRecord(): {
 	return useMemo(() => ({ openHash, setOpenHash, open }), [openHash, setOpenHash, open]);
 }
 
-/** The position in the vault's history: the address's `#at`, and the Spend chart's pin. `shown` is the header's answer. */
+/**
+ * The position in the vault's history: the address's `#at`, and the Spend chart's pin. `shown` is the header's answer.
+ * `preview` moves only the header (a hover on the chart), never the address.
+ */
 export function usePosition(): {
 	at: number | null;
 	setAt(p: number | null): void;
+	preview(p: number | null): void;
 	shown: DeskData["at"];
 } {
-	const { at, setAt } = useDeskView();
-	const { at: shown } = useDeskData();
-	return useMemo(() => ({ at, setAt, shown }), [at, setAt, shown]);
+	const { at, setAt, preview } = useDeskView();
+	const { headAt: shown } = useDeskData();
+	return useMemo(() => ({ at, setAt, preview, shown }), [at, setAt, preview, shown]);
 }
 
 /** The breakdown at the current level. Computed on the first read after a change, never for a tree that does not ask. */
@@ -189,32 +196,64 @@ function sameList(a: readonly string[], b: readonly string[]): boolean {
 }
 
 /**
+ * The colours of any dimension, read from the session's book: each map is built on its first read (observe the rows,
+ * then `mapFor`) and the same instance comes back for the life of the lookup. The book already keeps one map per
+ * dimension once the vault has loaded; the lookup keeps one before that too, so `colors()` and `colorsFor(level)`
+ * are the same object even while the book still hands out throwaway maps.
+ */
+export function colorLookup(
+	book: ColorBook,
+	rows: readonly LedgerRow[],
+	loaded: boolean,
+	totals: TotalsOutcome,
+): (dim: Dimension) => ColorMap {
+	const read = new Map<Dimension, ColorMap>();
+	return (dim) => {
+		const have = read.get(dim);
+		if (have !== undefined) return have;
+		book.observe(dim, rows);
+		const map = book.mapFor(dim, rows, loaded, totals);
+		read.set(dim, map);
+		return map;
+	};
+}
+
+/**
  * Everything the page's root computed, moved here: the ledger, the address state, the past position and the list the
  * windows draw, published in the three contexts.
  */
 export function DeskProvider({ children }: { children: ReactNode }): React.JSX.Element {
 	const { rows, summary, phase, live, liveIds, resyncs, rowsVault } = useLedger();
-	// The view, filters and open record live in the page address (`location.hash`): a reload keeps them, a link shares them.
-	const {
-		filters,
-		setFilters,
-		openHash,
-		setOpenHash,
-		at,
-		setAt,
-		range,
-		setRange,
-		dim,
-		setDim,
-		fill,
-		setFill,
-		navigation,
-		addressNote,
-	} = useUrlState();
+	// The view, filters, open record and position live in the page address (`location.hash`): a reload keeps them, a
+	// link shares them.
+	const { filters, setFilters, openHash, setOpenHash, at, setAt, navigation, addressNote } =
+		useUrlState();
+	// The layout (the window that fills the desk, the spend range, the split) lives in memory: a link does not carry it
+	// and Back does not undo it.
+	const { fill, setFill, range, setRange, dim, setDim } = useDeskMemory();
 	// The past position shown (`#at=N`), from /api/at. Until its first answer lands, or when it fails with nothing loaded,
 	// the screen stays live and the status under the header says so: a past view is only ever drawn from its own answer.
-	const { view: atView, preview } = useAt(at, summary, live, rows, resyncs, rowsVault, navigation);
+	const { view: atView } = useAt(at, summary, live, rows, resyncs, rowsVault, navigation);
 	const shownAt = atView.at;
+	// A hover on the Spend chart previews the HEADER only (A6): its own follower asks for the previewed position, and
+	// the list, the rows and every window keep reading `atView`, the committed position. A navigation drops a preview.
+	const [previewPos, setPreviewPos] = useState<number | null>(null);
+	const preview = setPreviewPos;
+	const { view: previewView } = useAt(
+		previewPos,
+		summary,
+		live,
+		rows,
+		resyncs,
+		rowsVault,
+		navigation,
+	);
+	const header = useMemo(
+		() => headerView(previewPos, atView, previewView),
+		[previewPos, atView, previewView],
+	);
+	// biome-ignore lint/correctness/useExhaustiveDependencies: `navigation` is a trigger, not a value the effect reads
+	useEffect(() => setPreviewPos(null), [navigation]);
 	// The past view reads each row's status against the rows the page held when the answer's request was SENT
 	// (`atView.rows`), not the rows held when the answer renders: a live `status` frame for a record after the
 	// position, one the server had not seen when it answered, can arrive in between, and `statusAt` cannot correct it
@@ -287,14 +326,20 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 			cancelled = true;
 		};
 	}, []);
-	const colors = useMemo(
-		() =>
-			memoOnce(() => {
-				book.observe(level, rows);
-				return book.mapFor(level, rows, phase === "loaded", totals);
-			}),
-		[book, level, rows, phase, totals],
+	// Any dimension's colours, each built on its first read; the level's are the same map, so a window that reads
+	// `colors()` and one that reads `colorsFor(level)` paint a category alike.
+	const colorsFor = useMemo(
+		() => colorLookup(book, rows, phase === "loaded", totals),
+		[book, rows, phase, totals],
 	);
+	const colors = useMemo(() => () => colorsFor(level), [colorsFor, level]);
+
+	// The filters in the order they were added, so Escape can take the newest off first. Kept with the "set state while
+	// rendering when it changed" pattern: the order is derived from the filters and what it was.
+	const [order, setOrder] = useState<string[]>(() => orderFilters([], filters));
+	const nextOrder = orderFilters(order, filters);
+	if (!sameList(order, nextOrder)) setOrder(nextOrder);
+	const newest = nextOrder.length === 0 ? null : (nextOrder[nextOrder.length - 1] as string);
 
 	const data = useMemo<DeskData>(
 		() => ({
@@ -304,6 +349,7 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 			live,
 			liveIds,
 			at: shownAt,
+			headAt: header.at,
 			head,
 			held,
 			holdNote,
@@ -314,6 +360,8 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 			level,
 			breakdown,
 			colors,
+			colorsFor,
+			filterOrder: order,
 		}),
 		[
 			rows,
@@ -322,6 +370,7 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 			live,
 			liveIds,
 			shownAt,
+			header.at,
 			head,
 			held,
 			holdNote,
@@ -332,6 +381,8 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 			level,
 			breakdown,
 			colors,
+			colorsFor,
+			order,
 		],
 	);
 	const view = useMemo<DeskView>(
@@ -348,6 +399,7 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 			setOpenHash,
 			at,
 			setAt,
+			preview,
 		}),
 		[
 			filters,
@@ -365,21 +417,14 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 		],
 	);
 
-	// The filters in the order they were added, so Escape can take the newest off first. Kept with the "set state while
-	// rendering when it changed" pattern: the order is derived from the filters and what it was.
-	const [order, setOrder] = useState<string[]>(() => orderFilters([], filters));
-	const nextOrder = orderFilters(order, filters);
-	if (!sameList(order, nextOrder)) setOrder(nextOrder);
-	const newest = nextOrder.length === 0 ? null : (nextOrder[nextOrder.length - 1] as string);
-
 	const open = useMemo(
 		() => (openHash === null ? null : (shownRows.find((r) => r.hash === openHash) ?? null)),
 		[shownRows, openHash],
 	);
 	const goLive = useCallback(() => {
-		preview(null);
+		setPreviewPos(null);
 		setAt(null);
-	}, [preview, setAt]);
+	}, [setAt]);
 	// The record layer counts only while its panel is on screen. While another window fills the desk the Ledger is
 	// hidden (`isDimmed`): Escape restores the fill first and the record's panel then opens, rather than closing a
 	// record no one can see and leaving the fill.
@@ -412,9 +457,9 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 	const shell = useMemo<ShellBinding>(
 		() => ({
 			status: {
-				error: atView.error,
-				loading: pointLoading(atView),
-				reloaded: atView.reloaded,
+				error: header.error,
+				loading: pointLoading(header),
+				reloaded: header.reloaded,
 				announce: announce.text,
 			},
 			goLive,
@@ -425,7 +470,7 @@ export function DeskProvider({ children }: { children: ReactNode }): React.JSX.E
 			peel,
 			act,
 		}),
-		[atView, announce.text, goLive, drawn.filters, newestOf, count, addressNote, peel, act],
+		[header, announce.text, goLive, drawn.filters, newestOf, count, addressNote, peel, act],
 	);
 
 	return (

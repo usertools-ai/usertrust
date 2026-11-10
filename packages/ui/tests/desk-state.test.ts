@@ -10,17 +10,20 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { DeskData, DeskView } from "../src/app/desk/desk-types.js";
 import { computeBreakdown, memoOnce } from "../src/app/desk/use-breakdown.js";
-import { ColorBook } from "../src/app/desk/use-colors.js";
+import { ColorBook, type TotalsOutcome } from "../src/app/desk/use-colors.js";
+import { useDeskMemory } from "../src/app/desk/use-desk-memory.js";
 import { breakdown, type Dimension } from "../src/shared/breakdown.js";
-import { SERIES } from "../src/shared/colors.js";
-import { withoutDimension } from "../src/shared/desk-filters.js";
+import { type ColorMap, MUTED, PROVIDER_COLOR, SERIES } from "../src/shared/colors.js";
+import { orderFilters, withoutDimension } from "../src/shared/desk-filters.js";
 import type { WindowId } from "../src/shared/desk-layout.js";
 import { applyFilters, EMPTY_FILTERS } from "../src/shared/filters.js";
 import { listView } from "../src/shared/list-view.js";
 import type { LedgerRow } from "../src/shared/rows.js";
+import { DEFAULT_RANGE } from "../src/shared/spend-series.js";
 import { defaultDeskData, withDesk } from "./helpers/desk.js";
 
 const T0 = Date.parse("2026-11-08T10:00:00.000Z");
@@ -171,7 +174,12 @@ interface StateModule {
 		setOpenHash(h: string | null): void;
 		open: LedgerRow | null;
 	};
-	usePosition(): { at: number | null; setAt(p: number | null): void; shown: DeskData["at"] };
+	usePosition(): {
+		at: number | null;
+		setAt(p: number | null): void;
+		preview(p: number | null): void;
+		shown: DeskData["at"];
+	};
 	useBreakdown(): ReturnType<DeskData["breakdown"]>;
 	useColors(): ReturnType<DeskData["colors"]>;
 	useSelection(): { dim: Dimension; keys: ReadonlySet<string> };
@@ -183,6 +191,12 @@ interface StateModule {
 	useShellBinding: unknown;
 	DeskShellContext: unknown;
 	DeskProvider: unknown;
+	colorLookup(
+		book: ColorBook,
+		rows: readonly LedgerRow[],
+		loaded: boolean,
+		totals: TotalsOutcome,
+	): (dim: Dimension) => ColorMap;
 }
 let state: StateModule;
 beforeAll(async () => {
@@ -290,9 +304,26 @@ describe("the desk's hooks", () => {
 			pos: 4,
 			ts: new Date(T0).toISOString(),
 		} as unknown as NonNullable<DeskData["at"]>;
-		const p = await probe(() => state.usePosition(), { view: { at: 4 }, data: { at } });
+		const p = await probe(() => state.usePosition(), { view: { at: 4 }, data: { headAt: at } });
 		expect(p.at).toBe(4);
 		expect(p.shown).toBe(at);
+	});
+
+	it("usePosition.preview is the view's preview, and calling it leaves the address's position as it is", async () => {
+		const wanted: Array<number | null> = [];
+		const set: Array<number | null> = [];
+		const p = await probe(() => state.usePosition(), {
+			view: {
+				at: 4,
+				setAt: (x) => void set.push(x),
+				preview: (x) => void wanted.push(x),
+			},
+		});
+		p.preview(9);
+		p.preview(null);
+		expect(wanted).toEqual([9, null]);
+		expect(set).toEqual([]);
+		expect(p.at).toBe(4);
 	});
 
 	it("useBreakdown and useColors return the thunks' values, and a tree that never reads them never calls them", async () => {
@@ -384,5 +415,147 @@ describe("the provider keeps what the page had", () => {
 	it("takes the window from the drawn answer, never the newer shown position", () => {
 		expect(src).toContain("deskWindow(range, list.at, nowMs)");
 		expect(src).not.toContain("deskWindow(range, shownAt");
+	});
+
+	it("red-first (the address held the layout): takes the fill, the range and the split from useDeskMemory, none from useUrlState", () => {
+		const flat = (t: string): string => t.replace(/\s+/g, "");
+		const fromAddress = /const \{([^}]*)\} =\s*useUrlState\(\);/.exec(src)?.[1] ?? "";
+		expect(fromAddress).toContain("filters");
+		expect(fromAddress).toContain("navigation");
+		for (const name of ["range", "setRange", "dim", "setDim", "fill", "setFill"])
+			expect(fromAddress, name).not.toMatch(new RegExp(`\\b${name}\\b`));
+		expect(flat(src)).toContain(
+			flat("const { fill, setFill, range, setRange, dim, setDim } = useDeskMemory();"),
+		);
+		expect(src).toContain('import { useDeskMemory } from "./use-desk-memory.js";');
+	});
+
+	it("red-first (the header preview was not on the view): the view carries the provider's own preview setter, and usePosition returns it", () => {
+		expect(src).toContain("const { view: atView } = useAt(");
+		// A6: the preview is its own state, read by the header only (`headerView`), never the committed view.
+		expect(src).toContain("const preview = setPreviewPos;");
+		// D7: the preview follower asks for the PREVIEWED position, not the address's.
+		expect(src).toMatch(/const \{ view: previewView \} = useAt\(\s*previewPos,/);
+		// D5: a navigation drops a preview, by an effect that depends on `navigation`.
+		expect(src).toContain("useEffect(() => setPreviewPos(null), [navigation]);");
+		// D6: going live drops a preview too.
+		const goLive =
+			/const goLive = useCallback\(\(\) => \{([\s\S]*?)\}, \[setAt\]\);/.exec(src)?.[1] ?? "";
+		expect(goLive.replace(/\s+/g, "")).toBe("setPreviewPos(null);setAt(null);");
+		const view = /const view = useMemo<DeskView>\(([\s\S]*?)\n\t\);/.exec(src)?.[1] ?? "";
+		expect(view).toMatch(/\bpreview,/);
+		// A function that sets the preview state, not a wrapper that could also move the address.
+		expect(view).not.toMatch(/preview:/);
+		const position = /export function usePosition\(\)[\s\S]*?\n\}\n/.exec(src)?.[0] ?? "";
+		expect(position).toContain("const { at, setAt, preview } = useDeskView();");
+		expect(position).toMatch(/\(\) => \(\{ at, setAt, preview, shown \}\)/);
+	});
+
+	it("red-first (no colours for another dimension): colours for any dimension from one lookup, and the level's are that lookup's", () => {
+		const flat = (t: string): string => t.replace(/\s+/g, "").replace(/,\)/g, ")");
+		expect(flat(src)).toContain(flat('colorLookup(book, rows, phase === "loaded", totals)'));
+		expect(flat(src)).toContain(flat("() => () => colorsFor(level)"));
+		const data = /const data = useMemo<DeskData>\(([\s\S]*?)\n\t\);/.exec(src)?.[1] ?? "";
+		expect(data).toMatch(/\bcolorsFor,/);
+		expect(data).toMatch(/\bcolors,/);
+	});
+
+	it("red-first (the filter order was the shell's alone): the data carries the order the filters were added in", () => {
+		const data = /const data = useMemo<DeskData>\(([\s\S]*?)\n\t\);/.exec(src)?.[1] ?? "";
+		// The shell's own state, the one Escape peels from: not a second order derived elsewhere.
+		expect(data).toContain("filterOrder: order,");
+		expect(src).toContain(
+			"const [order, setOrder] = useState<string[]>(() => orderFilters([], filters));",
+		);
+		// What that state keeps: a filter added later goes last, whatever the chips' own order.
+		const a = orderFilters([], { ...EMPTY_FILTERS, actors: ["a"] });
+		const ab = orderFilters(a, { ...EMPTY_FILTERS, actors: ["a"], kinds: ["llm_call"] });
+		expect(ab).toEqual(["actors:a", "kinds:llm_call"]);
+		expect(orderFilters([], { ...EMPTY_FILTERS, actors: ["a"], kinds: ["llm_call"] })).toEqual([
+			"kinds:llm_call",
+			"actors:a",
+		]);
+	});
+});
+
+describe("colorLookup: the colours of any dimension", () => {
+	const rows = [
+		row({ pos: 0, actor: "a", model: "m1", costUt: 9 }),
+		row({ pos: 1, actor: "b", model: "m2", costUt: 1 }),
+	];
+
+	it("gives the same instance for a dimension every time, so colorsFor(level) is colors()", () => {
+		const loaded = state.colorLookup(new ColorBook(), rows, true, null);
+		expect(loaded("lane")).toBe(loaded("lane"));
+		// Before the vault has loaded the book hands out a throwaway map each call: the lookup still keeps one.
+		const early = state.colorLookup(new ColorBook(), rows, false, "pending");
+		expect(early("lane")).toBe(early("lane"));
+	});
+
+	it("a provider's colour is its fixed one", () => {
+		const lookup = state.colorLookup(new ColorBook(), rows, true, null);
+		expect(lookup("provider").of("xAI")).toBe(PROVIDER_COLOR.xAI);
+		expect(lookup("provider").dim).toBe("provider");
+	});
+
+	it("is the book's map, fixed for the session, and gives a key first seen later the next slot", () => {
+		const book = new ColorBook();
+		const first = state.colorLookup(book, rows, true, null);
+		const lane = first("lane");
+		expect(lane).toBe(book.mapFor("lane", rows, true, null));
+		expect(first("model").of("m2")).toBe(SERIES[1]);
+		const more = [...rows, row({ pos: 2, actor: "c", costUt: 1 })];
+		const second = state.colorLookup(book, more, true, null);
+		expect(second("lane")).toBe(lane);
+		expect(lane.of("c")).toBe(SERIES[2]);
+		expect(lane.of("a")).toBe(SERIES[0]);
+	});
+
+	it("builds nothing for a dimension nobody asks for", () => {
+		const book = new ColorBook();
+		const spy = vi.spyOn(book, "mapFor");
+		const lookup = state.colorLookup(book, rows, true, null);
+		expect(spy).not.toHaveBeenCalled();
+		lookup("kind");
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(spy.mock.calls[0]?.[0]).toBe("kind");
+		expect(lookup("kind").of("never")).toBe(MUTED);
+	});
+
+	it("red-first (D3, D4): passes the rows, the loaded flag and the totals on to the book as they are", () => {
+		const book = new ColorBook();
+		const spy = vi.spyOn(book, "mapFor");
+		const pending = state.colorLookup(book, rows, false, "pending");
+		pending("lane");
+		expect(spy.mock.calls[0]?.slice(1)).toEqual([rows, false, "pending"]);
+		const totals = null;
+		state.colorLookup(book, rows, true, totals)("model");
+		expect(spy.mock.calls[1]?.slice(1)).toEqual([rows, true, null]);
+	});
+});
+
+describe("useDeskMemory: the reader's layout, kept in memory", () => {
+	it("starts with nothing filled, the default range and the Lane split", () => {
+		let got: ReturnType<typeof useDeskMemory> | null = null;
+		renderToStaticMarkup(
+			createElement(function Probe() {
+				got = useDeskMemory();
+				return null;
+			}),
+		);
+		if (got === null) throw new Error("the probe did not render");
+		const m = got as ReturnType<typeof useDeskMemory>;
+		expect(m.fill).toBeNull();
+		expect(m.range).toBe(DEFAULT_RANGE);
+		expect(m.dim).toBe("lane");
+		for (const fn of [m.setFill, m.setRange, m.setDim]) expect(typeof fn).toBe("function");
+	});
+
+	it("reads nothing from the address", () => {
+		const src = readFileSync(
+			join(import.meta.dirname, "../src/app/desk/use-desk-memory.ts"),
+			"utf8",
+		);
+		expect(src).not.toMatch(/location|history|useUrlState|url-state/);
 	});
 });
