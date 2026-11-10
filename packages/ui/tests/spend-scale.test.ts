@@ -147,6 +147,14 @@ describe("niceTicks", () => {
 	it("returns clean decimals, not float residue", () => {
 		expect(niceTicks(0.5)).toEqual([0.1, 0.2, 0.3, 0.4]);
 	});
+	it("ends on a top too small to step, and on a count that makes the step vanish", () => {
+		expect(niceTicks(Number.MIN_VALUE)).toEqual([]);
+		// raw = top / count is above 0 here but its magnitude underflows, so the step is 0: the guard on the step ends it.
+		expect(niceTicks(Number.MIN_VALUE, 1)).toEqual([]);
+		expect(niceTicks(4 * Number.MIN_VALUE)).toEqual([]);
+		expect(niceTicks(1, Number.POSITIVE_INFINITY)).toEqual([]);
+		expect(niceTicks(Number.MAX_VALUE, 1)).not.toContain(0);
+	});
 	it("gives nothing for a useless top", () => {
 		expect(niceTicks(0)).toEqual([]);
 		expect(niceTicks(Number.NaN)).toEqual([]);

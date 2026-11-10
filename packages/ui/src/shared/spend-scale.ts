@@ -105,13 +105,19 @@ export function geometry(a: {
 	};
 }
 
-/** Grid values at 1/2/5 steps: ascending, above 0 and below `top`, about `count` of them. */
+/**
+ * Grid values at 1/2/5 steps: ascending, above 0 and below `top`, about `count` of them. The ticks are in the unit of
+ * `top`. With a knee, `Geometry.top` is a drawn (squeezed) value, so ticks cut from it are drawn values too: a caller
+ * that labels them with rates must unsqueeze each one first. Gives nothing when `top / count` is too small to step.
+ */
 export function niceTicks(top: number, count = 4): number[] {
 	if (!(top > 0) || !Number.isFinite(top) || !(count > 0)) return [];
 	const raw = top / count;
+	if (!(raw > 0) || !Number.isFinite(raw)) return [];
 	const mag = 10 ** Math.floor(Math.log10(raw));
 	const norm = raw / mag;
 	const step = (norm < 1.5 ? 1 : norm < 3.5 ? 2 : norm < 7.5 ? 5 : 10) * mag;
+	if (!(step > 0) || !Number.isFinite(step)) return [];
 	const out: number[] = [];
 	for (let m = 1; ; m++) {
 		const v = Number((m * step).toPrecision(12));
