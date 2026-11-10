@@ -297,6 +297,26 @@ describe("breakRecord", () => {
 		expect(inWindow(s, empty).i1).toBeLessThan(inWindow(s, empty).i0);
 		expect(breakRecord(s, 2, empty)).toBe(-1);
 	});
+	it("a break whose record is at or past the window's end is none: the window has nothing after the break", () => {
+		const cut = { startMs: T0, endMs: s.t[2] as number };
+		expect(inWindow(s, cut).i1).toBe(1);
+		expect(breakRecord(s, 2, cut)).toBe(-1);
+		// The record exactly at endMs is outside the half-open window.
+		expect(breakRecord(s, 4, cut)).toBe(-1);
+		expect(breakRecord(s, 1, cut)).toBe(1);
+	});
+	it("a window whose records all precede the break gives none", () => {
+		const early = { startMs: T0, endMs: (s.t[1] as number) + 1 };
+		expect(inWindow(s, early)).toEqual({ i0: 0, i1: 1 });
+		expect(breakRecord(s, 5, early)).toBe(-1);
+		expect(breakRecord(s, 7, early)).toBe(-1);
+	});
+	it("an empty window before the break gives none", () => {
+		const before = { startMs: T0 - 100 * MIN, endMs: T0 - 50 * MIN };
+		expect(inWindow(s, before).i1).toBeLessThan(inWindow(s, before).i0);
+		expect(breakRecord(s, 2, before)).toBe(-1);
+		expect(breakRecord(s, 0, before)).toBe(-1);
+	});
 	it("a break whose record is exactly at the window's start is that record", () => {
 		const i = breakRecord(s, 2, all);
 		const edge = { startMs: s.t[i] as number, endMs: T0 + 60 * MIN };
