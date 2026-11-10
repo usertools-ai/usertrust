@@ -58,6 +58,34 @@ export function chunkReveal(s: ChunkState, index: number, total: number): ChunkS
 	return limit > s.limit ? { key: s.key, limit } : s;
 }
 
+export interface PinAction {
+	/** The hash of the pinned record already brought into view, or null: what the caller keeps for the next call. */
+	done: string | null;
+	/** The row to bring into view now (reveal its chunk, then scroll to it), or null when there is nothing to do. */
+	target: { hash: string; index: number } | null;
+}
+
+/**
+ * Whether the list should bring the pinned record into view, decided once per pin. `done` is the hash this
+ * returned last time, `pinned` the pinned record's hash (null: nothing is pinned), `order` the rows as sorted and
+ * filtered.
+ * - Nothing pinned: nothing is handled any more, so pinning the same record again brings it into view again.
+ * - The pin already handled: nothing to do. The reader may have scrolled away since, and is left where they are.
+ * - The pinned record is not in the list (not loaded yet, or filtered out): it waits; `done` is kept.
+ * - Otherwise the record is the target, at its index in `order`, and is now handled.
+ */
+export function pinAction(
+	done: string | null,
+	pinned: string | null,
+	order: readonly { hash: string }[],
+): PinAction {
+	if (pinned === null) return { done: null, target: null };
+	if (pinned === done) return { done, target: null };
+	const index = order.findIndex((r) => r.hash === pinned);
+	if (index < 0) return { done, target: null };
+	return { done: pinned, target: { hash: pinned, index } };
+}
+
 /** The rows drawn: the limit, or every row of a shorter list. */
 export function shownCount(s: ChunkState, total: number): number {
 	return Math.min(s.limit, countOf(total));

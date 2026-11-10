@@ -16,6 +16,7 @@ import {
 	chunkSync,
 	DENSE_ROW_PX,
 	pageSizeForRows,
+	pinAction,
 	shownCount,
 } from "../src/shared/list-chunk.js";
 
@@ -138,6 +139,50 @@ describe("shownCount: the rows drawn", () => {
 		expect(shownCount({ key: "k", limit: 300 }, 120)).toBe(120);
 		expect(shownCount({ key: "k", limit: 300 }, 1000)).toBe(300);
 		expect(shownCount({ key: "k", limit: 0 }, 1000)).toBe(0);
+	});
+});
+
+describe("pinAction: the pinned record is brought into view once per pin", () => {
+	const order = [{ hash: "a" }, { hash: "b" }, { hash: "c" }];
+
+	it("no pin: nothing is handled and there is nothing to move to", () => {
+		expect(pinAction(null, null, order)).toEqual({ done: null, target: null });
+		// The pin was let go: what was handled is forgotten.
+		expect(pinAction("b", null, order)).toEqual({ done: null, target: null });
+	});
+
+	it("a new pin in the list: it is the target, at its index, and is now handled", () => {
+		expect(pinAction(null, "c", order)).toEqual({ done: "c", target: { hash: "c", index: 2 } });
+		expect(pinAction("a", "b", order)).toEqual({ done: "b", target: { hash: "b", index: 1 } });
+	});
+
+	it("the pin already handled: nothing changes, so the reader's own scrolling is left alone", () => {
+		expect(pinAction("b", "b", order)).toEqual({ done: "b", target: null });
+		// Even after the row has left the list (a filter): it was handled.
+		expect(pinAction("z", "z", order)).toEqual({ done: "z", target: null });
+	});
+
+	it("a pin whose record is not in the list yet: it waits, and what was handled is kept", () => {
+		expect(pinAction(null, "z", order)).toEqual({ done: null, target: null });
+		expect(pinAction("a", "z", order)).toEqual({ done: "a", target: null });
+		expect(pinAction(null, "a", [])).toEqual({ done: null, target: null });
+		// When the record arrives, the same call targets it.
+		expect(pinAction("a", "z", [...order, { hash: "z" }])).toEqual({
+			done: "z",
+			target: { hash: "z", index: 3 },
+		});
+	});
+
+	it("after the pin is let go, the same pin targets again", () => {
+		const first = pinAction(null, "b", order);
+		expect(first.target).toEqual({ hash: "b", index: 1 });
+		expect(pinAction(first.done, "b", order).target).toBeNull();
+		const cleared = pinAction(first.done, null, order);
+		expect(cleared.done).toBeNull();
+		expect(pinAction(cleared.done, "b", order)).toEqual({
+			done: "b",
+			target: { hash: "b", index: 1 },
+		});
 	});
 });
 
