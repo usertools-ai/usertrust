@@ -511,3 +511,55 @@ describe("share values, legend, percentages and centre", () => {
 		expect(Object.keys(mod)).not.toContain("additive");
 	});
 });
+
+describe("donut paths and angles at the edges a wrong radius or guard would move", () => {
+	it("keeps the body's inner gap at the inner radius, not the outer", () => {
+		expect(ringPath(150, 150, 100, 50, 0, 1, HALF_GAP)).toBe(
+			"M152.2,50.02A100,100 0 0 1 232.94,94.13L190.84,121.16A50,50 0 0 0 152.2,100.05Z",
+		);
+	});
+
+	it("sets the inner large-arc flag from the inner edges, not the outer ones", () => {
+		// The outer edges span more than a half turn here and the inner ones do not.
+		expect(ringPath(150, 150, 100, 50, 0, Math.PI + 0.06, HALF_GAP)).toBe(
+			"M152.2,50.02A100,100 0 1 1 146.2,249.93L149.2,199.99A50,50 0 0 0 152.2,100.05Z",
+		);
+	});
+
+	it("insets a rim by the half gap too", () => {
+		expect(rimPath(150, 150, 100, 0, 1, HALF_GAP)).toBe("M152.2,50.02A100,100 0 0 1 232.94,94.13");
+	});
+
+	it("collapses an arc whose total is not finite", () => {
+		expect(sliceAngles([Number.POSITIVE_INFINITY, 1])).toEqual([
+			{ a0: 0, a1: 0 },
+			{ a0: 0, a1: 0 },
+		]);
+	});
+
+	it("treats a NaN value as no spend and still draws the rest", () => {
+		const [a, b] = sliceAngles([Number.NaN, 5]);
+		expect(a).toEqual({ a0: 0, a1: 0 });
+		expect(b?.a0).toBe(0);
+		expect(b?.a1).toBeCloseTo(Math.PI * 2, 12);
+	});
+
+	it("never writes a NaN into a path for a radius smaller than the half gap or the sliver", () => {
+		const tiny = [
+			ringPath(150, 150, 2, 1.5, 0, 2, HALF_GAP),
+			rimPath(150, 150, 0.9, 0, 2, 0),
+			ringPath(150, 150, 0.9, 0.5, 0, 2, 0),
+			rimPath(150, 150, 2, 0, 2, HALF_GAP),
+		];
+		for (const d of tiny) {
+			expect(d).not.toContain("NaN");
+			expect(d).not.toContain("Infinity");
+		}
+	});
+
+	it("treats a radius under the half gap as a quarter turn of gap, not as no gap", () => {
+		// half / r is 1.1 here; the gap angle is clamped to a quarter turn, so a slice spanning 5 radians still has a body
+		// that starts a quarter turn in (x = cx + r, y = cy), not the sliver centred on the mid-angle.
+		expect(ringPath(150, 150, 2, 1.5, 0, 5, HALF_GAP).startsWith("M152,150A2,2 0 ")).toBe(true);
+	});
+});
