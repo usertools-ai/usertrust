@@ -2,46 +2,83 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * The Spend chart's static marks: grid, area, the three-stroke line, the pin and the live dot, with the three SVG
- * layer slots in between. No state and no effects, so a cursor move never redraws it. Colour is CSS (`--sp-ink`,
- * `--sp-glow`, `--dk-*`), so this file never branches on it.
+ * The Spend chart's static marks: grid, area, the three-stroke line, the marks a reader is pointed to (a chain break,
+ * the open record, the pin) and the live dot, with the three SVG layer slots in between. No state and no effects, so
+ * a cursor move never redraws it. Colour is CSS (`--sp-ink`, `--sp-glow`, `--dk-*`, and the sheet's rules for the
+ * marks), so this file never branches on it.
  */
 
 import { memo, useId } from "react";
 import { formatUsdAxis } from "../../../shared/format.js";
 import {
+	AREA_HIGHLIGHT,
 	AREA_STOPS,
 	areaFadeTop,
 	type DrawnSeries,
 	type Geometry,
 	LINE_RECIPE,
+	niceTicks,
 } from "../../../shared/spend-scale.js";
+import { firstAreaClip } from "./ctx.js";
 import type { ChartCtx, LayerZ, SpendLayer } from "./layers.js";
 
 export interface ChartFrameProps {
 	ctx: ChartCtx;
 	geo: Geometry;
 	series: DrawnSeries;
-	ticks: Array<{ drawn: number; label: number }>;
+	/** The grid; null draws the plain ticks of the scale's top, each labelled with its own value. */
+	ticks: Array<{ drawn: number; label: number }> | null;
 	layers: readonly SpendLayer[];
 	live: boolean;
+	/** A pointer or key cursor is on the plot: the area brightens. It changes on enter and leave, not per move. */
+	hover: boolean;
+	/** The pinned record on the line; null when none is pinned or it is outside the window. */
 	pin: { x: number; y: number } | null;
+	/** The record open in the Ledger's panel, on the line; null when none is open or it is outside the window. */
+	mark: { x: number; y: number } | null;
+	/** The first spend record at or after a chain break, on the line; null for a clean chain. */
+	brk: { x: number; y: number } | null;
+	/** Under a filter: all spend's line, drawn faint on the same scale; null when nothing is filtered. */
+	ghost: string | null;
+	/** The words that say what the faint line is; drawn only with it. */
+	note: string | null;
 	idPrefix: string;
 }
 
 const DOT_R = 4.5;
+const MARK_R = 6.5;
+const BREAK_R = 4.5;
+/** What "chain breaks here" needs to the right of its ring; a break closer to the edge puts it on the left. */
+const BREAK_LABEL_W = 104;
+const BREAK_LABEL_MIN_Y = 12;
+
+/** A stop's opacity, scaled by the highlight; the largest product is 0.1625, so the cap never bites today. */
+function stopOpacity(a: number, k: number): number {
+	return Math.min(1, a * k);
+}
 
 function slot(layers: readonly SpendLayer[], z: LayerZ, ctx: ChartCtx): React.ReactNode {
 	return layers.filter((l) => l.z === z).map((l) => <l.Layer key={l.id} ctx={ctx} />);
 }
 
 export const ChartFrame = memo(function ChartFrame(p: ChartFrameProps): React.JSX.Element {
-	const { ctx, geo, series, ticks, layers, live, pin, idPrefix } = p;
+	const { ctx, geo, series, layers, live, hover, pin, mark, brk, ghost, note, idPrefix } = p;
 	const uid = `${idPrefix}${useId().replace(/[^A-Za-z0-9_-]/g, "")}`;
 	const gradId = `${uid}-area`;
 	const glowId = `${uid}-glow`;
+	const clipId = `${uid}-clip`;
+	const breakId = `${uid}-break`;
 	const drawn = series.d !== "";
 	const fadeTop = areaFadeTop(ctx.drawn, ctx.y, ctx.baseY);
+	const strength = hover ? AREA_HIGHLIGHT : 1;
+	const clip = firstAreaClip(layers, ctx);
+	// The plain grid is cut in the unit it is labelled in (one bucket's spend), so its steps read round: $1, $2, $5.
+	const ticks =
+		p.ticks ??
+		niceTicks(geo.top / ctx.perHour).map((t) => ({
+			drawn: t * ctx.perHour,
+			label: t * ctx.perHour,
+		}));
 	return (
 		<svg
 			className="ut-sp-svg"
@@ -63,7 +100,7 @@ export const ChartFrame = memo(function ChartFrame(p: ChartFrameProps): React.JS
 						<stop
 							key={offset}
 							offset={offset}
-							stopOpacity={opacity}
+							stopOpacity={stopOpacity(opacity, strength)}
 							style={{ stopColor: "var(--sp-ink)" }}
 						/>
 					))}
@@ -71,6 +108,16 @@ export const ChartFrame = memo(function ChartFrame(p: ChartFrameProps): React.JS
 				<filter id={glowId} x="-5%" y="-50%" width="110%" height="200%">
 					<feGaussianBlur stdDeviation={LINE_RECIPE.glowBlur} />
 				</filter>
+				{clip !== null && (
+					<clipPath id={clipId}>
+						<path d={clip} />
+					</clipPath>
+				)}
+				{brk !== null && (
+					<clipPath id={breakId}>
+						<rect x={brk.x} y={0} width={Math.max(0, ctx.w - brk.x)} height={ctx.h} />
+					</clipPath>
+				)}
 			</defs>
 			<g className="ut-sp-grid-g">
 				{ticks.map((t) => {
@@ -92,20 +139,34 @@ export const ChartFrame = memo(function ChartFrame(p: ChartFrameProps): React.JS
 								textAnchor="end"
 								style={{ fill: "var(--dk-label)" }}
 							>
-								{formatUsdAxis(t.label)}
+								{/* A tick is a per-hour rate; shown as one bucket's spend, the unit every figure here uses. */}
+								{formatUsdAxis(t.label / ctx.perHour)}
 							</text>
 						</g>
 					);
 				})}
-				<text className="ut-sp-unit" x={4} y={10} style={{ fill: "var(--dk-label)" }}>
-					$/h
-				</text>
 			</g>
 			{slot(layers, "under", ctx)}
 			{drawn && (
-				<path className="ut-sp-area" d={series.area} fill={`url(#${gradId})`} stroke="none" />
+				<path
+					className="ut-sp-area"
+					d={series.area}
+					fill={`url(#${gradId})`}
+					stroke="none"
+					clipPath={clip !== null ? `url(#${clipId})` : undefined}
+				/>
 			)}
 			{slot(layers, "mid", ctx)}
+			{ghost !== null && (
+				<>
+					<path className="ut-sp-ghost" d={ghost} fill="none" />
+					{note !== null && (
+						<text className="ut-sp-fcap" x={4} y={30}>
+							{note}
+						</text>
+					)}
+				</>
+			)}
 			{drawn && (
 				<>
 					<path
@@ -140,16 +201,36 @@ export const ChartFrame = memo(function ChartFrame(p: ChartFrameProps): React.JS
 					/>
 				</>
 			)}
+			{drawn && brk !== null && (
+				// From the break on the line is dashed: a pane-coloured copy hides the solid stroke between the dashes.
+				<g clipPath={`url(#${breakId})`}>
+					<path className="ut-sp-line ut-sp-gap" d={series.d} fill="none" />
+					<path className="ut-sp-line ut-sp-dashed" d={series.d} fill="none" />
+				</g>
+			)}
 			{slot(layers, "over", ctx)}
+			{brk !== null && (
+				<g className="ut-sp-break">
+					<circle cx={brk.x} cy={brk.y} r={BREAK_R} />
+					{brk.x + 8 + BREAK_LABEL_W <= ctx.w ? (
+						<text x={brk.x + 8} y={Math.max(BREAK_LABEL_MIN_Y, brk.y - 6)}>
+							chain breaks here
+						</text>
+					) : (
+						<text x={brk.x - 8} y={Math.max(BREAK_LABEL_MIN_Y, brk.y - 6)} textAnchor="end">
+							chain breaks here
+						</text>
+					)}
+				</g>
+			)}
+			{mark !== null && (
+				<circle className="ut-sp-mark" cx={mark.x} cy={mark.y} r={MARK_R} fill="none" />
+			)}
 			{pin !== null && (
-				<circle
-					className="ut-sp-pin"
-					cx={pin.x}
-					cy={pin.y}
-					r={DOT_R}
-					strokeWidth={1.5}
-					style={{ fill: "var(--sp-ink)", stroke: "var(--dk-pane)" }}
-				/>
+				<g className="ut-sp-pin">
+					<line x1={pin.x} x2={pin.x} y1={0} y2={ctx.h} />
+					<circle cx={pin.x} cy={pin.y} r={DOT_R} />
+				</g>
 			)}
 			{live && drawn && (
 				<circle
