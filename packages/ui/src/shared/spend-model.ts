@@ -23,7 +23,6 @@ import { smoothRadius, smoothRate } from "./smooth-rate.js";
 import { bucketSpanMs, rateOf } from "./spend-scale.js";
 import { bucketTotals, type RangeId } from "./spend-series.js";
 
-const MINUTE = 60_000;
 const HOUR = 3_600_000;
 
 /** The line's bucket: its length, and how it is named on screen (`per`). */
