@@ -21,6 +21,7 @@ import {
 	brokenFrom,
 	headLabel,
 	newText,
+	pinnedShown,
 	plotLabel,
 	recordNumber,
 	subLine,
@@ -293,6 +294,29 @@ describe("drawnCursor", () => {
 	});
 	it("never takes a stored sync or pin as the live cursor", () => {
 		expect(drawnCursor(sync, null, pin)).toBe(pin);
+	});
+});
+
+describe("pinnedShown", () => {
+	const rec = { t: 1000, pos: 3, cumUt: 500 };
+	it("reads the dated record when the pin's total is that record's cumulative", () => {
+		expect(pinnedShown({ pos: 5, cumUt: 500, record: rec, beforeUt: 0 })).toEqual({
+			shown: { t: 1000, pos: 3, pinned: true },
+			noRecord: false,
+		});
+	});
+	it("reads the pinned position with no time when undated spend lies between", () => {
+		const r = pinnedShown({ pos: 5, cumUt: 700, record: rec, beforeUt: 0 });
+		expect(r.noRecord).toBe(false);
+		expect(r.shown?.pos).toBe(5);
+		expect(Number.isNaN(r.shown?.t)).toBe(true);
+	});
+	it("names no record only when nothing but the spend before the rows is behind it", () => {
+		expect(pinnedShown({ pos: 0, cumUt: 40, record: null, beforeUt: 40 })).toEqual({
+			shown: null,
+			noRecord: true,
+		});
+		expect(pinnedShown({ pos: 0, cumUt: 90, record: null, beforeUt: 40 }).noRecord).toBe(false);
 	});
 });
 

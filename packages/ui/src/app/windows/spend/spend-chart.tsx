@@ -78,6 +78,7 @@ import {
 	brokenFrom,
 	headLabel,
 	newText,
+	pinnedShown,
 	plotLabel,
 	stamp,
 	subLine,
@@ -642,15 +643,33 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 				: headI >= 0
 					? (records.cum[headI] as number)
 					: records.before;
-	const shown =
-		headI !== null && headI >= 0
-			? {
-					t: records.t[headI] as number,
-					pos: records.pos[headI] as number,
-					pinned: live === null || headI === pinIdx,
-				}
+	const pinRead =
+		live === null && pinnedPos !== null
+			? pinnedShown({
+					pos: pinnedPos,
+					cumUt: cum,
+					record:
+						pinIdx >= 0
+							? {
+									t: records.t[pinIdx] as number,
+									pos: records.pos[pinIdx] as number,
+									cumUt: records.cum[pinIdx] as number,
+								}
+							: null,
+					beforeUt: records.before,
+				})
 			: null;
-	const pinnedNoRecord = live === null && pinned && pinIdx < 0;
+	const shown =
+		pinRead !== null
+			? pinRead.shown
+			: headI !== null && headI >= 0
+				? {
+						t: records.t[headI] as number,
+						pos: records.pos[headI] as number,
+						pinned: headI === pinIdx,
+					}
+				: null;
+	const pinnedNoRecord = pinRead?.noRecord ?? false;
 	const shownK = live !== null ? live.k : pin !== null ? pin.k : -1;
 	// The words say no spend only when the range holds none: the span can be empty while out-of-order times still
 	// put spend in its buckets. The slider and the keys read the span itself.

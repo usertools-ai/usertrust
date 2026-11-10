@@ -86,15 +86,15 @@ export function drawnCursor(
 	return sync ?? pin;
 }
 
-/**
- * What Enter or Space does with the live cursor on record `i`: go live when that record is the one pinned, else pin
- * it; nothing without a live cursor.
- */
 /** What clears a live cursor: the range (3m, ytd and 1y share a bucket size), the bucket, or the filters. */
 export function cursorResetKey(range: string, bucketMs: number, filterKey: string): string {
 	return `${range}|${bucketMs}|${filterKey}`;
 }
 
+/**
+ * What Enter or Space does with the live cursor on record `i`: go live when that record is the one pinned, else pin
+ * it; nothing without a live cursor.
+ */
 export function toggleTarget(
 	liveI: number,
 	livePos: number,

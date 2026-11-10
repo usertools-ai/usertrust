@@ -1050,6 +1050,33 @@ describe("spend chart: pinned on an undated row", () => {
 		expect(headline(html)).toBe(formatUsdTotal(30_000));
 		expect(headline(chart({ rows, head: 1, pinnedPos: 0 }))).toBe(formatUsdTotal(10_000));
 	});
+	it("names the pinned position and an unknown time, not the dated record before it", () => {
+		const rows = [
+			spendRow(0, { ts: new Date(T0 + HOUR).toISOString(), costUt: 10_000 }),
+			spendRow(1, { ts: "not a date", costUt: 20_000 }),
+		];
+		const html = chart({ rows, head: 1, pinnedPos: 1 });
+		expect(stripTags(textOf(html, "ut-sp-when"))).toBe("Pinned · unknown time · record 2");
+		const tag = plotTag(html);
+		expect(attr(tag, "aria-valuenow")).toBe("2");
+		expect(attr(tag, "aria-valuetext")).toBe(
+			`Record 2 of 2 · ${formatUsdTotal(30_000)} spent by unknown time · pinned`,
+		);
+		// The dated record's own pin still reads its own time and number.
+		const own = chart({ rows, head: 1, pinnedPos: 0 });
+		expect(stripTags(textOf(own, "ut-sp-when")).endsWith(" · record 1")).toBe(true);
+		expect(stripTags(textOf(own, "ut-sp-when"))).not.toContain("unknown time");
+	});
+	it("with undated spend before every dated record, does not say no spend was recorded", () => {
+		const rows = [
+			spendRow(0, { ts: "not a date", costUt: 20_000 }),
+			spendRow(1, { ts: new Date(T0 + HOUR).toISOString(), costUt: 10_000 }),
+		];
+		const html = chart({ rows, head: 1, pinnedPos: 0 });
+		expect(headline(html)).toBe(formatUsdTotal(20_000));
+		expect(stripTags(textOf(html, "ut-sp-when"))).toBe("Pinned · unknown time · record 1");
+		expect(attr(plotTag(html), "aria-valuenow")).toBe("1");
+	});
 });
 
 describe("spend chart: pinned", () => {

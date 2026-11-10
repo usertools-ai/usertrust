@@ -72,6 +72,27 @@ export function whenLine(p: {
 	return p.spent ? `Live${SEP}last spend time unknown` : `Live${SEP}no spend recorded yet`;
 }
 
+/**
+ * What a pin is read as. Its total is worked out by position, so spend with no readable time between the last dated
+ * record and the pin is in it; the dated record's own time and number then describe a different total. A pin whose
+ * total is not that record's cumulative is shown at its own position with an unknown time. With no dated record at or
+ * before it and no such spend, there is no spend to name by then.
+ */
+export function pinnedShown(p: {
+	pos: number;
+	cumUt: number;
+	/** The last dated record at or before the pin, or null when there is none. */
+	record: { t: number; pos: number; cumUt: number } | null;
+	/** What was spent before every record held. */
+	beforeUt: number;
+}): { shown: { t: number; pos: number; pinned: true } | null; noRecord: boolean } {
+	const own = p.record === null ? p.beforeUt : p.record.cumUt;
+	if (p.cumUt !== own)
+		return { shown: { t: Number.NaN, pos: p.pos, pinned: true }, noRecord: false };
+	if (p.record === null) return { shown: null, noRecord: true };
+	return { shown: { t: p.record.t, pos: p.record.pos, pinned: true }, noRecord: false };
+}
+
 /** Whether a shown record is at or after the chain's break, so the when-line says the links are broken from there. */
 export function brokenFrom(pos: number | null, breakPos: number | null): boolean {
 	return pos !== null && breakPos !== null && pos >= breakPos;
