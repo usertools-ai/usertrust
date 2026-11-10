@@ -46,9 +46,11 @@ interface DonutProps {
 }
 
 let ShareDonut: React.ComponentType<DonutProps>;
+let amountSize: (chars: number) => number;
 
 beforeAll(async () => {
 	ShareDonut = await appExport("windows/share/donut", "ShareDonut");
+	amountSize = await appExport("windows/share/donut", "amountSize");
 });
 
 afterEach(() => {
@@ -263,7 +265,7 @@ describe("the ring", () => {
 			const part = sliceOf(key);
 			const grad = /<radialGradient[^>]*>/.exec(part)?.[0] ?? "";
 			const id = attr(grad, "id") ?? "";
-			expect(id).not.toBe("");
+			expect(id).toMatch(/^[A-Za-z0-9_-]+$/);
 			ids.push(id);
 			expect(attr(grad, "gradientUnits")).toBe("userSpaceOnUse");
 			expect(attr(grad, "cx")).toBe(String(VB / 2));
@@ -307,6 +309,30 @@ describe("the ring", () => {
 		expect(attr(/<text class="c1"[^>]*>/.exec(kept)?.[0] ?? "", "text-anchor")).toBe("middle");
 		const cut = /<text class="c1"[^>]*>(.*?)<\/text>/.exec(await at(`${whole}y`))?.[1] ?? "";
 		expect(cut).toContain("<title>");
+	});
+
+	it("sets a long amount smaller so it stays inside the hole, and a short one at 30", async () => {
+		const at = async (amount: string): Promise<number> => {
+			const html = await withDesk(
+				donut({ centre: { name: "This range", amount, sub: "3 lanes", key: null } }),
+				{ data: shareData(ROWS) },
+			);
+			const style = attr(/<text class="c2"[^>]*>/.exec(html)?.[0] ?? "", "style") ?? "";
+			return Number(/font-size:([\d.]+)px/.exec(style)?.[1]);
+		};
+		expect(await at("$0.10")).toBe(30);
+		expect(await at("$12,345.67")).toBeLessThan(30);
+		for (const amount of ["$12,345.67", "$123,456.78", "$1,234,567.89", "$12,345,678.90"]) {
+			// The widest the text can be, at about 0.58 em a character, is inside the hole's 173 units.
+			expect(amount.length * 0.58 * (await at(amount))).toBeLessThanOrEqual(2 * RO * INNER);
+		}
+		expect(await at("$1,234,567.89")).toBeLessThan(await at("$123,456.78"));
+	});
+
+	it("sizes the amount by its length: 30 up to nine characters, then smaller, never NaN", () => {
+		expect([0, 1, 5, 9].map(amountSize)).toEqual([30, 30, 30, 30]);
+		expect(amountSize(Number.NaN)).toBe(30);
+		expect([10, 13, 14, 20].map(amountSize)).toEqual([27, 21, 19, 13]);
 	});
 
 	it("shortens a long name in the centre and keeps the whole of it in a title", async () => {

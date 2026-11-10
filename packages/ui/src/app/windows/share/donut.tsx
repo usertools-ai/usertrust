@@ -43,6 +43,19 @@ const RI = RO * INNER;
 /** The centre's first line holds this many characters; a longer name is cut in the middle, whole in its title. */
 const NAME_MAX = 24;
 
+/** The centre's amount is 30px, as wide as the hole allows for about nine characters; a longer one is set smaller. */
+export const AMOUNT_PX = 30;
+/** A digit in tabular figures is about this many em wide. */
+const DIGIT_EM = 0.58;
+/** The share of the hole's width the amount may fill. */
+const HOLE_FILL = 0.92;
+
+/** The font size that keeps an amount of this many characters inside the hole, at most `AMOUNT_PX`. */
+export function amountSize(chars: number): number {
+	if (!(chars > 0)) return AMOUNT_PX;
+	return Math.min(AMOUNT_PX, Math.floor((2 * RI * HOLE_FILL) / (DIGIT_EM * chars)));
+}
+
 const inFocus = (lit: Lit): boolean => lit === "selected" || lit === "hover";
 
 export interface ShareCentre {
@@ -147,7 +160,7 @@ export function ShareDonut(props: {
 	const colors = useDeskData().colorsFor(level);
 	const litOf = useLitOf(level);
 	const hover = useHoverCategory();
-	const uid = useId();
+	const uid = useId().replace(/[^A-Za-z0-9_-]/g, "");
 	const target = useMemo(
 		() => ringShape(keys, values, (key) => inFocus(litOf(key))),
 		[keys, values, litOf],
@@ -185,6 +198,7 @@ export function ShareDonut(props: {
 				x={C}
 				y={C + RI * 0.12}
 				textAnchor="middle"
+				style={{ fontSize: amountSize(centre.amount.length) }}
 				data-fig="share.centre"
 				{...(centre.key === null ? {} : { "data-key": centre.key })}
 			>
