@@ -6,9 +6,11 @@
  * every x would be 0; this file gives the plot a width and reads each mark against the record it stands for.
  */
 
+import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { stampShiftPct } from "../src/app/windows/spend/chart-text.js";
 import type { SpendLayer } from "../src/app/windows/spend/layers.js";
 import { formatUsdTotal } from "../src/shared/format.js";
 import { msToX } from "../src/shared/hit.js";
@@ -229,5 +231,47 @@ describe("the peak label", () => {
 	it("is not drawn before the plot has a width", () => {
 		box.w = 0;
 		expect(chart()).not.toContain("ut-sp-peak");
+	});
+});
+
+describe("the cursor's time stamp stays inside the plot", () => {
+	// The stamp's box is anchored at the record's x and pulled left by this share of its own width, so the box's left edge is
+	// x - shift * width: a first record (x = 0) leaves it flush with the left edge and the newest (x = plot width) flush
+	// with the right edge, whatever the stamp's width.
+	const edges = (x: number, boxW: number): [number, number] => {
+		const left = x - (stampShiftPct(x, W) / 100) * boxW;
+		return [left, left + boxW];
+	};
+	it("is left-aligned at the first record and right-aligned at the newest", () => {
+		expect(stampShiftPct(0, W)).toBe(0);
+		expect(stampShiftPct(W, W)).toBe(100);
+		for (const boxW of [90, 110, 140]) {
+			const [l0] = edges(0, boxW);
+			const [, rW] = edges(W, boxW);
+			expect(l0).toBe(0);
+			expect(rW).toBe(W);
+		}
+	});
+	it("is centred in the middle and never outside the plot anywhere along it", () => {
+		expect(stampShiftPct(W / 2, W)).toBe(50);
+		for (let x = 0; x <= W; x += 35) {
+			const [l, r] = edges(x, 110);
+			expect(l).toBeGreaterThanOrEqual(0);
+			expect(r).toBeLessThanOrEqual(W);
+		}
+	});
+	it("clamps an x outside the plot and centres when the plot has no width", () => {
+		expect(stampShiftPct(-20, W)).toBe(0);
+		expect(stampShiftPct(W + 20, W)).toBe(100);
+		expect(stampShiftPct(10, 0)).toBe(50);
+		expect(stampShiftPct(Number.NaN, W)).toBe(50);
+	});
+	it("is what the chart writes into the stamp's style, while the crosshair keeps the record's x", () => {
+		const src = readFileSync(
+			new URL("../src/app/windows/spend/spend-chart.tsx", import.meta.url),
+			"utf8",
+		);
+		expect(src).toMatch(/translate: `-\$\{stampShiftPct\(liveX, geo\.w\)\}% 2px`/);
+		expect(src).toMatch(/transform: `translateX\(\$\{liveX\}px\)`/);
 	});
 });

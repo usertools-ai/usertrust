@@ -418,6 +418,8 @@
 		position: absolute;
 		top: 100%;
 		left: 0;
+		/* The chart sets the shift in the style: the stamp slides from left-aligned at the plot's left edge to
+		   right-aligned at its right edge, so it never leaves the plot. This is its value in the middle. */
 		translate: -50% 2px;
 		padding: 0 6px;
 		border-radius: 4px;

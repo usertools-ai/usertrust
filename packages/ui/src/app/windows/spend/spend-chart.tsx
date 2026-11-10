@@ -89,6 +89,7 @@ import {
 	pinnedShown,
 	plotLabel,
 	stamp,
+	stampShiftPct,
 	subLine,
 	valueText,
 	whenLine,
@@ -712,7 +713,13 @@ export const SpendChart = memo(function SpendChart(p: SpendChartProps): React.JS
 					className="ut-sp-dot"
 					style={{ transform: `translate(${liveX - DOT_HALF}px, ${y - DOT_HALF}px)` }}
 				/>
-				<div className="ut-sp-time" style={{ transform: `translateX(${liveX}px)` }}>
+				<div
+					className="ut-sp-time"
+					style={{
+						transform: `translateX(${liveX}px)`,
+						translate: `-${stampShiftPct(liveX, geo.w)}% 2px`,
+					}}
+				>
 					{stamp(records.t[live.i] as number)}
 				</div>
 			</>
