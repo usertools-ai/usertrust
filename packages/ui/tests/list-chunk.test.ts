@@ -198,4 +198,47 @@ describe("pageSizeForRows: what PageUp and PageDown move", () => {
 		expect(pageSizeForRows(Number.NaN)).toBe(1);
 		expect(pageSizeForRows(300, 0)).toBe(1);
 	});
+
+	it("a row that only partly fits does not count", () => {
+		expect(pageSizeForRows(310)).toBe(9);
+		expect(pageSizeForRows(329)).toBe(9);
+		expect(pageSizeForRows(59)).toBe(1);
+		expect(pageSizeForRows(89)).toBe(1);
+		expect(pageSizeForRows(91)).toBe(2);
+	});
+});
+
+describe("a row count that is not a whole number of rows", () => {
+	const at150: ChunkState = { key: "k", limit: 150 };
+	const at300: ChunkState = { key: "k", limit: 300 };
+
+	it("a fraction of a row is not a row", () => {
+		expect(chunkInit("k", 10.7).limit).toBe(10);
+		expect(shownCount(at300, 10.7)).toBe(10);
+		expect(chunkGrow(at150, 160.9).limit).toBe(160);
+		expect(chunkReveal(at150, 160, 160.9)).toBe(at150);
+		expect(chunkSync({ key: "k", limit: 10 }, "k", 11.9).limit).toBe(11);
+	});
+
+	it("an endless count is no count", () => {
+		expect(chunkInit("k", Number.POSITIVE_INFINITY).limit).toBe(0);
+		expect(chunkGrow(at150, Number.POSITIVE_INFINITY)).toBe(at150);
+		expect(chunkReveal(at150, 150, Number.POSITIVE_INFINITY)).toBe(at150);
+		expect(shownCount(at300, Number.POSITIVE_INFINITY)).toBe(0);
+	});
+
+	it("shownCount draws nothing for a count that is not a number or is negative", () => {
+		expect(shownCount(at300, Number.NaN)).toBe(0);
+		expect(shownCount(at300, -5)).toBe(0);
+		expect(shownCount(at300, -0.5)).toBe(0);
+	});
+});
+
+describe("pinAction: the first row", () => {
+	const order = [{ hash: "a" }, { hash: "b" }, { hash: "c" }];
+
+	it("a pinned record that is the first row is brought into view like any other", () => {
+		expect(pinAction(null, "a", order)).toEqual({ done: "a", target: { hash: "a", index: 0 } });
+		expect(pinAction("b", "a", order)).toEqual({ done: "a", target: { hash: "a", index: 0 } });
+	});
 });
