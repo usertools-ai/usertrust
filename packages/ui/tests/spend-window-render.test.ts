@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { createElement } from "react";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { DeskData, DeskView } from "../src/app/desk/desk-types.js";
-import type { AtPayload, SummaryPayload } from "../src/shared/api.js";
+import type { SummaryPayload } from "../src/shared/api.js";
 import { breakdown, type SpendWindow as RangeWindow } from "../src/shared/breakdown.js";
 import { PROVIDER_COLOR, rankColors } from "../src/shared/colors.js";
 import { deskWindow } from "../src/shared/desk-filters.js";
@@ -611,6 +611,21 @@ describe("Spend: its states", () => {
 		const html = await spend({ filters: { ...EMPTY_FILTERS, actors: ["nobody"] } });
 		expect(html).toContain("no records in this view");
 		expect(html).not.toContain('role="slider"');
+	});
+
+	it("keeps the range chips with the empty line, so the range can still be changed (Share reads it)", async () => {
+		const html = await spend({ filters: { ...EMPTY_FILTERS, actors: ["nobody"] } });
+		expect(html).toContain("no records in this view");
+		const chips = /<[^>]*class="ut-sp-chips[^"]*"[^>]*>([\s\S]*?)<\/div>/.exec(html)?.[1] ?? "";
+		expect(html.match(/class="ut-sp-chips/g)).toHaveLength(1);
+		// The chart's frame, its headline row (the spacer, then the chips), then the empty line.
+		expect(html).toMatch(
+			/<div class="ut-sp-chart"><div class="ut-sp-head"><span class="ut-sp-grow"><\/span><div class="ut-sp-chips[^"]*"[\s\S]*?<\/div><\/div><p class="ut-sp-empty">no records in this view<\/p><\/div>/,
+		);
+		expect(chips.match(/<button/g)).toHaveLength(6);
+		expect(chips).toContain('aria-pressed="true"');
+		// Not while the vault loads, which says nothing about the records.
+		expect(await spend({ rows: [], phase: "loading" })).not.toContain("ut-sp-chips");
 	});
 
 	it("claims nothing about the records while the vault loads", async () => {

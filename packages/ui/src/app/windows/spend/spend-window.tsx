@@ -46,7 +46,17 @@ const SpendBody = memo(function SpendBody(): React.JSX.Element {
 		if (list.phase !== "loaded") {
 			return <div className="ut-sp-wait" aria-busy={list.phase === "loading"} />;
 		}
-		return <p className="ut-sp-empty">no records in this view</p>;
+		// The range chips are the page's only ones and the Share window reads the same range, so they stay with the empty
+		// line: two filters no record meets leave this chart empty while Share still has spend to range.
+		return (
+			<div className="ut-sp-chart">
+				<div className="ut-sp-head">
+					<span className="ut-sp-grow" />
+					{controls}
+				</div>
+				<p className="ut-sp-empty">no records in this view</p>
+			</div>
+		);
 	}
 
 	const filtered = chartRows.length !== rows.length;
