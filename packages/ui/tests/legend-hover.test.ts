@@ -194,6 +194,19 @@ describe("the legend's hover owner", () => {
 		expect(t.sent.length).toBe(5);
 	});
 
+	it("does not hand back a hover the legend itself left on the bus", () => {
+		const t = deferredIo();
+		const owner = createHoverOwner(t.io, "lane");
+		t.other(mine("x"));
+		owner.focus("a");
+		owner.blur();
+		expect(t.sent.at(-1)).toBeNull();
+	});
+
+	it("tells two lists of the same length apart", () => {
+		expect(listedKey(["a", "b"])).not.toBe(listedKey(["c", "d"]));
+	});
+
 	it("clears its own hover when disposed, and only then", () => {
 		const t = deferredIo();
 		const owner = createHoverOwner(t.io, "lane");

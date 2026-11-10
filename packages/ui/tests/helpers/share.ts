@@ -9,8 +9,8 @@
 import type { DeskData } from "../../src/app/desk/desk-types.js";
 import { breakdown, type SpendWindow } from "../../src/shared/breakdown.js";
 import { chartWindow } from "../../src/shared/chart-window.js";
-import { deskWindow } from "../../src/shared/desk-filters.js";
 import { rankColors } from "../../src/shared/colors.js";
+import { deskWindow } from "../../src/shared/desk-filters.js";
 import { EMPTY_FILTERS, type FilterState } from "../../src/shared/filters.js";
 import { listView } from "../../src/shared/list-view.js";
 import type { LedgerRow } from "../../src/shared/rows.js";

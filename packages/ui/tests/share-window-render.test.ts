@@ -13,7 +13,8 @@ import { createElement } from "react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { breakdown } from "../src/shared/breakdown.js";
 import { LINE_BUCKETS } from "../src/shared/chart-window.js";
-import { SHARE_EMPTY } from "../src/shared/donut.js";
+import { toggleCategory } from "../src/shared/desk-filters.js";
+import { formatShare, SHARE_EMPTY } from "../src/shared/donut.js";
 import { EMPTY_FILTERS } from "../src/shared/filters.js";
 import { formatUsdTotal, formatUtcMinute } from "../src/shared/format.js";
 import { categoryBus, momentBus } from "../src/shared/hover-bus.js";
@@ -232,7 +233,11 @@ describe("the Share of spend window", () => {
 	it("reads a pin at the very end of the range in the last bucket", async () => {
 		const last = Math.ceil((CHART.endMs - CHART.startMs) / HOUR) - 1;
 		const edge = spend("k0", 0, 0, { ts: iso(CHART.endMs), kind: "info" });
-		const rows = [spend("a", last, 700, { ts: iso(CHART.endMs - 1_000) }), spend("b", 1, 300), edge];
+		const rows = [
+			spend("a", last, 700, { ts: iso(CHART.endMs - 1_000) }),
+			spend("b", 1, 300),
+			edge,
+		];
 		const html = await win({ data: shareData(rows), view: { at: edge.pos } });
 		expect(centre(html).name).toBe(`At ${formatUtcMinute(iso(bucketStart(last)))}`);
 		expect(legendFigures(html)).toEqual([
@@ -359,5 +364,91 @@ describe("the Share of spend window", () => {
 			/[^/\w-]window\.|matchMedia|[^/\w-]document\.|requestAnimationFrame|performance\./,
 		);
 		expect(source).not.toMatch(/\.css["']/);
+	});
+});
+
+const litOfTag = (tag: string | undefined): string | null => attr(tag ?? "", "data-lit");
+const byKey = (html: string, cls: string, key: string): string | undefined =>
+	tagsOf(html, cls).find((t) => attr(t, "data-key") === key);
+
+describe("the Share of spend window followed down a level", () => {
+	const twoModels = (): LedgerRow[] => [
+		spend("a", 1, 500),
+		spend("b", 1, 300, { model: "claude-fable-5" }),
+	];
+
+	it("sees every model of the provider even with one model picked", async () => {
+		const rows = twoModels();
+		const picked = toggleCategory(EMPTY_FILTERS, "model", "claude-sonnet-5", false);
+		const html = await win({
+			data: shareData(rows, picked),
+			view: { dim: "provider", filters: picked },
+		});
+		expect(subtitle(html)).toBe(`${SUBTITLE_DRILL.model} · Anthropic`);
+		expect(sliceKeys(html)).toEqual(["claude-sonnet-5", "claude-fable-5"]);
+	});
+
+	it("reads the level it was followed down to in the centre, the ring's words, and a pinned moment", async () => {
+		const rows = twoModels();
+		const html = await win({ data: shareData(rows), view: { dim: "provider" } });
+		expect(centre(html).sub).toBe("2 models");
+		expect(ringLabel(html)).toMatch(/^Share of spend by model, this range: /);
+		const pin = rows[0] as LedgerRow;
+		const pinned = await win({
+			data: pinnedData(rows, pin),
+			view: { dim: "provider", at: pin.pos },
+		});
+		expect(centre(pinned).amount).toBe(formatUsdTotal(800));
+		expect(centre(pinned).sub).toBe("2 models");
+		expect(sum(legendFigures(pinned))).toBe(800);
+	});
+
+	it("lights the ring's slice and the legend's row for a hover at the level it was followed down to", async () => {
+		const rows = twoModels();
+		categoryBus.set({ dim: "model", key: "claude-fable-5", from: "spend" });
+		const html = await win({ data: shareData(rows), view: { dim: "provider" } });
+		expect(litOfTag(byKey(html, "ut-sh-slice", "claude-fable-5"))).toBe("hover");
+		expect(litOfTag(byKey(html, "ut-sh-row", "claude-fable-5"))).toBe("hover");
+		expect(centre(html).name).toBe("claude-fable-5");
+		// A hover at the level that was chosen, not the one drawn, lights nothing.
+		categoryBus.set({ dim: "provider", key: "Anthropic", from: "spend" });
+		const other = await win({ data: shareData(rows), view: { dim: "provider" } });
+		expect(litOfTag(byKey(other, "ut-sh-slice", "claude-fable-5"))).not.toBe("hover");
+		expect(litOfTag(byKey(other, "ut-sh-row", "claude-fable-5"))).not.toBe("hover");
+	});
+});
+
+describe("what the centre and the ring's words say", () => {
+	it("puts the total in the centre for a hovered or selected key that is not drawn", async () => {
+		const rows = eightLanes();
+		const total = formatUsdTotal(36_000 + 3_600 + 56);
+		categoryBus.set({ dim: "lane", key: "ghost", from: "spend" });
+		const hovered = await win({ data: shareData(rows) });
+		expect(centre(hovered)).toEqual({ name: "This range", amount: total, sub: "8 lanes" });
+		categoryBus.set(null);
+		const ghost = { ...EMPTY_FILTERS, actors: ["ghost"] };
+		const selected = await win({ data: shareData(rows, ghost), view: { filters: ghost } });
+		expect(centre(selected)).toEqual({ name: "This range", amount: total, sub: "8 lanes" });
+	});
+
+	it("counts only the keys that spent at the moment shown", async () => {
+		const rows = [spend("a", 2, 700), spend("b", 30, 300)];
+		const pin = rows[0] as LedgerRow;
+		const html = await win({ data: pinnedData(rows, pin), view: { at: pin.pos } });
+		expect(sliceKeys(html)).toEqual(["a", "b"]);
+		expect(centre(html).amount).toBe(formatUsdTotal(700));
+		expect(centre(html).sub).toMatch(/^1 /);
+	});
+
+	it("says no spend in words, and says Other with its dollars and its share", async () => {
+		const empty = await win({ data: shareData([]) });
+		expect(ringLabel(empty)).toBe("Share of spend by lane, this range: no spend");
+		const html = await win({ data: shareData(eightLanes()) });
+		const total = 36_000 + 3_600 + 56;
+		const other = 3_307 + 2_207 + 1_107;
+		expect(ringLabel(html)).toContain(
+			`; Other ${formatUsdTotal(other)}, ${formatShare(other / total, 1)}`,
+		);
+		expect(ringLabel(html)).not.toContain("Other $0.00");
 	});
 });
