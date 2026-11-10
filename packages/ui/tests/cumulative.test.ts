@@ -214,6 +214,22 @@ describe("lookups", () => {
 	it("stepIndex with a NaN step stays where it is", () => {
 		expect(stepIndex(2, 1, Number.NaN, { i0: 0, i1: 5 })).toBe(2);
 	});
+	it("stepIndex from a NaN index reads as the span's first record, in both directions and with a NaN step too", () => {
+		const span = { i0: 2, i1: 5 };
+		expect(stepIndex(Number.NaN, 1, 1, span)).toBe(2);
+		expect(stepIndex(Number.NaN, -1, 1, span)).toBe(2);
+		expect(stepIndex(Number.NaN, 1, Number.NaN, span)).toBe(2);
+		expect(stepIndex(Number.NaN, -1, Number.NaN, span)).toBe(2);
+	});
+	it("stepIndex from a NaN index on a span with no record is still -1", () => {
+		expect(stepIndex(Number.NaN, 1, 1, { i0: 3, i1: 2 })).toBe(-1);
+		expect(stepIndex(Number.NaN, -1, 1, { i0: 3, i1: 2 })).toBe(-1);
+	});
+	it("stepIndex with a NaN step stays where it is, in both directions", () => {
+		const span = { i0: 2, i1: 5 };
+		expect(stepIndex(3, 1, Number.NaN, span)).toBe(3);
+		expect(stepIndex(3, -1, Number.NaN, span)).toBe(3);
+	});
 	it("stepIndex clamps to the span", () => {
 		const span = { i0: 0, i1: 5 };
 		expect(stepIndex(3, 1, 10, span)).toBe(span.i1);

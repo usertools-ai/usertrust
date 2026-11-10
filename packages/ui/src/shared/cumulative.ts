@@ -110,7 +110,7 @@ export function inWindow(s: SpendRecords, win: SpendWindow): { i0: number; i1: n
 	return { i0, i1 };
 }
 
-/** `by` records from `i` in direction `dir`, clamped to the span; -1 when the span has no record. */
+/** `by` records from `i` in direction `dir`, clamped to the span; -1 when the span has no record. A NaN `i` reads as the span's first record; a NaN `by` stays at `i`. */
 export function stepIndex(
 	i: number,
 	dir: -1 | 1,
@@ -118,6 +118,7 @@ export function stepIndex(
 	span: { i0: number; i1: number },
 ): number {
 	if (span.i1 < span.i0) return -1;
+	if (Number.isNaN(i)) return span.i0;
 	const j = i + dir * by;
 	const k = Number.isNaN(j) ? i : j;
 	return Math.min(span.i1, Math.max(span.i0, k));
