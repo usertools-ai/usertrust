@@ -186,6 +186,23 @@ describe("chargeOf", () => {
 			expect(c.differenceUt).toBe(0);
 		});
 
+		it("the 1-hour rate need not be whole", () => {
+			const c = chargeOf({
+				costUt: 6,
+				usage: { ...NO_TOKENS, cacheWriteTokens: 1000 },
+				appliedRates: { ...RATES, cacheWritePer1k: 3.75 },
+				cacheWrite1h: { tokens: 400, ratePer1k: 7.5 },
+			});
+			expect(c.state).toBe("priced");
+			expect(c.lines[3]?.parts).toEqual([
+				{ label: "5-minute", count: 600, ratePer1k: 3.75, utText: "2.25", usdText: "$0.000225" },
+				{ label: "1-hour", count: 400, ratePer1k: 7.5, utText: "3", usdText: "$0.0003" },
+			]);
+			expect(c.sumText).toBe("5.25");
+			expect(c.computedUt).toBe(6);
+			expect(c.differenceUt).toBe(0);
+		});
+
 		it("a recorded share of 0 keeps both terms", () => {
 			const c = write(0, 75);
 			expect(c.lines[3]?.parts.map((p) => [p.label, p.count, p.utText])).toEqual([
@@ -230,6 +247,25 @@ describe("chargeOf", () => {
 		expect(c.costUt).toBe(0);
 		expect(c.computedUt).toBe(1);
 		expect(c.differenceUt).toBe(-1);
+	});
+
+	it("a cost that is not a finite number >= 0 is not a cost: nothing is priced against it", () => {
+		for (const costUt of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -5]) {
+			const c = chargeOf(fixture({ costUt }));
+			expect(c.state).toBe("none");
+			expect(c.costUt).toBeNull();
+			expect(c.sumText).toBeNull();
+			expect(c.computedUt).toBeNull();
+			expect(c.differenceUt).toBeNull();
+		}
+	});
+
+	it("a recorded cost with a fraction is still a cost, and its difference is shown as it is", () => {
+		const c = chargeOf(fixture({ costUt: 114.5 }));
+		expect(c.state).toBe("priced");
+		expect(c.costUt).toBe(114.5);
+		expect(c.computedUt).toBe(115);
+		expect(c.differenceUt).toBe(-0.5);
 	});
 
 	describe("the text is exact", () => {

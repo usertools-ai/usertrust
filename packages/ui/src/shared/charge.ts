@@ -71,7 +71,7 @@ export interface Charge {
 	sumText: string | null;
 	/** The whole usertokens the terms come to, as a charge computes them. `null` unless `priced`. */
 	computedUt: number | null;
-	/** The cost the record carries (the metered amount). */
+	/** The cost the record carries (the metered amount); `null` when it carries none, or no usable number. */
 	costUt: number | null;
 	/** `costUt - computedUt`: 0 when they agree, above 0 when the record charged more. `null` unless `priced`. */
 	differenceUt: number | null;
@@ -186,7 +186,8 @@ export function chargeOf(
 			usdText: priced ? usdText(tierExact) : null,
 		});
 	}
-	const costUt = row.costUt ?? null;
+	// A cost that is not a finite number >= 0 is not a cost. It need not be whole: a recorded fraction is shown.
+	const costUt = amountOf(row.costUt, false) ?? null;
 	const state: ChargeState =
 		costUt === null
 			? "none"
