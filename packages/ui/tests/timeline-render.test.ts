@@ -799,27 +799,29 @@ describe("the bar's one pill names a past position whichever window is open", ()
 	});
 });
 
-describe("the bar's header gives the vault path up first", () => {
-	// Measured in a browser: with the second mark and a long pill the header shrank into the search at 800–900 px.
+describe("the bar below the desk's break is two rows by rule", () => {
+	// Measured in a browser: the one pill fits beside the search from about 900 to 950 px up, and not below. The header
+	// takes the whole first row at the desk's break and under, pinned or not, so no state overlaps and a position moves nothing.
 	const css = readFileSync(
 		join(import.meta.dirname, "..", "src", "app", "desk", "desk.css"),
 		"utf-8",
 	);
-	const rule = (selector: string): string =>
-		new RegExp(`${selector.replace(/[.>[\]"=*]/g, "\\$&")}\\s*\\{([^}]*)\\}`).exec(css)?.[1] ?? "";
 
-	it("the header is never narrower than its own contents", () => {
-		const r = rule(".ut-dk-top > .ut-top");
-		expect(r).toMatch(/min-width:\s*min-content;/);
-		expect(r).toMatch(/flex:\s*1 1 320px;/);
+	it("gives the header the whole first row at 900 px and narrower (the desk's break)", () => {
+		const block = /@media \(max-width: 900px\)\s*\{([\s\S]*?)\n\t\}\n/.exec(css)?.[1] ?? "";
+		expect(block).toMatch(/\.ut-dk-top > \.ut-top\s*\{[^}]*flex-basis:\s*100%;/);
 	});
 
-	it("the path counts as nothing toward that size, takes the room left, and the spacer takes none", () => {
-		const path = rule(".ut-dk-top > .ut-top > .ut-asof");
-		expect(path).toMatch(/contain:\s*inline-size;/);
-		expect(path).toMatch(/flex:\s*1 1 0;/);
-		expect(path).toMatch(/text-align:\s*left;/);
-		expect(rule(".ut-dk-top > .ut-top > .ut-grow")).toMatch(/flex:\s*0 0 0;/);
+	it("leaves the bar's rules above the desk's break as they were: a basis, and no minimum or containment", () => {
+		const rule = /\.ut-dk-top > \.ut-top\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";
+		// The whole body, so a basis of 100% here (two rows at every width) cannot slip in beside the flex shorthand.
+		expect(rule.trim()).toBe("flex: 1 1 320px;");
+		expect(rule).not.toContain("flex-basis");
+		expect(css).not.toContain("min-width: min-content");
+		expect(css).not.toContain("contain: inline-size");
+		expect(css).not.toContain("data-past");
+		expect(css).not.toContain(".ut-asof");
+		expect(css).not.toContain(".ut-grow");
 	});
 });
 

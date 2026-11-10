@@ -54,21 +54,6 @@
 
 	.ut-dk-top > .ut-top {
 		flex: 1 1 320px;
-		/* Never narrower than the mark, the title and the pill: the outer row then wraps the search and Export under
-		   the header exactly when they no longer fit beside it, instead of the header shrinking into them. */
-		min-width: min-content;
-	}
-
-	/* The vault path is what gives way. It counts as nothing toward the header's own size (`contain`), so the minimum
-	   above is the pills' and not the path's text; it takes the width left over and ends in its ellipsis. */
-	.ut-dk-top > .ut-top > .ut-asof {
-		contain: inline-size;
-		flex: 1 1 0;
-		text-align: left;
-	}
-
-	.ut-dk-top > .ut-top > .ut-grow {
-		flex: 0 0 0;
 	}
 
 	.ut-dk-top > .ut-alarm,
@@ -313,6 +298,14 @@
 
 	/* Narrow: the desk is a scrolling column, every window shows, and fill is ignored. */
 	@media (max-width: 900px) {
+		/* Below the desk's own break (900 px here; the next part moves it to 1000 with the other blocks) the bar is two
+		   rows by rule, pin or no pin: the header takes the first row whole, the search and Export the second. The
+		   one pill then always fits (it needs about 640 px at its longest) and the bar's height does not depend on a
+		   position, so committing one moves nothing. */
+		.ut-dk-top > .ut-top {
+			flex-basis: 100%;
+		}
+
 		.ut-dk {
 			height: auto;
 			min-height: 100dvh;
