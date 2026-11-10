@@ -813,6 +813,10 @@ describe("spend chart: the headline is an exact sum", () => {
 			"Live · no spend recorded yet",
 		);
 	});
+	it("counts an undated zero-cost spend row as spend: its time is unknown, it is not no spend", () => {
+		const html = chart({ rows: [spendRow(0, { ts: "not a date", costUt: 0 })] });
+		expect(stripTags(textOf(html, "ut-sp-when"))).toBe("Live · last spend time unknown");
+	});
 	it("does not name the previous dated row when the newest spend row is undated", () => {
 		const rows = [
 			spendRow(0, { ts: new Date(T0).toISOString(), costUt: 1000 }),
