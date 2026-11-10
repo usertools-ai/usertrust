@@ -430,7 +430,7 @@ describe("the provider keeps what the page had", () => {
 		expect(src).toContain('import { useDeskMemory } from "./use-desk-memory.js";');
 	});
 
-	it("red-first (the header preview was not on the view): the view carries useAt's own preview, and usePosition returns it", () => {
+	it("red-first (the header preview was not on the view): the view carries the provider's own preview setter, and usePosition returns it", () => {
 		expect(src).toContain("const { view: atView } = useAt(");
 		// A6: the preview is its own state, read by the header only (`headerView`), never the committed view.
 		expect(src).toContain("const preview = setPreviewPos;");

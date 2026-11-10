@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { AtPayload, SummaryPayload } from "../shared/api.js";
 import { AtFollower, type AtView, LIVE_VIEW } from "../shared/at-follow.js";
 import type { LedgerRow } from "../shared/rows.js";
@@ -29,8 +29,8 @@ async function loadAt(pos: number, signal: AbortSignal): Promise<AtPayload> {
 
 /**
  * The vault as recorded at `pos` (the address's; null: live), from `/api/at`, one request at a time with the latest
- * position winning (`AtFollower`). `preview` asks for a position without touching the address (a hover or a pin in
- * progress). Each new summary (every append, status change and reload sends one) re-reads the position: a later record
+ * position winning (`AtFollower`). A hover on the chart previews a position through a second
+ * `useAt` of its own (`DeskProvider`), never this one. Each new summary (every append, status change and reload sends one) re-reads the position: a later record
  * can change the status a row had there, and a reload can change what the position names. When the live stream comes
  * back after dropping, the server may have restarted and restarted its epochs, so the follower forgets the epoch and
  * re-reads.
@@ -51,7 +51,7 @@ export function useAt(
 	resyncs: number,
 	rowsVault: string | null,
 	navigation: number,
-): { view: AtView; preview(pos: number | null): void } {
+): { view: AtView } {
 	const [view, setView] = useState<AtView>(LIVE_VIEW);
 	const follower = useRef<AtFollower | null>(null);
 	// The rows as of the last commit, for the follower to read when it sends a request. Written in an effect, never
@@ -99,6 +99,5 @@ export function useAt(
 		}
 	}, [live]);
 
-	const preview = useCallback((p: number | null) => follower.current?.want(p), []);
-	return { view, preview };
+	return { view };
 }
