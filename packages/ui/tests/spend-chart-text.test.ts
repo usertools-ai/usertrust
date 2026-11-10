@@ -82,12 +82,22 @@ describe("subLine", () => {
 describe("whenLine", () => {
 	it("names the pinned record by its time and vault number", () => {
 		expect(
-			whenLine({ shown: { t: T, pos: 17_951, pinned: true }, pinnedNoRecord: false, lastT: T }),
+			whenLine({
+				shown: { t: T, pos: 17_951, pinned: true },
+				pinnedNoRecord: false,
+				lastT: T,
+				spent: true,
+			}),
 		).toBe("Pinned · 11-07 18:00:05Z · record 17,952");
 	});
 	it("names a hovered record without the pin's word", () => {
 		expect(
-			whenLine({ shown: { t: T, pos: 4, pinned: false }, pinnedNoRecord: false, lastT: T }),
+			whenLine({
+				shown: { t: T, pos: 4, pinned: false },
+				pinnedNoRecord: false,
+				lastT: T,
+				spent: true,
+			}),
 		).toBe("11-07 18:00:05Z · record 5");
 	});
 	it("is live at rest", () => {
@@ -321,6 +331,8 @@ describe("reconcileCursor", () => {
 		hash: rows.map((r) => `h${r.pos}`),
 		before: 0,
 		total: 5,
+		rows: 5,
+		lastUndated: false,
 	};
 	const bucketAt = (start: number) => (t: number) => Math.floor((t - start) / 3_600_000);
 	const live = (i: number, k: number): CursorValue => ({ k, via: "pointer", i });
