@@ -58,7 +58,8 @@ export interface ChargeLine {
 /**
  * - `none`: the record carries no cost.
  * - `no-counts`: a cost, and none of the four token counts.
- * - `partial`: at least one count, but a count or a rate is missing (or the 1-hour share is unusable).
+ * - `partial`: at least one count, but a tier cannot be priced: its count or its rate is missing, or the record
+ *   carries a 1-hour cache write without a usable count and rate for it.
  * - `priced`: every tier has its count and rate.
  */
 export type ChargeState = "none" | "no-counts" | "partial" | "priced";
@@ -73,7 +74,11 @@ export interface Charge {
 	computedUt: number | null;
 	/** The cost the record carries (the metered amount); `null` when it carries none, or no usable number. */
 	costUt: number | null;
-	/** `costUt - computedUt`: 0 when they agree, above 0 when the record charged more. `null` unless `priced`. */
+	/**
+	 * `costUt - computedUt`: 0 when they agree, above 0 when the record charged more, below 0 when it charged less.
+	 * Below 0 is ordinary: a charge capped under what its tokens come to (a cost of 100 against 275 gives -175).
+	 * `null` unless `priced`.
+	 */
 	differenceUt: number | null;
 	version: string | null;
 }
@@ -129,8 +134,10 @@ type Term = Pick<ChargePart, "label" | "count" | "ratePer1k">;
 
 /**
  * The terms a tier is priced as. A cache write with a 1-hour share is two: the share (never more than the write
- * count) at its own rate, and the 5-minute remainder at the tier's rate. A share the row carries but that holds no
- * usable number leaves the tier unpriced.
+ * count) at its own rate, and the 5-minute remainder at the tier's rate. A row carries `cacheWrite1h` whenever its
+ * record does, with only the usable numbers: a share missing its count or its rate leaves the tier unpriced, since
+ * how much of the write was priced at which rate is then not known. Only a row with no `cacheWrite1h` at all is
+ * one term at the write rate.
  */
 function termsOf(
 	tier: Tier,

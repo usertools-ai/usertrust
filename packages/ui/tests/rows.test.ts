@@ -499,10 +499,10 @@ describe("a charge's inputs", () => {
 		expect(rowOf({ usage: {}, appliedRates: [] })).not.toHaveProperty("usage");
 		expect(rowOf({ usage: {}, appliedRates: [] })).not.toHaveProperty("appliedRates");
 		expect(rowOf({ usage: { inputTokens: -5 } })).not.toHaveProperty("usage");
-		expect(rowOf({ usage: 7, cacheWrite1h: 7 })).not.toHaveProperty("cacheWrite1h");
+		expect(rowOf({ usage: 7 })).not.toHaveProperty("usage");
 	});
 
-	it("the 1-hour cache write is kept only whole: its tokens and its rate together", () => {
+	it("a usable 1-hour cache write is kept as recorded: its tokens and its rate, and no other key", () => {
 		expect(rowOf({ cacheWrite1h: { tokens: 500, ratePer1k: 60 } }).cacheWrite1h).toEqual({
 			tokens: 500,
 			ratePer1k: 60,
@@ -517,18 +517,30 @@ describe("a charge's inputs", () => {
 			tokens: 0,
 			ratePer1k: 0,
 		});
-		for (const cacheWrite1h of [
-			{ tokens: 500 },
-			{ ratePer1k: 60 },
-			{ tokens: 1.5, ratePer1k: 60 },
-			{ tokens: -1, ratePer1k: 60 },
-			{ tokens: 500, ratePer1k: -60 },
-			{ tokens: 500, ratePer1k: "60" },
-			{},
-			null,
-		]) {
-			expect(rowOf({ cacheWrite1h })).not.toHaveProperty("cacheWrite1h");
+	});
+
+	it("a 1-hour cache write the record carries stays on the row, with only its usable numbers", () => {
+		// The row keeps the fact that the record carried one: without it the whole write would look like a 5-minute one.
+		const kept = (cacheWrite1h: unknown) => rowOf({ cacheWrite1h }).cacheWrite1h;
+		expect(kept({ tokens: 500 })).toEqual({ tokens: 500 });
+		expect(kept({ ratePer1k: 60 })).toEqual({ ratePer1k: 60 });
+		expect(kept({ tokens: 1.5, ratePer1k: 60 })).toEqual({ ratePer1k: 60 });
+		expect(kept({ tokens: -1, ratePer1k: 60 })).toEqual({ ratePer1k: 60 });
+		expect(kept({ tokens: Number.NaN, ratePer1k: 60 })).toEqual({ ratePer1k: 60 });
+		expect(kept({ tokens: 500, ratePer1k: -60 })).toEqual({ tokens: 500 });
+		expect(kept({ tokens: 500, ratePer1k: "60" })).toEqual({ tokens: 500 });
+		expect(kept({ tokens: "500", ratePer1k: Number.POSITIVE_INFINITY })).toEqual({});
+		// Present, with nothing usable in it: still on the row, and empty. Nothing is filled in.
+		for (const present of [{}, [], 7, 0, "1h", false]) {
+			expect(kept(present)).toEqual({});
+			expect(Object.keys(kept(present) ?? { none: 1 })).toEqual([]);
 		}
+	});
+
+	it("a record with no 1-hour cache write gives a row with no such key", () => {
+		expect(rowOf({ cacheWrite1h: null })).not.toHaveProperty("cacheWrite1h");
+		expect(rowOf({ cacheWrite1h: undefined })).not.toHaveProperty("cacheWrite1h");
+		expect(rowOf({ usage: { cacheWriteTokens: 2000 } })).not.toHaveProperty("cacheWrite1h");
 	});
 
 	it("the pricing table version is kept only as a string that names one", () => {

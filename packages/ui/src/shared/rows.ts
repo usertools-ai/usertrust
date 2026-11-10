@@ -74,9 +74,12 @@ export interface LedgerRow {
 	appliedRates?: Partial<TierRates>;
 	/**
 	 * The share of `usage.cacheWriteTokens` written with a 1-hour lifetime, and the rate it was priced at. The rest
-	 * of the write count is priced at `appliedRates.cacheWritePer1k`. Present only with both fields.
+	 * of the write count is priced at `appliedRates.cacheWritePer1k`. Present whenever the record carries one, and
+	 * absent only when it carries none. Each field is present only when the record holds a usable number for it, so
+	 * a share recorded without a usable count or rate is on the row with that field missing (at worst as `{}`):
+	 * the write then cannot be priced, and is never taken for a plain 5-minute write.
 	 */
-	cacheWrite1h?: { tokens: number; ratePer1k: number };
+	cacheWrite1h?: { tokens?: number; ratePer1k?: number };
 	/** The version of the pricing table the applied rates came from. */
 	pricingTableVersion?: string;
 	hash: string;
@@ -275,10 +278,14 @@ export function toLedgerRows(
 		if (usage !== undefined) row.usage = usage;
 		const appliedRates = amounts(e.data.appliedRates, RATE_KEYS, false);
 		if (appliedRates !== undefined) row.appliedRates = appliedRates;
-		const tokens1h = amounts(e.data.cacheWrite1h, ["tokens"], true)?.tokens;
-		const rate1h = amounts(e.data.cacheWrite1h, ["ratePer1k"], false)?.ratePer1k;
-		if (tokens1h !== undefined && rate1h !== undefined) {
-			row.cacheWrite1h = { tokens: tokens1h, ratePer1k: rate1h };
+		// Kept whenever the record carries one, usable or not: dropping an unusable one would leave a row that looks
+		// like a plain 5-minute write, and a charge that looks complete at the wrong rate.
+		const write1h = e.data.cacheWrite1h;
+		if (write1h !== undefined && write1h !== null) {
+			row.cacheWrite1h = {
+				...amounts(write1h, ["tokens"], true),
+				...amounts(write1h, ["ratePer1k"], false),
+			};
 		}
 		const pricingTableVersion = str(e.data.pricingTableVersion);
 		if (pricingTableVersion !== undefined && pricingTableVersion !== "") {

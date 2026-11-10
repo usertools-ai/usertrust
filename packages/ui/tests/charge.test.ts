@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
+import type { PersistedAuditEvent } from "usertrust";
 import { describe, expect, it } from "vitest";
 import { type Charge, chargeOf, TIERS } from "../src/shared/charge.js";
-import type { LedgerRow } from "../src/shared/rows.js";
+import { type LedgerRow, toLedgerRows } from "../src/shared/rows.js";
 
 type Inputs = Parameters<typeof chargeOf>[0];
 
@@ -212,6 +213,86 @@ describe("chargeOf", () => {
 			expect(c.computedUt).toBe(75);
 		});
 
+		describe("read from a record, through its row", () => {
+			const charged = (costUt: number, cacheWrite1h?: unknown) => {
+				const event: PersistedAuditEvent = {
+					id: "id-1",
+					timestamp: "2026-07-27T10:00:00.000Z",
+					previousHash: "0".repeat(64),
+					hash: "a".repeat(64),
+					kind: "llm_call",
+					actor: "local",
+					sequence: 1,
+					data: {
+						cost: costUt,
+						usage: { ...USAGE, cacheWriteTokens: 2000 },
+						appliedRates: RATES,
+						...(cacheWrite1h === undefined ? {} : { cacheWrite1h }),
+					},
+				};
+				const rows = toLedgerRows([event], { valid: true, breakIndex: null }, undefined, 0);
+				return chargeOf(rows[0] as LedgerRow);
+			};
+
+			it.each([
+				["its tokens and no rate", { tokens: 2000 }],
+				["its rate and no tokens", { ratePer1k: 60 }],
+				["a token count that is not a number", { tokens: Number.NaN, ratePer1k: 60 }],
+				["a negative token count", { tokens: -500, ratePer1k: 60 }],
+				["a fractional token count", { tokens: 500.5, ratePer1k: 60 }],
+				["a negative rate", { tokens: 500, ratePer1k: -60 }],
+				["nothing usable", {}],
+				["a value that is not an object", "1h"],
+			])(
+				"a 1-hour share recorded with %s leaves the write unpriced and the charge partial",
+				(_name, cacheWrite1h) => {
+					// Priced as one 5-minute write, 2,000 at 37.5 would look complete: 75, and a sum of 186.
+					const c = charged(186, cacheWrite1h);
+					expect(c.state).toBe("partial");
+					expect(c.lines[3]).toEqual({
+						tier: "cacheWrite",
+						label: "Cache write",
+						count: 2000,
+						ratePer1k: 37.5,
+						parts: [],
+						utText: null,
+						usdText: null,
+					});
+					expect(utTexts(c)).toEqual(["30", "75", "6", null]);
+					expect(c.lines.slice(0, 3).map((l) => l.parts.length)).toEqual([1, 1, 1]);
+					expect(c.sumText).toBeNull();
+					expect(c.computedUt).toBeNull();
+					expect(c.differenceUt).toBeNull();
+					expect(c.costUt).toBe(186);
+				},
+			);
+
+			it("a record with no 1-hour share prices the whole write at the one write rate", () => {
+				for (const none of [undefined, null]) {
+					const c = charged(186, none);
+					expect(c.state).toBe("priced");
+					expect(c.lines[3]?.parts).toEqual([
+						{ label: null, count: 2000, ratePer1k: 37.5, utText: "75", usdText: "$0.0075" },
+					]);
+					expect(c.sumText).toBe("186");
+					expect(c.computedUt).toBe(186);
+					expect(c.differenceUt).toBe(0);
+				}
+			});
+
+			it("a usable share is two terms, as before", () => {
+				const c = charged(198, { tokens: 500, ratePer1k: 60 });
+				expect(c.state).toBe("priced");
+				expect(c.lines[3]?.parts.map((p) => [p.label, p.count, p.ratePer1k, p.utText])).toEqual([
+					["5-minute", 1500, 37.5, "56.25"],
+					["1-hour", 500, 60, "30"],
+				]);
+				expect(c.sumText).toBe("197.25");
+				expect(c.computedUt).toBe(198);
+				expect(c.differenceUt).toBe(0);
+			});
+		});
+
 		it("a share or a 1-hour rate that is not a usable number leaves the write tier unpriced", () => {
 			for (const cacheWrite1h of [
 				{ tokens: Number.NaN, ratePer1k: 60 },
@@ -239,6 +320,15 @@ describe("chargeOf", () => {
 		const lower = chargeOf(fixture({ costUt: 112 }));
 		expect(lower.differenceUt).toBe(-3);
 		expect(lower.state).toBe("priced");
+		// A charge capped well under what its tokens come to: 250 + 25 = 275 against a cost of 100.
+		const capped = chargeOf({
+			costUt: 100,
+			usage: { ...NO_TOKENS, inputTokens: 5000, outputTokens: 1000 },
+			appliedRates: { ...RATES, inputPer1k: 50, outputPer1k: 25 },
+		});
+		expect(capped.computedUt).toBe(275);
+		expect(capped.differenceUt).toBe(-175);
+		expect(capped.state).toBe("priced");
 	});
 
 	it("a recorded cost of 0 is a cost: the charge is priced and the difference shown", () => {
