@@ -30,6 +30,10 @@ export interface SpendRecords {
 	total: number;
 	/** How many spend rows are held, dated or not. */
 	rows: number;
+	/** Every spend row's position, ascending, dated or not: the rows `spendCum` is read at. */
+	spendPos: Int32Array;
+	/** Spend up to and including each row of `spendPos`, `before` included. */
+	spendCum: Float64Array;
 	/** Whether the newest spend row (highest position) has no readable time. */
 	lastUndated: boolean;
 }
@@ -70,9 +74,15 @@ export function spendRecords(
 	let carry = before;
 	let maxT = Number.NEGATIVE_INFINITY;
 	let i = 0;
+	let n = 0;
+	const spendPos = new Int32Array(spend.length);
+	const spendCum = new Float64Array(spend.length);
 	for (const j of order) {
 		const row = spend[j] as LedgerRow;
 		carry += row.costUt as number;
+		spendPos[n] = row.pos;
+		spendCum[n] = carry;
+		n += 1;
 		const tj = times[j] as number;
 		if (Number.isNaN(tj)) continue;
 		if (tj > maxT) maxT = tj;
@@ -91,9 +101,21 @@ export function spendRecords(
 		hash,
 		before,
 		total: carry,
+		spendPos,
+		spendCum,
 		rows: spend.length,
 		lastUndated: last >= 0 && Number.isNaN(times[last] as number),
 	};
+}
+
+/**
+ * What was spent by position `pos`: the spend rows at or before it, dated or not, with what came before the rows held.
+ * A record's own `cum` leaves out undated rows after it, so a pin is read here.
+ */
+export function totalAtPos(s: SpendRecords, pos: number): number {
+	const n = s.spendPos.length;
+	const j = firstWhere(n, (k) => (s.spendPos[k] as number) > pos);
+	return j > 0 ? (s.spendCum[j - 1] as number) : s.before;
 }
 
 /** The first index in `[0, n)` where `past(index)` holds, `n` when none; `past` must be monotone. */

@@ -6,7 +6,7 @@
  * between the live cursor, another window's moment and the pin. The component only applies the answers.
  */
 
-import { indexAtPos, type SpendRecords } from "../../../shared/cumulative.js";
+import { indexAtPos, type SpendRecords, stepIndex } from "../../../shared/cumulative.js";
 import type { CursorValue } from "../../../shared/cursor-store.js";
 
 /** What a key on the plot asks for; null when the plot leaves the key alone. */
@@ -86,17 +86,23 @@ export function drawnCursor(
 	return sync ?? pin;
 }
 
+/** What clears a live cursor: the range (3m, ytd and 1y share a bucket size), the bucket, or the filters. */
+export function cursorResetKey(range: string, bucketMs: number, filterKey: string): string {
+	return `${range}|${bucketMs}|${filterKey}`;
+}
+
 /**
  * What Enter or Space does with the live cursor on record `i`: go live when that record is the one pinned, else pin
  * it; nothing without a live cursor.
  */
 export function toggleTarget(
 	liveI: number,
-	pinI: number,
-	pinned: boolean,
+	livePos: number,
+	pinnedPos: number | null,
 ): "live" | "pin" | "none" {
 	if (liveI < 0) return "none";
-	return pinned && liveI === pinI ? "live" : "pin";
+	// Compare vault positions: a pin on an undated row has no record index, but it is the same spot all the same.
+	return pinnedPos !== null && livePos === pinnedPos ? "live" : "pin";
 }
 
 /** What Escape does: go live when pinned, else clear a keyboard cursor, else nothing (the page's own Escape runs). */
@@ -120,6 +126,10 @@ export function frameKey(filterKey: string, empty: boolean): string {
  * A live cursor against a newer model of the same rows (a live append, a filter, a window one bucket later): the same
  * record when it is still inside the span, in the bucket of its time on the new line; null when the record is gone,
  * and the cursor must be dropped. `prevPos` is the position of the record the cursor was on, read from the old model.
+ *
+ * A cursor placed by a key may rest on a bucket that holds no record (a bucket step across an empty stretch lands on
+ * the record nearest it). `next.key` carries that bucket: the one holding the old bucket's start time on the new line
+ * is kept while it still resolves to the same record, so rows streaming in never send the cursor back.
  */
 export function reconcileCursor(
 	v: CursorValue | null,
@@ -128,16 +138,80 @@ export function reconcileCursor(
 		records: SpendRecords;
 		span: { i0: number; i1: number };
 		bucketOf(t: number): number;
+		key?: {
+			prevStartMs: number;
+			startMs: number;
+			bucketMs: number;
+			recordIn(k: number): number;
+		};
 	},
 ): CursorValue | null {
 	if (!isLiveCursor(v) || prevPos === undefined) return null;
 	const i = indexAtPos(next.records, prevPos);
 	if (i < next.span.i0 || i > next.span.i1 || next.records.pos[i] !== prevPos) return null;
-	return { k: next.bucketOf(next.records.t[i] as number), via: v.via, i };
+	const own = next.bucketOf(next.records.t[i] as number);
+	const key = next.key;
+	if (
+		v.via === "key" &&
+		key !== undefined &&
+		Number.isFinite(key.prevStartMs) &&
+		key.bucketMs > 0
+	) {
+		const k = next.bucketOf(key.prevStartMs);
+		const start = key.startMs + k * key.bucketMs;
+		if (
+			key.prevStartMs >= start &&
+			key.prevStartMs < start + key.bucketMs &&
+			key.recordIn(k) === i
+		) {
+			return { k, via: v.via, i };
+		}
+	}
+	return { k: own, via: v.via, i };
 }
 
 /** The time to republish when a kept cursor's record now reads a different time (a running maximum shifts when a filter drops an earlier row); null when it is unchanged. */
 export function movedTime(was: number | undefined, now: number | undefined): number | null {
 	if (now === undefined || Number.isNaN(now)) return null;
 	return now === was ? null : now;
+}
+
+/** Where a movement key puts the cursor: on record `i`, or in bucket `k` (the component finds the record in it). */
+export type KeyMove = { to: "record"; i: number } | { to: "bucket"; k: number };
+
+/**
+ * A movement key's answer. With no live cursor the first press shows it where the line is read from: the pin when it
+ * is inside the span, else the newest record. With one, a bucket key steps the bucket and a record key the record
+ * (clamped to the span); Home and End are the first and last bucket. `liveK` is null unless a live cursor is drawn.
+ */
+export function keyMove(
+	act: KeyAction,
+	s: {
+		liveI: number;
+		liveK: number | null;
+		pinI: number;
+		span: { i0: number; i1: number };
+		buckets: number;
+	},
+): KeyMove | null {
+	const { span } = s;
+	if (span.i1 < span.i0) return null;
+	const inSpan = (i: number): boolean => i >= span.i0 && i <= span.i1;
+	const base = s.liveI >= 0 ? s.liveI : inSpan(s.pinI) ? s.pinI : span.i1;
+	switch (act.type) {
+		case "bucket":
+			if (s.liveI < 0 || s.liveK === null) return { to: "record", i: base };
+			return { to: "bucket", k: stepBucket(s.liveK, act.by, s.buckets) };
+		case "record":
+			return {
+				to: "record",
+				i: s.liveI < 0 ? base : stepIndex(s.liveI, act.by > 0 ? 1 : -1, Math.abs(act.by), span),
+			};
+		case "home":
+			return { to: "bucket", k: 0 };
+		case "end":
+			return { to: "bucket", k: s.buckets - 1 };
+		default:
+			return null;
+	}
 }

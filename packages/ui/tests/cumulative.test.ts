@@ -12,6 +12,7 @@ import {
 	lastAtOrBefore,
 	spendRecords,
 	stepIndex,
+	totalAtPos,
 } from "../src/shared/cumulative.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 
@@ -368,6 +369,29 @@ describe("spendRecords: the total", () => {
 		expect(spendRecords([], null).total).toBe(0);
 		expect(spendRecords([], 5000).total).toBe(5000);
 		expect(spendRecords(rowsOf(SPECS), null).total).toBe(SPEND_SUM);
+	});
+});
+
+describe("totalAtPos", () => {
+	const at = (min: number): string => new Date(T0 + min * MIN).toISOString();
+	it("counts undated spend at or before a position, and the spend before the rows", () => {
+		const r = spendRecords(
+			rowsOf([
+				{ kind: "llm_call", cost: 10_000, ts: at(1) },
+				{ kind: "llm_call", cost: 20_000, ts: "not a date" },
+				{ kind: "llm_call", cost: 5_000, ts: at(3) },
+			]),
+			40_000,
+		);
+		expect(r.before).toBe(5_000);
+		expect(totalAtPos(r, -1)).toBe(5_000);
+		expect(totalAtPos(r, 0)).toBe(15_000);
+		expect(totalAtPos(r, 1)).toBe(35_000);
+		expect(totalAtPos(r, 2)).toBe(40_000);
+		expect(totalAtPos(r, 99)).toBe(40_000);
+	});
+	it("is the anchor's before with no rows", () => {
+		expect(totalAtPos(spendRecords([], 700), 3)).toBe(700);
 	});
 });
 
