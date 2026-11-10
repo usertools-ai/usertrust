@@ -660,4 +660,23 @@ describe("chart frame: the sheet", () => {
 			expect(sheet).toMatch(new RegExp(`\\.ut-sp-${cls}(?![\\w-])`));
 		}
 	});
+
+	/** The declarations of the sheet's rule for `selector`. */
+	const rule = (selector: string): string => {
+		const at = sheet.indexOf(`${selector} {`);
+		return at < 0 ? "" : sheet.slice(at, sheet.indexOf("}", at));
+	};
+
+	it("paints the dashed copy itself, since the main line's paint is inline on the main line", () => {
+		const dashed = rule(".ut-sp-line.ut-sp-dashed");
+		expect(dashed).toContain("stroke: var(--sp-ink)");
+		expect(dashed).toMatch(/stroke-width: [\d.]+/);
+		expect(dashed).toContain("stroke-dasharray");
+		const gap = rule(".ut-sp-line.ut-sp-gap");
+		expect(gap).toContain("stroke: var(--dk-pane)");
+		expect(gap).toMatch(/stroke-width: [\d.]+/);
+		// The gap under the dashes is wider than the dashes, or it would not hide the solid line.
+		const w = (r: string): number => Number(/stroke-width: ([\d.]+)/.exec(r)?.[1]);
+		expect(w(gap)).toBeGreaterThan(w(dashed));
+	});
 });

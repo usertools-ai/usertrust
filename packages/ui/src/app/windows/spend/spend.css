@@ -45,9 +45,15 @@
 	.ut-sp-line.ut-sp-gap {
 		stroke: var(--dk-pane);
 		stroke-width: 3.5;
+		stroke-linejoin: round;
 	}
 
+	/* The dashed copy is its own element: the main line's paint is inline on that one, so it is stated here. */
 	.ut-sp-line.ut-sp-dashed {
+		stroke: var(--sp-ink);
+		stroke-width: 1.6;
+		stroke-linejoin: round;
+		stroke-linecap: butt;
 		stroke-dasharray: 4 4;
 	}
 
