@@ -194,6 +194,30 @@ describe("the legend's hover owner", () => {
 		expect(t.sent.length).toBe(5);
 	});
 
+	it("does not bring back a ring hover the ring dropped while the legend held a row", () => {
+		const t = deferredIo();
+		const owner = createHoverOwner(t.io, "lane");
+		t.other({ dim: "lane", key: "r", from: "share" });
+		owner.focus("a");
+		t.other(null);
+		owner.enter("b");
+		owner.leave();
+		owner.blur();
+		expect(t.sent.at(-1)).toBeNull();
+	});
+
+	it("brings back the ring hover that replaced an earlier one the legend had displaced", () => {
+		const t = deferredIo();
+		const owner = createHoverOwner(t.io, "lane");
+		t.other({ dim: "lane", key: "r", from: "share" });
+		owner.focus("a");
+		t.other({ dim: "lane", key: "s", from: "share" });
+		owner.enter("b");
+		owner.leave();
+		owner.blur();
+		expect(t.sent.at(-1)).toEqual({ dim: "lane", key: "s", from: "share" });
+	});
+
 	it("does not hand back a hover the legend itself left on the bus", () => {
 		const t = deferredIo();
 		const owner = createHoverOwner(t.io, "lane");

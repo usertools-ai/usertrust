@@ -7,8 +7,9 @@
  *
  * Its range is a chart's: it reads every row the page holds, under the filters the list was drawn with (less the
  * level's own, so a picked slice is still drawn among the others), over the range to the end of the current minute.
- * A pin does not cut it short. While a record is pinned, or another window's crosshair is on a moment, it shows that
- * moment's bucket instead and says so ("At <time>"); the keys and their order stay the range's.
+ * A pin does not cut it short. While a record is pinned, or another window's crosshair is on a moment inside the range,
+ * it shows that moment's bucket instead and says so ("At <time>"); a moment outside the range, or a pin it cannot place,
+ * shows the whole range. The keys and their order stay the range's.
  */
 
 import { memo, useMemo, useState } from "react";
@@ -41,6 +42,7 @@ import {
 	roleSources,
 	scopeOf,
 } from "../../../shared/level.js";
+import { pastHeldNote } from "../../../shared/list-view.js";
 import type { LedgerRow, RowStatus } from "../../../shared/rows.js";
 import { bucketCount } from "../../../shared/spend-series.js";
 import { statusWord } from "../../../shared/status-word.js";
@@ -91,7 +93,15 @@ function useShareData(): ShareData {
 		if (dim === "provider") {
 			const rowsNoModel = applyFilters(rows, withoutDimension(filters, "model"));
 			level = effectiveLevel(dim, rowsNoModel, chartWindow).dim;
-			if (level !== "provider") scope = scopeOf(dim, level, rowsNoModel, chartWindow);
+			let scoped = rowsNoModel;
+			// Lanes lift the lane filter, which widens the rows: the lane level stands only if the widened rows still
+			// hold the one provider and the one model. Otherwise it stays at models, with the lane filter in force.
+			if (level === "lane") {
+				const widened = applyFilters(rows, withoutDimension(filters, "lane"));
+				if (effectiveLevel(dim, widened, chartWindow).dim === "lane") scoped = widened;
+				else level = "model";
+			}
+			if (level !== "provider") scope = scopeOf(dim, level, scoped, chartWindow);
 		}
 		const rowsExcl = applyFilters(rows, withoutDimension(filters, level));
 		return {
@@ -155,6 +165,8 @@ function ShareBody({ data, filled }: { data: ShareData; filled: boolean }): Reac
 	const hover = useHoverCategory();
 	const hoverMoment = useHoverMoment("share");
 	const pinMs = usePinMs();
+	const { list, pastNote } = useDeskData();
+	const reloading = list.reloading === true;
 
 	// The moment shown: another window's crosshair, else the pinned record's time; its bucket is the Spend line's.
 	const momentMs = hoverMoment?.ms ?? pinMs;
@@ -188,6 +200,19 @@ function ShareBody({ data, filled }: { data: ShareData; filled: boolean }): Reac
 	};
 
 	const gen = useChangeMark(`${range}|${dim}|${JSON.stringify(filters)}`);
+	// While the point's own records are on their way the ring would only say "no spend": it waits, as the Spend line does.
+	if (reloading) {
+		return (
+			<div className="ut-sh" data-filled={filled} data-gen={gen}>
+				<div className="ut-sh-dims">
+					<DimSwitch />
+				</div>
+				<div className="ut-empty">
+					<b>{pastNote ?? pastHeldNote(false)}</b>
+				</div>
+			</div>
+		);
+	}
 	return (
 		<div className="ut-sh" data-filled={filled} data-gen={gen}>
 			<div className="ut-sh-dims">

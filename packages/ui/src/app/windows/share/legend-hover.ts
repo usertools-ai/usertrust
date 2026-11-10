@@ -68,8 +68,9 @@ export function createHoverOwner(io: HoverIo, level: Dimension): HoverOwner {
 	let displaced: HoverCategory | null = null;
 	const publish = (key: string | null): void => {
 		if (key !== null) {
-			if (published === null) {
-				const now = io.latest();
+			// Read again whenever the bus is not the legend's own: the ring may have dropped, or changed, what was held.
+			const now = io.latest();
+			if (!isOurs(now, level, published)) {
 				displaced = now !== null && now.from !== LEGEND_FROM ? now : null;
 			}
 			published = key;

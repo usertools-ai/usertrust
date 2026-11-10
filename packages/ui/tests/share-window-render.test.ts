@@ -452,3 +452,37 @@ describe("what the centre and the ring's words say", () => {
 		expect(ringLabel(html)).not.toContain("Other $0.00");
 	});
 });
+
+describe("the window while the point's records are on their way", () => {
+	it("keeps the switch and says what the Spend line says, in place of the ring and the legend", async () => {
+		const d = shareData(eightLanes());
+		const waiting = {
+			...d,
+			list: { ...d.list, reloading: true },
+			pastNote: "Loading that day",
+		} as typeof d;
+		const html = await win({ data: waiting });
+		expect(tagsOf(html, "ut-seg")).toHaveLength(1);
+		expect(innerOf(html, /<div class="ut-empty"[^>]*><b>/)).toBe("Loading that day");
+		expect(tagsOf(html, "ut-sh-ring")).toHaveLength(0);
+		expect(tagsOf(html, "ut-sh-legend")).toHaveLength(0);
+		expect(tagsOf(html, "ut-sh-slice")).toHaveLength(0);
+	});
+
+	it("keeps the lane level when picking a lane would widen the rows to more than one model", async () => {
+		// Lane a has one model; lane b has two. With a picked, the lane level would lift the pick and show b's other
+		// model too, so the window stays at models, scoped to the one provider.
+		const rows = [
+			spend("a", 1, 500),
+			spend("b", 1, 300),
+			spend("b", 1, 200, { model: "claude-fable-5" }),
+		];
+		const picked = toggleCategory(EMPTY_FILTERS, "lane", "a", false);
+		const html = await win({
+			data: shareData(rows, picked),
+			view: { dim: "provider", filters: picked },
+		});
+		expect(subtitle(html)).toBe(`${SUBTITLE_DRILL.model} · Anthropic`);
+		expect(sliceKeys(html)).toEqual(["claude-sonnet-5"]);
+	});
+});
