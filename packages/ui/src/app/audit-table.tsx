@@ -99,6 +99,9 @@ function DenseRowBody(props: { row: LedgerRow }): React.JSX.Element {
 					style={{ background: provider === "Other" ? MUTED : PROVIDER_COLOR[provider] }}
 					aria-hidden="true"
 				/>
+				{/* A record with no model is named by its kind. The kind has a cell of its own; a narrow list drops it, and
+				    the sheet shows this in place of the dash exactly there. */}
+				{row.model === undefined && <span className="ut-lg-kin">{row.kind}</span>}
 				<span className="ut-lg-name">{row.model ?? NONE}</span>
 			</span>
 			<span className="ut-lg-a" title={`actor ${row.actor}`}>
@@ -141,6 +144,13 @@ function DenseRowBody(props: { row: LedgerRow }): React.JSX.Element {
 			</span>
 			<span className="ut-lg-c">
 				{/* A record with no cost shows the dash: an unknown cost is not $0. */}
+				{/* The usage cell says a cost rests on estimated usage; a narrow list drops that cell, and the sheet shows
+				    this mark exactly there. A figure that is an estimate never reads as an exact one. */}
+				{cost?.estimated === true && (
+					<span className="ut-lg-est" title={ESTIMATED_TITLE}>
+						est.
+					</span>
+				)}
 				<span className="ut-amt">{cost === null ? NONE : cost.usd}</span>
 			</span>
 		</>

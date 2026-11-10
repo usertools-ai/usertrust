@@ -224,6 +224,16 @@
 		text-overflow: ellipsis;
 	}
 
+	/* The kind of a record with no model, in the model's cell. Hidden while the kind has its own cell. */
+	.ut-lg-m .ut-lg-kin {
+		display: none;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		color: var(--dk-label);
+		font-family: var(--fig);
+	}
+
 	.ut-lg-row .ut-lg-u {
 		color: var(--dk-label);
 	}
@@ -273,6 +283,14 @@
 		font-variant-numeric: tabular-nums;
 	}
 
+	/* A cost that rests on estimated usage says so before the figure. Hidden while the usage cell says it. */
+	.ut-lg-row .ut-lg-est {
+		display: none;
+		margin-right: 4px;
+		color: var(--info);
+		font: 600 10px/1 var(--sans);
+	}
+
 	/* The records of the hour a chart points at, then the one record it has pinned, then the row under the pointer:
 	   in this order, so a pinned record in the hour reads as pinned. Only the row itself lights, never one beside it. */
 	/* The bar is the row's own. The tint is a layer under the row's cells, not the row's background: a record that has
@@ -316,6 +334,20 @@
 
 		.ut-lg-row .ut-lg-k,
 		.ut-lg-row .ut-lg-u {
+			display: none;
+		}
+
+		/* What those two cells alone said moves to cells that stay: the estimate beside the cost, and the kind of a
+		   record with no model in place of the model's dash. */
+		.ut-lg-row .ut-lg-est {
+			display: inline;
+		}
+
+		.ut-lg-m .ut-lg-kin {
+			display: block;
+		}
+
+		.ut-lg-m .ut-lg-kin + .ut-lg-name {
 			display: none;
 		}
 	}

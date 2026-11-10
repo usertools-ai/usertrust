@@ -852,9 +852,34 @@ describe("the dense list", () => {
 		expect(title(row({ model: "claude-sonnet-4-6" }))).toBe("claude-sonnet-4-6, Anthropic");
 		expect(title(row({ model: "some-other-model" }))).toBe("some-other-model");
 		expect(title(bare)).toBe("no model");
-		// With no model the cell shows the long dash, not the kind and not an empty cell.
+		// With no model the cell shows the long dash, not an empty cell (and its kind, where the sheet says so).
 		expect(one(bare)).toContain(`<span class="ut-lg-name">${DASH}</span>`);
 		expect(one(row({ model: "gpt-5" }))).toContain('<span class="ut-lg-name">gpt-5</span>');
+	});
+
+	it("a cost that rests on estimated usage says est. in the cost cell; an exact cost carries no mark", () => {
+		// The usage cell says it too, and a narrow list drops that cell: the sheet shows this mark exactly there.
+		const est = one(row({ costUt: 3_800, usageSource: "estimated" }));
+		expect(est).toContain(
+			'<span class="ut-lg-c"><span class="ut-lg-est" title="This cost rests on estimated usage">est.</span><span class="ut-amt">$0.3800</span></span>',
+		);
+		expect(est.match(/ut-lg-est/g)).toHaveLength(1);
+		expect(one(row({ costUt: 3_800, usageSource: "provider" }))).not.toContain("ut-lg-est");
+		const { usageSource: _source, ...unsaid } = row({ costUt: 3_800 });
+		expect(one(unsaid)).not.toContain("ut-lg-est");
+		// No cost, no mark: there is no figure for it to qualify.
+		const { costUt: _cost, ...bare } = row({ usageSource: "estimated" });
+		expect(one(bare)).toContain(`<span class="ut-lg-c"><span class="ut-amt">${DASH}</span></span>`);
+		expect(src).toContain("{cost?.estimated === true && (");
+	});
+
+	it("a record with no model carries its kind in the model cell, for the widths that drop the kind's own cell", () => {
+		const { model: _model, ...bare } = row({ kind: "policy_denied" });
+		expect(one(bare)).toContain(
+			`<span class="ut-lg-kin">policy_denied</span><span class="ut-lg-name">${DASH}</span>`,
+		);
+		// A record with a model is named by it at every width: no second name.
+		expect(one(row({ model: "gpt-5", kind: "llm_call" }))).not.toContain("ut-lg-kin");
 	});
 
 	it("the cost is in dollars, with nothing drawn behind it; no cost is a dash, never $0", () => {
@@ -1367,6 +1392,44 @@ describe("the Ledger window's sheet", () => {
 		expect(`${five}${four}`).not.toMatch(/[^-]height:|white-space/);
 		// Where a row scrolled to stops under the phone's sort bar is the list's to measure: no figure for it here.
 		expect(css).not.toContain("scroll-margin");
+	});
+
+	it("what a dropped cell alone said moves to a cell that stays: est. beside the cost, the kind of a record with no model", () => {
+		// Hidden while the usage cell and the kind cell are there, so no row says either thing twice.
+		const mark = rule(".ut-lg-row .ut-lg-est");
+		for (const decl of [
+			"display: none;",
+			"margin-right: 4px;",
+			"color: var(--info);",
+			"font: 600 10px/1 var(--sans);",
+		]) {
+			expect(mark, decl).toContain(decl);
+		}
+		const kin = rule(".ut-lg-m .ut-lg-kin");
+		for (const decl of [
+			"display: none;",
+			"min-width: 0;",
+			"overflow: hidden;",
+			"text-overflow: ellipsis;",
+			"color: var(--dk-label);",
+			"font-family: var(--fig);",
+		]) {
+			expect(kin, decl).toContain(decl);
+		}
+		// Shown from the width that drops those two cells, and so at every narrower one.
+		const five = narrow(600);
+		expect(ruleIn(five, ".ut-lg-row .ut-lg-est")).toContain("display: inline;");
+		expect(ruleIn(five, ".ut-lg-m .ut-lg-kin")).toContain("display: block;");
+		// The kind takes the place of the dash that stood for no model.
+		expect(ruleIn(five, ".ut-lg-m .ut-lg-kin + .ut-lg-name")).toContain("display: none;");
+		expect(five).toContain(".ut-lg-row .ut-lg-k,\n\t\t.ut-lg-row .ut-lg-u {");
+		// Nowhere else: the two shows are in that one block, after the rules that hide them.
+		expect(css.match(/\.ut-lg-row \.ut-lg-est \{/g)).toHaveLength(2);
+		expect(css.match(/\.ut-lg-m \.ut-lg-kin \{/g)).toHaveLength(2);
+		const tier = css.indexOf("@container (max-width: 600px)");
+		expect(css.indexOf(".ut-lg-row .ut-lg-est {")).toBeLessThan(tier);
+		expect(css.indexOf(".ut-lg-m .ut-lg-kin {")).toBeLessThan(tier);
+		expect(narrow(520)).not.toMatch(/ut-lg-est|ut-lg-kin/);
 	});
 
 	it("the record's actions sit in one wrapping row", () => {
