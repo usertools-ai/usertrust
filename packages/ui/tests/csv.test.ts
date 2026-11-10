@@ -509,15 +509,27 @@ describe("the formula guard, from the record", () => {
 
 	// Characters named by code point, so that none of them sits in this file where it cannot be seen.
 	const chars = (points: number[]) => points.map((point) => String.fromCodePoint(point));
-	// Whitespace to JavaScript beyond the space, tab and line breaks: vertical tab, form feed, the no-break space, the
-	// ogham space mark, en quad, em space, hair space, line and paragraph separators, the narrow no-break space, the
-	// medium mathematical space, the ideographic space and the byte order mark.
+	// Every character that is whitespace to JavaScript beyond the space, tab, line feed and carriage return: vertical
+	// tab, form feed, the no-break space, the ogham space mark, the eleven spaces from en quad to hair space, line and
+	// paragraph separators, the narrow no-break space, the medium mathematical space, the ideographic space and the
+	// byte order mark. With the four ASCII ones this is the whole set, and the first test below holds it to that.
 	const WIDE_WHITESPACE = chars([
-		0x0b, 0x0c, 0xa0, 0x1680, 0x2000, 0x2003, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000,
-		0xfeff,
+		0x0b, 0x0c, 0xa0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007,
+		0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff,
 	]);
-	// Not whitespace to JavaScript: a null, the next-line control, the zero-width space and the word joiner.
-	const NOT_WHITESPACE = chars([0x00, 0x85, 0x200b, 0x2060]);
+	// Not whitespace to JavaScript: a null, a unit separator, the next-line control, the soft hyphen, the Mongolian
+	// vowel separator, the zero-width space and the word joiner.
+	const NOT_WHITESPACE = chars([0x00, 0x1f, 0x85, 0xad, 0x180e, 0x200b, 0x2060]);
+
+	it("the wide whitespace named here, with the four ASCII ones, is all the whitespace there is", () => {
+		const all = new Set([" ", "\t", "\n", "\r", ...WIDE_WHITESPACE]);
+		expect(all.size).toBe(25);
+		for (let point = 0; point <= 0xffff; point++) {
+			const char = String.fromCharCode(point);
+			expect(all.has(char), `U+${point.toString(16)}`).toBe(/^\s$/.test(char));
+		}
+		for (const char of NOT_WHITESPACE) expect(/\s/.test(char)).toBe(false);
+	});
 
 	// Ordinary text, and how the export has always written it. None of these may change by a single byte.
 	const ORDINARY: [string, string][] = [
@@ -560,8 +572,16 @@ describe("the formula guard, from the record", () => {
 		[" *1", " *1"],
 		[" /1", " /1"],
 		[" (1)", " (1)"],
-		// A first character that cannot be seen and is not whitespace to JavaScript (a null, a next-line control, a
-		// zero-width space, a word joiner) is not skipped: the cell starts with that character, not with the formula.
+		["#1", "#1"],
+		[" #1", " #1"],
+		// A formula character at the start of a later line, after a line feed or a carriage return and line feed: the
+		// guard looks at the start of the cell only. Quoted for the line break, as always.
+		["hello\n=cmd()", '"hello\n=cmd()"'],
+		["a\r\n@x", '"a\r\n@x"'],
+		["a\n +1", '"a\n +1"'],
+		["a\n-1", '"a\n-1"'],
+		// A first character that cannot be seen and is not whitespace to JavaScript (a null, a zero-width space, a
+		// word joiner and the like) is not skipped: the cell starts with that character, not with the formula.
 		...NOT_WHITESPACE.map((first): [string, string] => [`${first}=1`, `${first}=1`]),
 	];
 
