@@ -15,10 +15,12 @@ import type { Dimension } from "../src/shared/breakdown.js";
 import { rankColors } from "../src/shared/colors.js";
 import {
 	FADE,
+	FADE_HOT,
 	GROW,
 	HALF_GAP,
 	INNER,
 	OUTLINE_INSET,
+	RIM_W,
 	RIM_W_HOT,
 	rimPath,
 	ringPath,
@@ -241,6 +243,70 @@ describe("the ring", () => {
 			);
 		expect(opacity("a")).toContain("stroke-opacity:0.6");
 		expect(opacity("b")).toContain("stroke-opacity:0.9");
+	});
+
+	it("paints each slice with its own gradient, in its colour, hot or at rest, and a rim of the right width", async () => {
+		const filters = { ...EMPTY_FILTERS, actors: ["b"] };
+		const html = await withDesk(donut(), { data: shareData(ROWS, filters), view: { filters } });
+		const colors = rankColors(ROWS, "lane");
+		const sliceOf = (key: string): string => {
+			const at = html.indexOf(`data-key="${key}"`);
+			const next = html.indexOf('class="ut-sh-slice"', at + 1);
+			return html.slice(at, next < 0 ? undefined : next);
+		};
+		const ids: string[] = [];
+		for (const [key, table, width] of [
+			["a", FADE, RIM_W],
+			["b", FADE_HOT, RIM_W_HOT],
+			["c", FADE, RIM_W],
+		] as const) {
+			const part = sliceOf(key);
+			const grad = /<radialGradient[^>]*>/.exec(part)?.[0] ?? "";
+			const id = attr(grad, "id") ?? "";
+			expect(id).not.toBe("");
+			ids.push(id);
+			expect(attr(grad, "gradientUnits")).toBe("userSpaceOnUse");
+			expect(attr(grad, "cx")).toBe(String(VB / 2));
+			expect(attr(grad, "cy")).toBe(String(VB / 2));
+			expect(attr(grad, "r")).toBe(String(RO));
+			const stops = [...part.matchAll(/<stop [^>]*>/g)].map((m) => m[0]);
+			expect(stops).toHaveLength(table.length);
+			[...table].reverse().forEach(([band, opacity], i) => {
+				expect(attr(stops[i] ?? "", "stop-color")).toBe(colors.of(key));
+				expect(attr(stops[i] ?? "", "stop-opacity")).toBe(String(opacity));
+				expect(attr(stops[i] ?? "", "offset")).toBe(String(1 - band * (1 - INNER)));
+			});
+			const body = /<path class="body"[^>]*>/.exec(part)?.[0] ?? "";
+			expect(attr(body, "fill")).toBe(`url(#${id})`);
+			const rim = /<path class="rim"[^>]*>/.exec(part)?.[0] ?? "";
+			expect(attr(rim, "style")).toContain(`stroke-width:${width}`);
+		}
+		expect(new Set(ids).size).toBe(3);
+		expect(FADE_HOT).not.toEqual(FADE);
+		expect(RIM_W).not.toBe(RIM_W_HOT);
+	});
+
+	it("draws no rim for a slice with nothing, and dims nothing for a hover on a key the ring does not hold", async () => {
+		const empty = await withDesk(donut({ values: [500, 0, 200] }), { data: shareData(ROWS) });
+		expect(empty.match(/<path class="rim"/g)).toHaveLength(2);
+		categoryBus.set({ dim: "lane", key: "not-in-the-ring", from: "spend" });
+		const html = await withDesk(donut(), { data: shareData(ROWS) });
+		expect(attr(tagsOf(html, "ut-sh-slices")[0] ?? "", "data-hot")).toBe("false");
+	});
+
+	it("keeps a name of 24 characters whole with no title, cuts a longer one, and centres the first line", async () => {
+		const whole = "x".repeat(24);
+		const at = async (name: string): Promise<string> =>
+			withDesk(donut({ centre: { name, amount: "$0.05", sub: "50.0% this range", key: null } }), {
+				data: shareData(ROWS),
+			});
+		const kept = await at(whole);
+		const c1 = /<text class="c1"[^>]*>(.*?)<\/text>/.exec(kept)?.[1] ?? "";
+		expect(c1).toBe(whole);
+		expect(c1).not.toContain("<title>");
+		expect(attr(/<text class="c1"[^>]*>/.exec(kept)?.[0] ?? "", "text-anchor")).toBe("middle");
+		const cut = /<text class="c1"[^>]*>(.*?)<\/text>/.exec(await at(`${whole}y`))?.[1] ?? "";
+		expect(cut).toContain("<title>");
 	});
 
 	it("shortens a long name in the centre and keeps the whole of it in a title", async () => {
