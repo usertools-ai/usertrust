@@ -2,7 +2,15 @@
 // Copyright 2026 Usertools, Inc.
 
 import { describe, expect, it } from "vitest";
-import { hourSpanOf, msToX, nearestIndex, snapPx, xToMs } from "../src/shared/hit.js";
+import {
+	hourSpanOf,
+	msToX,
+	nearestIndex,
+	shouldCapture,
+	shouldTrack,
+	snapPx,
+	xToMs,
+} from "../src/shared/hit.js";
 
 const HOUR = 3_600_000;
 
@@ -91,5 +99,24 @@ describe("hourSpanOf", () => {
 		}
 		// A 13-minute bucket straddling 14:00 starting 13:55: the cursor's record at 14:03 gets the 14:00 hour.
 		expect(hourSpanOf(Date.UTC(2026, 10, 7, 14, 3))[0]).toBe(Date.UTC(2026, 10, 7, 14));
+	});
+});
+
+describe("touch: the crosshair only while pressed", () => {
+	it("shouldTrack: a mouse always; a touch or a pen only while it is down", () => {
+		expect(shouldTrack("mouse", false)).toBe(true);
+		expect(shouldTrack("mouse", true)).toBe(true);
+		expect(shouldTrack("touch", false)).toBe(false);
+		expect(shouldTrack("touch", true)).toBe(true);
+		expect(shouldTrack("pen", false)).toBe(false);
+		expect(shouldTrack("pen", true)).toBe(true);
+	});
+	it("shouldCapture: never a mouse, never a press on a ring, every other press", () => {
+		expect(shouldCapture("mouse", false)).toBe(false);
+		expect(shouldCapture("mouse", true)).toBe(false);
+		expect(shouldCapture("touch", false)).toBe(true);
+		expect(shouldCapture("touch", true)).toBe(false);
+		expect(shouldCapture("pen", false)).toBe(true);
+		expect(shouldCapture("pen", true)).toBe(false);
 	});
 });

@@ -10,7 +10,12 @@ import { buildCtx } from "../../src/app/windows/spend/ctx.js";
 import type { ChartCtx } from "../../src/app/windows/spend/layers.js";
 import type { SpendWindow } from "../../src/shared/breakdown.js";
 import type { LedgerRow } from "../../src/shared/rows.js";
-import { buildSpendModel, type SpendModel } from "../../src/shared/spend-model.js";
+import {
+	buildSpendModel,
+	LINE_BUCKETS,
+	type LineBucket,
+	type SpendModel,
+} from "../../src/shared/spend-model.js";
 import {
 	type DrawnSeries,
 	drawSeries,
@@ -72,16 +77,26 @@ export interface ChartFixture {
 	ctx: ChartCtx;
 }
 
-/** The chart's pieces for `rows` over `win` in a `w` by `h` plot, with no knee unless one is given. */
+/**
+ * The chart's pieces for `rows` over `win` in a `w` by `h` plot, with no knee unless one is given. The bucket is the
+ * week's own (the default window is a week) unless one is given.
+ */
 export function chartFixture(
-	o: { rows?: LedgerRow[]; win?: SpendWindow; w?: number; h?: number; knee?: number } = {},
+	o: {
+		rows?: LedgerRow[];
+		win?: SpendWindow;
+		w?: number;
+		h?: number;
+		knee?: number;
+		bucket?: LineBucket;
+	} = {},
 ): ChartFixture {
 	const rows = o.rows ?? weekRows();
 	const win = o.win ?? WEEK_WIN;
 	const w = o.w ?? 700;
 	const h = o.h ?? 220;
 	const knee = o.knee ?? Number.POSITIVE_INFINITY;
-	const model = buildSpendModel(rows, win, w, null);
+	const model = buildSpendModel(rows, win, o.bucket ?? LINE_BUCKETS["1w"], null);
 	const geo = geometry({ w, h, win, bucketMs: model.bucketMs, peakRate: model.peakRate, knee });
 	const series = drawSeries(geo, model.rates);
 	const ticks = niceTicks(geo.top).map((t) => ({ drawn: t, label: t }));

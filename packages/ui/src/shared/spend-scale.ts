@@ -25,6 +25,8 @@ export const AREA_STOPS: ReadonlyArray<readonly [number, number]> = [
 	[0.7, 0.012],
 	[0.9, 0],
 ];
+/** While a cursor is on the plot, every area stop's opacity is multiplied by this, so the fill answers the hover. */
+export const AREA_HIGHLIGHT = 1.25;
 /** The area fades over at most this many pixels, and no fewer than AREA_FADE_MIN. */
 export const AREA_FADE_MAX = 200;
 const AREA_FADE_MIN = 12;
@@ -76,7 +78,12 @@ export interface Geometry {
 	spanMs(k: number): number;
 }
 
-/** `h` must be at least PAD_T + PAD_B; a smaller box has no plot, and the rates passed to `yOf` must be finite. */
+/**
+ * The plot's scales. `peakRate` is the peak the y axis fits: the model's SMOOTHED peak (`drawnPeak`), since the drawn
+ * line is what must fill the band, and under a filter the unfiltered model's, so a filtered line is never drawn on a
+ * scale that flatters it. `knee` is a number, `Infinity` for none, so nothing here branches on its absence.
+ * `h` must be at least PAD_T + PAD_B; a smaller box has no plot, and the rates passed to `yOf` must be finite.
+ */
 export function geometry(a: {
 	w: number;
 	h: number;
@@ -157,7 +164,8 @@ const fx = (v: number): string => (Math.round(v * 100) / 100).toString();
 
 /**
  * The line: one point per bucket centre, thinned to about one per 2.5px (always keeping the first, the last and the
- * highest), drawn through a monotone curve. `area` closes the same path down to the base.
+ * highest), drawn through a monotone curve. `area` closes the same path down to the base. Callers pass the model's
+ * smoothed `drawn` rates: this is the path only, and no figure is read back off it.
  */
 export function drawSeries(g: Geometry, rates: Float64Array): DrawnSeries {
 	const n = rates.length;
@@ -185,4 +193,43 @@ export function drawSeries(g: Geometry, rates: Float64Array): DrawnSeries {
 	const last = px[px.length - 1] as number;
 	const area = `${d}L${fx(last)} ${fx(g.baseY)}L${fx(first)} ${fx(g.baseY)}Z`;
 	return { d, area, idx, curve, first, last };
+}
+
+/** Where the plot's edge bands start: a peak this close to an edge is labelled away from it. */
+const PEAK_LABEL_BAND = 90;
+/** The label's x stays this far inside the plot. */
+const PEAK_LABEL_INSET = 4;
+
+/**
+ * Where the peak's label sits over the peak at plot point (x, y): just above the line, never above y 10, x kept 4px
+ * inside the plot, and anchored away from the nearer edge so its text never runs off the plot. A plot narrower than
+ * both bands puts a right-hand peak's label to its left.
+ */
+export function peakLabelPlace(p: { x: number; y: number; w: number }): {
+	x: number;
+	y: number;
+	anchor: "start" | "middle" | "end";
+} {
+	const x = Math.min(p.w - PEAK_LABEL_INSET, Math.max(PEAK_LABEL_INSET, p.x));
+	const y = Math.max(10, p.y - 6);
+	const anchor = p.x > p.w - PEAK_LABEL_BAND ? "end" : p.x < PEAK_LABEL_BAND ? "start" : "middle";
+	return { x, y, anchor };
+}
+
+/**
+ * Whether the line names its peak. Only at rest: not with no plot or no spend, not while a cursor reads the line
+ * (the cursor's own figure is the one to read), not mid-morph (the peak is moving), not when the knee compresses the
+ * peak (the label would sit on a squeezed point), and not when a ring already marks the peak bucket.
+ */
+export function peakLabelShown(p: {
+	w: number;
+	peakRate: number;
+	hasCursor: boolean;
+	morphing: boolean;
+	knee: number;
+	ringed: boolean;
+}): boolean {
+	if (!(p.w > 0) || !(p.peakRate > 0)) return false;
+	if (p.hasCursor || p.morphing || p.ringed) return false;
+	return !(p.knee !== Number.POSITIVE_INFINITY && p.peakRate > p.knee);
 }

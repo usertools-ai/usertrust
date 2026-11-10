@@ -3,7 +3,8 @@
 
 /**
  * Where the Spend chart meets the layers drawn on it. The types are the one definition both sides write against; the
- * list is empty until a layer is added. This file holds only types and the list.
+ * list is empty until a layer is added. This file holds only types, the list and the one selector a layer's ring
+ * buttons are found by, so adding a layer never conflicts with a helper here.
  */
 
 import type { ComponentType } from "react";
@@ -18,7 +19,8 @@ export interface ChartCtx {
 	bucketMs: number;
 	win: SpendWindow;
 	rows: readonly LedgerRow[]; // the fully filtered rows the line is built from
-	rate: Float64Array; // TRUE spend rate per bucket, UT/h (length nB)
+	rate: Float64Array; // TRUE spend rate per bucket, UT/h (length nB); figures read it
+	drawn: Float64Array; // the SMOOTHED rate the line is drawn from and `y` is fit to (length nB); a mark on the line reads it
 	perHour: number; // 3_600_000 / bucketMs
 	idx: readonly number[]; // the bucket indices the drawn line passes through (lttb)
 	x(k: number): number; // bucket k's drawn centre
@@ -41,6 +43,13 @@ export interface SpendLayer {
 		ticks: Array<{ drawn: number; label: number }>;
 	}; // the frame calls it before building ctx.y
 	onKey?(e: { key: string }, ctx: ChartCtx): boolean; // true: handled (the chart calls preventDefault)
+	marksPeak?(k: number, ctx: ChartCtx): boolean; // true: a ring already marks bucket k, so the chart hides its peak label
+	Overlay?: ComponentType<{ ctx: ChartCtx }>; // HTML of this layer, in the overlay slot after its Layer
+	Note?: ComponentType<{ ctx: ChartCtx }>; // rendered inside the headline's sub-line, after the chart's own text
+	areaClip?(ctx: ChartCtx): string | null; // SVG path d: the frame clips the base area fill to the first non-null
 }
+
+/** A press on a ring stays the ring's on touch: the plot does not capture a pointer that went down inside one. */
+export const RING_SELECTOR = "[data-sp-ring]";
 
 export const LAYERS: readonly SpendLayer[] = [];

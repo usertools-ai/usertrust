@@ -4,6 +4,11 @@
 /**
  * The one model the Spend line is drawn from: records, buckets and rates over a window. Pure.
  *
+ * Each range draws with a fixed bucket (`LINE_BUCKETS`), a unit people use, never one derived from the plot's width:
+ * the same range then has the same buckets on any screen, and a bucket's spend can be named ("these 5 min"). The
+ * rates stay per hour inside, so a figure shown per bucket goes through `toBucket`. `drawn` is the rates smoothed for
+ * the path alone; every figure reads `values`, `rates` and `peakRate`, never `drawn`.
+ *
  * `rangeUt` is the sum of the buckets, which is the breakdown's total over the same window (one number). `byStatus`
  * splits that same spend by outcome. An unresolved charge (a transfer whose outcome is not confirmed) keeps its cost:
  * it stays INSIDE spend as its own figure, never held and never settled, so `settledUt + unresolvedUt + heldUt +
@@ -13,8 +18,46 @@
 import type { SpendWindow } from "./breakdown.js";
 import { inWindow, type SpendRecords, spendRecords } from "./cumulative.js";
 import { type LedgerRow, statusOf } from "./rows.js";
+import { smoothRadius, smoothRate } from "./smooth-rate.js";
 import { bucketSpanMs, rateOf } from "./spend-scale.js";
-import { bucketTotals, lineBucketMs } from "./spend-series.js";
+import { bucketTotals, type RangeId } from "./spend-series.js";
+
+const MINUTE = 60_000;
+const HOUR = 3_600_000;
+
+/** The line's bucket: its length, and how it is named on screen (`per`). */
+export interface LineBucket {
+	ms: number;
+	per: string;
+}
+
+/**
+ * The bucket each range draws with. Above a month it is 6 h, not a day: a day's bucket averages an hour-long burst
+ * of spend down until it no longer stands out from the rest of the line.
+ */
+export const LINE_BUCKETS: Record<RangeId, LineBucket> = {
+	"1d": { ms: 5 * MINUTE, per: "5 min" },
+	"1w": { ms: HOUR, per: "hour" },
+	"1m": { ms: 4 * HOUR, per: "4 h" },
+	"3m": { ms: 6 * HOUR, per: "6 h" },
+	ytd: { ms: 6 * HOUR, per: "6 h" },
+	"1y": { ms: 6 * HOUR, per: "6 h" },
+};
+
+/** A per-hour rate as the spend of one whole bucket, the unit every figure on the line is shown in. */
+export function toBucket(ratePerHour: number, bucket: LineBucket): number {
+	return (ratePerHour * bucket.ms) / HOUR;
+}
+
+/** The words for one bucket in a sentence: "this hour", "these 5 min", "these 6 h". */
+export function bucketPhrase(per: string): string {
+	return per === "hour" || per === "day" ? `this ${per}` : `these ${per}`;
+}
+
+/** The unit after a per-bucket figure: "/h" for an hour, else "/5 min", "/4 h", "/6 h". */
+export function perShort(per: string): string {
+	return per === "hour" ? "/h" : `/${per}`;
+}
 
 /** The range's spend by outcome. Every spend row in the range is in exactly one figure. */
 export interface SpendByStatus {
@@ -41,19 +84,24 @@ export interface SpendModel {
 	/** Spend rate per bucket, UT per hour, over each bucket's real span. */
 	rates: Float64Array;
 	rangeUt: number;
+	/** The highest TRUE rate, UT per hour: what the peak's figures read. */
 	peakRate: number;
 	/** The bucket of the highest rate (the first, on a tie); 0 when there is no spend. */
 	peakAt: number;
+	/** The rates smoothed for drawing (`smoothRate` at the bucket's radius). The path reads it, no figure does. */
+	drawn: Float64Array;
+	/** The highest drawn value, 0 when none: the y scale's top comes from it, so the drawn line fills its band. */
+	drawnPeak: number;
 	byStatus: SpendByStatus;
 }
 
 export function buildSpendModel(
 	rows: readonly LedgerRow[],
 	win: SpendWindow,
-	widthPx: number,
+	bucket: LineBucket,
 	totalUt: number | null,
 ): SpendModel {
-	const bucketMs = lineBucketMs(win, widthPx > 0 ? widthPx : 1);
+	const bucketMs = bucket.ms;
 	// The buckets count a row only in a finite, non-empty window (`bucketTotals`); the split does the same.
 	const span = win.endMs - win.startMs;
 	const bounded = span > 0 && Number.isFinite(span);
@@ -84,6 +132,9 @@ export function buildSpendModel(
 			peakAt = k;
 		}
 	}
+	const drawn = smoothRate(rates, smoothRadius(bucket.per));
+	let drawnPeak = 0;
+	for (const d of drawn) if (d > drawnPeak) drawnPeak = d;
 	return {
 		records,
 		span: inWindow(records, win),
@@ -93,6 +144,8 @@ export function buildSpendModel(
 		rangeUt,
 		peakRate,
 		peakAt,
+		drawn,
+		drawnPeak,
 		byStatus,
 	};
 }

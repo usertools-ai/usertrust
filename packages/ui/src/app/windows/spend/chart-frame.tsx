@@ -41,7 +41,7 @@ export const ChartFrame = memo(function ChartFrame(p: ChartFrameProps): React.JS
 	const gradId = `${uid}-area`;
 	const glowId = `${uid}-glow`;
 	const drawn = series.d !== "";
-	const fadeTop = areaFadeTop(ctx.rate, ctx.y, ctx.baseY);
+	const fadeTop = areaFadeTop(ctx.drawn, ctx.y, ctx.baseY);
 	return (
 		<svg
 			className="ut-sp-svg"

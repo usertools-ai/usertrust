@@ -20,18 +20,19 @@ import type { ChartCtx, SpendLayer } from "./layers.js";
 
 /**
  * The knee and the grid ticks: the first layer with a `scale` decides, given the true rates and the top the plain scale
- * would have. No such layer is no knee and no ticks (`ticks: null`: the caller then supplies the plain ones). A knee that is not a finite
- * positive number (other than `Infinity`, which means none) is ignored: a layer cannot break the scale.
+ * would have. That top comes from `peak`, the SMOOTHED peak the line is drawn to (under a filter, the unfiltered
+ * line's), not from the largest true rate: the drawn line must fill its band. No such layer is no knee and no ticks
+ * (`ticks: null`: the caller then supplies the plain ones). A knee that is not a finite positive number (other than
+ * `Infinity`, which means none) is ignored: a layer cannot break the scale.
  */
 export function resolveScale(
 	layers: readonly SpendLayer[],
 	rate: Float64Array,
+	peak: number,
 ): { knee: number; ticks: Array<{ drawn: number; label: number }> | null } {
 	const layer = layers.find((l) => l.scale !== undefined);
 	if (layer?.scale === undefined) return { knee: Number.POSITIVE_INFINITY, ticks: null };
-	let peak = 0;
-	for (let k = 0; k < rate.length; k++) if ((rate[k] as number) > peak) peak = rate[k] as number;
-	const top = Math.max(peak * HEADROOM, MIN_TOP);
+	const top = Math.max((Number.isFinite(peak) ? Math.max(0, peak) : 0) * HEADROOM, MIN_TOP);
 	const out = layer.scale({ rate, top, ticks: (t) => niceTicks(t) });
 	const knee =
 		out.knee === Number.POSITIVE_INFINITY || (Number.isFinite(out.knee) && out.knee > 0)
@@ -52,6 +53,24 @@ export function dispatchKey(
 	return false;
 }
 
+/** The path the base area fill is clipped to: the first layer's that gives one; null when none does. */
+export function firstAreaClip(layers: readonly SpendLayer[], ctx: ChartCtx): string | null {
+	for (const l of layers) {
+		const d = l.areaClip?.(ctx) ?? null;
+		if (d !== null) return d;
+	}
+	return null;
+}
+
+/** Whether a layer's ring already marks bucket `k`, so the line's own peak label would only repeat it. */
+export function peakRinged(layers: readonly SpendLayer[], k: number, ctx: ChartCtx): boolean {
+	return layers.some((l) => l.marksPeak?.(k, ctx) === true);
+}
+
+/**
+ * The context every layer reads, built once per model (never per cursor move). `rate` is the model's TRUE rates, the
+ * same array: a layer's figures read them, never the smoothed values the path is drawn from.
+ */
 export function buildCtx(a: {
 	geo: Geometry;
 	series: DrawnSeries;
@@ -70,6 +89,7 @@ export function buildCtx(a: {
 		win: a.win,
 		rows: a.rows,
 		rate: model.rates,
+		drawn: model.drawn,
 		perHour: 3_600_000 / model.bucketMs,
 		idx: series.idx,
 		x: geo.centerX,
