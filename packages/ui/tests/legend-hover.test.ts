@@ -116,6 +116,35 @@ describe("the legend's hover owner", () => {
 		expect(t.sent).toHaveLength(n);
 	});
 
+	it("clears the hover when a row only focus held is blurred (the keyboard path)", () => {
+		const t = deferredIo();
+		const owner = createHoverOwner(t.io, "lane");
+		owner.focus("a");
+		owner.blur();
+		t.flush();
+		expect(t.sent).toEqual([mine("a"), null]);
+		expect(t.shown()).toBeNull();
+	});
+
+	it("publishes at its own level, and takes only a hover at that level for its own", () => {
+		const t = deferredIo();
+		const owner = createHoverOwner(t.io, "model");
+		owner.enter("a");
+		expect(t.sent).toEqual([{ dim: "model", key: "a", from: LEGEND_FROM }]);
+		// A hover at another level with the same key and sender is not this owner's to clear.
+		t.other({ dim: "lane", key: "a", from: LEGEND_FROM });
+		owner.leave();
+		expect(t.sent.at(-1)).toEqual({ dim: "lane", key: "a", from: LEGEND_FROM });
+	});
+
+	it("sets nothing again when the list changes but the row it shows is still there", () => {
+		const t = deferredIo();
+		const owner = createHoverOwner(t.io, "lane");
+		owner.enter("a");
+		owner.rows(["a", "b"]);
+		expect(t.sent).toEqual([mine("a")]);
+	});
+
 	it("clears its own hover when disposed, and only then", () => {
 		const t = deferredIo();
 		const owner = createHoverOwner(t.io, "lane");
