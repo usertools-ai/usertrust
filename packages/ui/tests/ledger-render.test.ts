@@ -455,6 +455,19 @@ describe("the lines under a record's status", () => {
 		expect(html).not.toContain("Budget");
 		expect(html).not.toContain("ut-lg-share");
 	});
+
+	it("a cost that is not a cost (below 0, not a number) has no share, so no budget line and no source", () => {
+		for (const costUt of [-5, Number.NaN]) {
+			expect(extra(row({ costUt }), [], budget()), String(costUt)).toBe("");
+			const html = extra({ ...(busy[0] as LedgerRow), costUt }, busy, budget());
+			expect(html).toContain('role="note"');
+			expect(html).not.toContain("Budget");
+		}
+		// A cost of exactly 0 is a cost: its share and the source are shown.
+		const zero = extra(row({ costUt: 0 }), [], budget());
+		expect(zero).toContain("% of the budget. ");
+		expect(zero).toContain("Budget: from the vault config.");
+	});
 });
 
 describe("the record panel", () => {
