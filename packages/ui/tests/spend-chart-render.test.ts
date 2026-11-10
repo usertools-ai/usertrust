@@ -19,7 +19,7 @@ import {
 } from "../src/app/windows/spend/layers.js";
 import type { AtPayload } from "../src/shared/api.js";
 import type { SpendWindow } from "../src/shared/breakdown.js";
-import { formatUsd, formatUsdAxis, formatUsdTotal, formatUtc } from "../src/shared/format.js";
+import { formatUsd, formatUsdAxis, formatUsdTotal } from "../src/shared/format.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 import {
 	buildSpendModel,
@@ -70,7 +70,6 @@ interface ChartProps {
 	filterKey: string;
 	controls?: React.ReactNode;
 	onPin(pos: number | null): void;
-	onPreview(pos: number | null): void;
 }
 
 interface FrameProps {
@@ -767,7 +766,6 @@ function chart(over: Partial<ChartProps> = {}): string {
 			bucket: LINE_BUCKETS["1w"],
 			filterKey: "{}",
 			onPin: () => undefined,
-			onPreview: () => undefined,
 			...over,
 		}),
 	);
@@ -911,10 +909,10 @@ describe("spend chart: figures and words read exactly", () => {
 		);
 		expect(stripTags(textOf(chart(), "ut-sp-sub"))).not.toContain("No spend recorded");
 	});
-	it("hides the visible figure and the axis from assistive tech, and says it is not pinned", () => {
+	it("hides the visible figure from assistive tech, and says it is not pinned", () => {
 		const html = chart();
 		expect(html).toMatch(/<span class="ut-tick" aria-hidden="true"/);
-		expect(html).toMatch(/<div class="ut-sp-axis" aria-hidden="true"/);
+		expect(html).not.toContain("ut-sp-axis");
 		expect(plotTag(html)).toContain('data-pinned="false"');
 	});
 });
@@ -957,7 +955,7 @@ describe("spend chart: the layers' hand in the chart", () => {
 
 describe("spend chart: the record a bucket lands on", () => {
 	const at = (ms: number): { ts: string } => ({ ts: new Date(ms).toISOString() });
-	/** Render with a layer that moves to bucket `k` as the arrow keys would; the position the header was sent to. */
+	/** Render with a layer that moves to bucket `k` as the arrow keys would; the record index the live cursor lands on. */
 	function landed(
 		rows: LedgerRow[],
 		k: number,
@@ -969,10 +967,12 @@ describe("spend chart: the record a bucket lands on", () => {
 			z: "overlay",
 			Layer: (p: { ctx: ChartCtx }) => {
 				p.ctx.moveTo(k);
+				const c = p.ctx.cursor.get();
+				if (c !== null && "i" in c) sent = c.i as number;
 				return null;
 			},
 		};
-		chart({ rows, win, layers: [probe], onPreview: (pos) => (sent = pos) });
+		chart({ rows, win, layers: [probe] });
 		return sent;
 	}
 	it("takes the last record of a bucket that holds two", () => {
@@ -1031,9 +1031,9 @@ describe("spend chart: nothing a row says is dropped", () => {
 		expect(sub).not.toContain("No spend recorded");
 		expect(sub.startsWith(`+${formatUsdTotal(50_000)} in this range`)).toBe(true);
 	});
-	it("writes the axis for a window that does not read, instead of throwing", () => {
+	it("draws a window that does not read, instead of throwing", () => {
 		const html = chart({ win: { startMs: Number.NaN, endMs: Number.NaN } });
-		expect(html).toContain("<span>unknown time</span><span>unknown time</span>");
+		expect(html).toContain('class="ut-sp-plot"');
 	});
 });
 
@@ -1248,13 +1248,8 @@ describe("spend chart: the plot at rest", () => {
 	it("marks the when-line as live, not past, with no cursor", () => {
 		expect(chart()).toContain('class="ut-sp-when" data-past="false"');
 	});
-	it("labels the axis with the window's start, then its end", () => {
-		const axis = /<div class="ut-sp-axis"[^>]*><span>([^<]*)<\/span><span>([^<]*)<\/span>/.exec(
-			chart(),
-		);
-		expect(axis?.[1]).toBe(formatUtc(new Date(WEEK_WIN.startMs).toISOString()));
-		expect(axis?.[2]).toBe(formatUtc(new Date(WEEK_WIN.endMs).toISOString()));
-		expect(axis?.[1]).not.toBe(axis?.[2]);
+	it("draws no start and end stamps under the plot at rest", () => {
+		expect(chart()).not.toContain("ut-sp-axis");
 	});
 	it("shows the faint line's caption only with the faint line", () => {
 		const html = chart({ filterNote: "a note" });
@@ -1280,7 +1275,7 @@ describe("spend chart: the layers' slots", () => {
 	let plot = "";
 	beforeAll(() => {
 		html = chart({ layers: [under, ov] });
-		plot = html.slice(html.indexOf('class="ut-sp-plot"'), html.indexOf('class="ut-sp-axis"'));
+		plot = html.slice(html.indexOf('class="ut-sp-plot"'));
 	});
 	it("puts an overlay layer and then its Overlay in the plot, after the svg", () => {
 		const svgEnd = plot.indexOf("</svg>");
