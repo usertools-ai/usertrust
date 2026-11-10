@@ -4,25 +4,21 @@
 /**
  * The usual range behind a spend line. Pure; for drawing and for the "unusual spend rate" caption.
  *
- * For each bucket the range is the median of the BAND_WINDOW buckets before it, plus and minus BAND_K times their
- * median absolute deviation (MAD). The bucket itself is left out of its own history, so one big bucket never widens the
- * range it is judged against. The median and the MAD are used rather than the mean and standard deviation because
- * spend is bursty: a single large hour would drag a mean-based range up for a day afterwards.
+ * For each bucket the range is the mean of the BAND_WINDOW buckets before it, plus and minus BAND_K (population)
+ * standard deviations, never below 0. The bucket itself is left out of its own history. Callers pass the rate they
+ * draw, so a line leaving the range is seen to leave it; this function does not smooth.
  *
- * BAND_K is 3, applied to the MAD scaled by 1.4826 (which makes it comparable to a standard deviation on steady
- * data): about "three deviations", a range a steady run stays inside and a real jump leaves. Where more than half the
- * recent buckets are empty the MAD is 0, the range collapses to the median, and any spend above it is unusual: that is
- * the intended reading of a vault that is normally quiet.
+ * A mean and a standard deviation are pulled by a large bucket: one big hour widens the range for the day after it,
+ * and can hide a second spike behind the first. So a caller may pass `skip`, the buckets already marked unusual
+ * (see `spikeMask`), and those are left out of every history. Without it, an earlier spike stays in the range.
  */
 
 /** How many buckets before a bucket make "the usual". */
 export const BAND_WINDOW = 24;
 /** Fewer buckets of history than this: no range yet (the bounds are NaN and drawing skips them). */
 export const BAND_MIN_HISTORY = 6;
-/** The range's half-width, in scaled MADs. */
-export const BAND_K = 3;
-/** Makes a MAD comparable to a standard deviation for normally distributed data. */
-const MAD_SCALE = 1.4826;
+/** The range's half-width, in standard deviations. */
+export const BAND_K = 2;
 
 /** The median of `xs`, which must not be empty. */
 export function medianOf(xs: readonly number[]): number {
@@ -35,25 +31,71 @@ export interface UsualBand {
 	mid: Float64Array;
 	lo: Float64Array;
 	hi: Float64Array;
+	/** The first bucket with a range: min(n, BAND_MIN_HISTORY). The bounds are NaN before it. */
+	from: number;
 }
 
 /**
- * The usual range for every bucket of `values`. `hi >= mid >= lo >= 0` wherever it is defined; NaN where the bucket
- * has fewer than BAND_MIN_HISTORY buckets before it.
+ * The usual range for every bucket of `values`. `hi >= mid >= lo >= 0` wherever it is defined; NaN before `from`, and
+ * where every bucket of the history is in `skip`.
+ *
+ * `skip`: buckets marked `true` are left out of every history (the unusual ones), so a spike does not widen the range
+ * the buckets after it are judged against.
  */
-export function usualBand(values: ArrayLike<number>): UsualBand {
+export function usualBand(values: ArrayLike<number>, skip?: ArrayLike<boolean>): UsualBand {
 	const n = values.length;
 	const mid = new Float64Array(n).fill(Number.NaN);
 	const lo = new Float64Array(n).fill(Number.NaN);
 	const hi = new Float64Array(n).fill(Number.NaN);
-	for (let k = BAND_MIN_HISTORY; k < n; k++) {
-		const w: number[] = [];
-		for (let j = Math.max(0, k - BAND_WINDOW); j < k; j++) w.push(values[j] as number);
-		const m = medianOf(w);
-		const mad = medianOf(w.map((v) => Math.abs(v - m))) * MAD_SCALE;
-		mid[k] = m;
-		hi[k] = m + BAND_K * mad;
-		lo[k] = Math.max(0, m - BAND_K * mad);
+	const from = Math.min(n, BAND_MIN_HISTORY);
+	for (let k = from; k < n; k++) {
+		let sum = 0;
+		let sq = 0;
+		let c = 0;
+		for (let j = Math.max(0, k - BAND_WINDOW); j < k; j++) {
+			if (skip?.[j] === true) continue;
+			const v = values[j] as number;
+			sum += v;
+			sq += v * v;
+			c += 1;
+		}
+		if (c === 0) continue;
+		const mean = sum / c;
+		const sd = Math.sqrt(Math.max(0, sq / c - mean * mean));
+		mid[k] = mean;
+		hi[k] = mean + BAND_K * sd;
+		lo[k] = Math.max(0, mean - BAND_K * sd);
 	}
-	return { mid, lo, hi };
+	return { mid, lo, hi, from };
+}
+
+/** The buckets to leave out of a range's history: each run, widened by `radius` buckets either side. */
+export function spikeMask(
+	n: number,
+	runs: Array<{ k0: number; k1: number }>,
+	radius: number,
+): boolean[] {
+	const out = new Array<boolean>(n).fill(false);
+	for (const r of runs)
+		for (let k = Math.max(0, r.k0 - radius); k <= Math.min(n - 1, r.k1 + radius); k++)
+			out[k] = true;
+	return out;
+}
+
+/** The maximal runs of buckets where `values` is above the range's upper bound, from `band.from` on. */
+export function exceedRuns(
+	values: ArrayLike<number>,
+	band: Pick<UsualBand, "hi" | "from">,
+): Array<{ k0: number; k1: number }> {
+	const out: Array<{ k0: number; k1: number }> = [];
+	let k0 = -1;
+	for (let k = band.from; k <= values.length; k++) {
+		const over = k < values.length && (values[k] as number) > (band.hi[k] as number);
+		if (over && k0 < 0) k0 = k;
+		else if (!over && k0 >= 0) {
+			out.push({ k0, k1: k - 1 });
+			k0 = -1;
+		}
+	}
+	return out;
 }
