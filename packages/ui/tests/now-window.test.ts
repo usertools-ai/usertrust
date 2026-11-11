@@ -910,6 +910,33 @@ describe("the Now window's sheet", () => {
 		expect(whole(beside(BREAK - 4), "$999.99")).toBe(false);
 	});
 
+	it("never cuts the Budget heading's source chip: it wraps under the word, and the provenance line wraps whole", () => {
+		const heading = rule('[data-win="now"] .ut-facts .ut-fact.budget > b');
+		expect(heading).toMatch(/(?:^|[;\s])flex-wrap:\s*wrap;/);
+		expect(px(heading, "row-gap")).toBe(4);
+		// The chip is the heading's own child, so it can wrap beneath the word; the older sheet keeps it from breaking
+		// inside, and nothing here clips the heading.
+		expect(heading).not.toMatch(/overflow|text-overflow|-webkit-line-clamp|(?:^|[;\s])height:/);
+		expect(allCss()).toMatch(/\.ut-mark\s*\{[^}]*white-space:\s*nowrap;/);
+		const why = rule('[data-win="now"] .ut-facts .ut-fact.budget:has(> b > .ut-mark) > .ut-why');
+		expect(why).toMatch(/(?:^|[;\s])display:\s*block;/);
+		expect(why).toMatch(/(?:^|[;\s])height:\s*auto;/);
+		expect(why).toMatch(/(?:^|[;\s])overflow:\s*visible;/);
+		expect(why).toMatch(/-webkit-line-clamp:\s*unset;/);
+		expect(why).toMatch(/(?:^|[;\s])line-clamp:\s*unset;/);
+		// Only the live Budget fact's note (the one with the chip): the other facts and the past fact keep their two
+		// clamped lines.
+		expect(rules.filter(([sel]) => /\.ut-why/.test(sel)).map(([sel]) => sel)).toEqual([
+			'[data-win="now"] .ut-facts .ut-fact.budget:has(> b > .ut-mark) > .ut-why',
+		]);
+		// The chip is in the heading in the markup, after the word.
+		const strip = readFileSync(
+			join(import.meta.dirname, "..", "src", "app", "summary-strip.tsx"),
+			"utf-8",
+		);
+		expect(strip).toMatch(/<b>\s*Budget\s*<span className="ut-mark" data-tone=\{word\.tone\}>/);
+	});
+
 	it("sets the facts' lines closer than the page-wide strip did, so the Budget fact is at most 170px tall", () => {
 		const gap = px(rule('[data-win="now"] .ut-facts .ut-fact'), "row-gap");
 		const label = px(rule('[data-win="now"] .ut-facts .ut-fact > b'), "min-height");

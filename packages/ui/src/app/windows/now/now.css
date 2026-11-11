@@ -72,6 +72,23 @@
 		line-clamp: 1;
 	}
 
+	/* The Budget heading's source chip ("config · unconfirmed") is never cut: when it does not fit beside the word it
+	   wraps whole onto a line of its own under it. The provenance line below ("from <file>; not confirmed as
+	   enforced") wraps to as many lines as it needs, where the other facts' lines clamp. Only the live fact, the one
+	   that has the chip: the past fact's longer note keeps its two lines and its full text in its title. */
+	[data-win="now"] .ut-facts .ut-fact.budget > b {
+		flex-wrap: wrap;
+		row-gap: 4px;
+	}
+
+	[data-win="now"] .ut-facts .ut-fact.budget:has(> b > .ut-mark) > .ut-why {
+		display: block;
+		height: auto;
+		overflow: visible;
+		-webkit-line-clamp: unset;
+		line-clamp: unset;
+	}
+
 	/* The Integrity fact's pill is 23px tall, so the fact is 110px: label, pill, its note and the reason. */
 	[data-win="now"] .ut-facts .ut-pill {
 		height: 23px;
