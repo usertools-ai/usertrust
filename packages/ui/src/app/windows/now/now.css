@@ -244,11 +244,19 @@
 		color: var(--dk-label);
 	}
 
-	/* Under 1000px the page scrolls and no row is fitted to the window: the facts keep the older sheet's room. */
+	/* Under 1000px the page scrolls and no row is fitted to the window: the facts keep the older sheet's room, the
+	   three columns, the dense flow, the wider gap and the Budget fact across two of them, from 999px down (the older
+	   page keeps its own step at 900px). */
 	@media (max-width: 999px) {
 		[data-win="now"] .ut-facts {
 			grid-template-columns: repeat(3, minmax(0, 1fr));
+			grid-auto-flow: row dense;
+			gap: 16px 20px;
 			padding-block: 14px 15px;
+		}
+
+		[data-win="now"] .ut-facts .ut-fact.budget {
+			grid-column: span 2;
 		}
 	}
 

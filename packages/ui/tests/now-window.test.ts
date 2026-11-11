@@ -1050,6 +1050,19 @@ describe("the Now window's sheet", () => {
 		expect(ruleIn(block("@media (max-width: 999px)"), '[data-win="now"] .ut-facts')).toMatch(
 			/(?:^|[;\s])padding-block:\s*14px 15px;/,
 		);
+		// From 999px down the facts lay out as the older sheet's 900px block does (so 901 to 999px does not differ from
+		// 900px and under): three columns, the dense flow, the wider gap, and the Budget fact across two columns.
+		const column = block("@media (max-width: 999px)");
+		const cols = ruleIn(column, '[data-win="now"] .ut-facts');
+		expect(cols).toMatch(/grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\);/);
+		expect(cols).toMatch(/grid-auto-flow:\s*row dense;/);
+		expect(cols).toMatch(/(?:^|[;\s])gap:\s*16px 20px;/);
+		expect(ruleIn(column, '[data-win="now"] .ut-facts .ut-fact.budget')).toMatch(
+			/grid-column:\s*span 2;/,
+		);
+		expect(older).toMatch(
+			/@media \(max-width: 900px\)\s*\{[^}]*\.ut-facts\s*\{[^}]*grid-auto-flow:\s*row dense;[^}]*gap:\s*16px 20px;/,
+		);
 		// A phone's facts have 12px all round in the older sheet.
 		expect(older).toMatch(
 			/@media \(max-width: 760px\)[\s\S]*?\n\t\t\.ut-facts\s*\{[^}]*padding:\s*12px;/,
