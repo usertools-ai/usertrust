@@ -9,6 +9,8 @@
  * Below the compact width the desk is a scrolling column and fill is ignored, so no window is ever inert or hidden.
  */
 
+import { GAP, gridRowsStyle, TOP_MIN_ROWS } from "./desk-grid.js";
+
 /** The windows that can sit on, or fill, the desk, in grid order. */
 export const WINDOW_IDS = ["spend", "share", "ledger", "now"] as const;
 export type WindowId = (typeof WINDOW_IDS)[number];
@@ -28,12 +30,21 @@ export const HOME: Readonly<Record<WindowId, Place>> = {
 	now: { col: 9, span: 4, row: 2 },
 };
 
-/** The two grid rows, as `grid-template-rows`. */
-export const HOME_ROWS = "minmax(0, 11fr) minmax(0, 9fr)";
+/** The rows the Now window needs at the desk's usual widths: its title bar, its frame and its facts. */
+export const USUAL_NOW_ROWS = 12;
+/**
+ * The two grid rows the desk is first painted with, as `grid-template-rows`: nine above, and below the rows Now
+ * usually needs. Where there is a page the rows are fitted to it before the first paint (`useRowFit`); these are the
+ * rows of a static render, and of a desk that cannot be measured yet. They are the rows a measure usually gives, so
+ * the fit moves nothing then.
+ */
+export const HOME_ROWS = gridRowsStyle({ top: TOP_MIN_ROWS, bottom: USUAL_NOW_ROWS });
 /** The gap between windows, in CSS px. */
-export const DESK_GAP = 16;
-/** At or under this width the desk is a column and fill is ignored. */
-export const COMPACT_QUERY = "(max-width: 900px)";
+export const DESK_GAP = GAP;
+/** The narrowest window the desk is laid out in, in CSS px. */
+export const DESK_MIN_WIDTH = 1000;
+/** Under that width the desk is a column and fill is ignored. The desk's sheets write the same width. */
+export const COMPACT_QUERY = `(max-width: ${DESK_MIN_WIDTH - 1}px)`;
 /** At or over this width a filled ledger shows its record panel docked beside it. */
 export const DOCK_QUERY = "(min-width: 1100px)";
 

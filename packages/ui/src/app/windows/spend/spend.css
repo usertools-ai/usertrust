@@ -24,7 +24,7 @@
 
 	/* The narrow column takes its content's height, so nothing in it has a height to grow into: the chart has the
 	   height of the page's own chart. */
-	@media (max-width: 900px) {
+	@media (max-width: 999px) {
 		[data-win="spend"] .ut-trends {
 			flex: 0 0 auto;
 		}

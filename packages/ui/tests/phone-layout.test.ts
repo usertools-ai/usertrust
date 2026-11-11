@@ -88,13 +88,15 @@ describe("the phone breakpoint", () => {
 	it("is one number: the components' query and the stylesheet's narrow block agree", () => {
 		expect(phoneAt).toBeGreaterThan(0);
 		expect(PHONE_QUERY).toBe(`(max-width: ${PHONE_MAX_WIDTH}px)`);
-		// Every narrow block is written at the phone width (or the summary's wider 900px step), so a phone block written
-		// with another number, which would drift from the components' query, fails here. (The hit-area block at the end
-		// has its own phone-width section, at the same width.)
+		// Every narrow block is written at the phone width (or the summary's wider 900px step, or the 999px under which
+		// the desk is a column), so a phone block written with another number, which would drift from the components'
+		// query, fails here. (The hit-area block at the end has its own phone-width section, at the same width.)
 		const widths = [...allCss().matchAll(/@media \(max-width: (\d+)px\)/g)].map((m) =>
 			Number(m[1]),
 		);
 		expect(widths.filter((w) => w !== PHONE_MAX_WIDTH && w !== 900 && w !== 999)).toEqual([]);
+		// The column's width is the desk's own number, and it is in the sheets: 900px alone would pass with it missing.
+		expect(widths.filter((w) => w === 999).length).toBeGreaterThanOrEqual(1);
 		expect(widths.filter((w) => w === PHONE_MAX_WIDTH).length).toBeGreaterThanOrEqual(1);
 	});
 });

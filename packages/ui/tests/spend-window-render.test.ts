@@ -704,7 +704,7 @@ describe("Spend: the stylesheet", () => {
 	});
 
 	it("lets the chart take its content's height on a phone, so the stamp's room stays inside the window", () => {
-		const phone = /@media \(max-width: 900px\)\s*\{([\s\S]*?\n\t\})/.exec(own);
+		const phone = /@media \(max-width: 999px\)\s*\{([\s\S]*?\n\t\})/.exec(own);
 		expect(phone).not.toBeNull();
 		const rule = /\[data-win="spend"\] \.ut-sp-chart\s*\{([^}]*)\}/.exec(phone?.[1] ?? "");
 		expect(rule?.[1]).toContain("flex: 0 0 auto");
@@ -790,7 +790,7 @@ describe("Spend: the stylesheet", () => {
 		expect(own.match(/@media \(max-width/g)).toHaveLength(1);
 		expect(own).toContain(
 			[
-				"\t@media (max-width: 900px) {",
+				"\t@media (max-width: 999px) {",
 				'\t\t[data-win="spend"] .ut-trends {',
 				"\t\t\tflex: 0 0 auto;",
 				"\t\t}",

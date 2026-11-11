@@ -4,7 +4,8 @@
 /**
  * The desk's shell: the page around the four windows. The top bar (glass: it is a control), the status under it, the
  * filters and the count, and the desk itself. Everything it shows comes from the desk's state; it keeps no state of its
- * own except what a screen needs to hand focus back after a window fills the desk or is restored.
+ * own except what a screen needs: to hand focus back after a window fills the desk or is restored, and to fit the
+ * desk's rows to the Now window.
  */
 
 import { useEffect, useRef } from "react";
@@ -21,6 +22,7 @@ import { useDeskData, useFill, useFilters, useShellBinding } from "./desk-state.
 import { useEscapePeel } from "./escape-peel.js";
 import { installGlass } from "./glass.js";
 import { useMedia } from "./use-box-size.js";
+import { useRowFit } from "./use-row-fit.js";
 import { WINDOWS } from "./windows.js";
 
 /** Each window's component by its id, for the order the screen shows them in (`windowOrder`). */
@@ -55,6 +57,10 @@ export function DeskShell(): React.JSX.Element {
 	const { shownRows, filtered } = list;
 	// On a phone the facts come before the list, which flows in the page to its end (`windowOrder`).
 	const phone = useMedia(PHONE_QUERY, false);
+	// The rows fit the Now window, so it never scrolls. They are measured before the first paint and kept while a
+	// window fills the desk; where nothing can be measured the desk has the rows it is first painted with.
+	const deskRef = useRef<HTMLElement>(null);
+	const fit = useRowFit(deskRef, fill !== null);
 
 	useEscapePeel(peel, act);
 	useFocusAfterFill(fill);
@@ -132,7 +138,12 @@ export function DeskShell(): React.JSX.Element {
 					count={count}
 				/>
 			</div>
-			<main className="ut-dk-desk" style={{ gridTemplateRows: HOME_ROWS }}>
+			<main
+				ref={deskRef}
+				className="ut-dk-desk"
+				data-filled={fill !== null}
+				style={{ gridTemplateRows: fit ?? HOME_ROWS }}
+			>
 				{windowOrder(phone).map((id) => {
 					const Component = WINDOW_BY_ID.get(id);
 					return Component === undefined ? null : <Component key={id} />;

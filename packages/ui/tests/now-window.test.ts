@@ -12,7 +12,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { chartWindow } from "../src/shared/chart-window.js";
 import { rankColors } from "../src/shared/colors.js";
-import { DESK_GAP, HOME } from "../src/shared/desk-layout.js";
+import { GAP, ROW_STEP, rowsToFit } from "../src/shared/desk-grid.js";
+import { DESK_GAP, HOME, USUAL_NOW_ROWS } from "../src/shared/desk-layout.js";
 import { applyFilters, EMPTY_FILTERS, type FilterState } from "../src/shared/filters.js";
 import { formatUsd, formatUsdTotal, formatUt } from "../src/shared/format.js";
 import { listView } from "../src/shared/list-view.js";
@@ -909,6 +910,33 @@ describe("the Now window's sheet", () => {
 		expect(whole(beside(BREAK - 4), "$999.99")).toBe(false);
 	});
 
+	it("never cuts the Budget heading's source chip: it wraps under the word, and the provenance line wraps whole", () => {
+		const heading = rule('[data-win="now"] .ut-facts .ut-fact.budget > b');
+		expect(heading).toMatch(/(?:^|[;\s])flex-wrap:\s*wrap;/);
+		expect(px(heading, "row-gap")).toBe(4);
+		// The chip is the heading's own child, so it can wrap beneath the word; the older sheet keeps it from breaking
+		// inside, and nothing here clips the heading.
+		expect(heading).not.toMatch(/overflow|text-overflow|-webkit-line-clamp|(?:^|[;\s])height:/);
+		expect(allCss()).toMatch(/\.ut-mark\s*\{[^}]*white-space:\s*nowrap;/);
+		const why = rule('[data-win="now"] .ut-facts .ut-fact.budget:has(> b > .ut-mark) > .ut-why');
+		expect(why).toMatch(/(?:^|[;\s])display:\s*block;/);
+		expect(why).toMatch(/(?:^|[;\s])height:\s*auto;/);
+		expect(why).toMatch(/(?:^|[;\s])overflow:\s*visible;/);
+		expect(why).toMatch(/-webkit-line-clamp:\s*unset;/);
+		expect(why).toMatch(/(?:^|[;\s])line-clamp:\s*unset;/);
+		// Only the live Budget fact's note (the one with the chip): the other facts and the past fact keep their two
+		// clamped lines.
+		expect(rules.filter(([sel]) => /\.ut-why/.test(sel)).map(([sel]) => sel)).toEqual([
+			'[data-win="now"] .ut-facts .ut-fact.budget:has(> b > .ut-mark) > .ut-why',
+		]);
+		// The chip is in the heading in the markup, after the word.
+		const strip = readFileSync(
+			join(import.meta.dirname, "..", "src", "app", "summary-strip.tsx"),
+			"utf-8",
+		);
+		expect(strip).toMatch(/<b>\s*Budget\s*<span className="ut-mark" data-tone=\{word\.tone\}>/);
+	});
+
 	it("sets the facts' lines closer than the page-wide strip did, so the Budget fact is at most 170px tall", () => {
 		const gap = px(rule('[data-win="now"] .ut-facts .ut-fact'), "row-gap");
 		const label = px(rule('[data-win="now"] .ut-facts .ut-fact > b'), "min-height");
@@ -946,6 +974,104 @@ describe("the Now window's sheet", () => {
 		expect(cell).toBeLessThanOrEqual(170);
 	});
 
+	it("red-first (421px of data, thirteen rows of the desk): at 1440px the window's data is 390.9px tall, at most 394", () => {
+		const older = allCss();
+		const num = (re: RegExp, css: string): number => Number(re.exec(css)?.[1] ?? Number.NaN);
+		// Summed from the window's top edge down, each height read from the sheet that sets it. At 1440px the window is
+		// wider than the break (the case above), so the rate has its line beside it.
+		// 1. The as-at line: one line of its 12px text.
+		expect(older).toMatch(/\.ut-asat\s*\{[^}]*height:\s*calc\(12px \* 1\.4\);/);
+		const asAt = 12 * 1.4;
+		// 2. The facts' edge and the room inside it: above the first row, and under the last.
+		const facts = rule('[data-win="now"] .ut-facts');
+		const edge = num(/\.ut-facts\s*\{[^}]*border:\s*([0-9.]+)px/, older);
+		const [above = Number.NaN, under = Number.NaN] = (
+			/(?:^|[;\s])padding-block:\s*([0-9.]+)px ([0-9.]+)px;/.exec(facts) ?? []
+		)
+			.slice(1)
+			.map(Number);
+		const between = num(/gap:\s*([0-9.]+)px 16px;/, facts);
+		// 3. The three rows. A fact's lines: its label, its figure, and the lines under them, a gap apart.
+		const gap = px(rule('[data-win="now"] .ut-facts .ut-fact'), "row-gap");
+		const label = px(rule('[data-win="now"] .ut-facts .ut-fact > b'), "min-height");
+		const figure = px(
+			rule('[data-win="now"] .ut-facts .ut-fact .v, [data-win="now"] .ut-facts .ut-fact .v.na'),
+			"height",
+		);
+		const oneLine = px(rule('[data-win="now"] .ut-facts .ut-fact.budget > .ut-sub'), "height");
+		const meter = num(/\.ut-meter\s*\{\s*height:\s*([0-9.]+)px;/, older);
+		const amounts = num(/\.ut-facts \.ut-amts\s*\{\s*height:\s*([0-9.]+)px;/, older);
+		const twoLines = num(/\.ut-facts \.ut-sub\s*\{\s*height:\s*([0-9.]+)px;/, older);
+		const why = num(/\.ut-facts \.ut-why\s*\{\s*height:\s*([0-9.]+)px;/, older);
+		// Spend and Budget: the Budget fact's seven lines are the taller.
+		const budget = label + figure + meter + amounts + oneLine + oneLine + why + 6 * gap;
+		// The rate and its projection: the rate's label, figure and words, its own gap apart.
+		const rateGap = px(rule('[data-win="now"] .ut-facts .ut-nw-rate'), "row-gap");
+		const words = num(/font:\s*500 11\.5px\/([0-9.]+)px var\(--sans\);/, rule(".ut-nw-words"));
+		const rate = label + figure + words + 2 * rateGap;
+		// Integrity and Details: the label, the pill, the pill's two-line note and the two-line reason.
+		const pill = rule('[data-win="now"] .ut-facts .ut-pill');
+		expect(pill).toMatch(/padding-block:\s*0;/);
+		const integrity = label + px(pill, "height") + twoLines + why + 3 * gap;
+		// 4. The last record: one line of its 11.5px text and the room under it.
+		const last = rule(".ut-nw-last");
+		expect(last).toMatch(/font:\s*400 11\.5px\/1\.4 var\(--sans\);/);
+		const [lastAbove = Number.NaN, lastUnder = Number.NaN] = (
+			/(?:^|[;\s])padding:\s*([0-9.]+)(?:px)? 14px ([0-9.]+)px;/.exec(last) ?? []
+		)
+			.slice(1)
+			.map(Number);
+		const lastRecord = lastAbove + 11.5 * 1.4 + lastUnder;
+
+		expect([edge + above, budget, between, rate, integrity, under + edge]).toEqual([
+			8, 152, 12, 51, 110, 10,
+		]);
+		expect(lastRecord).toBeCloseTo(19.1, 6);
+		const factsBox = edge + above + budget + between + rate + between + integrity + under + edge;
+		expect(factsBox).toBe(355);
+		const sum = asAt + factsBox + lastRecord;
+		expect(sum).toBeCloseTo(390.9, 6);
+		expect(sum).toBeLessThanOrEqual(394);
+
+		// What that costs in rows: the window is its title bar and frame around the data.
+		const bar = num(/\.ut-win-bar\s*\{[^}]*min-height:\s*([0-9.]+)px;/, older);
+		const frame = num(/\.ut-win\s*\{[^}]*border:\s*([0-9.]+)px/, older);
+		expect(bar + 2 * frame).toBe(46);
+		// A window of n rows is n * 40 - 16px tall: eleven rows hold 378px of data under this bar, twelve hold 418.
+		expect([11, 12].map((n) => n * ROW_STEP - GAP - (bar + 2 * frame))).toEqual([378, 418]);
+		expect(rowsToFit(bar + 2 * frame + sum)).toBe(12);
+		// The desk is first painted with these rows, so the fit moves nothing at this width.
+		expect(USUAL_NOW_ROWS).toBe(rowsToFit(bar + 2 * frame + sum));
+	});
+
+	it("red-first (the desk's tighter edges carried into the column and the phone): under 1000px the facts keep the older sheet's room", () => {
+		const older = allCss();
+		expect(older).toMatch(/\.ut-facts\s*\{[^}]*padding:\s*14px 18px 15px;/);
+		expect(ruleIn(block("@media (max-width: 999px)"), '[data-win="now"] .ut-facts')).toMatch(
+			/(?:^|[;\s])padding-block:\s*14px 15px;/,
+		);
+		// From 999px down the facts lay out as the older sheet's 900px block does (so 901 to 999px does not differ from
+		// 900px and under): three columns, the dense flow, the wider gap, and the Budget fact across two columns.
+		const column = block("@media (max-width: 999px)");
+		const cols = ruleIn(column, '[data-win="now"] .ut-facts');
+		expect(cols).toMatch(/grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\);/);
+		expect(cols).toMatch(/grid-auto-flow:\s*row dense;/);
+		expect(cols).toMatch(/(?:^|[;\s])gap:\s*16px 20px;/);
+		expect(ruleIn(column, '[data-win="now"] .ut-facts .ut-fact.budget')).toMatch(
+			/grid-column:\s*span 2;/,
+		);
+		expect(older).toMatch(
+			/@media \(max-width: 900px\)\s*\{[^}]*\.ut-facts\s*\{[^}]*grid-auto-flow:\s*row dense;[^}]*gap:\s*16px 20px;/,
+		);
+		// A phone's facts have 12px all round in the older sheet.
+		expect(older).toMatch(
+			/@media \(max-width: 760px\)[\s\S]*?\n\t\t\.ut-facts\s*\{[^}]*padding:\s*12px;/,
+		);
+		expect(ruleIn(NARROW, '[data-win="now"] .ut-facts')).toMatch(
+			/(?:^|[;\s])padding-block:\s*12px;/,
+		);
+	});
+
 	it("gives each held box the size of what it will hold, and keeps it unseen", () => {
 		// The line's box is the drawn line's: 96 by 32, whether it is the line or its place.
 		const spark = rule('[data-win="now"] .ut-nw-rate > .ut-nw-spark');
@@ -959,5 +1085,9 @@ describe("the Now window's sheet", () => {
 		// Inside the facts the older sheet hides what is held; the last record sits outside them.
 		expect(allCss()).toMatch(/\.ut-facts \[data-reserve="true"\]\s*\{\s*visibility:\s*hidden;/);
 		expect(rule('.ut-nw-last[data-reserve="true"]')).toMatch(/visibility:\s*hidden;/);
+		// A held line is its line's own rule and nothing else, so it is the height of what it holds: the last record's
+		// room, the rate's words.
+		expect(rule('.ut-nw-last[data-reserve="true"]').trim()).toBe("visibility: hidden;");
+		expect(SHEET).not.toMatch(/\.ut-nw-words\[data-reserve/);
 	});
 });
