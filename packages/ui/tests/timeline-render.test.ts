@@ -799,20 +799,31 @@ describe("the bar's one pill names a past position whichever window is open", ()
 	});
 });
 
-describe("the bar below the desk's break is two rows by rule", () => {
-	// Measured in a browser: the one pill fits beside the search from about 900 to 950 px up, and not below. The header
-	// takes the whole first row at the desk's break and under, pinned or not, so no state overlaps and a position moves nothing.
+describe("the bar under 1000 px is two rows by rule", () => {
+	// Measured in a browser, the widest pill (the second mark, a year in the time, the stream down: 219 px) overlapped
+	// the search by 25 px at 920 and 5 px at 940 and cleared it by 12 px from 960. The header takes the whole first row
+	// below the break, pinned or not, so no state overlaps and a position moves nothing.
+	const MEASURED_FIT_PX = 960;
 	const css = readFileSync(
 		join(import.meta.dirname, "..", "src", "app", "desk", "desk.css"),
 		"utf-8",
 	);
 
-	it("gives the header the whole first row at 900 px and narrower (the desk's break)", () => {
-		const block = /@media \(max-width: 900px\)\s*\{([\s\S]*?)\n\t\}\n/.exec(css)?.[1] ?? "";
-		expect(block).toMatch(/\.ut-dk-top > \.ut-top\s*\{[^}]*flex-basis:\s*100%;/);
+	it("gives the header the whole first row from the width the widest pill is measured to fit, up to the desk's 1000px", () => {
+		const m = /@media \(max-width: (\d+)px\)\s*\{([\s\S]*?)\n\t\}\n/.exec(
+			css.slice(css.indexOf(".ut-dk-top > .ut-top {") + 1),
+		);
+		const w = Number(m?.[1]);
+		// At or above the measured width, so a wider pill fails here and not in a review; below 1000, where one row is the rule.
+		expect(w).toBeGreaterThanOrEqual(MEASURED_FIT_PX - 1);
+		expect(w).toBe(999);
+		expect(m?.[2] ?? "").toMatch(/\.ut-dk-top > \.ut-top\s*\{[^}]*flex-basis:\s*100%;/);
+		// Only that rule: the 900px block no longer carries it.
+		const at900 = /@media \(max-width: 900px\)\s*\{([\s\S]*?)\n\t\}\n/.exec(css)?.[1] ?? "";
+		expect(at900).not.toContain(".ut-top");
 	});
 
-	it("leaves the bar's rules above the desk's break as they were: a basis, and no minimum or containment", () => {
+	it("leaves the bar's rules above the break as they were: a basis, and no minimum or containment", () => {
 		const rule = /\.ut-dk-top > \.ut-top\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";
 		// The whole body, so a basis of 100% here (two rows at every width) cannot slip in beside the flex shorthand.
 		expect(rule.trim()).toBe("flex: 1 1 320px;");
@@ -822,6 +833,31 @@ describe("the bar below the desk's break is two rows by rule", () => {
 		expect(css).not.toContain("data-past");
 		expect(css).not.toContain(".ut-asof");
 		expect(css).not.toContain(".ut-grow");
+	});
+});
+
+describe("the as-at line's slot in the Now window", () => {
+	// Measured: the clamped form ("As recorded at <time> (latest record)") wrapped to two lines (31 px of text) in the
+	// one-line (17 px) box in windows 277, 318 and 343 px wide, and fits from 377 px; with a year it needs about 390.
+	const now = readFileSync(join(import.meta.dirname, "..", "src", "app", "styles.css"), "utf-8");
+	const block =
+		/@container ut-nw \(max-width: (\d+)px\)\s*\{\s*\[data-win="now"\] \.ut-asat \{([^}]*)\}\s*\[data-win="now"\] \.ut-asat::before \{([^}]*)\}/.exec(
+			now,
+		);
+
+	it("holds two lines inside the window's own container, live and past alike", () => {
+		expect(block).not.toBeNull();
+		// At or above the width the longest form is measured to need (about 390 px), from the window and not the screen.
+		expect(Number(block?.[1])).toBeGreaterThanOrEqual(390);
+		expect(block?.[2]).toMatch(/height:\s*calc\(2 \* 12px \* 1\.4\);/);
+		expect(block?.[2]).toMatch(/align-items:\s*flex-start;/);
+		expect(block?.[3]).toMatch(/margin-top:\s*calc\(12px \* 0\.7 - 1px\);/);
+	});
+
+	it("is one slot for both: the rule names neither data-live state and hides nothing", () => {
+		expect(block?.[0] ?? "").not.toContain("data-live");
+		expect(block?.[0] ?? "").not.toContain("visibility");
+		expect(block?.[0] ?? "").not.toContain("display");
 	});
 });
 

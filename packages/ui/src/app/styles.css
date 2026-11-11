@@ -354,6 +354,22 @@ body {
 		background: var(--accent);
 	}
 
+	/* The as-at line holds two lines below the width at which its longest form ("As recorded at <year>-<date>
+	   <time> (latest record)", about 390px with the dash) fits on one. The slot is the same height live and past, so
+	   entering the past moves nothing; it is sized from the window, not the screen (the window is 4 of 12 columns).
+	   Measured: the clamped form wrapped to 31px of text in a 17px box at windows 277, 318 and 343px wide, and fits
+	   from 377px. */
+	@container ut-nw (max-width: 400px) {
+		[data-win="now"] .ut-asat {
+			height: calc(2 * 12px * 1.4);
+			align-items: flex-start;
+		}
+
+		[data-win="now"] .ut-asat::before {
+			margin-top: calc(12px * 0.7 - 1px);
+		}
+	}
+
 	/* ── Header facts ── */
 	.ut-facts {
 		display: grid;

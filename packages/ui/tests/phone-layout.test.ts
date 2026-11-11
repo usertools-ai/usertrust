@@ -94,7 +94,7 @@ describe("the phone breakpoint", () => {
 		const widths = [...allCss().matchAll(/@media \(max-width: (\d+)px\)/g)].map((m) =>
 			Number(m[1]),
 		);
-		expect(widths.filter((w) => w !== PHONE_MAX_WIDTH && w !== 900)).toEqual([]);
+		expect(widths.filter((w) => w !== PHONE_MAX_WIDTH && w !== 900 && w !== 999)).toEqual([]);
 		expect(widths.filter((w) => w === PHONE_MAX_WIDTH).length).toBeGreaterThanOrEqual(1);
 	});
 });
