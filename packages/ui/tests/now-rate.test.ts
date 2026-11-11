@@ -2,8 +2,20 @@
 // Copyright 2026 Usertools, Inc.
 
 import { describe, expect, it } from "vitest";
-import { NOW_COPY, weekPaceWords, youngPaceWords } from "../src/shared/now-copy.js";
-import { HOUR_MS, RATE_HOURS, rateNow, rateWords } from "../src/shared/now-rate.js";
+import {
+	NOW_COPY,
+	weekPaceWords,
+	wholeVaultProjection,
+	youngPaceWords,
+} from "../src/shared/now-copy.js";
+import {
+	HOUR_MS,
+	oldestHeldMs,
+	RATE_HOURS,
+	rateNow,
+	rateWords,
+	reachesBack,
+} from "../src/shared/now-rate.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 
 const END = Date.UTC(2026, 10, 8, 12);
@@ -175,6 +187,89 @@ describe("rateNow", () => {
 	});
 });
 
+describe("oldestHeldMs and reachesBack", () => {
+	it("reads the oldest record of any kind, wherever it sits in the list", () => {
+		const old = llm(END - 9 * HOUR_MS, 0, { kind: "tool_use" });
+		expect(oldestHeldMs([llm(END - HOUR_MS, 1), old, llm(END - 3 * HOUR_MS, 1)])).toBe(
+			END - 9 * HOUR_MS,
+		);
+	});
+
+	it("is infinite with no record, or none whose time can be read, and passes over an unreadable one", () => {
+		expect(oldestHeldMs([])).toBe(Number.POSITIVE_INFINITY);
+		expect(oldestHeldMs([llm(END, 1, { ts: "not a time" })])).toBe(Number.POSITIVE_INFINITY);
+		expect(oldestHeldMs([llm(END, 1, { ts: "not a time" }), llm(END - HOUR_MS, 1)])).toBe(
+			END - HOUR_MS,
+		);
+	});
+
+	it("reaches back from a record exactly the span before the end, and not from one a millisecond after", () => {
+		expect(reachesBack([llm(END - 5 * HOUR_MS, 1)], END, 5 * HOUR_MS)).toBe(true);
+		expect(reachesBack([llm(END - 5 * HOUR_MS + 1, 1)], END, 5 * HOUR_MS)).toBe(false);
+		expect(reachesBack([], END, HOUR_MS)).toBe(false);
+	});
+});
+
+describe("where the held rows are complete", () => {
+	it("is read from the oldest time held, whatever order the rows come in: times are taken to follow chain order", () => {
+		const a = llm(END - 30 * HOUR_MS, 1);
+		const b = llm(END - 2 * HOUR_MS, 1);
+		const c = llm(END - 10 * HOUR_MS, 1);
+		for (const order of [
+			[a, b, c],
+			[c, b, a],
+			[b, a, c],
+		]) {
+			expect(oldestHeldMs(order)).toBe(END - 30 * HOUR_MS);
+			expect(reachesBack(order, END, 30 * HOUR_MS)).toBe(true);
+			expect(reachesBack(order, END, 30 * HOUR_MS + 1)).toBe(false);
+		}
+	});
+});
+
+describe("rateNow on a cut vault", () => {
+	const START = END - RATE_HOURS * HOUR_MS;
+	// 40 steady hours, then the last hour 50 times larger: far above the usual range, where one is known.
+	const rows = withLastHour(steady(40, 1000), 50_000);
+	const held = (hoursBack: number): number => END - hoursBack * HOUR_MS;
+
+	it("is as before when nothing says it is cut", () => {
+		const v = rateNow(rows, END);
+		expect(v.firstHour).toBe(0);
+		expect(v.known).toBe(true);
+		expect(v.unusual).toBe(true);
+		expect(rateNow(rows, END, null)).toEqual(v);
+		// Rows that begin before the week are whole from its first hour.
+		expect(rateNow(rows, END, START).firstHour).toBe(0);
+		expect(rateNow(rows, END, START - 5 * HOUR_MS).firstHour).toBe(0);
+	});
+
+	it("is whole from the first hour that begins at or after the oldest row held", () => {
+		expect(rateNow(rows, END, START + 1).firstHour).toBe(1);
+		expect(rateNow(rows, END, START + HOUR_MS).firstHour).toBe(1);
+		expect(rateNow(rows, END, START + HOUR_MS + 1).firstHour).toBe(2);
+		expect(rateNow(rows, END, held(1)).firstHour).toBe(RATE_HOURS - 1);
+		expect(rateNow(rows, END, held(1) + 1).firstHour).toBe(RATE_HOURS);
+		expect(rateNow(rows, END, Number.POSITIVE_INFINITY).firstHour).toBe(RATE_HOURS);
+	});
+
+	it("gives a usual range only when the hours it reads are whole: 25 hours back is enough, a millisecond less is not", () => {
+		const reached = rateNow(rows, END, held(25));
+		expect(reached.known).toBe(true);
+		expect(reached.unusual).toBe(true);
+		const short = rateNow(rows, END, held(25) + 1);
+		expect(short.known).toBe(false);
+		expect(short.unusual).toBe(false);
+		expect(rateWords(short)).toBe(NOW_COPY.rateUnknown);
+		for (const a of [short.band.mid, short.band.lo, short.band.hi]) {
+			expect(a.every(Number.isNaN)).toBe(true);
+		}
+		// The hours themselves are the rows' own.
+		expect(short.hours).toEqual(rateNow(rows, END).hours);
+		expect(short.ratePerHourUt).toBe(50_000);
+	});
+});
+
 describe("rateWords", () => {
 	const view = (known: boolean, unusual: boolean) => ({ ...rateNow([], END), known, unusual });
 
@@ -191,15 +286,25 @@ describe("NOW_COPY", () => {
 			scopeVault: "whole vault",
 			scopeFiltered: "llm calls · filtered",
 			scopeFilteredPast: "llm calls · filtered, up to this point",
+			scopeFilteredHeld: "llm calls · filtered, rows held only",
+			scopeFilteredHeldPast: "llm calls · filtered, rows held only, up to this point",
+			rateHeading: "Rate now",
+			rateHeadingFiltered: "Rate now · filtered",
 			rateUnknown: "too little history to call",
 			rateUnusual: "unusual spend rate",
 			rateNormal: "normal rate",
 			rateTip: "The last hour's spend against the usual range of the 24 hours before",
+			rateNotWhole: "The list begins inside the last hour, so its spend is not known",
+			rateFromFirstWhole: ", beginning at the first whole hour listed",
 			rateBandNote: "The shaded band is the usual range for those hours.",
+			projectionLead: "Projection:",
+			projectionLeadFiltered: "Projection, whole vault:",
 			projectionUsed: "Projection: the budget is already used",
 			projectionIdle: "Projection: no spend in the past week, so no date",
 			projectionPaceWeek: "the past week's pace",
 			projectionPaceYoung: "the pace so far",
+			lastRecord: "Last record",
+			lastRecordFiltered: "Last record · filtered",
 			integrityIntact: "hash links intact",
 			integrityMonitor: "The dashboard is a monitor: usertrust verify is the authoritative check.",
 			statusEmpty: "no records in this view",
@@ -216,6 +321,28 @@ describe("NOW_COPY", () => {
 			"the average of $1.00/day since the first spend record, under a day ago,",
 		);
 		expect(weekPaceWords("$0.24/day")).toBe("the past 7 days' average of $0.24/day");
+	});
+
+	it("a projection's sentence opens by saying it is the whole vault's when the figures beside it are a filter's", () => {
+		for (const sentence of [NOW_COPY.projectionUsed, NOW_COPY.projectionIdle]) {
+			expect(sentence.startsWith(`${NOW_COPY.projectionLead} `)).toBe(true);
+			expect(wholeVaultProjection(sentence)).toBe(
+				sentence.replace("Projection:", "Projection, whole vault:"),
+			);
+		}
+		expect(wholeVaultProjection("Projection: reaches $10.00 on 11-18 at the pace so far")).toBe(
+			"Projection, whole vault: reaches $10.00 on 11-18 at the pace so far",
+		);
+	});
+
+	it("the word held is said of rows only: the two labels of a filtered sum in a vault the list does not hold whole", () => {
+		const held = Object.entries(NOW_COPY).filter(([, value]) => /held/i.test(value));
+		expect(held.map(([key]) => key)).toEqual(["scopeFilteredHeld", "scopeFilteredHeldPast"]);
+		for (const [, value] of held) {
+			expect(value.split("rows held only").length - 1).toBe(1);
+			expect(value.replace("rows held only", "")).not.toMatch(/held/i);
+		}
+		for (const value of Object.values(NOW_COPY)) expect(value).not.toMatch(/this month/i);
 	});
 
 	it("claims no cause and no check it has not made", () => {

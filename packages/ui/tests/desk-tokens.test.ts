@@ -197,11 +197,11 @@ describe("the desk's stylesheets", () => {
 		expect(roots).toHaveLength(1);
 	});
 
-	it("use only the two breakpoints the page has: 760px and 900px", () => {
+	it("use only the breakpoints the page has: 760px and 900px, and the bar's own 999px step (one under the 1000px the desk moves to)", () => {
 		const widths = [...allCss().matchAll(/@media\s*\(max-width:\s*(\d+)px\)/g)].map((m) =>
 			Number(m[1]),
 		);
-		expect(widths.filter((w) => w !== 760 && w !== 900)).toEqual([]);
+		expect(widths.filter((w) => w !== 760 && w !== 900 && w !== 999)).toEqual([]);
 	});
 
 	it("red-first: on a narrow screen no window is squeezed, and the Ledger's list keeps a real height above the phone width", () => {

@@ -3,8 +3,8 @@
 
 import { describe, expect, it } from "vitest";
 import type { SummaryPayload } from "../src/shared/api.js";
-import { monthBurn, projectionOf } from "../src/shared/now-burn.js";
-import { NOW_COPY } from "../src/shared/now-copy.js";
+import { coversWeek, monthBurn, projectionOf } from "../src/shared/now-burn.js";
+import { NOW_COPY, weekPaceWords } from "../src/shared/now-copy.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 
 const HOUR = 3_600_000;
@@ -301,6 +301,37 @@ describe("projectionOf", () => {
 		expect(projectionOf(summary({ remainingUt: 1e18 }), week(2400), END)).toBeNull();
 	});
 
+	it("beside a filter's figures each sentence says it is the whole vault's, and nothing else of it changes", () => {
+		const young = [llm(END - 3 * DAY, 3600), llm(END - HOUR, 3600)];
+		const cases: [ReturnType<typeof summary>, ReturnType<typeof week>][] = [
+			[summary(), week(2400)],
+			[summary({ remainingUt: 24_000 }), young],
+			[summary({ remainingUt: 0 }), week(2400)],
+			[summary(), []],
+		];
+		for (const [s, rows] of cases) {
+			const plain = projectionOf(s, rows, END);
+			expect(plain?.text.startsWith("Projection: ")).toBe(true);
+			expect(projectionOf(s, rows, END, true)).toStrictEqual({
+				text: `Projection, whole vault: ${plain?.text.slice("Projection: ".length)}`,
+				title: plain?.title,
+			});
+			expect(projectionOf(s, rows, END, false)).toStrictEqual(plain);
+		}
+		expect(projectionOf(summary(), week(2400), END, true)?.text).toBe(
+			"Projection, whole vault: reaches $10.00 on 11-18 at the past week's pace",
+		);
+		expect(projectionOf(summary({ remainingUt: 0 }), week(2400), END, true)?.text).toBe(
+			"Projection, whole vault: the budget is already used",
+		);
+		expect(projectionOf(summary(), [], END, true)?.text).toBe(
+			"Projection, whole vault: no spend in the past week, so no date",
+		);
+		// Where there is no line to print, a filter makes none.
+		expect(projectionOf(null, week(2400), END, true)).toBeNull();
+		expect(projectionOf(summary(), [llm(END - HOUR, 2400)], END, true)).toBeNull();
+	});
+
 	it("no sentence promises or claims a check", () => {
 		const all = [
 			projectionOf(summary(), week(2400), END),
@@ -311,5 +342,62 @@ describe("projectionOf", () => {
 			expect(p).not.toBeNull();
 			expect(`${p?.text} ${p?.title}`).not.toMatch(/\bwill\b|verified/i);
 		}
+	});
+});
+
+describe("coversWeek", () => {
+	it("holds from a record exactly a week before the end, and not from one a millisecond after", () => {
+		expect(coversWeek([llm(END - 7 * DAY, 1)], END)).toBe(true);
+		expect(coversWeek([llm(END - 7 * DAY + 1, 1)], END)).toBe(false);
+		expect(coversWeek([llm(END - 8 * DAY, 1), llm(END - HOUR, 1)], END)).toBe(true);
+	});
+
+	it("reads the oldest record of any kind, wherever it sits in the list", () => {
+		expect(coversWeek([llm(END - HOUR, 1), llm(END - 9 * DAY, 0, { kind: "tool_use" })], END)).toBe(
+			true,
+		);
+		expect(coversWeek([llm(END - 3 * DAY, 1), llm(END - DAY, 1)], END)).toBe(false);
+	});
+
+	it("is false with no record, or none whose time can be read", () => {
+		expect(coversWeek([], END)).toBe(false);
+		expect(coversWeek([llm(END - 9 * DAY, 1, { ts: "not a time" })], END)).toBe(false);
+		expect(
+			coversWeek([llm(END - 9 * DAY, 1, { ts: "not a time" }), llm(END - 8 * DAY, 1)], END),
+		).toBe(true);
+	});
+});
+
+describe("projectionOf on a cut vault", () => {
+	const cutRows = [llm(END - 2 * DAY, 4800), llm(END - DAY, 4800)];
+
+	it("states no pace of a week the rows do not reach, whatever the held spend says", () => {
+		for (const rows of [cutRows, [], [llm(END - HOUR, 0)], [llm(END - 7 * DAY + 1, 9_000)]]) {
+			expect(projectionOf(summary(), rows, END, false, true)).toBeNull();
+			expect(projectionOf(summary({ remainingUt: 0 }), rows, END, false, true)).toBeNull();
+			expect(projectionOf(summary(), rows, END, true, true)).toBeNull();
+		}
+		// The same rows are a whole vault when it is not cut: its own age.
+		expect(projectionOf(summary(), cutRows, END)).not.toBeNull();
+	});
+
+	it("with the budget unknown or no summary it is still none", () => {
+		expect(projectionOf(null, week(100), END, false, true)).toBeNull();
+	});
+
+	it("states the week's pace when the rows reach back over it, as a vault at least a week old", () => {
+		const held = [llm(END - 7 * DAY, 0, { kind: "tool_use" }), llm(END - DAY, 700)];
+		const cut = projectionOf(summary({ remainingUt: 1000 }), held, END, false, true);
+		expect(cut?.text).toContain("11-18");
+		expect(cut?.text).toContain(NOW_COPY.projectionPaceWeek);
+		expect(cut?.title).toContain(weekPaceWords("$0.01/day"));
+		// Held spend young by its own oldest record does not make the vault young.
+		expect(cut?.text).not.toContain(NOW_COPY.projectionPaceYoung);
+		// No spend held over a week it does reach is no spend in that week.
+		const quiet = [llm(END - 8 * DAY, 0)];
+		expect(projectionOf(summary(), quiet, END, false, true)?.text).toBe(NOW_COPY.projectionIdle);
+		expect(projectionOf(summary({ remainingUt: 0 }), quiet, END, false, true)?.text).toBe(
+			NOW_COPY.projectionUsed,
+		);
 	});
 });

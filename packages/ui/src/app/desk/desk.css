@@ -296,6 +296,18 @@
 		}
 	}
 
+	/* The bar is two rows under 1000 px, pin or no pin: the header takes the first row whole, the search and Export the
+	   second, so a position moves nothing. At and above 1000 px they share one row. The step is the width at which the
+	   WIDEST pill (the second mark, a year in the time, the stream down: 219 px) was measured to clear the search in a
+	   browser: it overlapped by 25 px at 920 and 5 px at 940, and cleared by 12 px from 960 (see the test, which pins the
+	   break at or above that width). The header holds one line from about 530 px up even then; below that the pill
+	   wraps onto its own line inside the header. */
+	@media (max-width: 999px) {
+		.ut-dk-top > .ut-top {
+			flex-basis: 100%;
+		}
+	}
+
 	/* Narrow: the desk is a scrolling column, every window shows, and fill is ignored. */
 	@media (max-width: 900px) {
 		.ut-dk {

@@ -13,7 +13,7 @@ import { formatUtc } from "./format.js";
  * The time a record carries, as the rows show it (`formatUtc`), with the year in front when it is not the year of
  * `nowIso`: the rows' `MM-DD` never needs one, a point a year back does.
  */
-function recordedAt(ts: string, nowIso: string): string {
+export function recordedAt(ts: string, nowIso: string): string {
 	const t = Date.parse(ts);
 	const now = Date.parse(nowIso);
 	if (Number.isNaN(t) || Number.isNaN(now)) return formatUtc(ts);

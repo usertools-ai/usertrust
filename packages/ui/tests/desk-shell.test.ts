@@ -82,6 +82,30 @@ describe("the desk shell", () => {
 		for (const tag of panes) expect(classesOf(tag)).not.toContain("ut-glass");
 	});
 
+	it("a vault the list does not hold whole: the Window notice is on the page once, in the top bar, whichever window fills the desk", async () => {
+		const data = loadedData({ summary: dayOneSummary({ truncated: true, rowCount: 3 }) });
+		for (const fill of [null, "spend", "share", "ledger", "now"] as const) {
+			const html = await shell({ fill, data });
+			if (fill !== null) expect(html).toContain(`data-win="${fill}" data-filled="true"`);
+			expect(html.split('class="ut-notice"').length - 1).toBe(1);
+			expect(html.split("<b>Window</b>").length - 1).toBe(1);
+			// In the top bar, with the header: no window carries it, so none can hide it.
+			const top = html.slice(
+				html.indexOf('class="ut-dk-top ut-glass"'),
+				html.indexOf('class="ut-at-status"'),
+			);
+			expect(top).toContain(
+				'<div class="ut-notice" role="status"><b>Window</b>Showing the newest 3 of ',
+			);
+			expect(top).not.toContain("ut-asat");
+			// The as-at line is the Now window's, once.
+			expect(html.split('class="ut-asat"').length - 1).toBe(1);
+			expect(html.indexOf('class="ut-asat"')).toBeGreaterThan(html.indexOf('data-win="now"'));
+		}
+		// A vault held whole has no notice anywhere.
+		expect(await shell({ data: loadedData() })).not.toContain("ut-notice");
+	});
+
 	it("draws no slider and keeps the status under the header mounted, whatever the data", async () => {
 		for (const data of [{}, loadedData(), { summary: dayOneSummary() }]) {
 			const html = await shell({ data });
