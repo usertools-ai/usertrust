@@ -490,7 +490,7 @@ async function settleAtEstimate({ sessionId, agentId, entry, input }) {
 		// Same 16 KiB cap as the output hold so a content-cap result cannot
 		// price above the reservation.
 		outputTokens: estimateTokens(
-			JSON.stringify(input.tool_response ?? "").slice(0, MAX_CONTENT_CHARS),
+			JSON.stringify(input.tool_response ?? input.error ?? "").slice(0, MAX_CONTENT_CHARS),
 		),
 		usageSource: "estimated",
 		// A hold authorized under the `job` capability names its job again, and says when

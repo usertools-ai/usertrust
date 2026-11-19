@@ -76,6 +76,7 @@ const HOOKS = new Set([
 	"session-start",
 	"pre-tool-use",
 	"post-tool-use",
+	"post-tool-use-failure",
 	"stop",
 	"subagent-stop",
 	"session-end",

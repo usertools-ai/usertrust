@@ -1061,7 +1061,36 @@ describe("the model a hold names is the session's own", () => {
 		const plugin = JSON.parse(
 			await readFile(join(HOOKS, "..", ".claude-plugin", "plugin.json"), "utf-8"),
 		) as { hooks?: unknown };
-		expect(plugin.hooks).toBe("./hooks/model-switch.json");
+		expect(plugin.hooks).toEqual([
+			"./hooks/model-switch.json",
+			"./hooks/post-tool-use-failure.json",
+		]);
+	});
+
+	it("PostToolUseFailure is registered in its own hooks file: a Claude Code before v2.0.56 rejects a whole file that names it", async () => {
+		// The nine events Claude Code v2.0.12, the first with plugins, accepts, from its own hooks
+		// schema (a record keyed by an enum of these names; a name outside it fails the whole file,
+		// "Failed to load hooks for ..."). v2.0.56 adds PostToolUseFailure. In hooks.json it would
+		// switch every hook off on a client between the two; in a file of its own an older client
+		// drops that file alone and keeps the rest.
+		const v2012 = new Set(
+			"PreToolUse PostToolUse Notification UserPromptSubmit SessionStart SessionEnd Stop SubagentStop PreCompact".split(
+				" ",
+			),
+		);
+		type Manifest = { hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>> };
+		const read = async (file: string) =>
+			JSON.parse(await readFile(join(HOOKS, file), "utf-8")) as Manifest;
+		const main = await read("hooks.json");
+		expect(Object.keys(main.hooks).filter((event) => !v2012.has(event))).toEqual([]);
+		const failure = await read("post-tool-use-failure.json");
+		expect(Object.keys(failure.hooks)).toEqual(["PostToolUseFailure"]);
+		expect(
+			failure.hooks.PostToolUseFailure?.flatMap((entry) => entry.hooks.map((h) => h.command)),
+		).toEqual(
+			// biome-ignore lint/suspicious/noTemplateCurlyInString: Claude Code expands ${CLAUDE_PLUGIN_ROOT} itself
+			['node "${CLAUDE_PLUGIN_ROOT}/hooks/launch.mjs" post-tool-use-failure'],
+		);
 	});
 
 	it("before any response of its agent, the main agent's hold names the SessionStart model, and a subagent's is `unknown`", async () => {
