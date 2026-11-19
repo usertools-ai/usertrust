@@ -7,6 +7,18 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ## [Unreleased]
 
+### Fixed
+
+- **A tool call that fails now closes its hold at once.** Until now a Bash command that exits
+  non-zero (and any other failed tool call) left its hold until a Stop, SubagentStop or
+  SessionEnd, or the server's pending timeout, because PostToolUse runs only after a call
+  succeeds. A subagent's failed call waited for the subagent to end, so those holds were found
+  long past their life and logged as "past its life, no settle was sent" gaps. The plugin now
+  registers PostToolUseFailure and settles the call as PostToolUse does (the failure's `error`
+  text stands where a result's `tool_response` would). A Claude Code without the event keeps the
+  old path. Calls that never run (rejected at the prompt, denied) and cancelled calls are
+  unchanged.
+
 ## [3.2.0] - 2026-11-08
 
 ### Renamed
