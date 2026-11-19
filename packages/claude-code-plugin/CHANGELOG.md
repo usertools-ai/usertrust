@@ -7,6 +7,8 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ## [Unreleased]
 
+## [3.2.1] - 2026-11-19
+
 ### Fixed
 
 - **A tool call that fails now closes its hold at once.** Until now a Bash command that exits
