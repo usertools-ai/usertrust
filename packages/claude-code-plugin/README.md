@@ -836,13 +836,16 @@ retry.
 
 **Known limitation: a call that does not complete keeps its reservation for a
 while.** PostToolUse, the hook that closes a call's hold,
-[runs only after a tool completes successfully](https://code.claude.com/docs/en/hooks#posttooluse),
-and the plugin registers no other hook that sees the call end. That leaves:
-- a call that fails, which Claude Code reports through
-  [PostToolUseFailure](https://code.claude.com/docs/en/hooks#posttoolusefailure).
-  That covers most commands that exit non-zero: exit 1 is a result, not a
-  failure, only for `grep`, `rg`, `egrep`, `fgrep`, `find`, `diff`, `test`, `[`,
-  `git diff` and `git grep` ([tools reference](https://code.claude.com/docs/en/tools-reference));
+[runs only after a tool completes successfully](https://code.claude.com/docs/en/hooks#posttooluse).
+A call that FAILS (a Bash command that exits non-zero, except `grep`, `rg`, `egrep`,
+`fgrep`, `find`, `diff`, `test`, `[`, `git diff` and `git grep`, whose exit 1 is a result;
+[tools reference](https://code.claude.com/docs/en/tools-reference)) is reported through
+[PostToolUseFailure](https://code.claude.com/docs/en/hooks#posttoolusefailure), which the
+plugin registers and settles exactly as PostToolUse does: the call ran, so it is
+charged, and its hold is closed at once, in the main session and in a subagent
+(the event carries the same `tool_use_id` and `agent_id`). Claude Code fires one of
+the two per call. A Claude Code that has no such event runs the old path for failed
+calls: Stop, SubagentStop and SessionEnd give the hold back. What is left is:
 - a call you reject at the permission prompt;
 - a call a permission rule, another hook or auto mode denies.
 
@@ -850,17 +853,16 @@ Each keeps its hold pending until a later Stop, SubagentStop or SessionEnd gives
 it back (settling it at its real counts if it carries transcript usage). At the
 latest, the server's pending-hold TTL voids it (`pendingTtlMs`, 300 000 ms by
 default). Stop may not run at the end of that very turn: it does not run after a
-user interrupt. Until then the hold counts against the budget: in enforce mode,
+user interrupt, and a cancelled call fires neither PostToolUse nor
+PostToolUseFailure. Until then the hold counts against the budget: in enforce mode,
 near the budget, a later call can be refused (402) although the budget would
 cover it. In watch mode nothing is blocked; this only adds `would_block` records.
 Nothing is charged twice, and in estimate mode such a call's estimate is never
-charged. A fix for failed calls is tracked in
-[#234](https://github.com/usertools-ai/usertrust/issues/234) (item 9). A call
-auto mode denies fires
+charged. A call auto mode denies fires
 [PermissionDenied](https://code.claude.com/docs/en/hooks#permissiondenied), whose
 input names the call's `tool_use_id`, but the plugin does not register it yet;
-the same item notes that registering it would cover auto mode's denials, and
-nothing else. A call you reject at the prompt, or one a permission rule or
+registering it would cover auto mode's denials, and nothing else
+([#234](https://github.com/usertools-ai/usertrust/issues/234), item 9). A call you reject at the prompt, or one a permission rule or
 another hook denies, fires none of PostToolUse, PostToolUseFailure and
 PermissionDenied.
 

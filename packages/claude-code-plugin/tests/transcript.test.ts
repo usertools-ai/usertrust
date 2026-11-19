@@ -1883,13 +1883,21 @@ describe("the final response, written after Stop — SessionEnd and a bounded wa
 		run("session-end.mjs", endInput(), env);
 	const STOP_GAVE_UP = "the turn's final response was not in the transcript by the end of the wait";
 
-	it("hooks.json registers SessionEnd, beside the five hooks before it", async () => {
+	it("hooks.json registers SessionEnd, beside the hooks before it", async () => {
 		const hooks = JSON.parse(await readFile(join(HOOKS, "hooks.json"), "utf-8")) as {
 			hooks: Record<string, Array<{ hooks: Array<{ command: string; timeout?: number }> }>>;
 		};
 		// SessionStart announces the mode (see mode.test.ts).
 		expect(Object.keys(hooks.hooks).sort()).toEqual(
-			["PostToolUse", "PreToolUse", "SessionEnd", "SessionStart", "Stop", "SubagentStop"].sort(),
+			[
+				"PostToolUse",
+				"PostToolUseFailure",
+				"PreToolUse",
+				"SessionEnd",
+				"SessionStart",
+				"Stop",
+				"SubagentStop",
+			].sort(),
 		);
 		const sessionEnd = hooks.hooks.SessionEnd?.[0]?.hooks[0];
 		expect(sessionEnd?.command).toContain('hooks/launch.mjs" session-end');
