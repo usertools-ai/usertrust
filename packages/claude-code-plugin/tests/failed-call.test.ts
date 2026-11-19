@@ -240,29 +240,24 @@ describe("transcript mode (the default): a failed call settles as a successful o
 		await writeFile(transcript(), response("msg_1"));
 		expect((await preT("tu_1")).code).toBe(0);
 	};
-	/** A settle body without the fields that are clock readings. */
-	const stable = (body: Record<string, unknown> | undefined) =>
-		Object.fromEntries(
-			Object.entries(body ?? {}).filter(([key]) => !/(At|From|To|Ms|time|ts)$/i.test(key)),
-		);
 	const settleBodies = () => seen.filter((s) => s.path === "/v1/settle").map((s) => s.body);
 
-	let controlBody: Record<string, unknown> | undefined;
+	// What a hold settles at in this mode: the counts of the transcript's one response, as the
+	// provider reported them. A successful call and a failed one must settle at the same body.
+	const COUNTS = { inputTokens: 10, outputTokens: 5, usageSource: "provider" };
 
 	it("CONTROL: a successful call's hold settles at the transcript's counts", async () => {
 		await prepare();
 		expect((await postT("tu_1")).code).toBe(0);
 		expect(settled()).toEqual(["tx_1"]);
-		controlBody = stable(settleBodies()[0]);
-		expect(controlBody.usageSource).not.toBe("estimated");
+		expect(settleBodies()[0]).toMatchObject(COUNTS);
 	});
 
-	it("a failed call's hold settles at once, with the same body as the control's", async () => {
+	it("a failed call's hold settles at once, with the same counts as a successful call's", async () => {
 		await prepare();
 		expect((await failedT("tu_1")).code).toBe(0);
 		expect(settled()).toEqual(["tx_1"]);
-		expect(controlBody).toBeDefined();
-		expect(stable(settleBodies()[0])).toEqual(controlBody);
+		expect(settleBodies()[0]).toMatchObject(COUNTS);
 		expect(await holdFiles()).toEqual([]);
 	});
 
