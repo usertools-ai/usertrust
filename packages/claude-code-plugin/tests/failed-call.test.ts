@@ -4,7 +4,7 @@
 // its `agent_id`. The failure's hold is settled as a success's is: the call ran, so it is charged.
 // Before this hook was registered a failed call's hold was never settled by its own call: it waited
 // for a Stop, a SubagentStop or SessionEnd, or the server's pending timeout.
-import { mkdtemp, readdir, readFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,17 +15,20 @@ const HOOKS = join(import.meta.dirname, "..", "hooks");
 const PRE = join(HOOKS, "pre-tool-use.mjs");
 const POST = join(HOOKS, "post-tool-use.mjs");
 const POST_FAILURE = join(HOOKS, "post-tool-use-failure.mjs");
+const STOP = join(HOOKS, "stop.mjs");
+const SESSION_START = join(HOOKS, "session-start.mjs");
 const ESTIMATE = { UT_CC_USAGE: "estimate" };
 const SESSION = "sess-failed-call";
 
 interface Seen {
 	path: string;
-	body: { transferId?: string; outputTokens?: number };
+	body: { transferId?: string; outputTokens?: number } & Record<string, unknown>;
 }
 
 let server: Server | undefined;
 let seen: Seen[];
 let stateDir: string;
+let projectDir: string;
 let env: Record<string, string>;
 let nextTransfer: number;
 
@@ -71,6 +74,7 @@ function startFake(): Promise<number> {
 
 beforeEach(async () => {
 	stateDir = await mkdtemp(join(tmpdir(), "utcc-failed-"));
+	projectDir = await mkdtemp(join(tmpdir(), "utcc-failed-project-"));
 	const port = await startFake();
 	env = {
 		UT_CC_STATE_DIR: stateDir,
@@ -109,15 +113,27 @@ const holdFiles = async () =>
 	);
 
 describe("PostToolUseFailure settles the hold of a call that failed", () => {
-	it("is registered, beside PostToolUse, for every tool", async () => {
-		const manifest = JSON.parse(await readFile(join(HOOKS, "hooks.json"), "utf-8")) as {
+	it("is registered in its own hooks file, declared by the plugin, for every tool", async () => {
+		const manifest = JSON.parse(
+			await readFile(join(HOOKS, "post-tool-use-failure.json"), "utf-8"),
+		) as {
 			hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ command: string }> }>>;
 		};
+		expect(Object.keys(manifest.hooks)).toEqual(["PostToolUseFailure"]);
 		expect(
 			manifest.hooks.PostToolUseFailure?.flatMap((e) => e.hooks.map((h) => h.command)),
 			// biome-ignore lint/suspicious/noTemplateCurlyInString: Claude Code expands ${CLAUDE_PLUGIN_ROOT} itself
 		).toEqual(['node "${CLAUDE_PLUGIN_ROOT}/hooks/launch.mjs" post-tool-use-failure']);
 		expect(manifest.hooks.PostToolUseFailure?.every((e) => e.matcher === undefined)).toBe(true);
+		const plugin = JSON.parse(
+			await readFile(join(HOOKS, "..", ".claude-plugin", "plugin.json"), "utf-8"),
+		) as { hooks?: string[] };
+		expect(plugin.hooks).toContain("./hooks/post-tool-use-failure.json");
+		// Not in hooks.json: a Claude Code before v2.0.56 would reject that whole file.
+		const main = JSON.parse(await readFile(join(HOOKS, "hooks.json"), "utf-8")) as {
+			hooks: Record<string, unknown>;
+		};
+		expect(Object.keys(main.hooks)).not.toContain("PostToolUseFailure");
 	});
 
 	it("CONTROL: a call that succeeds is settled by PostToolUse, as before", async () => {
@@ -137,7 +153,9 @@ describe("PostToolUseFailure settles the hold of a call that failed", () => {
 		expect(await holdFiles()).toEqual([]);
 		// The call is charged for the error text it produced, as a result's text would be.
 		const sent = seen.find((s) => s.path === "/v1/settle");
-		expect(sent?.body.outputTokens).toBeGreaterThan(0);
+		// "Exit code 1" as JSON is 13 characters: 4 tokens at 4 characters each. With `error` not read
+		// (`tool_response` absent) the estimate would be that of an empty string, 1.
+		expect(sent?.body.outputTokens).toBe(4);
 		expect(seen.filter((s) => s.path === "/v1/authorize")).toHaveLength(1);
 	});
 
@@ -162,5 +180,96 @@ describe("PostToolUseFailure settles the hold of a call that failed", () => {
 		const result = await failed("tu_never_authorized");
 		expect(result.code).toBe(0);
 		expect(settled()).toEqual([]);
+	});
+
+	it("both events for one call, one after the other: one settle", async () => {
+		await pre("tu_x");
+		await failed("tu_x");
+		await post("tu_x");
+		expect(settled()).toEqual(["tx_1"]);
+		expect(await holdFiles()).toEqual([]);
+	});
+
+	it("both events for one call at the same time: one settle", async () => {
+		await pre("tu_x");
+		const both = await Promise.all([failed("tu_x"), post("tu_x")]);
+		expect(both.map((r) => r.code)).toEqual([0, 0]);
+		expect(settled()).toEqual(["tx_1"]);
+		expect(await holdFiles()).toEqual([]);
+	});
+
+	it("the error text is what is priced: 400 characters settle at 101 output tokens", async () => {
+		await pre("tu_x");
+		await runHook(
+			POST_FAILURE,
+			{ ...call("tu_x"), error: "x".repeat(400), is_interrupt: false },
+			{ ...env, ...ESTIMATE },
+		);
+		expect(seen.find((s) => s.path === "/v1/settle")?.body.outputTokens).toBe(101);
+	});
+});
+
+describe("transcript mode (the default): a failed call settles as a successful one does", () => {
+	const OPUS = "claude-opus-5-5";
+	const transcript = () => join(projectDir, `${SESSION}.jsonl`);
+	const response = (id: string) =>
+		`${JSON.stringify({
+			type: "assistant",
+			timestamp: new Date().toISOString(),
+			message: {
+				id,
+				model: OPUS,
+				stop_reason: "tool_use",
+				usage: { input_tokens: 10, output_tokens: 5 },
+			},
+		})}\n`;
+	const withPath = (id: string) => call(id, { transcript_path: transcript() });
+	const preT = (id: string) => runHook(PRE, withPath(id), env);
+	const postT = (id: string) => runHook(POST, { ...withPath(id), tool_response: "ok" }, env);
+	const failedT = (id: string) =>
+		runHook(
+			POST_FAILURE,
+			{ ...withPath(id), error: "Exit code 1", is_interrupt: false, duration_ms: 29 },
+			env,
+		);
+	const stopT = () => runHook(STOP, { session_id: SESSION, transcript_path: transcript() }, env);
+	const prepare = async () => {
+		expect(
+			(await runHook(SESSION_START, { session_id: SESSION, source: "startup" }, env)).code,
+		).toBe(0);
+		await writeFile(transcript(), response("msg_1"));
+		expect((await preT("tu_1")).code).toBe(0);
+	};
+	/** A settle body without the fields that are clock readings. */
+	const stable = (body: Record<string, unknown> | undefined) =>
+		Object.fromEntries(
+			Object.entries(body ?? {}).filter(([key]) => !/(At|From|To|Ms|time|ts)$/i.test(key)),
+		);
+	const settleBodies = () => seen.filter((s) => s.path === "/v1/settle").map((s) => s.body);
+
+	let controlBody: Record<string, unknown> | undefined;
+
+	it("CONTROL: a successful call's hold settles at the transcript's counts", async () => {
+		await prepare();
+		expect((await postT("tu_1")).code).toBe(0);
+		expect(settled()).toEqual(["tx_1"]);
+		controlBody = stable(settleBodies()[0]);
+		expect(controlBody.usageSource).not.toBe("estimated");
+	});
+
+	it("a failed call's hold settles at once, with the same body as the control's", async () => {
+		await prepare();
+		expect((await failedT("tu_1")).code).toBe(0);
+		expect(settled()).toEqual(["tx_1"]);
+		expect(controlBody).toBeDefined();
+		expect(stable(settleBodies()[0])).toEqual(controlBody);
+		expect(await holdFiles()).toEqual([]);
+	});
+
+	it("both events for one call: one settle, and a Stop after it settles nothing more", async () => {
+		await prepare();
+		await Promise.all([failedT("tu_1"), postT("tu_1")]);
+		await stopT();
+		expect(settled()).toEqual(["tx_1"]);
 	});
 });

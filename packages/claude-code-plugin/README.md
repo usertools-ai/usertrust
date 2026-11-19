@@ -844,8 +844,11 @@ A call that FAILS (a Bash command that exits non-zero, except `grep`, `rg`, `egr
 plugin registers and settles exactly as PostToolUse does: the call ran, so it is
 charged, and its hold is closed at once, in the main session and in a subagent
 (the event carries the same `tool_use_id` and `agent_id`). Claude Code fires one of
-the two per call. A Claude Code that has no such event runs the old path for failed
-calls: Stop, SubagentStop and SessionEnd give the hold back. What is left is:
+the two per call. The hook is registered in a file of its own
+(`hooks/post-tool-use-failure.json`, declared by `plugin.json`, as the model-switch hook is): a
+Claude Code before v2.0.56 does not know the event and rejects that file alone, so every other hook
+keeps running, and failed calls take the old path there: Stop, SubagentStop and SessionEnd give the
+hold back. What is left is:
 - a call you reject at the permission prompt;
 - a call a permission rule, another hook or auto mode denies.
 

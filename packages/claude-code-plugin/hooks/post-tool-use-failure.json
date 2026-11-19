@@ -1,0 +1,16 @@
+{
+	"description": "usertrust: a tool call that failed settles its hold at once (Claude Code v2.0.56 or later; an older one rejects this file alone)",
+	"hooks": {
+		"PostToolUseFailure": [
+			{
+				"hooks": [
+					{
+						"type": "command",
+						"command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/launch.mjs\" post-tool-use-failure",
+						"timeout": 15
+					}
+				]
+			}
+		]
+	}
+}
