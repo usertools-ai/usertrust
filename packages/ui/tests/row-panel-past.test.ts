@@ -68,14 +68,42 @@ describe("the explicit check in the inspector", () => {
 	});
 });
 
+/** Each `<RowPanel ... />` element of the source, whole: up to the `/>` that closes it outside every `{...}` prop. */
+function panelSites(src: string): string[] {
+	const sites: string[] = [];
+	for (let at = src.indexOf("<RowPanel"); at >= 0; at = src.indexOf("<RowPanel", at + 1)) {
+		let depth = 0;
+		let i = at;
+		for (; i < src.length; i++) {
+			if (src[i] === "{") depth++;
+			else if (src[i] === "}") depth--;
+			else if (depth === 0 && src.startsWith("/>", i)) break;
+		}
+		sites.push(src.slice(at, i + 2));
+	}
+	return sites;
+}
+
 describe("the page tells the inspector the position drawn, not the one in the address", () => {
 	it("both RowPanel call sites pass past from list.at, so a #at that failed to load does not label a live screen as past", () => {
-		const src = appSource();
-		const sites = src.match(/<RowPanel[\s\S]*?\/?>/g) ?? [];
+		const sites = panelSites(appSource());
 		expect(sites).toHaveLength(2);
 		for (const site of sites) {
 			expect(site).toContain("past={list.at !== null}");
 			expect(site).not.toContain("past={at !== null}");
 		}
+	});
+
+	it("the two sites are the panel over the list (in the window) and the docked one beside it; no hint stands in", () => {
+		const src = appSource();
+		const sites = panelSites(src);
+		expect(sites.filter((site) => /\sinWindow\s/.test(site))).toHaveLength(1);
+		for (const site of sites) {
+			expect(site).toMatch(/\sdocked\s/);
+			expect(site).toContain("onStep={step}");
+			expect(site).toContain("extra={");
+			expect(site).toContain("actions={");
+		}
+		expect(src).not.toContain("<InspectorHint");
 	});
 });

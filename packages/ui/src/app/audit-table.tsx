@@ -70,15 +70,20 @@ export function rowDomId(hash: string): string {
 /** What a cell with nothing to show prints. */
 const NONE = "—";
 
+/** What a cut hash ends with. */
+const ELLIPSIS = String.fromCharCode(0x2026);
+
 /**
  * One record on one line, in columns: time, model (with a short dash in its provider's colour), actor, kind, how its
  * usage was measured, status, and its cost in dollars.
+ * `full` (the Ledger fills the desk) adds its transaction and the start of its hash after the kind, as recorded.
  */
-function DenseRowBody(props: { row: LedgerRow }): React.JSX.Element {
+function DenseRowBody(props: { row: LedgerRow; full: boolean }): React.JSX.Element {
 	const { row } = props;
 	const status = statusOf(row);
 	const cost = costView(row);
 	const provider = providerOf(row);
+	const tx = transferView(row);
 	return (
 		<>
 			<span className="ut-lg-t" title={row.ts}>
@@ -110,6 +115,19 @@ function DenseRowBody(props: { row: LedgerRow }): React.JSX.Element {
 			<span className="ut-lg-k" title={row.kind}>
 				{row.kind}
 			</span>
+			{props.full && (
+				<>
+					<span
+						className="ut-lg-x"
+						title={tx.kind === "transfer" ? `transfer ${tx.id}` : "no transfer"}
+					>
+						{tx.kind === "transfer" ? tx.id : NONE}
+					</span>
+					<span className="ut-lg-h" title={`hash ${row.hash}`}>
+						{`${row.hash.slice(0, 10)}${ELLIPSIS}`}
+					</span>
+				</>
+			)}
 			<span
 				className="ut-lg-u"
 				title={
@@ -248,8 +266,11 @@ export const AuditRow = memo(function AuditRow(props: {
 	pinned?: boolean;
 	/** How far down the list's one block this row stands, in px. */
 	top: number;
+	/** The Ledger fills the desk: the row adds its transaction and hash. */
+	full?: boolean;
 }): React.JSX.Element {
 	const { row } = props;
+	const full = props.full === true;
 	const ms = Date.parse(row.ts);
 	return (
 		// biome-ignore lint/a11y/useFocusableInteractive: an option of a listbox that holds focus and names it (aria-activedescendant)
@@ -259,6 +280,7 @@ export const AuditRow = memo(function AuditRow(props: {
 			data-ms={Number.isFinite(ms) ? ms : undefined}
 			data-hour={props.hour === true ? "true" : undefined}
 			data-pinned={props.pinned === true ? "true" : undefined}
+			data-full={full ? "true" : undefined}
 			aria-selected={props.selected}
 			aria-posinset={props.index + 1}
 			aria-setsize={props.setSize}
@@ -266,7 +288,7 @@ export const AuditRow = memo(function AuditRow(props: {
 			className={`ut-row ut-lg-row${props.selected ? " sel" : ""}${props.active ? " act" : ""}${props.fresh ? " fresh" : ""}`}
 			style={{ transform: `translateY(${props.top}px)` }}
 		>
-			<DenseRowBody row={row} />
+			<DenseRowBody row={row} full={full} />
 		</div>
 	);
 });
@@ -392,6 +414,8 @@ export const AuditTable = memo(function AuditTable(props: {
 	onHover?(ms: number | null): void;
 	/** Set, while the list is mounted, to a function that opens the record before (-1) or after (1) the open one. */
 	stepRef?: React.RefObject<((dir: -1 | 1) => void) | null>;
+	/** The Ledger fills the desk: each row shows its transaction and hash too. */
+	full?: boolean;
 }): React.JSX.Element {
 	const [sortKey, setSortKey] = useState<SortKey>("seq");
 	const [desc, setDesc] = useState(true);
@@ -696,6 +720,7 @@ export const AuditTable = memo(function AuditTable(props: {
 									hour={rowInSpan(row.ts, hour)}
 									pinned={item.index === pinnedIndex}
 									top={item.start - virtualizer.options.scrollMargin}
+									full={props.full === true}
 								/>
 							);
 						})}

@@ -208,7 +208,8 @@ describe("the desk's stylesheets", () => {
 	});
 
 	it("red-first (the column kept to 900 px while the desk starts at 1000): no desk or window sheet is written at 900px", () => {
-		expect(/max-width:\s*900px/.test(deskCss())).toBe(false);
+		// A viewport breakpoint at 900px; the Ledger list's own container query (its width, not the screen's) is not one.
+		expect(/@media\s*\(max-width:\s*900px\)/.test(deskCss())).toBe(false);
 		// The desk's sheets know two widths: the phone's, and the last one under the desk's first.
 		expect(DESK_MIN_WIDTH - 1).toBe(999);
 		expect(COMPACT_QUERY).toBe("(max-width: 999px)");

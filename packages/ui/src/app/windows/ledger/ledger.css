@@ -3,18 +3,57 @@
 
 /* The Ledger window's rules (prefix ut-lg-). Scoped overrides of the older classes use [data-win="ledger"]. */
 
-/* PR 5 replaces this file's body. Day one: the list fills the window's body, and the record panel docks beside it
-   when the window is filled and wide. */
+/* The list fills the window's body. The open record floats over it in glass, or, when the Ledger fills the desk,
+   docks in a second column beside it. */
 @layer components {
 	.ut-lg-body {
+		position: relative;
 		flex: 1 1 0;
 		min-height: 0;
 		display: grid;
 		grid-template-columns: minmax(0, 1fr);
 	}
 
-	.ut-lg-body[data-docked="true"] {
-		grid-template-columns: minmax(0, 1fr) 380px;
+	/* Filled: a second column, 0 wide with nothing open, that opens to the panel's width. */
+	.ut-lg-body[data-fill="ledger"] {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) 0px;
+		column-gap: 0;
+		transition:
+			grid-template-columns 0.26s cubic-bezier(0.16, 0.84, 0.3, 1),
+			column-gap 0.26s cubic-bezier(0.16, 0.84, 0.3, 1);
+	}
+
+	.ut-lg-body[data-fill="ledger"][data-detail="true"] {
+		grid-template-columns: minmax(0, 1fr) 400px;
+		column-gap: 10px;
+	}
+
+	/* While its column opens the panel is cut at the column's edge, never wider; it still scrolls down. */
+	.ut-lg-body[data-fill="ledger"] > .ut-insp {
+		min-width: 0;
+		overflow-x: hidden;
+	}
+
+	/* One fade of the data when the filters or the range change: two names in turn, so each change runs it again. */
+	.ut-lg-body[data-gen="a"] {
+		animation: ut-lg-gen-a 0.22s cubic-bezier(0.16, 0.84, 0.3, 1);
+	}
+
+	.ut-lg-body[data-gen="b"] {
+		animation: ut-lg-gen-b 0.22s cubic-bezier(0.16, 0.84, 0.3, 1);
+	}
+
+	@keyframes ut-lg-gen-a {
+		from {
+			opacity: 0.55;
+		}
+	}
+
+	@keyframes ut-lg-gen-b {
+		from {
+			opacity: 0.55;
+		}
 	}
 
 	.ut-lg-list {
@@ -29,13 +68,6 @@
 		min-height: 0;
 	}
 
-	/* A phone: the list flows in the page, as the page's own list does (styles.css), so it takes its content's height
-	   and the page is its scroller. Held at no height, its rows ran over the next window. */
-	@media (max-width: 760px) {
-		[data-win="ledger"] .ut-list {
-			flex: 0 0 auto;
-		}
-	}
 
 	/* The record panel floating over the window. It sits over the list, so its glass is near opaque (97%, an 18px
 	   blur) and no figure of the list shows through. The older rules for the panel's inside apply as they are. */
@@ -154,10 +186,100 @@
 		margin: 6px 0 10px;
 	}
 
+	/* The record's buttons, tier 3: 28px tall, quiet at rest, lit under the pointer. */
+	[data-win="ledger"] .ut-t3 {
+		position: relative;
+		display: inline-flex;
+		align-items: center;
+		box-sizing: border-box;
+		height: 28px;
+		padding: 0 9px;
+		border: 1px solid transparent;
+		border-radius: 7px;
+		background: transparent;
+		color: var(--dk-legend);
+		font: 500 12.5px/1 var(--sans);
+		white-space: nowrap;
+		cursor: pointer;
+		transition:
+			background-color 0.12s ease,
+			color 0.12s ease,
+			border-color 0.12s ease;
+	}
+
+	/* The area a pointer can hit: 32px tall, reaching past the button above and below, never beside it. */
+	[data-win="ledger"] .ut-t3::after {
+		content: "";
+		position: absolute;
+		inset: -3px -1px;
+	}
+
+	[data-win="ledger"] .ut-t3:hover {
+		background: var(--dk-hover);
+		color: var(--dk-text);
+	}
+
+	/* An Only button whose value is the facet's only one. After the hover, so it reads as pressed under the pointer. */
+	[data-win="ledger"] .ut-t3[aria-pressed="true"] {
+		border-color: color-mix(in srgb, var(--dk-gold) 45%, transparent);
+		background: color-mix(in srgb, var(--dk-gold) 10%, transparent);
+		color: var(--dk-gold);
+	}
+
+	/* A phone: the list flows in the page, as the page's own list does (styles.css), so it takes its content's height
+	   and the page is its scroller. Held at no height, its rows ran over the next window. */
+	@media (max-width: 760px) {
+		[data-win="ledger"] .ut-list {
+			flex: 0 0 auto;
+		}
+
+		/* Each record button takes a 44px touch, and two rows of them stay apart. */
+		[data-win="ledger"] .ut-t3::after {
+			inset: -9px -1px;
+		}
+
+		.ut-lg-actions {
+			row-gap: 16px;
+		}
+	}
+
+	/* Below the desk's width (999px, where the desk starts at 1000) either panel is a sheet from the bottom of the screen. */
+	@media (max-width: 999px) {
+		.ut-glass.ut-lg-peek {
+			position: fixed;
+			inset: auto 0 0 0;
+			z-index: 40;
+			width: auto;
+			max-height: 80dvh;
+			border-radius: var(--dk-radius) var(--dk-radius) 0 0;
+		}
+
+		.ut-lg-body[data-fill="ledger"] > .ut-insp {
+			position: fixed;
+			inset: auto 0 0 0;
+			z-index: 40;
+			max-height: 80dvh;
+		}
+	}
+
+	/* Reduced motion: no slide, no fade, no column opening. As specific as the rules it cancels, and after them. */
 	@media (prefers-reduced-motion: reduce) {
 		.ut-glass.ut-lg-peek {
 			animation: none;
 		}
+
+		.ut-lg-body[data-gen],
+		.ut-lg-body[data-fill="ledger"] {
+			animation: none;
+			transition: none;
+		}
+	}
+
+	/* The same, asked for by the page's own switch. */
+	:root[data-motion="reduced"] .ut-lg-body,
+	:root[data-motion="reduced"] .ut-glass.ut-lg-peek {
+		animation: none;
+		transition: none;
 	}
 
 	/* The list: one record a line, in columns. Every row is 30px whatever it holds. The rows stand in one block as
@@ -182,6 +304,18 @@
 		border-radius: 0;
 		color: var(--dk-legend);
 		font: 400 12px/1 var(--sans);
+	}
+
+	/* Filled: nine columns, the Transaction and the Hash between the kind and the usage. */
+	[data-win="ledger"] .ut-lg-row[data-full="true"] {
+		grid-template-columns: 118px minmax(0, 1.2fr) minmax(0, 1fr) 64px 100px 104px 60px 92px minmax(96px, 0.8fr);
+	}
+
+	.ut-lg-row .ut-lg-x,
+	.ut-lg-row .ut-lg-h {
+		color: var(--dk-label);
+		font-family: var(--fig);
+		font-variant-numeric: tabular-nums;
 	}
 
 	/* A hairline under each row. Not on the open record, whose border is its own. */
@@ -325,11 +459,28 @@
 		background: color-mix(in srgb, var(--dk-text) 6%, transparent);
 	}
 
+	/* A filled list made narrow by the docked panel drops the Transaction and the Hash first. */
+	@container (max-width: 900px) {
+		[data-win="ledger"] .ut-lg-row[data-full="true"] {
+			grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 64px 60px 92px minmax(96px, 0.9fr);
+		}
+
+		.ut-lg-row .ut-lg-x,
+		.ut-lg-row .ut-lg-h {
+			display: none;
+		}
+	}
+
 	/* A narrower list drops columns and never squeezes them: first the kind and the usage, then the actor. All
-	   seven stay down to 600px, which a 1000px screen's list is above. */
+	   seven stay down to 600px, which a 1000px screen's list is above. Each step repeats its columns for a filled
+	   row, whose own rule is more specific. */
 	@container (max-width: 600px) {
 		.ut-row.ut-lg-row {
 			grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 116px minmax(104px, max-content);
+		}
+
+		[data-win="ledger"] .ut-lg-row[data-full="true"] {
+			grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 92px minmax(96px, 0.9fr);
 		}
 
 		.ut-lg-row .ut-lg-k,
@@ -364,6 +515,10 @@
 		.ut-lg-s .ut-badge {
 			gap: 4px;
 			letter-spacing: 0;
+		}
+
+		[data-win="ledger"] .ut-lg-row[data-full="true"] {
+			grid-template-columns: 102px minmax(0, 1fr) 76px 70px;
 		}
 
 		.ut-lg-row .ut-lg-a {
