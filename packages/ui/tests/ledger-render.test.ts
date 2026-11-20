@@ -52,6 +52,7 @@ interface ListProps {
 	onClearFilters(): void;
 	hourSpan?: readonly [number, number] | null;
 	pinnedPos?: number | null;
+	full?: boolean;
 }
 interface ListRowProps {
 	row: LedgerRow;
@@ -63,6 +64,7 @@ interface ListRowProps {
 	hour?: boolean;
 	pinned?: boolean;
 	top: number;
+	full?: boolean;
 }
 let AuditTable: Component<ListProps>;
 let AuditRow: Component<ListRowProps>;
@@ -837,6 +839,47 @@ describe("the dense list", () => {
 		expect(one(r, { hour: false, pinned: false })).not.toMatch(/data-hour|data-pinned/);
 	});
 
+	it("filled, a row has nine cells: the Transaction and the Hash after the kind, and says so", () => {
+		const ELLIPSIS = String.fromCharCode(0x2026);
+		const r = row({ transferId: "0000abcd" });
+		const html = one(r, { full: true });
+		expect(html).toMatch(/^<div[^>]*data-full="true"/);
+		// The row's own cells as they are, with the two new ones right after the kind and nowhere else.
+		const cellsOf = (h: string): string[] =>
+			[...h.matchAll(/<span class="(ut-lg-[a-z])"/g)].map((m) => m[1] as string);
+		const plainCells = cellsOf(one(r));
+		const k = plainCells.indexOf("ut-lg-k");
+		expect(k).toBeGreaterThanOrEqual(0);
+		expect(cellsOf(html)).toEqual([
+			...plainCells.slice(0, k + 1),
+			"ut-lg-x",
+			"ut-lg-h",
+			...plainCells.slice(k + 1),
+		]);
+		expect(html).toContain('<span class="ut-lg-x" title="transfer 0000abcd">0000abcd</span>');
+		expect(html).toContain(
+			`<span class="ut-lg-h" title="hash ${r.hash}">${r.hash.slice(0, 10)}${ELLIPSIS}</span>`,
+		);
+		// No transfer: the dash, and a title that says there is none.
+		expect(one(row(), { full: true })).toContain(
+			`<span class="ut-lg-x" title="no transfer">${DASH}</span>`,
+		);
+		expect(html).not.toMatch(/verified/i);
+		// Not filled, neither cell and no mark.
+		for (const plain of [one(r), one(r, { full: false })]) {
+			expect(plain).not.toMatch(/ut-lg-x|ut-lg-h|data-full/);
+		}
+		// The list hands it to every row it draws, however many that is.
+		const rows = many(3);
+		const filled = list(rows, { full: true });
+		const drawn = count(filled, 'role="option"');
+		expect(drawn).toBeGreaterThan(0);
+		expect(count(filled, 'data-full="true"')).toBe(drawn);
+		expect(count(filled, 'class="ut-lg-x"')).toBe(drawn);
+		expect(count(filled, 'class="ut-lg-h"')).toBe(drawn);
+		expect(list(rows)).not.toMatch(/ut-lg-x|ut-lg-h|data-full/);
+	});
+
 	it("the model has a short dash in its provider's colour, muted for a provider it cannot name", () => {
 		const dash = (r: LedgerRow): string =>
 			/<i class="ut-lg-dash" style="([^"]*)"/.exec(one(r))?.[1] ?? "";
@@ -1363,6 +1406,8 @@ describe("the Ledger window's sheet", () => {
 		// All seven columns stay down to a 600px list: a 1000px screen gives the list 640px.
 		expect(narrow(680)).toBe("");
 		expect(css.match(/@container \(max-width: \d+px\)/g)).toEqual([
+			// A filled list made narrow by the docked panel drops its Transaction and Hash (the filled-columns test below).
+			"@container (max-width: 900px)",
 			"@container (max-width: 600px)",
 			"@container (max-width: 520px)",
 		]);
@@ -1446,5 +1491,265 @@ describe("the Ledger window's sheet", () => {
 		expect(actions).toContain("display: flex");
 		expect(actions).toContain("flex-wrap: wrap");
 		expect(actions).toMatch(/gap: \d+px/);
+	});
+
+	/** The body of the first block that opens with `head` (an at-rule's prelude), braces balanced. */
+	const blockOf = (head: string, from = 0): string => {
+		const at = css.indexOf(`${head} {`, from);
+		if (at < 0) return "";
+		let depth = 1;
+		let i = at + head.length + 2;
+		const start = i;
+		while (i < css.length && depth > 0) {
+			if (css[i] === "{") depth++;
+			if (css[i] === "}") depth--;
+			i++;
+		}
+		return css.slice(start, i - 1);
+	};
+	/** Every block that opens with `head`, joined. */
+	const blocksOf = (head: string): string => {
+		const out: string[] = [];
+		for (let at = css.indexOf(`${head} {`); at >= 0; at = css.indexOf(`${head} {`, at + 1)) {
+			out.push(blockOf(head, at));
+		}
+		return out.join("\n");
+	};
+	/** The numbers of one declaration (`inset: -3px -1px` gives [-3, -1]); none when it is absent. */
+	const px = (decls: string, prop: string): number[] => {
+		const value = new RegExp(`(?:^|[\\s;{])${prop}: ([^;]+);`).exec(decls)?.[1];
+		return value === undefined ? [] : value.trim().split(/\s+/).map(Number.parseFloat);
+	};
+
+	it("starts its rules inside the components layer", () => {
+		expect(css.trim().startsWith("@layer components {")).toBe(true);
+		expect(css.trim().endsWith("}")).toBe(true);
+	});
+
+	it("filled, a row is nine columns, Transaction and Hash between the kind and the usage, still 30px", () => {
+		const full = rule('[data-win="ledger"] .ut-lg-row[data-full="true"]');
+		expect(full).toContain(
+			"grid-template-columns: 118px minmax(0, 1.2fr) minmax(0, 1fr) 64px 100px 104px 60px 92px minmax(96px, 0.8fr);",
+		);
+		expect(full).not.toMatch(/[^-]height:/);
+		// The two cells are muted figures, as the time and the kind are.
+		const ids = rule(".ut-lg-row .ut-lg-x,\n\t.ut-lg-row .ut-lg-h");
+		expect(ids).toContain("font-family: var(--fig);");
+		expect(ids).toContain("color: var(--dk-label);");
+		expect(ids).toContain("font-variant-numeric: tabular-nums;");
+		// A list made narrow by the docked panel drops the two cells first, then the rest as an unfilled list does.
+		const docked = narrow(900);
+		expect(ruleIn(docked, '[data-win="ledger"] .ut-lg-row[data-full="true"]')).toContain(
+			"grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 64px 60px 92px minmax(96px, 0.9fr);",
+		);
+		expect(ruleIn(docked, ".ut-lg-row .ut-lg-x,\n\t\t.ut-lg-row .ut-lg-h")).toContain(
+			"display: none;",
+		);
+		expect(ruleIn(narrow(600), '[data-win="ledger"] .ut-lg-row[data-full="true"]')).toContain(
+			"grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 92px minmax(96px, 0.9fr);",
+		);
+		expect(ruleIn(narrow(520), '[data-win="ledger"] .ut-lg-row[data-full="true"]')).toContain(
+			"grid-template-columns: 102px minmax(0, 1fr) 76px 70px;",
+		);
+	});
+
+	it("filled, the record docks in a second column that opens to 400px over .26s, and is 0 wide with nothing open", () => {
+		const fill = rule('.ut-lg-body[data-fill="ledger"]');
+		expect(fill).toContain("display: grid;");
+		expect(fill).toContain("grid-template-columns: minmax(0, 1fr) 0px;");
+		expect(fill).toContain("column-gap: 0;");
+		expect(fill).toContain("grid-template-columns 0.26s cubic-bezier(0.16, 0.84, 0.3, 1)");
+		expect(fill).toContain("column-gap 0.26s cubic-bezier(0.16, 0.84, 0.3, 1)");
+		const open = rule('.ut-lg-body[data-fill="ledger"][data-detail="true"]');
+		expect(open).toContain("grid-template-columns: minmax(0, 1fr) 400px;");
+		expect(open).toContain("column-gap: 10px;");
+		const panel = rule('.ut-lg-body[data-fill="ledger"] > .ut-insp');
+		expect(panel).toContain("min-width: 0;");
+		// Cut sideways while its column opens, and still a scroller downwards: never `overflow: hidden`.
+		expect(panel).toContain("overflow-x: hidden;");
+		expect(panel).not.toMatch(/[^-]overflow: hidden|overflow-y: hidden/);
+		// The panel over the list is placed against the window's body.
+		expect(rule(".ut-lg-body")).toContain("position: relative;");
+		const glass = rule(".ut-glass.ut-lg-peek");
+		for (const d of ["top: 8px;", "right: 8px;", "bottom: 8px;", "width: min(400px, 86%);"]) {
+			expect(glass).toContain(d);
+		}
+	});
+
+	it("below the desk's width (999px) either panel is a bottom sheet", () => {
+		const compact = blockOf("@media (max-width: 999px)");
+		for (const sel of [".ut-glass.ut-lg-peek", '.ut-lg-body[data-fill="ledger"] > .ut-insp']) {
+			const sheet = ruleIn(compact, sel);
+			expect(sheet, sel).toContain("position: fixed;");
+			expect(sheet, sel).toContain("inset: auto 0 0 0;");
+			expect(sheet, sel).toContain("max-height: 80dvh;");
+			// Over the page's other windows, which the floating panel's own 20 is not.
+			expect(px(sheet, "z-index"), sel).toEqual([40]);
+		}
+		// The glass sheet spans the screen, not the floating panel's width, and is rounded only at its top.
+		const glass = ruleIn(compact, ".ut-glass.ut-lg-peek");
+		expect(glass).toContain("width: auto;");
+		expect(glass).toContain("border-radius: var(--dk-radius) var(--dk-radius) 0 0;");
+	});
+
+	it("one fade on the data container when the filters or the range change, and no motion when it is reduced", () => {
+		const fade = "0.22s cubic-bezier(0.16, 0.84, 0.3, 1)";
+		expect(rule('.ut-lg-body[data-gen="a"]')).toContain(`animation: ut-lg-gen-a ${fade};`);
+		expect(rule('.ut-lg-body[data-gen="b"]')).toContain(`animation: ut-lg-gen-b ${fade};`);
+		for (const name of ["ut-lg-gen-a", "ut-lg-gen-b"]) {
+			expect(css).toMatch(
+				new RegExp(`@keyframes ${name}\\s*\\{\\s*from\\s*\\{\\s*opacity: 0\\.55;`),
+			);
+		}
+		// On the container only: no row, cell or panel is animated by it, and nothing in the sheet runs on a resize.
+		const gens = [...css.matchAll(/([^{}]*)\{[^{}]*ut-lg-gen-[ab][^{}]*\}/g)].map((m) =>
+			(m[1] ?? "").trim(),
+		);
+		expect(gens).toEqual(['.ut-lg-body[data-gen="a"]', '.ut-lg-body[data-gen="b"]']);
+		expect(css).not.toMatch(/ut-lg-row[^{}]*\{[^{}]*animation/);
+		// Reduced motion, by the system or by the page's own switch: no fade, no slide, no column transition.
+		for (const reduced of [
+			blocksOf("@media (prefers-reduced-motion: reduce)"),
+			rule(
+				':root[data-motion="reduced"] .ut-lg-body,\n\t:root[data-motion="reduced"] .ut-glass.ut-lg-peek',
+			),
+		]) {
+			expect(reduced).toMatch(/animation: none/);
+		}
+		const media = blocksOf("@media (prefers-reduced-motion: reduce)");
+		// As specific as the rules it cancels, and after them.
+		const still = ruleIn(media, '.ut-lg-body[data-gen],\n\t\t.ut-lg-body[data-fill="ledger"]');
+		expect(still).toContain("animation: none;");
+		expect(still).toContain("transition: none;");
+		expect(ruleIn(media, ".ut-glass.ut-lg-peek")).toContain("animation: none;");
+		expect(
+			rule(
+				':root[data-motion="reduced"] .ut-lg-body,\n\t:root[data-motion="reduced"] .ut-glass.ut-lg-peek',
+			),
+		).toContain("transition: none;");
+	});
+
+	it("the record's buttons are tier 3: 28px tall in desk tokens, with a hit area of 32px, 44px on a phone", () => {
+		const t3 = rule('[data-win="ledger"] .ut-t3');
+		expect(t3).toContain("height: 28px;");
+		expect(t3).toContain("box-sizing: border-box;");
+		expect(t3).toContain("position: relative;");
+		expect(t3).toContain("color: var(--dk-legend);");
+		expect(t3).toContain("font: 500 12.5px/1 var(--sans);");
+		// The height the button computes to: the border box the sheet gives it, whatever its label.
+		const border = px(t3, "border")[0] ?? 0;
+		expect(px(t3, "height")).toEqual([28]);
+		const hit = rule('[data-win="ledger"] .ut-t3::after');
+		expect(hit).toContain('content: "";');
+		expect(hit).toContain("position: absolute;");
+		expect(hit).not.toMatch(/background|border|color|shadow|outline/);
+		const reach = (decls: string): number => -(px(decls, "inset")[0] ?? 0);
+		const phone = ruleIn(blockOf("@media (max-width: 760px)"), '[data-win="ledger"] .ut-t3::after');
+		expect(28 - 2 * border + 2 * reach(hit)).toBeGreaterThanOrEqual(32);
+		expect(28 - 2 * border + 2 * reach(phone)).toBeGreaterThanOrEqual(44);
+		// Two rows of buttons keep their areas apart: each reaches past its edge by less than half the row gap.
+		const rowGap = (decls: string): number =>
+			px(decls, "row-gap")[0] ?? px(decls, "gap")[0] ?? Number.NaN;
+		expect(2 * (reach(hit) - border)).toBeLessThanOrEqual(rowGap(rule(".ut-lg-actions")));
+		expect(2 * (reach(phone) - border)).toBeLessThanOrEqual(
+			rowGap(ruleIn(blockOf("@media (max-width: 760px)"), ".ut-lg-actions")),
+		);
+		// Sideways the area stays within the button.
+		expect(-(px(hit, "inset")[1] ?? 0)).toBeLessThanOrEqual(border);
+		expect(-(px(phone, "inset")[1] ?? 0)).toBeLessThanOrEqual(border);
+		const hover = rule('[data-win="ledger"] .ut-t3:hover');
+		expect(hover).toContain("background: var(--dk-hover);");
+		expect(hover).toContain("color: var(--dk-text);");
+		// The rest of the button's shape: a centred one-line label, its padding and its corners, and a short ease.
+		for (const decl of [
+			"display: inline-flex;",
+			"align-items: center;",
+			"padding: 0 9px;",
+			"border-radius: 7px;",
+			"white-space: nowrap;",
+			"background-color 0.12s ease,",
+			"\tcolor 0.12s ease,",
+			"border-color 0.12s ease;",
+		]) {
+			expect(t3, decl).toContain(decl);
+		}
+	});
+
+	it("an Only button that is pressed looks pressed, in gold, over its hover", () => {
+		const pressed = rule('[data-win="ledger"] .ut-t3[aria-pressed="true"]');
+		expect(pressed).toContain("color: var(--dk-gold);");
+		expect(pressed).toContain("background: color-mix(in srgb, var(--dk-gold) 10%, transparent);");
+		expect(pressed).toContain("border-color: color-mix(in srgb, var(--dk-gold) 45%, transparent);");
+		expect(css.indexOf('[data-win="ledger"] .ut-t3[aria-pressed="true"] {')).toBeGreaterThan(
+			css.indexOf('[data-win="ledger"] .ut-t3:hover {'),
+		);
+		// A resting button is not gold.
+		expect(rule('[data-win="ledger"] .ut-t3')).not.toContain("--dk-gold");
+	});
+});
+
+describe("the Ledger window's wiring", () => {
+	const src = appFile("windows/ledger/ledger-window.tsx");
+
+	it("imports no sheet and reads no screen query", () => {
+		expect(src).not.toMatch(/import\s+["'][^"']+\.css["']/);
+		expect(src).not.toMatch(/matchMedia|useMedia|DOCK_QUERY|InspectorHint/);
+	});
+
+	it("feeds the list the open record, the pin, the hour, the reset key and the filled columns", () => {
+		expect(src).toContain("selected={openHash}");
+		expect(src).toContain("pinnedPos={resolvedPin(at, resolvedPos)}");
+		expect(src).toContain("hourSpan={hourSpan}");
+		expect(src).toContain("full={filled}");
+		expect(src).toContain("stepRef={stepRef}");
+		expect(src).toContain("onHover={onHover}");
+		expect(src).toContain(
+			// biome-ignore lint/suspicious/noTemplateCurlyInString: a line of the source, quoted as it is written
+			'const resetKey = `${JSON.stringify(filters)}|${list.at?.pos ?? "live"}`;',
+		);
+		// A chart's hover first, else the pin's hour from the header's position.
+		expect(src).toMatch(
+			/\(\) => hover\?\.span \?\? \(pinMs === null \? null : hourSpanOf\(pinMs\)\),\s*\[hover, pinMs\],/,
+		);
+		expect(src).toContain('useHoverMoment("ledger")');
+		expect(src).toContain("const pinAt = shown === null ? Number.NaN : Date.parse(shown.ts);");
+		expect(src).toContain("const pinMs = Number.isFinite(pinAt) ? pinAt : null;");
+	});
+
+	it("publishes the hovered record's hour as the Ledger's, and nothing once it leaves or the window goes", () => {
+		expect(src).toContain('setHoverMoment({ ms, span: hourSpanOf(ms), from: "ledger" });');
+		expect(
+			src.match(/setHoverMoment\(\{ ms: null, span: null, from: "ledger" \}\);/g),
+		).toHaveLength(2);
+		// Leaving says nothing unless a record was said, so a pointer moving over gaps does not clear another window's
+		// hover; a record said is remembered before it is published.
+		expect(src).toMatch(
+			/if \(ms === null\) \{\s*if \(!published\.current\) return;\s*published\.current = false;\s*setHoverMoment\(\{ ms: null, span: null, from: "ledger" \}\);\s*return;\s*\}\s*published\.current = true;\s*setHoverMoment\(\{ ms, span: hourSpanOf\(ms\), from: "ledger" \}\);/,
+		);
+		// The effect's cleanup, from its comment to its empty list of dependencies.
+		const from = src.indexOf("// Unmounted");
+		const unmount = src.slice(from, src.indexOf("[],", from));
+		expect(from).toBeGreaterThan(0);
+		expect(unmount).toMatch(
+			/\(\) => \(\) => \{\s*if \(published\.current\) setHoverMoment\(\{ ms: null, span: null, from: "ledger" \}\);\s*\},\s*$/,
+		);
+	});
+
+	it("the panel steps through the list's order, and gets the record's lines and actions", () => {
+		expect(src).toMatch(
+			/const step = useCallback\(\(dir: -1 \| 1\) => stepRef\.current\?\.\(dir\), \[\]\);/,
+		);
+		expect(src).toContain("rows={list.shownRows}");
+		expect(src).toContain("budget={budgetOf(summary, shown)}");
+		expect(src).toContain("onPin={setAt}");
+		expect(src).toContain("onFilters={setFilters}");
+		expect(src).toContain("filters={filters}");
+	});
+
+	it("the fade's generation moves only when the filters or the range change", () => {
+		// biome-ignore lint/suspicious/noTemplateCurlyInString: a line of the source, quoted as it is written
+		expect(src).toContain("const fadeOn = `${JSON.stringify(filters)}|${range}`;");
+		expect(src).toContain("if (fade.on !== fadeOn) setFade({ on: fadeOn, n: fade.n + 1 });");
+		expect(src).toContain('data-gen={fade.n === 0 ? undefined : fade.n % 2 === 1 ? "a" : "b"}');
 	});
 });
