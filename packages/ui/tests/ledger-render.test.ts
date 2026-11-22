@@ -1408,6 +1408,8 @@ describe("the Ledger window's sheet", () => {
 		expect(css.match(/@container \(max-width: \d+px\)/g)).toEqual([
 			// A filled list made narrow by the docked panel drops its Transaction and Hash (the filled-columns test below).
 			"@container (max-width: 900px)",
+			// The docked panel's own block (the test below it).
+			"@container (max-width: 800px)",
 			"@container (max-width: 600px)",
 			"@container (max-width: 520px)",
 		]);
@@ -1477,9 +1479,10 @@ describe("the Ledger window's sheet", () => {
 		// The kind takes the place of the dash that stood for no model.
 		expect(ruleIn(five, ".ut-lg-m .ut-lg-kin + .ut-lg-name")).toContain("display: none;");
 		expect(five).toContain(".ut-lg-row .ut-lg-k,\n\t\t.ut-lg-row .ut-lg-u {");
-		// Nowhere else: the two shows are in that one block, after the rules that hide them.
-		expect(css.match(/\.ut-lg-row \.ut-lg-est \{/g)).toHaveLength(2);
-		expect(css.match(/\.ut-lg-m \.ut-lg-kin \{/g)).toHaveLength(2);
+		// Nowhere else: the base rule that hides each, the show in that block, and the show in the docked panel's
+		// block (the test of its own), where the same two cells are dropped. All after the rules that hide them.
+		expect(css.match(/\.ut-lg-row \.ut-lg-est \{/g)).toHaveLength(3);
+		expect(css.match(/\.ut-lg-m \.ut-lg-kin \{/g)).toHaveLength(3);
 		const tier = css.indexOf("@container (max-width: 600px)");
 		expect(css.indexOf(".ut-lg-row .ut-lg-est {")).toBeLessThan(tier);
 		expect(css.indexOf(".ut-lg-m .ut-lg-kin {")).toBeLessThan(tier);
@@ -1551,6 +1554,52 @@ describe("the Ledger window's sheet", () => {
 		expect(ruleIn(narrow(520), '[data-win="ledger"] .ut-lg-row[data-full="true"]')).toContain(
 			"grid-template-columns: 102px minmax(0, 1fr) 76px 70px;",
 		);
+	});
+
+	it("docked, the list drops the kind, the usage and the actor so the model keeps its whole name", () => {
+		const docked = narrow(800);
+		const body = '.ut-lg-body[data-detail="true"]';
+		const gridRule = ruleIn(
+			docked,
+			`${body} .ut-row.ut-lg-row,\n\t\t[data-win="ledger"] ${body} .ut-lg-row[data-full="true"]`,
+		);
+		expect(gridRule).toContain(
+			"grid-template-columns: 118px minmax(0, 1fr) 116px minmax(104px, max-content);",
+		);
+		expect(
+			ruleIn(
+				docked,
+				`${body} .ut-lg-row .ut-lg-k,\n\t\t${body} .ut-lg-row .ut-lg-u,\n\t\t${body} .ut-lg-row .ut-lg-a`,
+			),
+		).toContain("display: none;");
+		// What the dropped usage and kind cells said moves to cells that stay, as in the 600px block.
+		expect(ruleIn(docked, `${body} .ut-lg-row .ut-lg-est`)).toContain("display: inline;");
+		expect(ruleIn(docked, `${body} .ut-lg-m .ut-lg-kin`)).toContain("display: block;");
+		// Only while the panel is docked: an undocked list keeps its seven columns above 600px.
+		expect(docked.replace(/\s+/g, " ")).not.toMatch(/(^|[,}] )\.ut-row\.ut-lg-row \{/);
+		// The model's whole name is not cut at 1050px with the panel open. Measured in Chrome (1000, 1050, 1100 and
+		// 1200px, a fixture vault): the docked list is the screen minus 444px, its row 18px narrower, and the longest
+		// model ("claude-sonnet-5-5") needs 108px, its dash 10px and the gap 7px. This is the arithmetic of those
+		// measurements: the model's cell is what the row leaves after its padding, its three gaps and the other columns.
+		const NAME = 108 + 10 + 7;
+		// The other columns' widths are read from the sheet itself, so a wider one fails here.
+		const others = [...gridRule.matchAll(/(\d+)px/g)].reduce((sum, m) => sum + Number(m[1]), 0);
+		expect(others).toBe(118 + 116 + 104);
+		const modelCell = (screen: number): number => screen - 444 - 18 - 24 - 3 * 10 - others;
+		expect(modelCell(1000)).toBe(146);
+		expect(modelCell(1050)).toBe(196);
+		for (const screen of [1000, 1050, 1100, 1200, 1244]) {
+			expect(modelCell(screen), `${screen}px`).toBeGreaterThanOrEqual(NAME);
+		}
+		// 1245px is a 801px list: the block ends at 800px, and the seven columns give the model 148px there (measured).
+		expect(1245 - 444).toBeGreaterThan(800);
+	});
+
+	it("the open row's ring is the list's one ring: the list's own is transparent while that row is drawn", () => {
+		const own = rule('[data-win="ledger"] .ut-list:focus-visible:has(.ut-row.act)');
+		expect(own).toContain("outline-color: transparent;");
+		// Transparent, not removed: the desk-tokens guard forbids `outline: none`, and forced colours draw it.
+		expect(own).not.toMatch(/outline:\s*(none|0)/);
 	});
 
 	it("filled, the record docks in a second column that opens to 400px over .26s, and is 0 wide with nothing open", () => {

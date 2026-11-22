@@ -68,6 +68,13 @@
 		min-height: 0;
 	}
 
+	/* One ring: the active row's. While that row is drawn the list's own ring over its whole box is transparent (not
+	   removed: forced colours still draw it), since its top edge read as a second outlined row. With the row scrolled
+	   out of the drawn rows the list keeps its visible ring. */
+	[data-win="ledger"] .ut-list:focus-visible:has(.ut-row.act) {
+		outline-color: transparent;
+	}
+
 
 	/* The record panel floating over the window. It sits over the list, so its glass is near opaque (97%, an 18px
 	   blur) and no figure of the list shows through. The older rules for the panel's inside apply as they are. */
@@ -467,6 +474,36 @@
 
 		.ut-lg-row .ut-lg-x,
 		.ut-lg-row .ut-lg-h {
+			display: none;
+		}
+	}
+
+	/* The docked panel leaves the list 556px (a 1000px screen) to 656px (1100px), and 756px at 1200px: the kind, the
+	   usage and the actor go, so the model keeps its whole name, which is the column that matters most. The panel
+	   shows the actor. Only while the panel is docked (data-detail), where the rules above and below are beaten by
+	   the longer selectors; the desk never goes under 1000px, so a docked list is never under 556px. Each moved
+	   cell is repeated as in the 600px block. */
+	@container (max-width: 800px) {
+		.ut-lg-body[data-detail="true"] .ut-row.ut-lg-row,
+		[data-win="ledger"] .ut-lg-body[data-detail="true"] .ut-lg-row[data-full="true"] {
+			grid-template-columns: 118px minmax(0, 1fr) 116px minmax(104px, max-content);
+		}
+
+		.ut-lg-body[data-detail="true"] .ut-lg-row .ut-lg-k,
+		.ut-lg-body[data-detail="true"] .ut-lg-row .ut-lg-u,
+		.ut-lg-body[data-detail="true"] .ut-lg-row .ut-lg-a {
+			display: none;
+		}
+
+		.ut-lg-body[data-detail="true"] .ut-lg-row .ut-lg-est {
+			display: inline;
+		}
+
+		.ut-lg-body[data-detail="true"] .ut-lg-m .ut-lg-kin {
+			display: block;
+		}
+
+		.ut-lg-body[data-detail="true"] .ut-lg-m .ut-lg-kin + .ut-lg-name {
 			display: none;
 		}
 	}
