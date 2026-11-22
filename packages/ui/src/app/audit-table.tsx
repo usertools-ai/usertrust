@@ -17,7 +17,7 @@ import { type SortKey, sortRows } from "../shared/filters.js";
 import { compactActor, formatUtc, UT_KEY } from "../shared/format.js";
 import { hourSpanOf } from "../shared/hit.js";
 import { PHONE_QUERY } from "../shared/layout.js";
-import { DENSE_ROW_PX, pageSizeForRows, pinAction } from "../shared/list-chunk.js";
+import { DENSE_ROW_PX, type PinState, pageSizeForRows, pinStep } from "../shared/list-chunk.js";
 import { type BeforeWindow, pastHeldNote } from "../shared/list-view.js";
 import { rowInSpan, stepRecord } from "../shared/peek.js";
 import { providerOf } from "../shared/provider.js";
@@ -408,6 +408,8 @@ export const AuditTable = memo(function AuditTable(props: {
 	hourSpan?: readonly [number, number] | null;
 	/** The position of the record a chart has pinned: it is marked with the records of its hour, and scrolled to the middle once. */
 	pinnedPos?: number | null;
+	/** What the vault answered for the pinned position (its position, or "live"): the pinned record is scrolled to once for each answer drawn, since the rows are cut at the answer and its place moves with them. */
+	pinAnswer?: string;
 	/** What the rows are a list of (the filters, as one string). A new key starts again at the top; with none passed, a new set of filters does not. */
 	resetKey?: string;
 	/** The time (ms) of the record under the pointer, or null when the pointer is on none. Called only on a change. */
@@ -602,17 +604,17 @@ export const AuditTable = memo(function AuditTable(props: {
 		parentRef.current?.focus({ preventScroll: true });
 	}, [restore?.n]);
 
-	// The pinned record is made the active row and scrolled to the middle, once per pin: the reader may scroll away
-	// from it afterwards and is left where they are.
-	const pinDone = useRef<string | null>(null);
-	// biome-ignore lint/correctness/useExhaustiveDependencies: decided when the pin or the rows change, not per render
+	// The pinned record is made the active row and scrolled to the middle, once per pin and answer drawn: the reader
+	// may scroll away from it afterwards and is left where they are.
+	const pinState = useRef<PinState>({ done: null, answer: props.pinAnswer });
+	// biome-ignore lint/correctness/useExhaustiveDependencies: decided when the pin, the answer or the rows change, not per render
 	useEffect(() => {
-		const act = pinAction(pinDone.current, pinnedHash, sorted);
-		pinDone.current = act.done;
-		if (act.target === null) return;
-		setActiveHash(act.target.hash);
-		showRow(act.target.index, "center");
-	}, [pinnedHash, sorted]);
+		const step = pinStep(pinState.current, pinnedHash, sorted, props.pinAnswer);
+		pinState.current = step.state;
+		if (step.target === null) return;
+		setActiveHash(step.target.hash);
+		showRow(step.target.index, "center");
+	}, [pinnedHash, sorted, props.pinAnswer]);
 
 	// The record before or after the open one, in the order drawn: what the inspector's own keys ask for. With no
 	// record open it steps from the active row.

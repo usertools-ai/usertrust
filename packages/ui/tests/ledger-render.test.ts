@@ -1065,12 +1065,14 @@ describe("the dense list", () => {
 	});
 
 	it("the pinned record is centred and made the active row once per pin, and gives the list its hour", () => {
-		const pin = between("const pinDone = useRef", "}, [pinnedHash, sorted]);");
-		expect(pin).toContain("const act = pinAction(pinDone.current, pinnedHash, sorted);");
-		expect(pin).toContain("pinDone.current = act.done;");
-		expect(pin).toContain("if (act.target === null) return;");
-		expect(pin).toContain("setActiveHash(act.target.hash);");
-		expect(pin).toContain('showRow(act.target.index, "center");');
+		const pin = between("const pinState = useRef", "}, [pinnedHash, sorted, props.pinAnswer]);");
+		expect(pin).toContain(
+			"const step = pinStep(pinState.current, pinnedHash, sorted, props.pinAnswer);",
+		);
+		expect(pin).toContain("pinState.current = step.state;");
+		expect(pin).toContain("if (step.target === null) return;");
+		expect(pin).toContain("setActiveHash(step.target.hash);");
+		expect(pin).toContain('showRow(step.target.index, "center");');
 		expect(src).toContain("sorted.findIndex((r) => r.pos === pinnedPos)");
 		expect(src).toContain(
 			"props.hourSpan ?? (Number.isFinite(pinnedMs) ? hourSpanOf(pinnedMs) : null)",
@@ -1833,11 +1835,12 @@ describe("the Ledger window's wiring", () => {
 		expect(src).toContain("onHover={onHover}");
 		expect(src).toContain(
 			// biome-ignore lint/suspicious/noTemplateCurlyInString: a line of the source, quoted as it is written
-			'const resetKey = `${JSON.stringify(filters)}|${at === null ? "live" : "past"}`;',
+			"const resetKey = `${JSON.stringify(filters)}|${pinAnswer}`;",
 		);
-		// Not on the vault's answer: it arrives after the list has scrolled to the pinned record, which the pin's own
-		// effect would not scroll to again.
-		expect(src).not.toMatch(/resetKey = [^;]*list\.at/);
+		// The answer is what is drawn: it is the reset key, so a position whose record is filtered out (nothing to
+		// pin) starts at the top, and it is the pin's, so the pinned record is scrolled to once for each answer.
+		expect(src).toContain('const pinAnswer = String(list.at?.pos ?? "live");');
+		expect(src).toContain("pinAnswer={pinAnswer}");
 		// A chart's hover first, else the pin's hour from the header's position.
 		expect(src).toMatch(
 			/\(\) => hover\?\.span \?\? \(pinMs === null \? null : hourSpanOf\(pinMs\)\),\s*\[hover, pinMs\],/,

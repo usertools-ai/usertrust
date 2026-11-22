@@ -17,6 +17,7 @@ import {
 	DENSE_ROW_PX,
 	pageSizeForRows,
 	pinAction,
+	pinStep,
 	shownCount,
 } from "../src/shared/list-chunk.js";
 
@@ -257,5 +258,71 @@ describe("pinAction: the first row", () => {
 	it("a pinned record that is the first row is brought into view like any other", () => {
 		expect(pinAction(null, "a", order)).toEqual({ done: "a", target: { hash: "a", index: 0 } });
 		expect(pinAction("b", "a", order)).toEqual({ done: "a", target: { hash: "a", index: 0 } });
+	});
+});
+
+describe("pinStep: the pinned record is brought into view once for each answer drawn", () => {
+	const VIEW = 452;
+	const ROW = DENSE_ROW_PX;
+	/** The rows of a vault of positions 0..head, cut at a past position, in the sort the list draws. */
+	const rowsAt = (head: number, cut: number | null, desc: boolean): { hash: string }[] => {
+		const end = cut ?? head;
+		const all = Array.from({ length: end + 1 }, (_, pos) => ({ hash: `h${pos}` }));
+		return desc ? all.reverse() : all;
+	};
+	/** Where `showRow(index, "center")` leaves a list of `n` rows (a viewport of 452px), and whether the row is on it. */
+	const centred = (index: number, n: number): { top: number; shown: boolean } => {
+		const top = Math.min(Math.max(index * ROW - (VIEW - ROW) / 2, 0), Math.max(n * ROW - VIEW, 0));
+		return { top, shown: index * ROW >= top && (index + 1) * ROW <= top + VIEW };
+	};
+	/** The pin decision over a past position's two draws: the rows held while the answer is pending, then the cut rows. */
+	const replay = (head: number, b: number, desc: boolean) => {
+		const pending = rowsAt(head, null, desc);
+		const answered = rowsAt(head, b, desc);
+		const first = pinStep({ done: null, answer: undefined }, `h${b}`, pending, "live");
+		const second = pinStep(first.state, `h${b}`, answered, String(b));
+		return { first, second, answered };
+	};
+
+	it("descending: the pinned record becomes the first row when the answer lands, and is scrolled to", () => {
+		for (const head of [599, 320]) {
+			const { first, second, answered } = replay(head, 300, true);
+			// While the answer is pending the record is in the middle of the rows held (head minus its position).
+			expect(first.target?.index, `head ${head}`).toBe(head - 300);
+			expect(second.target, `head ${head}`).toEqual({ hash: "h300", index: 0 });
+			expect(centred(second.target?.index ?? -1, answered.length).shown, `head ${head}`).toBe(true);
+			// Once per pin, not once per answer: the old decision did nothing for the same record.
+			expect(pinAction(first.state.done, "h300", answered).target).toBeNull();
+		}
+	});
+
+	it("ascending: the pinned record becomes the last row when the answer lands, and is scrolled to", () => {
+		const { first, second, answered } = replay(599, 300, false);
+		expect(first.target?.index).toBe(300);
+		expect(second.target).toEqual({ hash: "h300", index: 300 });
+		const where = centred(300, answered.length);
+		expect(where.shown).toBe(true);
+		// 301 rows of 30px in a 452px viewport: the end of the list (the measured 8578).
+		expect(where.top).toBe(301 * ROW - VIEW);
+	});
+
+	it("from one past position to an earlier one: the record is scrolled to again once its answer lands", () => {
+		const a = replay(599, 450, true);
+		const toB = pinStep(a.second.state, "h300", rowsAt(599, 450, true), "450");
+		// B is among A's rows while its answer is pending: the first decision is the old position's rows.
+		expect(toB.target?.index).toBe(150);
+		const landed = pinStep(toB.state, "h300", rowsAt(599, 300, true), "300");
+		expect(landed.target).toEqual({ hash: "h300", index: 0 });
+	});
+
+	it("the reader's own scrolling is left alone while the same answer stands, and nothing is pinned for a record filtered out", () => {
+		const { second, answered } = replay(599, 300, true);
+		// A new row arrives, or the list is redrawn: the same pin and answer, nothing to do.
+		expect(pinStep(second.state, "h300", answered, "300").target).toBeNull();
+		expect(pinStep(second.state, "h300", [{ hash: "new" }, ...answered], "300").target).toBeNull();
+		// The pinned record is outside the filters once the answer lands: no target and nothing handled, so the
+		// list's reset key (the answer) is what takes it to the top.
+		const filtered = pinStep(second.state, "h300", [{ hash: "x" }, { hash: "y" }], "280");
+		expect(filtered).toEqual({ state: { done: null, answer: "280" }, target: null });
 	});
 });
