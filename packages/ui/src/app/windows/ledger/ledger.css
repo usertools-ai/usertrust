@@ -478,6 +478,21 @@
 		}
 	}
 
+	/* Docked, the nine columns need a list of about 985px for the model's whole name (its cell is what the row leaves
+	   after the other columns; measured: cut on 10 of 12 rows at 901px, 5 of 12 at 956px, none at 996px). So with the
+	   panel docked the Transaction and the Hash are dropped up to 1000px, a screen of 1444px, where the 900px block
+	   above drops them only up to 900px. Docked only: a filled list with nothing open keeps its nine columns. */
+	@container (max-width: 1000px) {
+		[data-win="ledger"] .ut-lg-body[data-detail="true"] .ut-lg-row[data-full="true"] {
+			grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 64px 60px 92px minmax(96px, 0.9fr);
+		}
+
+		.ut-lg-body[data-detail="true"] .ut-lg-row .ut-lg-x,
+		.ut-lg-body[data-detail="true"] .ut-lg-row .ut-lg-h {
+			display: none;
+		}
+	}
+
 	/* The docked panel leaves the list 556px (a 1000px screen) to 656px (1100px), and 756px at 1200px: the kind, the
 	   usage and the actor go, so the model keeps its whole name, which is the column that matters most. The panel
 	   shows the actor. Only while the panel is docked (data-detail), where the rules above and below are beaten by

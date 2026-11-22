@@ -1408,7 +1408,8 @@ describe("the Ledger window's sheet", () => {
 		expect(css.match(/@container \(max-width: \d+px\)/g)).toEqual([
 			// A filled list made narrow by the docked panel drops its Transaction and Hash (the filled-columns test below).
 			"@container (max-width: 900px)",
-			// The docked panel's own block (the test below it).
+			// The docked panel's own two blocks (the tests below it): the nine columns, then the seven.
+			"@container (max-width: 1000px)",
 			"@container (max-width: 800px)",
 			"@container (max-width: 600px)",
 			"@container (max-width: 520px)",
@@ -1593,6 +1594,71 @@ describe("the Ledger window's sheet", () => {
 		}
 		// 1245px is a 801px list: the block ends at 800px, and the seven columns give the model 148px there (measured).
 		expect(1245 - 444).toBeGreaterThan(800);
+	});
+
+	it("docked, the model's whole name keeps its cell from 1245px to 1500px: the Transaction and the Hash go up to a 1000px list", () => {
+		const body = '.ut-lg-body[data-detail="true"]';
+		const wide = narrow(1000);
+		const sevenRule = ruleIn(wide, `[data-win="ledger"] ${body} .ut-lg-row[data-full="true"]`);
+		expect(sevenRule).toContain(
+			"grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 64px 60px 92px minmax(96px, 0.9fr);",
+		);
+		expect(ruleIn(wide, `${body} .ut-lg-row .ut-lg-x,\n\t\t${body} .ut-lg-row .ut-lg-h`)).toContain(
+			"display: none;",
+		);
+		// Docked only: every selector in the block carries the open panel's mark, so a filled list with nothing open
+		// keeps the nine columns the shared 900px block leaves it.
+		const selectors = wide.match(/^\t\t[^\t{}][^{}]*(?=\{)/gm) ?? [];
+		expect(selectors.length).toBeGreaterThan(0);
+		for (const sel of selectors) expect(sel, sel).toContain(body.slice(0, 14));
+		expect(wide).toContain('[data-detail="true"]');
+		expect(wide).not.toMatch(/(^|\n)\t\t\.ut-row\.ut-lg-row \{/);
+		// The model's cell, from a grid template: fixed px columns, fr columns with their minimum, the gaps (10px)
+		// and the row's padding and margin (18 + 24px). The cell is what an fr column gets after the fixed ones; a
+		// minimum that its share does not reach is taken and the others share the rest. The longest model name
+		// ("claude-sonnet-5-5") needs 108px, its dash 10px and the gap 7px (measured in Chrome).
+		const modelCell = (template: string, list: number): number => {
+			const cols = template.match(/minmax\([^)]*\)|[\d.]+px/g) ?? [];
+			let fixed = 0;
+			const fr: { w: number; min: number }[] = [];
+			for (const c of cols) {
+				const m = /^minmax\((\d+)(?:px)?, ([\d.]+)fr\)$/.exec(c);
+				if (m !== null) fr.push({ w: Number(m[2]), min: Number(m[1]) });
+				else fixed += Number.parseFloat(c);
+			}
+			let free = list - 18 - 24 - (cols.length - 1) * 10 - fixed;
+			let live = fr;
+			for (;;) {
+				const unit = free / live.reduce((a, c) => a + c.w, 0);
+				const held = live.filter((c) => c.w * unit < c.min);
+				if (held.length === 0) return fr[0] === undefined ? 0 : fr[0].w * unit;
+				free -= held.reduce((a, c) => a + c.min, 0);
+				live = live.filter((c) => !held.includes(c));
+			}
+		};
+		const NAME = 108 + 10 + 7;
+		const template = (rule: string): string =>
+			/grid-template-columns: ([^;]+);/.exec(rule)?.[1] ?? "";
+		// The docked list is the screen minus 444px. From 801px (a 1245px screen) to the block's end at 1000px
+		// (1444px) it is the seven columns; above that the nine, at the full width the first 1445px screen gives.
+		const seven = template(sevenRule);
+		const nine = template(rule('[data-win="ledger"] .ut-lg-row[data-full="true"]'));
+		expect(seven).toContain("92px");
+		expect(nine).toContain("104px");
+		for (const screen of [1245, 1300, 1344, 1345, 1400, 1440, 1444]) {
+			expect(modelCell(seven, screen - 444), `seven columns at ${screen}px`).toBeGreaterThanOrEqual(
+				NAME,
+			);
+		}
+		for (const screen of [1445, 1500, 1700]) {
+			expect(modelCell(nine, screen - 444), `nine columns at ${screen}px`).toBeGreaterThanOrEqual(
+				NAME,
+			);
+		}
+		// The nine columns do not fit the name at the widths the block now covers (the reason it is there): 956px
+		// is the 1400px screen, where Chrome cut the model on 5 of 12 rows.
+		expect(modelCell(nine, 1400 - 444)).toBeLessThan(NAME);
+		expect(modelCell(nine, 901)).toBeLessThan(NAME);
 	});
 
 	it("the open row's ring is the list's one ring: the list's own is transparent while that row is drawn", () => {
