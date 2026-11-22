@@ -1833,8 +1833,11 @@ describe("the Ledger window's wiring", () => {
 		expect(src).toContain("onHover={onHover}");
 		expect(src).toContain(
 			// biome-ignore lint/suspicious/noTemplateCurlyInString: a line of the source, quoted as it is written
-			'const resetKey = `${JSON.stringify(filters)}|${list.at?.pos ?? "live"}`;',
+			'const resetKey = `${JSON.stringify(filters)}|${at === null ? "live" : "past"}`;',
 		);
+		// Not on the vault's answer: it arrives after the list has scrolled to the pinned record, which the pin's own
+		// effect would not scroll to again.
+		expect(src).not.toMatch(/resetKey = [^;]*list\.at/);
 		// A chart's hover first, else the pin's hour from the header's position.
 		expect(src).toMatch(
 			/\(\) => hover\?\.span \?\? \(pinMs === null \? null : hourSpanOf\(pinMs\)\),\s*\[hover, pinMs\],/,

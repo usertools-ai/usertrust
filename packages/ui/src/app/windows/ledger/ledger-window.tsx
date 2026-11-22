@@ -95,8 +95,11 @@ const LedgerBody = memo(function LedgerBody(props: {
 		[],
 	);
 
-	// A new set of filters, or another position drawn, is a new list: it starts again at its first rows.
-	const resetKey = `${JSON.stringify(filters)}|${list.at?.pos ?? "live"}`;
+	// A new set of filters, or the Ledger going between the live list and a past position, is a new list: it starts
+	// again at its first rows. Keyed on the address, not on the vault's answer to it: the list scrolls to the pinned
+	// record when the address is set, and a reset when the answer arrives (or a move between two past positions,
+	// which the pin follows) would take the list back to the top, off a pinned record that is last in the order.
+	const resetKey = `${JSON.stringify(filters)}|${at === null ? "live" : "past"}`;
 	// One fade of the data when the filters or the range change; none on the first draw. Two names in turn, so each
 	// change starts the animation again.
 	const fadeOn = `${JSON.stringify(filters)}|${range}`;
