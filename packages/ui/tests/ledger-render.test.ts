@@ -1100,6 +1100,11 @@ describe("the dense list", () => {
 		expect(hover).toContain('closest<HTMLElement>("[data-ms]")?.dataset.ms');
 		expect(hover).toContain("hoverTo(at === undefined ? null : Number(at));");
 		expect(hover).toContain("const onPointerLeave = (): void => hoverTo(null);");
+		// The handlers are the rows': when the list stops being rows (a filter empties it) the record under the pointer is
+		// let go, or the shared hover would stay on a record nothing can leave.
+		expect(src).toMatch(
+			/useEffect\(\(\) => \{\s*if \(state !== "rows"\) hoverTo\(null\);\s*\}, \[state\]\);/,
+		);
 		expect(src).toMatch(/onClick,\s*onPointerOver,\s*onPointerLeave,/);
 		// A row has no pointer handler of its own, and no hovered state: hover is the sheet's.
 		const rowSrc = between("export const AuditRow", "export type { BeforeWindow }");

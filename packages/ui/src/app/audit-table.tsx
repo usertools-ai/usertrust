@@ -655,6 +655,12 @@ export const AuditTable = memo(function AuditTable(props: {
 		beforeWindow: (props.beforeWindow ?? null) !== null,
 		reloading: props.reloading === true,
 	});
+	// The pointer handlers go with the rows (a filter that empties the list, a list still loading): a record the
+	// pointer was over is then no longer under it, and nothing else would say so.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: said when the list stops being rows; hoverTo reads a ref
+	useEffect(() => {
+		if (state !== "rows") hoverTo(null);
+	}, [state]);
 
 	return (
 		<>
