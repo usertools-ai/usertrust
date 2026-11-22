@@ -68,10 +68,11 @@
 		min-height: 0;
 	}
 
-	/* One ring: the active row's. While that row is drawn the list's own ring over its whole box is transparent (not
-	   removed: forced colours still draw it), since its top edge read as a second outlined row. With the row scrolled
-	   out of the drawn rows the list keeps its visible ring. */
-	[data-win="ledger"] .ut-list:focus-visible:has(.ut-row.act) {
+	/* One ring: the active row's. While that row is on the screen (the list marks it: the rows drawn include an
+	   overscan outside it) the list's own ring over its whole box is transparent (not removed: forced colours still
+	   draw it), since its top edge read as a second outlined row. With the row out of sight, drawn or not, the list
+	   keeps its visible ring. */
+	[data-win="ledger"] .ut-list[data-active-shown="true"]:focus-visible {
 		outline-color: transparent;
 	}
 

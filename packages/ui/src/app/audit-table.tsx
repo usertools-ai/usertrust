@@ -472,6 +472,8 @@ export const AuditTable = memo(function AuditTable(props: {
 	});
 	const virtualizer = phone ? inPage : inList;
 	const items = virtualizer.getVirtualItems();
+	// The rows drawn include an overscan above and below the screen; the range is what the screen shows.
+	const shown = virtualizer.range;
 
 	const pinnedPos = props.pinnedPos ?? null;
 	const pinnedIndex = useMemo(
@@ -686,6 +688,15 @@ export const AuditTable = memo(function AuditTable(props: {
 							"aria-activedescendant":
 								activeRow !== undefined && items.some((v) => v.index === activeIndex)
 									? rowDomId(activeRow.hash)
+									: undefined,
+							// The active row is on the screen, not merely drawn in the overscan: the sheet then leaves the
+							// row its focus ring alone, and rings the list itself when the row is out of sight.
+							"data-active-shown":
+								activeRow !== undefined &&
+								shown !== null &&
+								activeIndex >= shown.startIndex &&
+								activeIndex <= shown.endIndex
+									? "true"
 									: undefined,
 							onKeyDown,
 							onFocus,

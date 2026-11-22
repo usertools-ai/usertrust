@@ -755,6 +755,19 @@ describe("the dense list", () => {
 		expect(tagOf(far, placed(rows, 300))).toBe("");
 	});
 
+	it("the list marks its active row as on the screen only when it is: not for one drawn in the overscan, nor one far away", () => {
+		const rows = many(400);
+		// Place 3 is on the first screen; 24 is drawn (the overscan under it) but not on the screen; 300 is not drawn.
+		const onScreen = list(rows, { selected: placed(rows, 3).hash });
+		expect(onScreen).toContain('data-active-shown="true"');
+		const overscan = list(rows, { selected: placed(rows, 24).hash });
+		expect(overscan).toContain(`aria-activedescendant="ut-row-${placed(rows, 24).hash}"`);
+		expect(tagOf(overscan, placed(rows, 24))).toContain("ut-row ut-lg-row sel act");
+		expect(overscan).not.toContain("data-active-shown");
+		const far = list(rows, { selected: placed(rows, 300).hash });
+		expect(far).not.toContain("data-active-shown");
+	});
+
 	/** Five calls twenty minutes apart from midnight: positions 0 to 2 in the first hour, 3 and 4 in the second. */
 	const spaced = (): LedgerRow[] =>
 		many(5).map((r, i) => ({ ...r, ts: new Date(T0 + i * 20 * 60_000).toISOString() }));
@@ -1662,7 +1675,7 @@ describe("the Ledger window's sheet", () => {
 	});
 
 	it("the open row's ring is the list's one ring: the list's own is transparent while that row is drawn", () => {
-		const own = rule('[data-win="ledger"] .ut-list:focus-visible:has(.ut-row.act)');
+		const own = rule('[data-win="ledger"] .ut-list[data-active-shown="true"]:focus-visible');
 		expect(own).toContain("outline-color: transparent;");
 		// Transparent, not removed: the desk-tokens guard forbids `outline: none`, and forced colours draw it.
 		expect(own).not.toMatch(/outline:\s*(none|0)/);
