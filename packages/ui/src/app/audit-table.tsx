@@ -17,7 +17,7 @@ import { type SortKey, sortRows } from "../shared/filters.js";
 import { compactActor, formatUtc, UT_KEY } from "../shared/format.js";
 import { hourSpanOf } from "../shared/hit.js";
 import { PHONE_QUERY } from "../shared/layout.js";
-import { DENSE_ROW_PX, pageSizeForRows, pinAction } from "../shared/list-chunk.js";
+import { DENSE_ROW_PX, type PinState, pageSizeForRows, pinStep } from "../shared/list-chunk.js";
 import { type BeforeWindow, pastHeldNote } from "../shared/list-view.js";
 import { rowInSpan, stepRecord } from "../shared/peek.js";
 import { providerOf } from "../shared/provider.js";
@@ -70,15 +70,20 @@ export function rowDomId(hash: string): string {
 /** What a cell with nothing to show prints. */
 const NONE = "—";
 
+/** What a cut hash ends with. */
+const ELLIPSIS = String.fromCharCode(0x2026);
+
 /**
  * One record on one line, in columns: time, model (with a short dash in its provider's colour), actor, kind, how its
  * usage was measured, status, and its cost in dollars.
+ * `full` (the Ledger fills the desk) adds its transaction and the start of its hash after the kind, as recorded.
  */
-function DenseRowBody(props: { row: LedgerRow }): React.JSX.Element {
+function DenseRowBody(props: { row: LedgerRow; full: boolean }): React.JSX.Element {
 	const { row } = props;
 	const status = statusOf(row);
 	const cost = costView(row);
 	const provider = providerOf(row);
+	const tx = transferView(row);
 	return (
 		<>
 			<span className="ut-lg-t" title={row.ts}>
@@ -110,6 +115,19 @@ function DenseRowBody(props: { row: LedgerRow }): React.JSX.Element {
 			<span className="ut-lg-k" title={row.kind}>
 				{row.kind}
 			</span>
+			{props.full && (
+				<>
+					<span
+						className="ut-lg-x"
+						title={tx.kind === "transfer" ? `transfer ${tx.id}` : "no transfer"}
+					>
+						{tx.kind === "transfer" ? tx.id : NONE}
+					</span>
+					<span className="ut-lg-h" title={`hash ${row.hash}`}>
+						{`${row.hash.slice(0, 10)}${ELLIPSIS}`}
+					</span>
+				</>
+			)}
 			<span
 				className="ut-lg-u"
 				title={
@@ -248,8 +266,11 @@ export const AuditRow = memo(function AuditRow(props: {
 	pinned?: boolean;
 	/** How far down the list's one block this row stands, in px. */
 	top: number;
+	/** The Ledger fills the desk: the row adds its transaction and hash. */
+	full?: boolean;
 }): React.JSX.Element {
 	const { row } = props;
+	const full = props.full === true;
 	const ms = Date.parse(row.ts);
 	return (
 		// biome-ignore lint/a11y/useFocusableInteractive: an option of a listbox that holds focus and names it (aria-activedescendant)
@@ -259,6 +280,7 @@ export const AuditRow = memo(function AuditRow(props: {
 			data-ms={Number.isFinite(ms) ? ms : undefined}
 			data-hour={props.hour === true ? "true" : undefined}
 			data-pinned={props.pinned === true ? "true" : undefined}
+			data-full={full ? "true" : undefined}
 			aria-selected={props.selected}
 			aria-posinset={props.index + 1}
 			aria-setsize={props.setSize}
@@ -266,7 +288,7 @@ export const AuditRow = memo(function AuditRow(props: {
 			className={`ut-row ut-lg-row${props.selected ? " sel" : ""}${props.active ? " act" : ""}${props.fresh ? " fresh" : ""}`}
 			style={{ transform: `translateY(${props.top}px)` }}
 		>
-			<DenseRowBody row={row} />
+			<DenseRowBody row={row} full={full} />
 		</div>
 	);
 });
@@ -386,12 +408,16 @@ export const AuditTable = memo(function AuditTable(props: {
 	hourSpan?: readonly [number, number] | null;
 	/** The position of the record a chart has pinned: it is marked with the records of its hour, and scrolled to the middle once. */
 	pinnedPos?: number | null;
+	/** What the vault answered for the pinned position (its position, or "live"): the pinned record is scrolled to once for each answer drawn, since the rows are cut at the answer and its place moves with them. */
+	pinAnswer?: string;
 	/** What the rows are a list of (the filters, as one string). A new key starts again at the top; with none passed, a new set of filters does not. */
 	resetKey?: string;
 	/** The time (ms) of the record under the pointer, or null when the pointer is on none. Called only on a change. */
 	onHover?(ms: number | null): void;
 	/** Set, while the list is mounted, to a function that opens the record before (-1) or after (1) the open one. */
 	stepRef?: React.RefObject<((dir: -1 | 1) => void) | null>;
+	/** The Ledger fills the desk: each row shows its transaction and hash too. */
+	full?: boolean;
 }): React.JSX.Element {
 	const [sortKey, setSortKey] = useState<SortKey>("seq");
 	const [desc, setDesc] = useState(true);
@@ -448,6 +474,8 @@ export const AuditTable = memo(function AuditTable(props: {
 	});
 	const virtualizer = phone ? inPage : inList;
 	const items = virtualizer.getVirtualItems();
+	// The rows drawn include an overscan above and below the screen; the range is what the screen shows.
+	const shown = virtualizer.range;
 
 	const pinnedPos = props.pinnedPos ?? null;
 	const pinnedIndex = useMemo(
@@ -576,17 +604,17 @@ export const AuditTable = memo(function AuditTable(props: {
 		parentRef.current?.focus({ preventScroll: true });
 	}, [restore?.n]);
 
-	// The pinned record is made the active row and scrolled to the middle, once per pin: the reader may scroll away
-	// from it afterwards and is left where they are.
-	const pinDone = useRef<string | null>(null);
-	// biome-ignore lint/correctness/useExhaustiveDependencies: decided when the pin or the rows change, not per render
+	// The pinned record is made the active row and scrolled to the middle, once per pin and answer drawn: the reader
+	// may scroll away from it afterwards and is left where they are.
+	const pinState = useRef<PinState>({ done: null, answer: props.pinAnswer });
+	// biome-ignore lint/correctness/useExhaustiveDependencies: decided when the pin, the answer or the rows change, not per render
 	useEffect(() => {
-		const act = pinAction(pinDone.current, pinnedHash, sorted);
-		pinDone.current = act.done;
-		if (act.target === null) return;
-		setActiveHash(act.target.hash);
-		showRow(act.target.index, "center");
-	}, [pinnedHash, sorted]);
+		const step = pinStep(pinState.current, pinnedHash, sorted, props.pinAnswer);
+		pinState.current = step.state;
+		if (step.target === null) return;
+		setActiveHash(step.target.hash);
+		showRow(step.target.index, "center");
+	}, [pinnedHash, sorted, props.pinAnswer]);
 
 	// The record before or after the open one, in the order drawn: what the inspector's own keys ask for. With no
 	// record open it steps from the active row.
@@ -627,6 +655,12 @@ export const AuditTable = memo(function AuditTable(props: {
 		beforeWindow: (props.beforeWindow ?? null) !== null,
 		reloading: props.reloading === true,
 	});
+	// The pointer handlers go with the rows (a filter that empties the list, a list still loading): a record the
+	// pointer was over is then no longer under it, and nothing else would say so.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: said when the list stops being rows; hoverTo reads a ref
+	useEffect(() => {
+		if (state !== "rows") hoverTo(null);
+	}, [state]);
 
 	return (
 		<>
@@ -663,6 +697,15 @@ export const AuditTable = memo(function AuditTable(props: {
 								activeRow !== undefined && items.some((v) => v.index === activeIndex)
 									? rowDomId(activeRow.hash)
 									: undefined,
+							// The active row is on the screen, not merely drawn in the overscan: the sheet then leaves the
+							// row its focus ring alone, and rings the list itself when the row is out of sight.
+							"data-active-shown":
+								activeRow !== undefined &&
+								shown !== null &&
+								activeIndex >= shown.startIndex &&
+								activeIndex <= shown.endIndex
+									? "true"
+									: undefined,
 							onKeyDown,
 							onFocus,
 							onClick,
@@ -696,6 +739,7 @@ export const AuditTable = memo(function AuditTable(props: {
 									hour={rowInSpan(row.ts, hour)}
 									pinned={item.index === pinnedIndex}
 									top={item.start - virtualizer.options.scrollMargin}
+									full={props.full === true}
 								/>
 							);
 						})}

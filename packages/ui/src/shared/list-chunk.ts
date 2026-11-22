@@ -87,6 +87,30 @@ export function pinAction(
 	return { done: pinned, target: { hash: pinned, index } };
 }
 
+/** What the list keeps between two pin decisions: the pinned record already brought into view, for which answer. */
+export interface PinState {
+	done: string | null;
+	/** What the vault answered for the pinned position when `done` was decided (its position, or "live"). */
+	answer: string | undefined;
+}
+
+/**
+ * `pinAction`, decided once per DRAWN ANSWER and not once per pin. A past position's rows are cut at the position the
+ * vault answers, so the pinned record's place in them moves when the answer lands: the sort puts it first (newest
+ * first) or last (oldest first) of the new rows, where it was in the middle of the rows held while the answer was
+ * pending. A record already brought into view for another answer is brought into view again for this one.
+ */
+export function pinStep(
+	state: PinState,
+	pinned: string | null,
+	order: readonly { hash: string }[],
+	answer: string | undefined,
+): { state: PinState; target: PinAction["target"] } {
+	const held = state.answer === answer ? state.done : null;
+	const act = pinAction(held, pinned, order);
+	return { state: { done: act.done, answer }, target: act.target };
+}
+
 /** The rows drawn: the limit, or every row of a shorter list. */
 export function shownCount(s: ChunkState, total: number): number {
 	return Math.min(s.limit, countOf(total));
