@@ -1616,23 +1616,22 @@ describe("the Ledger window's sheet", () => {
 		expect(1245 - 444).toBeGreaterThan(800);
 	});
 
-	it("docked, the model's whole name keeps its cell from 1245px to 1500px: the Transaction and the Hash go up to a 1000px list", () => {
+	it("the model's whole name keeps its cell: the Transaction and the Hash go up to a 1000px list, docked from 1245px to 1500px and with nothing open at 1000px", () => {
 		const body = '.ut-lg-body[data-detail="true"]';
 		const wide = narrow(1000);
-		const sevenRule = ruleIn(wide, `[data-win="ledger"] ${body} .ut-lg-row[data-full="true"]`);
+		const sevenRule = ruleIn(wide, '[data-win="ledger"] .ut-lg-row[data-full="true"]');
 		expect(sevenRule).toContain(
 			"grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 64px 60px 92px minmax(96px, 0.9fr);",
 		);
-		expect(ruleIn(wide, `${body} .ut-lg-row .ut-lg-x,\n\t\t${body} .ut-lg-row .ut-lg-h`)).toContain(
+		expect(ruleIn(wide, ".ut-lg-row .ut-lg-x,\n\t\t.ut-lg-row .ut-lg-h")).toContain(
 			"display: none;",
 		);
-		// Docked only: every selector in the block carries the open panel's mark, so a filled list with nothing open
-		// keeps the nine columns the shared 900px block leaves it.
-		const selectors = wide.match(/^\t\t[^\t{}][^{}]*(?=\{)/gm) ?? [];
-		expect(selectors.length).toBeGreaterThan(0);
-		for (const sel of selectors) expect(sel, sel).toContain(body.slice(0, 14));
-		expect(wide).toContain('[data-detail="true"]');
+		// Not docked-only: the model's cell is the same with the panel shut, so a filled list with nothing open at a
+		// 1000px screen (a 966px list) is covered too. No selector in the block carries the open panel's mark, and
+		// the docked 800px block still beats it with its longer selectors.
+		expect(wide).not.toContain("data-detail");
 		expect(wide).not.toMatch(/(^|\n)\t\t\.ut-row\.ut-lg-row \{/);
+		expect(narrow(800)).toContain(`[data-win="ledger"] ${body} .ut-lg-row[data-full="true"]`);
 		// The model's cell, from a grid template: fixed px columns, fr columns with their minimum, the gaps (10px)
 		// and the row's padding and margin (18 + 24px). The cell is what an fr column gets after the fixed ones; a
 		// minimum that its share does not reach is taken and the others share the rest. The longest model name
@@ -1679,6 +1678,25 @@ describe("the Ledger window's sheet", () => {
 		// is the 1400px screen, where Chrome cut the model on 5 of 12 rows.
 		expect(modelCell(nine, 1400 - 444)).toBeLessThan(NAME);
 		expect(modelCell(nine, 901)).toBeLessThan(NAME);
+		// With nothing open the list is the screen minus 34px (measured: 966px at 1000px, 1016px at 1050px). The nine
+		// columns cut the model on 5 of 12 rows at 1000px (a 114.5px column, 98px for the name against its 108px);
+		// the seven give it the cell, and from 1035px, where the block ends, the nine have it again.
+		const open = (screen: number): number => screen - 34;
+		expect(modelCell(nine, open(1000))).toBeLessThan(NAME);
+		expect(modelCell(seven, open(1000))).toBeGreaterThanOrEqual(NAME);
+		for (const screen of [1000, 1010, 1019, 1034]) {
+			expect(
+				modelCell(seven, open(screen)),
+				`seven columns at ${screen}px, nothing open`,
+			).toBeGreaterThanOrEqual(NAME);
+		}
+		for (const screen of [1035, 1050, 1100, 1200, 1400]) {
+			expect(open(screen), `the block ends before ${screen}px`).toBeGreaterThan(1000);
+			expect(
+				modelCell(nine, open(screen)),
+				`nine columns at ${screen}px, nothing open`,
+			).toBeGreaterThanOrEqual(NAME);
+		}
 	});
 
 	it("the open row's ring is the list's one ring: the list's own is transparent while that row is drawn", () => {
