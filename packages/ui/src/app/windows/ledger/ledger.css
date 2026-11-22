@@ -479,17 +479,19 @@
 		}
 	}
 
-	/* Docked, the nine columns need a list of about 985px for the model's whole name (its cell is what the row leaves
-	   after the other columns; measured: cut on 10 of 12 rows at 901px, 5 of 12 at 956px, none at 996px). So with the
-	   panel docked the Transaction and the Hash are dropped up to 1000px, a screen of 1444px, where the 900px block
-	   above drops them only up to 900px. Docked only: a filled list with nothing open keeps its nine columns. */
+	/* The nine columns need a list of about 985px for the model's whole name (its cell is what the row leaves after
+	   the other columns; measured: cut on 10 of 12 rows at 901px, 5 of 12 at 956px and at 966px, none at 996px; a
+	   list of 985px is the 125px cell). So the Transaction and the Hash are dropped up to 1000px, where the 900px
+	   block above drops them only up to 900px. Docked, the list is the screen minus 444px, so this covers screens up
+	   to 1444px; with nothing open it is the screen minus 34px, so it covers the screens from 1000px to 1034px, and the
+	   nine columns come back at 1035px with room to spare (1050px: 141px for the model). */
 	@container (max-width: 1000px) {
-		[data-win="ledger"] .ut-lg-body[data-detail="true"] .ut-lg-row[data-full="true"] {
+		[data-win="ledger"] .ut-lg-row[data-full="true"] {
 			grid-template-columns: 118px minmax(0, 1.3fr) minmax(0, 1fr) 64px 60px 92px minmax(96px, 0.9fr);
 		}
 
-		.ut-lg-body[data-detail="true"] .ut-lg-row .ut-lg-x,
-		.ut-lg-body[data-detail="true"] .ut-lg-row .ut-lg-h {
+		.ut-lg-row .ut-lg-x,
+		.ut-lg-row .ut-lg-h {
 			display: none;
 		}
 	}
